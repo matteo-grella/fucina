@@ -50,7 +50,7 @@ pub fn Ops(comptime Self: type) type {
             const class_axis = comptime axis(class_tag);
             const row_stats = try rowStatsAlloc(ctx, self.requiresGrad(), labels.len);
             defer if (row_stats) |stats| ctx.allocator.free(stats);
-            var value = try ctx.crossEntropyLossExStatsAxisRank(tag_rank, self.asRawTensor(), class_axis, labels, options, row_stats);
+            var value = try ctx.crossEntropyLossExStats(tag_rank, self.asRawTensor(), class_axis, labels, options, row_stats);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), CrossEntropyExtBackward(tags, class_axis, options), .{ ctx.allocator, self.grad_state, self.asRawTensor(), labels, row_stats orelse &[_]f32{} });
         }
@@ -87,7 +87,7 @@ pub fn Ops(comptime Self: type) type {
             defer if (row_stats) |stats| ctx.allocator.free(stats);
             var logits = try ctx.matmulTransB(self.asRawTensor(), weight_ptr.asRawTensor());
             defer logits.deinit();
-            var value = try ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, labels, options, row_stats);
+            var value = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, options, row_stats);
             errdefer value.deinit();
             return finishOp(
                 result_tags,

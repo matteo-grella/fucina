@@ -57,7 +57,7 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = if (comptime trans_b)
-                    try ctx.matmul2D(gy, &self.right)
+                    try ctx.matmul(.f32, gy, &self.right)
                 else
                     try ctx.matmulTransB(gy, &self.right);
             }
@@ -469,9 +469,9 @@ pub fn ConstRhsEinsumBackward(
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
-                    try ctx.dequantizeTensorTyped(rhs_dtype, &self.right_value)
+                    try ctx.dequantizeTensor(rhs_dtype, &self.right_value)
                 else
-                    try ctx.castTyped(rhs_dtype, .f32, &self.right_value);
+                    try ctx.cast(rhs_dtype, .f32, &self.right_value);
                 defer right_f32.deinit();
 
                 // dL/dleft is itself a contraction (einsum closure); axes the
@@ -569,13 +569,13 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             defer gy2d.deinit();
 
             if (needs_grad.len > 0 and needs_grad[0]) {
-                var right_f32 = try ctx.emptyRankTyped(.f32, 2, .{ n, k });
+                var right_f32 = try ctx.empty(.f32, .{ n, k });
                 defer right_f32.deinit();
                 const rows = right_f32.data();
                 for (0..n) |row| {
                     try backend_quant.cold.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
                 }
-                var dx = try ctx.matmul2D(&gy2d, &right_f32);
+                var dx = try ctx.matmul(.f32, &gy2d, &right_f32);
                 errdefer dx.deinit();
                 if (!std.mem.eql(usize, dx.shape.slice(), self.left_shape[0..])) {
                     const reshaped = try dx.reshape(self.left_shape[0..]);

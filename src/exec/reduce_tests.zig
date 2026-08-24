@@ -27,7 +27,7 @@ test "exec context reduces a compile-time axis" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 2, 3 }, &.{
+    var x = try ctx.fromSlice(.f32, .{ 2, 2, 3 }, &.{
         1,  2,  3,
         4,  5,  6,
         7,  8,  9,
@@ -35,15 +35,15 @@ test "exec context reduces a compile-time axis" {
     });
     defer x.deinit();
 
-    var rows = try ctx.sumAxisRank(3, &x, 1);
+    var rows = try ctx.sumAxis(.f32, 3, &x, 1);
     defer rows.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, rows.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9, 17, 19, 21 }, rows.dataConst());
 
-    var vector = try ctx.fromSliceRank(1, .{3}, &.{ 2, 4, 6 });
+    var vector = try ctx.fromSlice(.f32, .{3}, &.{ 2, 4, 6 });
     defer vector.deinit();
 
-    var all = try ctx.sumAxisRank(1, &vector, 0);
+    var all = try ctx.sumAxis(.f32, 1, &vector, 0);
     defer all.deinit();
     try std.testing.expectEqualSlices(usize, &.{1}, all.shape.slice());
     try std.testing.expectEqual(@as(f32, 12), all.item());
@@ -55,15 +55,15 @@ test "exec context uses contiguous reduction paths for rank-one and last-axis su
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var v = try ctx.fromSliceRank(1, .{4}, &.{ 1, 2, 3, 4 });
+    var v = try ctx.fromSlice(.f32, .{4}, &.{ 1, 2, 3, 4 });
     defer v.deinit();
-    var total = try ctx.sumAxisRank(1, &v, 0);
+    var total = try ctx.sumAxis(.f32, 1, &v, 0);
     defer total.deinit();
     try std.testing.expectEqualSlices(f32, &.{10}, total.dataConst());
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer x.deinit();
-    var rows = try ctx.sumAxisRank(3, &x, 2);
+    var rows = try ctx.sumAxis(.f32, 3, &x, 2);
     defer rows.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, rows.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 6, 15, 24, 33 }, rows.dataConst());
@@ -74,16 +74,16 @@ test "exec segmentSum reduces contiguous ranges and its broadcast expands them b
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 5, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
+    var x = try ctx.fromSlice(.f32, .{ 5, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 });
     defer x.deinit();
 
     // segments [0,2), [2,2) empty, [2,5): rows {4,6}, {0,0}, {21,24}.
     const offsets = [_]usize{ 0, 2, 2, 5 };
-    var summed = try ctx.segmentSumAxisRank(2, &x, 0, &offsets);
+    var summed = try ctx.segmentSum(2, &x, 0, &offsets);
     defer summed.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 4, 6, 0, 0, 21, 24 }, summed.dataConst());
 
-    var expanded = try ctx.segmentBroadcastAxisRank(2, &summed, 0, &offsets, 5);
+    var expanded = try ctx.segmentBroadcast(2, &summed, 0, &offsets, 5);
     defer expanded.deinit();
     try std.testing.expectEqualSlices(
         f32,
@@ -93,17 +93,17 @@ test "exec segmentSum reduces contiguous ranges and its broadcast expands them b
 
     // Along the last axis: segments [0,1), [1,2) of a (2, 2) tensor are the
     // identity partition.
-    var y = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var y = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer y.deinit();
     const unit = [_]usize{ 0, 1, 2 };
-    var same = try ctx.segmentSumAxisRank(2, &y, 1, &unit);
+    var same = try ctx.segmentSum(2, &y, 1, &unit);
     defer same.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, same.dataConst());
 
     const bad = [_]usize{ 0, 3 };
     try std.testing.expectError(
         tensor.TensorError.InvalidShape,
-        ctx.segmentSumAxisRank(2, &x, 0, &bad),
+        ctx.segmentSum(2, &x, 0, &bad),
     );
 }
 
@@ -112,24 +112,24 @@ test "exec cumsum forward and reverse match torch.cumsum along both axes" {
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
     // torch.cumsum(x, dim=1): rows {1,3,6} and {4,9,15}.
-    var last = try ctx.cumsumAxisRank(2, &x, 1);
+    var last = try ctx.cumsum(2, &x, 1);
     defer last.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 3, 6, 4, 9, 15 }, last.dataConst());
 
     // torch.cumsum(x, dim=0): {1,2,3} then {5,7,9} (inner > 1 layout).
-    var first = try ctx.cumsumAxisRank(2, &x, 0);
+    var first = try ctx.cumsum(2, &x, 0);
     defer first.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 5, 7, 9 }, first.dataConst());
 
     // Reverse (suffix) sums — the cumsum VJP: torch.cumsum(x.flip(1), 1).flip(1).
-    var rev = try ctx.cumsumReverseAxisRank(2, &x, 1);
+    var rev = try ctx.cumsumReverse(2, &x, 1);
     defer rev.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 6, 5, 3, 15, 11, 6 }, rev.dataConst());
-    var rev0 = try ctx.cumsumReverseAxisRank(2, &x, 0);
+    var rev0 = try ctx.cumsumReverse(2, &x, 0);
     defer rev0.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9, 4, 5, 6 }, rev0.dataConst());
 }

@@ -51,7 +51,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn logsumexp(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.logsumexpAxisRank(tag_rank, self.asRawTensor(), reduce_axis);
+            var value = try ctx.logsumexp(tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), LogsumexpBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
@@ -65,7 +65,7 @@ pub fn Ops(comptime Self: type) type {
         /// backward is the saved-output identity `g − exp(y)·Σg`.
         pub fn logSoftmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.logSoftmaxAxisRank(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.logSoftmax(tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), LogSoftmaxBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &value });
         }
@@ -85,7 +85,7 @@ pub fn Ops(comptime Self: type) type {
             }
             const softmax_axis = comptime axis(tag);
             if (comptime @typeInfo(Options).@"struct".fields.len == 0) {
-                var value = try ctx.softmaxAxisRank(tag_rank, self.asRawTensor(), softmax_axis);
+                var value = try ctx.softmax(tag_rank, self.asRawTensor(), softmax_axis);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), SoftmaxBackward(tags, softmax_axis), .{ ctx.allocator, self.grad_state, &value });
             }
@@ -113,10 +113,10 @@ pub fn Ops(comptime Self: type) type {
                 const mask_ptr = tensorObjectPtrFrom(@TypeOf(options.mask), &options.mask);
                 if (mask_ptr.requiresGrad()) return error.UnsupportedGradient;
                 const Mask = TensorObject(@TypeOf(options.mask));
-                mask_view = try broadcastTensorTo(Mask.axis_tags, mask_ptr.asRawTensor(), tags, self.shape());
+                mask_view = try broadcastTensorTo(.f32, Mask.axis_tags, mask_ptr.asRawTensor(), tags, self.shape());
             }
 
-            var value = try ctx.softmaxExtAxisRank(
+            var value = try ctx.softmaxExt(
                 tag_rank,
                 self.asRawTensor(),
                 softmax_axis,

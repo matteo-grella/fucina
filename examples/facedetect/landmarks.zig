@@ -43,7 +43,7 @@ pub fn landmarks(ctx: *ExecContext, allocator: std.mem.Allocator, io: std.Io, fi
     defer allocator.free(buf);
     const inv = 1.0 / std_dev;
     for (img.pixels, 0..) |px, i| buf[i] = (@as(f32, @floatFromInt(px)) - mean) * inv;
-    var input = try ctx.fromSlice(&.{ img.height, img.width, 3 }, buf);
+    var input = try ctx.fromSlice(.f32, &.{ img.height, img.width, 3 }, buf);
     defer input.deinit();
 
     var compiled = try graph.Compiled.compile(ctx, allocator, file, prefix, specs, out_name, input_name, 1e-5);

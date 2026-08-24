@@ -181,12 +181,12 @@ pub fn relposAttention(
     // per-head [H,T,dk] tensors (fold u/v into q), then: AC = (q+u)·kᵀ via
     // matmul .trans_b; BD_raw = (q+v)·pᵀ likewise; the Transformer-XL rel-shift
     // `p[kj-qi+T-1]` becomes a light O(H·T²) skew of BD_raw into scores;
-    // softmaxExtAxisRank (scale = 1/√dk, axis = kj) → attn; context = attn·V
+    // softmaxExt (scale = 1/√dk, axis = kj) → attn; context = attn·V
     // via matmul .plain; merge heads → [T,d_model]. The heavy O(H·T²·dk) work runs in the
     // threaded SIMD GEMM; only the index remaps stay scalar.
     // Per-head [H,T,dk] scratch as public facade Tensors straight from the
     // BufferPool (write into the pooled tensor's data — no raw alloc +
-    // fromSliceRank copy): `try .data()` gives the mutable buffer for the local
+    // fromSlice copy): `try .data()` gives the mutable buffer for the local
     // Q/K/V/pos packing fills below (allowed glue), and the GEMMs call facade
     // `.matmul` (.plain/.trans_b) directly.
     var qut = try fucina.Tensor(3).empty(ctx, .{ h_count, t_len, dk });
@@ -360,7 +360,7 @@ fn fullName(buf: []u8, il: usize, mid: []const u8, suffix: []const u8) []const u
 fn layerNormRaw(ctx: *ExecContext, in: []const f32, t_len: usize, d: usize, g: []const f32, b: []const f32) !fucina.internal.RawTensor {
     // KEPT RAW (numerics exception): the slice-based row kernel
     // `layerNormAffineRows` and the public facade `layerNorm` affine arm
-    // (the `layerNormAffineAxisRank` kernel) are DIFFERENT kernels — routing
+    // (the `layerNormAffine` kernel) are DIFFERENT kernels — routing
     // through the facade shifted the `--compare encoder` cosine (0.99999766 →
     // 0.99999782), so per the no-parity-drift rule this stays on the row kernel.
     return ctx.layerNormAffineRows(in, t_len, d, g, b, 1e-5);

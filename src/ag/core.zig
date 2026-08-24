@@ -246,7 +246,7 @@ pub const GradState = struct {
         const has_grad = self.hasGradLocked();
         self.grad_mutex.unlock();
         if (has_grad) return null;
-        if (output_value.isScalar()) return try ctx.scalar(1);
+        if (output_value.isScalar()) return try ctx.scalar(.f32, 1);
         return AgError.MissingOutputGradient;
     }
 
@@ -269,14 +269,14 @@ pub const GradState = struct {
 
     fn prepareInitialAccumulator(engine: *GradEngine, value: *Tensor, will_accumulate_more: bool) !void {
         if (!will_accumulate_more or value.canTakeInPlace()) return;
-        const materialized = try engine.ctx.materialize(value);
+        const materialized = try engine.ctx.materialize(.f32, value);
         value.deinit();
         value.* = materialized;
     }
 
     fn prepareMutableAccumulator(engine: *GradEngine, current: *Tensor) !void {
         if (current.canTakeInPlace()) return;
-        const materialized = try engine.ctx.materialize(current);
+        const materialized = try engine.ctx.materialize(.f32, current);
         current.deinit();
         current.* = materialized;
     }
@@ -706,7 +706,7 @@ test "backward scheduler releases pending operand on missing gradient" {
     const parent = try GradState.leaf(ctx.allocator);
     defer parent.deinit();
 
-    var output_value = try ctx.scalar(0);
+    var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try createNode(MissingGradientBackward, .{ ctx.allocator, parent });
@@ -773,7 +773,7 @@ test "backward scheduler releases pending operand on backward error" {
     const parent = try GradState.leaf(ctx.allocator);
     defer parent.deinit();
 
-    var output_value = try ctx.scalar(0);
+    var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try createNode(FailingBackward, .{ ctx.allocator, parent });

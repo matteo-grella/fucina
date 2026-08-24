@@ -281,7 +281,7 @@ pub const Muon = struct {
         const config = self.config;
         const rows = slot.param.rows;
         const cols = slot.param.cols;
-        var u = try ctx.emptyRank(2, .{ rows, cols });
+        var u = try ctx.empty(.f32, .{ rows, cols });
         defer u.deinit();
         switch (slot.momentum) {
             .f32 => |ms| momentumRun(.f32, ctx, ms, g, u.data(), config.momentum, config.nesterov),
@@ -379,7 +379,7 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
     const rows = u.shape.at(0);
     const cols = u.shape.at(1);
     const transposed = rows > cols;
-    var x = if (transposed) try transpose2D(ctx, u) else try ctx.materialize(u);
+    var x = if (transposed) try transpose2D(ctx, u) else try ctx.materialize(.f32, u);
     errdefer x.deinit();
 
     const sumsq = try sumSquares(ctx, x.dataConst());
@@ -389,10 +389,10 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
     for (0..steps) |_| {
         var gram = try ctx.matmulTransB(&x, &x);
         defer gram.deinit();
-        var quad = try ctx.matmul2D(&gram, &gram);
+        var quad = try ctx.matmul(.f32, &gram, &gram);
         defer quad.deinit();
         for (quad.data(), gram.dataConst()) |*qi, gi| qi.* = ns_coeff_b * gi + ns_coeff_c * qi.*;
-        var bx = try ctx.matmul2D(&quad, &x);
+        var bx = try ctx.matmul(.f32, &quad, &x);
         errdefer bx.deinit();
         for (bx.data(), x.dataConst()) |*oi, xi| oi.* = ns_coeff_a * xi + oi.*;
         x.deinit();
@@ -412,5 +412,5 @@ fn transpose2D(ctx: *ExecContext, t: *const RawTensor) !RawTensor {
     const cols = t.shape.at(1);
     var view = try t.viewWithStrides(&.{ cols, rows }, &.{ 1, cols });
     defer view.deinit();
-    return try ctx.materialize(&view);
+    return try ctx.materialize(.f32, &view);
 }

@@ -1027,14 +1027,14 @@ test "deinit recycles transient buffers through the pool" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var a = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
 
-    var first = try ctx.add(&a, &a);
+    var first = try ctx.elementwise(.add, &a, &a);
     const first_ptr = first.dataConst().ptr;
     first.deinit(); // storage returns to the pool free list
 
-    var second = try ctx.add(&a, &a); // same size: the pool hands back the same address
+    var second = try ctx.elementwise(.add, &a, &a); // same size: the pool hands back the same address
     defer second.deinit();
     try std.testing.expectEqual(first_ptr, second.dataConst().ptr);
 }

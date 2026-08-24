@@ -25,17 +25,17 @@ const FakePackedBlock = extern struct {
     bsums: [64]i16,
 };
 
-test "typed emptyTyped reuses released slabs (f16 address reuse)" {
+test "typed empty reuses released slabs (f16 address reuse)" {
     var ctx: ExecContext = undefined;
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var first = try ctx.emptyTyped(.f16, &.{ 32, 64 });
+    var first = try ctx.empty(.f16, &.{ 32, 64 });
     @memset(first.data(), 0);
     const first_ptr = first.dataConst().ptr;
     first.deinit();
 
-    var second = try ctx.emptyTyped(.f16, &.{ 32, 64 });
+    var second = try ctx.empty(.f16, &.{ 32, 64 });
     defer second.deinit();
     try std.testing.expectEqual(first_ptr, second.dataConst().ptr);
 }

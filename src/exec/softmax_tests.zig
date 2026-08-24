@@ -57,9 +57,9 @@ test "exec context softmax fast path matches generic layout and naive reference"
         defer allocator.free(data);
         for (data) |*value| value.* = random.floatNorm(f32) * 3;
 
-        var x = try ctx.fromSliceRank(2, .{ rows, cols }, data);
+        var x = try ctx.fromSlice(.f32, .{ rows, cols }, data);
         defer x.deinit();
-        var y = try ctx.softmaxAxisRank(2, &x, 1);
+        var y = try ctx.softmax(2, &x, 1);
         defer y.deinit();
         const yd = y.dataConst();
 
@@ -78,9 +78,9 @@ test "exec context softmax fast path matches generic layout and naive reference"
         for (0..rows) |row| {
             for (0..cols) |col| transposed[col * rows + row] = data[row * cols + col];
         }
-        var xt = try ctx.fromSliceRank(2, .{ cols, rows }, transposed);
+        var xt = try ctx.fromSlice(.f32, .{ cols, rows }, transposed);
         defer xt.deinit();
-        var yt = try ctx.softmaxAxisRank(2, &xt, 0);
+        var yt = try ctx.softmax(2, &xt, 0);
         defer yt.deinit();
         const ytd = yt.dataConst();
         for (0..rows) |row| {
@@ -104,9 +104,9 @@ test "softmax NaN logits poison the row on both SIMD and scalar paths" {
     data[3] = nan; // row 0 carries a NaN logit; row 1 stays clean
 
     // Last-axis softmax: contiguous rows, the SIMD vexpf path.
-    var x = try ctx.fromSliceRank(2, .{ 2, cols }, &data);
+    var x = try ctx.fromSlice(.f32, .{ 2, cols }, &data);
     defer x.deinit();
-    var y = try ctx.softmaxAxisRank(2, &x, 1);
+    var y = try ctx.softmax(2, &x, 1);
     defer y.deinit();
     const yd = y.dataConst();
 
@@ -116,9 +116,9 @@ test "softmax NaN logits poison the row on both SIMD and scalar paths" {
     for (0..2) |row| {
         for (0..cols) |col| transposed[col * 2 + row] = data[row * cols + col];
     }
-    var xt = try ctx.fromSliceRank(2, .{ cols, 2 }, &transposed);
+    var xt = try ctx.fromSlice(.f32, .{ cols, 2 }, &transposed);
     defer xt.deinit();
-    var yt = try ctx.softmaxAxisRank(2, &xt, 0);
+    var yt = try ctx.softmax(2, &xt, 0);
     defer yt.deinit();
     const ytd = yt.dataConst();
 
@@ -156,11 +156,11 @@ test "exec context softmax backward fast path matches generic layout" {
         for (y_data[row * cols ..][0..cols]) |*value| value.* /= row_sum;
     }
 
-    var y = try ctx.fromSliceRank(2, .{ rows, cols }, y_data);
+    var y = try ctx.fromSlice(.f32, .{ rows, cols }, y_data);
     defer y.deinit();
-    var gy = try ctx.fromSliceRank(2, .{ rows, cols }, gy_data);
+    var gy = try ctx.fromSlice(.f32, .{ rows, cols }, gy_data);
     defer gy.deinit();
-    var gx = try ctx.softmaxExtBackwardAxisRank(2, &y, &gy, 1, 0.5);
+    var gx = try ctx.softmaxBackward(2, &y, &gy, 1, 0.5);
     defer gx.deinit();
     const gxd = gx.dataConst();
 
@@ -174,11 +174,11 @@ test "exec context softmax backward fast path matches generic layout" {
             gyt_data[col * rows + row] = gy_data[row * cols + col];
         }
     }
-    var yt = try ctx.fromSliceRank(2, .{ cols, rows }, yt_data);
+    var yt = try ctx.fromSlice(.f32, .{ cols, rows }, yt_data);
     defer yt.deinit();
-    var gyt = try ctx.fromSliceRank(2, .{ cols, rows }, gyt_data);
+    var gyt = try ctx.fromSlice(.f32, .{ cols, rows }, gyt_data);
     defer gyt.deinit();
-    var gxt = try ctx.softmaxExtBackwardAxisRank(2, &yt, &gyt, 0, 0.5);
+    var gxt = try ctx.softmaxBackward(2, &yt, &gyt, 0, 0.5);
     defer gxt.deinit();
     const gxtd = gxt.dataConst();
 
@@ -221,18 +221,18 @@ test "softmax family strided inner kernels match last-axis rows across the paral
         }
     }
 
-    var x = try ctx.fromSliceRank(2, .{ rows, cols }, data);
+    var x = try ctx.fromSlice(.f32, .{ rows, cols }, data);
     defer x.deinit();
-    var xt = try ctx.fromSliceRank(2, .{ cols, rows }, transposed);
+    var xt = try ctx.fromSlice(.f32, .{ cols, rows }, transposed);
     defer xt.deinit();
-    var gy = try ctx.fromSliceRank(2, .{ rows, cols }, gy_data);
+    var gy = try ctx.fromSlice(.f32, .{ rows, cols }, gy_data);
     defer gy.deinit();
-    var gyt = try ctx.fromSliceRank(2, .{ cols, rows }, gyt_data);
+    var gyt = try ctx.fromSlice(.f32, .{ cols, rows }, gyt_data);
     defer gyt.deinit();
 
-    var y = try ctx.softmaxAxisRank(2, &x, 1);
+    var y = try ctx.softmax(2, &x, 1);
     defer y.deinit();
-    var yt = try ctx.softmaxAxisRank(2, &xt, 0);
+    var yt = try ctx.softmax(2, &xt, 0);
     defer yt.deinit();
     for (0..rows) |row| {
         for (0..cols) |col| {
@@ -243,9 +243,9 @@ test "softmax family strided inner kernels match last-axis rows across the paral
     // Log-space outputs compare across two different exp-sum accumulation
     // orders (vector-tree rows kernel vs sequential per-lane inner kernel),
     // so the band is wider than the probability-space checks above.
-    var ls = try ctx.logSoftmaxAxisRank(2, &x, 1);
+    var ls = try ctx.logSoftmax(2, &x, 1);
     defer ls.deinit();
-    var lst = try ctx.logSoftmaxAxisRank(2, &xt, 0);
+    var lst = try ctx.logSoftmax(2, &xt, 0);
     defer lst.deinit();
     for (0..rows) |row| {
         for (0..cols) |col| {
@@ -253,17 +253,17 @@ test "softmax family strided inner kernels match last-axis rows across the paral
         }
     }
 
-    var lse = try ctx.logsumexpAxisRank(2, &x, 1);
+    var lse = try ctx.logsumexp(2, &x, 1);
     defer lse.deinit();
-    var lset = try ctx.logsumexpAxisRank(2, &xt, 0);
+    var lset = try ctx.logsumexp(2, &xt, 0);
     defer lset.deinit();
     for (0..rows) |row| {
         try expectCloseToF64(lset.dataConst()[row], lse.dataConst()[row], 5e-5, 1e-5);
     }
 
-    var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 1);
+    var gx = try ctx.softmaxBackward(2, &y, &gy, 1, 1);
     defer gx.deinit();
-    var gxt = try ctx.softmaxBackwardAxisRank(2, &yt, &gyt, 0);
+    var gxt = try ctx.softmaxBackward(2, &yt, &gyt, 0, 1);
     defer gxt.deinit();
     for (0..rows) |row| {
         for (0..cols) |col| {
@@ -299,11 +299,11 @@ test "exec context softmaxExt SIMD rows match strided scalar rows across option 
     for (mask_data) |*value| value.* = random.floatNorm(f32);
     const sinks = [_]f32{ 0.3, -0.2, 0.8, 0.1 };
 
-    var x = try ctx.fromSliceRank(3, .{ heads, q_dim, src_dim }, data);
+    var x = try ctx.fromSlice(.f32, .{ heads, q_dim, src_dim }, data);
     defer x.deinit();
-    var mask = try ctx.fromSliceRank(3, .{ heads, q_dim, src_dim }, mask_data);
+    var mask = try ctx.fromSlice(.f32, .{ heads, q_dim, src_dim }, mask_data);
     defer mask.deinit();
-    var y = try ctx.softmaxExtAxisRank(3, &x, 2, .{
+    var y = try ctx.softmaxExt(3, &x, 2, .{
         .mask = &mask,
         .sinks = &sinks,
         .scale = 0.5,
@@ -327,11 +327,11 @@ test "exec context softmaxExt SIMD rows match strided scalar rows across option 
             }
         }
     }
-    var xt = try ctx.fromSliceRank(3, .{ heads, src_dim, q_dim }, data_t);
+    var xt = try ctx.fromSlice(.f32, .{ heads, src_dim, q_dim }, data_t);
     defer xt.deinit();
-    var maskt = try ctx.fromSliceRank(3, .{ heads, src_dim, q_dim }, mask_t);
+    var maskt = try ctx.fromSlice(.f32, .{ heads, src_dim, q_dim }, mask_t);
     defer maskt.deinit();
-    var yt = try ctx.softmaxExtAxisRank(3, &xt, 1, .{
+    var yt = try ctx.softmaxExt(3, &xt, 1, .{
         .mask = &maskt,
         .sinks = &sinks,
         .scale = 0.5,
@@ -360,7 +360,7 @@ test "exec context softmaxExt mask broadcast along the softmax axis takes the sc
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 4, 6 }, &.{
+    var x = try ctx.fromSlice(.f32, .{ 2, 4, 6 }, &.{
         0.1,  -0.4, 0.7,  1.2,  -0.9, 0.3,
         -1.1, 0.5,  0.2,  -0.6, 1.4,  0.8,
         0.9,  -0.2, -1.3, 0.4,  0.6,  -0.7,
@@ -377,18 +377,18 @@ test "exec context softmaxExt mask broadcast along the softmax axis takes the sc
     // body. The same mask materialized to full shape takes the SIMD body —
     // the two must agree.
     const mask_rows = [_]f32{ 0.5, -0.5, 0, -1, 1, 0.25, -0.25, 2 };
-    var mask_thin = try ctx.fromSliceRank(3, .{ 2, 4, 1 }, &mask_rows);
+    var mask_thin = try ctx.fromSlice(.f32, .{ 2, 4, 1 }, &mask_rows);
     defer mask_thin.deinit();
     var mask_full_data: [2 * 4 * 6]f32 = undefined;
     for (0..8) |row| {
         for (0..6) |col| mask_full_data[row * 6 + col] = mask_rows[row];
     }
-    var mask_full = try ctx.fromSliceRank(3, .{ 2, 4, 6 }, &mask_full_data);
+    var mask_full = try ctx.fromSlice(.f32, .{ 2, 4, 6 }, &mask_full_data);
     defer mask_full.deinit();
 
-    var y_thin = try ctx.softmaxExtAxisRank(3, &x, 2, .{ .mask = &mask_thin, .scale = 0.7 });
+    var y_thin = try ctx.softmaxExt(3, &x, 2, .{ .mask = &mask_thin, .scale = 0.7 });
     defer y_thin.deinit();
-    var y_full = try ctx.softmaxExtAxisRank(3, &x, 2, .{ .mask = &mask_full, .scale = 0.7 });
+    var y_full = try ctx.softmaxExt(3, &x, 2, .{ .mask = &mask_full, .scale = 0.7 });
     defer y_full.deinit();
 
     for (y_thin.dataConst(), y_full.dataConst()) |scalar_path, fast| {

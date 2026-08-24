@@ -451,7 +451,7 @@ pub const ReluBackward = struct {
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
 
-        var gx = try ctx.empty(x.shape.slice());
+        var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
         for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
             dst.* = if (value > 0) grad else 0;
@@ -1065,9 +1065,9 @@ const ScaledSquare = struct {
     pub const Output = fucina.Tensor(.{.d});
 
     pub fn forward(ctx: *fucina.ExecContext, extra: f32, inputs: []const *const RawTensor) !RawTensor {
-        var sq = try ctx.mulRank(1, inputs[0], inputs[0]);
+        var sq = try ctx.mul(.f32, 1, inputs[0], inputs[0]);
         defer sq.deinit();
-        return ctx.scale(&sq, extra); // y = extra * x^2
+        return ctx.scale(.f32, &sq, extra); // y = extra * x^2
     }
 
     pub fn backward(
@@ -1081,9 +1081,9 @@ const ScaledSquare = struct {
     ) !void {
         _ = output;
         if (needs_grad[0]) {
-            var slope = try ctx.scale(inputs[0], 2 * extra); // dy/dx = 2*extra*x
+            var slope = try ctx.scale(.f32, inputs[0], 2 * extra); // dy/dx = 2*extra*x
             defer slope.deinit();
-            out[0] = try ctx.mulRank(1, gy, &slope); // engine consumes out[0]
+            out[0] = try ctx.mul(.f32, 1, gy, &slope); // engine consumes out[0]
         }
     }
 };

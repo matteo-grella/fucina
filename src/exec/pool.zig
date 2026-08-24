@@ -46,10 +46,10 @@ pub fn pool2d(ctx: *ExecContext, comptime kind: PoolKind, input: *const Tensor, 
     const view = try input.rankView(3);
     const d = try pool2dDims(view.shape[0], view.shape[1], view.shape[2], kernel, stride, pad);
 
-    var ii = try ctx.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
 
-    var out = try ctx.emptyRank(3, .{ d.oh, d.ow, d.c });
+    var out = try ctx.empty(.f32, .{ d.oh, d.ow, d.c });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(d.oh * d.ow * d.c * d.kh * d.kw, parallel.vector_elementwise_len_threshold);
     kernels.pool2dInto(ctx.pc(), kind, &out, ii.tensor(), d);
@@ -75,9 +75,9 @@ pub fn avgPool2dBackward(ctx: *ExecContext, gy: *const Tensor, in_h: usize, in_w
     const d = try pool2dDims(in_h, in_w, gy_view.shape[2], kernel, stride, pad);
     if (d.oh != gy_view.shape[0] or d.ow != gy_view.shape[1]) return tensor.TensorError.ShapeMismatch;
 
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var out = try ctx.emptyRank(3, .{ in_h, in_w, d.c });
+    var out = try ctx.empty(.f32, .{ in_h, in_w, d.c });
     errdefer out.deinit();
     kernels.avgPool2dBackwardInto(ctx.pc(), &out, gg.tensor(), d);
     return out;
@@ -92,11 +92,11 @@ pub fn maxPool2dBackward(ctx: *ExecContext, input: *const Tensor, gy: *const Ten
     const d = try pool2dDims(in_view.shape[0], in_view.shape[1], in_view.shape[2], kernel, stride, pad);
     if (d.oh != gy_view.shape[0] or d.ow != gy_view.shape[1]) return tensor.TensorError.ShapeMismatch;
 
-    var ii = try ctx.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var out = try ctx.emptyRank(3, .{ d.h, d.w, d.c });
+    var out = try ctx.empty(.f32, .{ d.h, d.w, d.c });
     errdefer out.deinit();
     kernels.maxPool2dBackwardInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), d);
     return out;
@@ -110,9 +110,9 @@ pub fn upsample2xNearest(ctx: *ExecContext, input: *const Tensor) !Tensor {
     const w = view.shape[1];
     const c = view.shape[2];
 
-    var ii = try ctx.prepareContiguous(input);
+    var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
-    var out = try ctx.emptyRank(3, .{ 2 * h, 2 * w, c });
+    var out = try ctx.empty(.f32, .{ 2 * h, 2 * w, c });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(4 * h * w * c, parallel.vector_elementwise_len_threshold);
     kernels.upsample2xNearestInto(ctx.pc(), &out, ii.tensor(), h, w, c);

@@ -490,11 +490,12 @@ another's order.
 A view ([Chapter 3](03-tensors-from-scratch.md)) is a shape and strides
 over a shared buffer; the tag layer adds that you never permute *by
 position*, you align *to a target tag order*. Here is the real
-implementation, short enough to read whole (src/tag_ops.zig:330–362,
-`alignTensorToOf`; `alignTensorTo` at :324 is its f32 wrapper):
+implementation, short enough to read whole (src/tag_ops.zig:302,
+`alignTensorTo`; the leading comptime dtype selects the storage, `.f32`
+for the default facade):
 
 ```zig
-pub fn alignTensorToOf(
+pub fn alignTensorTo(
     comptime tensor_dtype: DType,
     comptime source_tags: anytype,
     source: *const tensor_mod.TensorOf(tensor_dtype),
@@ -507,7 +508,7 @@ pub fn alignTensorToOf(
             if (tagIndex(target_tags, tag) == null) @compileError("target tags must include all source tags");
         }
     }
-    try validateTensorRankOf(tensor_dtype, source_tags, source);
+    try validateTensorRank(tensor_dtype, source_tags, source);
 
     // (scalar-target fast path elided)
 
@@ -1157,7 +1158,7 @@ neither a tag nor a check for one.
   to bottom, and the best `comptime` tutorial in the tree.
 - `src/tags_tests.zig` / `src/tag_ops_tests.zig` — the algebra's rules
   pinned as tests, comptime and runtime halves respectively.
-- `src/tag_ops.zig` — the runtime half: `alignTensorToOf` (the workhorse
+- `src/tag_ops.zig` — the runtime half: `alignTensorTo` (the workhorse
   view), `pointwise`, `taggedDot`/`taggedEinsum` with the orientation probe.
   Remember: internal — user code goes through `Tensor` methods.
 - `src/ag/tensor.zig:189–215` — the facade constructor: normalize, validate,

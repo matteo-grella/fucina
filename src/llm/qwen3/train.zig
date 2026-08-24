@@ -260,7 +260,7 @@ fn widenedFrozen(cache: *FrozenCache, weight: *const LinearWeight, ctx: *ExecCon
                 .q8_0 => .q8_0,
                 else => unreachable,
             };
-            var raw = try ctx.dequantizeTensorTyped(dt, w.value.asRawTensor());
+            var raw = try ctx.dequantizeTensor(dt, w.value.asRawTensor());
             defer raw.deinit();
             break :blk try adoptWidened(ctx, &raw);
         },

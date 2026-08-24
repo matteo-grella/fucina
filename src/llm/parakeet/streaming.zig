@@ -5,7 +5,7 @@
 //!
 //! ConvCache — the conformer conv module's causal depthwise conv left-context cache
 //! (NeMo `cache_last_time`). The causal depthwise conv1d itself is the SHARED op
-//! `ExecContext.causalDepthwiseConv1dAxisRank` (its `state` is the `taps-1`
+//! `ExecContext.causalDepthwiseConv1d` (its `state` is the `taps-1`
 //! historical rows preceding the chunk). This module owns the per-layer cache
 //! and its chunk-to-chunk advance, so a chunked stream is byte-equivalent to the
 //! full-sequence causal conv (the cache-equivalence property, pinned by the
@@ -354,7 +354,7 @@ fn streamingConvModule(
         try dw.addAxisVectorInPlace(ctx, try encoder.f32Data(bi), ._1);
 
     // layer_norm over channels per frame (g/b stored under the batch_norm names) via
-    // the facade `layerNorm` affine arm (the layerNormAffineAxisRank kernel) — NOT the
+    // the facade `layerNorm` affine arm (the layerNormAffine kernel) — NOT the
     // offline encoder's layerNormAffineRows row kernel: the two differ numerically
     // (see `encoder.zig` layerNormRaw); streaming parity was validated on this one.
     var gt = try fucina.Tensor(1).fromBorrowedConstSlice(ctx, .{d}, try encoder.f32Data(try w.file.get(encoder.convName(&wb, il, "batch_norm.weight"))));

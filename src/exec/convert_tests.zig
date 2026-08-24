@@ -20,7 +20,7 @@ const LayoutClass = exec.LayoutClass;
 const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 
-test "castTyped bf16 vector lanes match the scalar converters bit-for-bit" {
+test "cast bf16 vector lanes match the scalar converters bit-for-bit" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
@@ -41,15 +41,15 @@ test "castTyped bf16 vector lanes match the scalar converters bit-for-bit" {
     var values: [67]f32 = undefined;
     for (&values, 0..) |*v, i| v.* = @bitCast(patterns[i % patterns.len]);
 
-    var x = try ctx.fromSlice(&.{values.len}, &values);
+    var x = try ctx.fromSlice(.f32, &.{values.len}, &values);
     defer x.deinit();
-    var narrowed = try ctx.castTyped(.f32, .bf16, &x);
+    var narrowed = try ctx.cast(.f32, .bf16, &x);
     defer narrowed.deinit();
     for (narrowed.dataConst(), values) |got, value| {
         try std.testing.expectEqual(dtype_mod.f32ToBf16(value), got);
     }
 
-    var widened = try ctx.castTyped(.bf16, .f32, &narrowed);
+    var widened = try ctx.cast(.bf16, .f32, &narrowed);
     defer widened.deinit();
     for (widened.dataConst(), narrowed.dataConst()) |got, bits| {
         // Bit compare: NaN payloads must survive, and nan != nan by value.

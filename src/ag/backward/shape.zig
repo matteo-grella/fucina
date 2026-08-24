@@ -62,7 +62,7 @@ pub fn NarrowBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.sliceGradientAxisRank(rawRank(source_tags.len), gy, self.source_shape, axis, self.start);
+            out[0] = try ctx.sliceGradient(rawRank(source_tags.len), gy, self.source_shape, axis, self.start);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -91,9 +91,9 @@ pub fn PadBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            var view = try ctx.narrowAxisRank(rawRank(source_tags.len), gy, axis, self.before, self.source_shape[axis]);
+            var view = try ctx.narrowAxis(.f32, rawRank(source_tags.len), gy, axis, self.before, self.source_shape[axis]);
             defer view.deinit();
-            out[0] = try ctx.materialize(&view);
+            out[0] = try ctx.materialize(.f32, &view);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -122,9 +122,9 @@ pub fn ConcatBackward(comptime tags: anytype, comptime axis: usize) type {
             for (self.sizes, 0..) |size, i| {
                 defer start += size;
                 if (i >= needs_grad.len or !needs_grad[i]) continue;
-                var view = try ctx.narrowAxisRank(rawRank(tags.len), gy, axis, start, size);
+                var view = try ctx.narrowAxis(.f32, rawRank(tags.len), gy, axis, start, size);
                 defer view.deinit();
-                out[i] = try ctx.materialize(&view);
+                out[i] = try ctx.materialize(.f32, &view);
             }
         }
 
@@ -153,7 +153,7 @@ pub const ReshapeBackward = struct {
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
-        var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(gy);
+        var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(.f32, gy);
         defer ready.deinit();
         out[0] = try ready.reshape(self.source_shape);
     }
@@ -198,7 +198,7 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
 
             var view = try gy.viewWithStrides(self.source_shape[0..], strides[0..]);
             defer view.deinit();
-            out[0] = try ctx.materialize(&view);
+            out[0] = try ctx.materialize(.f32, &view);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -250,14 +250,14 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
 
             if (!self.gyShapeMatches(gy)) return tensor_mod.TensorError.ShapeMismatch;
 
-            var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(gy);
+            var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(.f32, gy);
             defer ready.deinit();
             if (!self.aliases_source or self.order_preserving) {
                 out[0] = try ready.reshape(self.source_shape[0..]);
                 return;
             }
 
-            var gx = try ctx.emptyRank(source_rank, self.source_shape);
+            var gx = try ctx.empty(.f32, self.source_shape);
             errdefer gx.deinit();
             @memset(gx.data(), 0);
 

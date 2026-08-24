@@ -176,7 +176,7 @@ fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Out
 fn finishWithBackward(comptime Output: type, value: RawTensor, state: *GradState) !Output {
     errdefer state.deinit();
     var owned_value = value;
-    try tag_ops.validateTensorRank(Output.axis_tags, &owned_value);
+    try tag_ops.validateTensorRank(.f32, Output.axis_tags, &owned_value);
     return .{ .value = owned_value, .grad_state = state };
 }
 

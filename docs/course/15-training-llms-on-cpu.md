@@ -180,7 +180,7 @@ pub fn init(ctx: *ExecContext, in_dim: usize, out_dim: usize, config: AdapterCon
     if (!(config.dropout_p >= 0 and config.dropout_p < 1)) return LoraError.InvalidDropout;
 
     var a = blk: {
-        var value = try ctx.emptyRank(2, .{ config.rank, in_dim });
+        var value = try ctx.empty(.f32, .{ config.rank, in_dim });
         errdefer value.deinit();
         rng.kaimingUniformFill(seed, value.data(), in_dim);
         break :blk try ATensor.variable(ctx, value);
@@ -188,7 +188,7 @@ pub fn init(ctx: *ExecContext, in_dim: usize, out_dim: usize, config: AdapterCon
     errdefer a.deinit();
 
     const b = blk: {
-        var value = try ctx.zeros(&.{ out_dim, config.rank });
+        var value = try ctx.zeros(.f32, &.{ out_dim, config.rank });
         errdefer value.deinit();
         break :blk try BTensor.variable(ctx, value);
     };

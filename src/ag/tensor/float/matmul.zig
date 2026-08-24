@@ -26,10 +26,10 @@ const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
 const dotBatchLen = tags_mod.dotBatchLen;
 const dotLeftFreeLen = tags_mod.dotLeftFreeLen;
 const dotRightFreeLen = tags_mod.dotRightFreeLen;
-const alignTensorToOf = tag_ops.alignTensorToOf;
-const contiguousForReshapeOf = tag_ops.contiguousForReshapeOf;
-const dotResultShapeOf = tag_ops.dotResultShapeOf;
-const productRangeOf = tag_ops.productRangeOf;
+const alignTensorTo = tag_ops.alignTensorTo;
+const contiguousForReshape = tag_ops.contiguousForReshape;
+const dotResultShape = tag_ops.dotResultShape;
+const productRange = tag_ops.productRange;
 const Matmul2DBackward = backward.Matmul2DBackward;
 const BmmBackward = backward.BmmBackward;
 const DotBackward = backward.DotBackward;
@@ -79,7 +79,7 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("matmul: rank-2 .trans_a has no backward record — use `dot` (its tag algebra reaches the 2-D trans-A kernel)");
                 };
                 var value = try switch (comptime kind) {
-                    .plain => ctx.matmul2D(self.asRawTensor(), other_ptr.asRawTensor()),
+                    .plain => ctx.matmul(.f32, self.asRawTensor(), other_ptr.asRawTensor()),
                     .trans_b => ctx.matmulTransB(self.asRawTensor(), other_ptr.asRawTensor()),
                     .trans_a => unreachable, // rejected above
                 };
@@ -204,7 +204,7 @@ pub fn Ops(comptime Self: type) type {
                 // lowering. A constant RHS routes gradient to `self` only; a
                 // grad-requiring 16-bit RHS variable also receives its f32
                 // gradient (gradients are always f32).
-                var right_f32 = try ctx.castTyped(Other.dtype, .f32, other_ptr.asRawTensor());
+                var right_f32 = try ctx.cast(Other.dtype, .f32, other_ptr.asRawTensor());
                 defer right_f32.deinit();
                 var value = try tag_ops.taggedEinsum(tags, self.asRawTensor(), ctx, other_tags, &right_f32, result_tags);
                 errdefer value.deinit();
@@ -241,22 +241,22 @@ pub fn Ops(comptime Self: type) type {
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(weight), &weight);
             const weight_raw = weight_ptr.asRawTensor();
 
-            const result_shape = try dotResultShapeOf(.f32, .f32, tags, self.asRawTensor(), weight_tags, weight_raw, contract_tag);
+            const result_shape = try dotResultShape(.f32, .f32, tags, self.asRawTensor(), weight_tags, weight_raw, contract_tag);
             const n = weight_raw.shape.at(0);
             const k = weight_raw.shape.at(1);
             if (self.asRawTensor().shape.at(tag_rank - 1) != k) return TensorError.ShapeMismatch;
             if (k == 0 or k % dtype_mod.qk_k_block_size != 0) return error.TernaryContractDimNotBlockAligned;
 
             const left_free_rank = comptime dotLeftFreeLen(tags, weight_tags, contract_tag);
-            var left_aligned = try alignTensorToOf(.f32, tags, self.asRawTensor(), dotLeftOrder(tags, weight_tags, contract_tag));
+            var left_aligned = try alignTensorTo(.f32, tags, self.asRawTensor(), dotLeftOrder(tags, weight_tags, contract_tag));
             defer left_aligned.deinit();
-            const m = productRangeOf(.f32, &left_aligned, 0, left_free_rank);
-            var left_ready = try contiguousForReshapeOf(.f32, ctx, &left_aligned);
+            const m = productRange(.f32, &left_aligned, 0, left_free_rank);
+            var left_ready = try contiguousForReshape(.f32, ctx, &left_aligned);
             defer left_ready.deinit();
             var left_matrix = try left_ready.reshape(&.{ m, k });
             defer left_matrix.deinit();
 
-            var weight_ready = try contiguousForReshapeOf(.f32, ctx, weight_raw);
+            var weight_ready = try contiguousForReshape(.f32, ctx, weight_raw);
             defer weight_ready.deinit();
 
             // Per-tensor absmean scale + round-clip encode of the latent weight.
@@ -265,7 +265,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer if (rhs_owned) rhs.deinit();
 
             var value = forward: {
-                var product = try ctx.emptyRankTyped(.f32, 2, .{ m, n });
+                var product = try ctx.empty(.f32, .{ m, n });
                 errdefer product.deinit();
                 const work = parallel.saturatedMul3(m, n, k);
                 const config: backend_mod.vector_impl.ParallelConfig =
@@ -342,7 +342,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(.f32) {
             comptime if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
             if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
-            return ctx.packDenseMatmulRhsTyped(.f32, self.asRawTensor());
+            return ctx.packDenseMatmulRhs(.f32, self.asRawTensor());
         }
 
         /// Fused rmsNormMul + packed GEMM: computes

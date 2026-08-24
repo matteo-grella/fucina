@@ -179,15 +179,15 @@ const Base = struct {
         const oh = (case.h + 2 * case.pad - case.k) / case.stride + 1;
         const ow = (case.w + 2 * case.pad - case.k) / case.stride + 1;
 
-        var input = try ctx.emptyRank(3, .{ case.h, case.w, case.cin });
+        var input = try ctx.empty(.f32, .{ case.h, case.w, case.cin });
         errdefer input.deinit();
         fillPattern(&input, 1);
 
-        var weight = try ctx.emptyRank(4, .{ case.cout, case.k, case.k, case.cin / case.groups });
+        var weight = try ctx.empty(.f32, .{ case.cout, case.k, case.k, case.cin / case.groups });
         errdefer weight.deinit();
         fillPattern(&weight, 2);
 
-        var gy = try ctx.emptyRank(3, .{ oh, ow, case.cout });
+        var gy = try ctx.empty(.f32, .{ oh, ow, case.cout });
         errdefer gy.deinit();
         fillPattern(&gy, 3);
 

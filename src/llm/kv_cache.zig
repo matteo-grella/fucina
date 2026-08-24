@@ -182,7 +182,7 @@ pub const KvCache = struct {
     }
 
     fn makeLayer(ctx: *ExecContext, kv_heads: usize, head_dim: usize, capacity: usize) !KvTensor {
-        var raw = try ctx.emptyRankTyped(.f16, 3, .{ capacity, kv_heads, head_dim });
+        var raw = try ctx.empty(.f16, .{ capacity, kv_heads, head_dim });
         errdefer raw.deinit();
         return KvTensor.fromTensor(ctx, raw);
     }
@@ -296,7 +296,7 @@ pub const KvCache = struct {
                 const span = m * row;
                 // Cast straight into the cache slot: one pass, no temporaries. K is
                 // contiguous; V is a split view of the fused QKV row, walked as
-                // per-row contiguous spans (previously castTyped materialized an f32
+                // per-row contiguous spans (previously cast materialized an f32
                 // copy of V, allocated an unpooled f16 temp for each, and memcpy'd).
                 const k_slot = try self.k[layer_i].data();
                 const v_slot = try self.v[layer_i].data();

@@ -470,7 +470,7 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
     const rows = u.shape.at(0);
     const cols = u.shape.at(1);
     const transposed = rows > cols;
-    var x = if (transposed) try transpose2D(ctx, u) else try ctx.materialize(u);
+    var x = if (transposed) try transpose2D(ctx, u) else try ctx.materialize(.f32, u);
     errdefer x.deinit();
 
     const sumsq = try sumSquares(ctx, x.dataConst());

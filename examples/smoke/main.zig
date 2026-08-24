@@ -12,13 +12,13 @@ pub fn main(init: std.process.Init) !void {
 
     var x = try fucina.Tensor(.{ .batch, .in }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }),
+        try ctx.fromSlice(.f32, &.{ 1, 2 }, &.{ 2, 3 }),
     );
     defer x.deinit();
 
     var w = try fucina.Tensor(.{ .in, .out }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }),
+        try ctx.fromSlice(.f32, &.{ 2, 1 }, &.{ 4, 5 }),
     );
     defer w.deinit();
 

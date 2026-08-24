@@ -55,7 +55,7 @@ pub fn Ops(comptime Self: type) type {
                 // The partial exec entry self-falls-back to the full kernel
                 // when table.feature_dim equals the feature axis length (one
                 // integer compare); the backward mirrors it.
-                var value = try ctx.ropePartialAxisRankWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
+                var value = try ctx.ropePartialWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), RopeTableBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, source });
             }
@@ -69,7 +69,7 @@ pub fn Ops(comptime Self: type) type {
                         @compileError("rope: an on-the-fly source needs both .positions and .theta_base");
                 }
                 const theta = exec_mod.RopeTheta{ .positions = source.positions, .theta_base = source.theta_base };
-                var value = try ctx.ropeAxisRank(tag_rank, self.asRawTensor(), position_axis, feature_axis, theta.positions, theta.theta_base, mode, false);
+                var value = try ctx.rope(tag_rank, self.asRawTensor(), position_axis, feature_axis, theta.positions, theta.theta_base, mode, false);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), RopeBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, theta.positions, theta.theta_base });
             }

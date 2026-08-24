@@ -219,88 +219,52 @@ pub const ExecContext = struct {
         return .arbitrary;
     }
 
-    pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: []const usize) !Tensor {
-        _ = self;
-        return x.broadcastTo(shape);
-    }
-
-    pub fn broadcastToRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, shape: [rank]usize) !Tensor {
-        _ = self;
-        return x.broadcastToRank(rank, shape);
-    }
+    pub const broadcastTo = exec_runtime.broadcastTo;
 
     pub const empty = exec_runtime.empty;
-    pub const emptyRank = exec_runtime.emptyRank;
-    pub const emptyTyped = exec_runtime.emptyTyped;
-    pub const emptyRankTyped = exec_runtime.emptyRankTyped;
     pub const zeros = exec_runtime.zeros;
-    pub const zerosRank = exec_runtime.zerosRank;
-    pub const zerosTyped = exec_runtime.zerosTyped;
-    pub const zerosRankTyped = exec_runtime.zerosRankTyped;
     pub const ones = exec_runtime.ones;
-    pub const onesRank = exec_runtime.onesRank;
-    pub const onesTyped = exec_runtime.onesTyped;
-    pub const onesRankTyped = exec_runtime.onesRankTyped;
     pub const full = exec_runtime.full;
-    pub const fullTyped = exec_runtime.fullTyped;
     pub const scalar = exec_runtime.scalar;
-    pub const scalarTyped = exec_runtime.scalarTyped;
     pub const fromSlice = exec_runtime.fromSlice;
-    pub const fromSliceRank = exec_runtime.fromSliceRank;
-    pub const fromBorrowedSliceRank = exec_runtime.fromBorrowedSliceRank;
-    pub const fromSliceTyped = exec_runtime.fromSliceTyped;
-    pub const fromSliceRankTyped = exec_runtime.fromSliceRankTyped;
-    pub const fromBorrowedSliceRankTyped = exec_runtime.fromBorrowedSliceRankTyped;
-    pub const fromStorageSliceRankTyped = exec_runtime.fromStorageSliceRankTyped;
-    pub const fromBorrowedStorageSliceRankTyped = exec_runtime.fromBorrowedStorageSliceRankTyped;
+    pub const fromBorrowedSlice = exec_runtime.fromBorrowedSlice;
+    pub const fromStorageSlice = exec_runtime.fromStorageSlice;
+    pub const fromBorrowedStorageSlice = exec_runtime.fromBorrowedStorageSlice;
     pub const replace = exec_runtime.replace;
     pub const materialize = exec_runtime.materialize;
-    pub const materializeTyped = exec_runtime.materializeTyped;
     pub const clone = exec_runtime.clone;
-    pub const cloneTyped = exec_runtime.cloneTyped;
     pub const prepareContiguous = exec_runtime.prepareContiguous;
-    pub const prepareContiguousTyped = exec_runtime.prepareContiguousTyped;
     pub const enableNativeVectorPoolForWork = exec_runtime.enableNativeVectorPoolForWork;
     pub const enableNativeMatmulPoolForWork = exec_runtime.enableNativeMatmulPoolForWork;
-    pub const enableNativeTypedMatmulPoolForWork = exec_runtime.enableNativeTypedMatmulPoolForWork;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)
     // ----------------------------------------------------------------------
+    pub const elementwise = exec_elementwise.elementwise;
     pub const add = exec_elementwise.add;
     pub const sub = exec_elementwise.sub;
     pub const mul = exec_elementwise.mul;
     pub const div = exec_elementwise.div;
-    pub const addRank = exec_elementwise.addRank;
-    pub const addRankTyped = exec_elementwise.addRankTyped;
-    pub const subRank = exec_elementwise.subRank;
-    pub const subRankTyped = exec_elementwise.subRankTyped;
-    pub const mulRank = exec_elementwise.mulRank;
-    pub const mulRankTyped = exec_elementwise.mulRankTyped;
-    pub const divRank = exec_elementwise.divRank;
-    pub const divRankTyped = exec_elementwise.divRankTyped;
-    pub const maxRank = exec_elementwise.maxRank;
-    pub const maxRankTyped = exec_elementwise.maxRankTyped;
-    pub const minRankTyped = exec_elementwise.minRankTyped;
-    pub const divTruncRankTyped = exec_elementwise.divTruncRankTyped;
-    pub const divFloorRankTyped = exec_elementwise.divFloorRankTyped;
-    pub const remRankTyped = exec_elementwise.remRankTyped;
-    pub const modRankTyped = exec_elementwise.modRankTyped;
-    pub const bitwiseRankTyped = exec_elementwise.intBitwiseRankTyped;
-    pub const minRank = exec_elementwise.minRank;
-    pub const gatedRank = exec_elementwise.gatedRank;
-    pub const gluRank = exec_elementwise.gluRank;
-    pub const swigluRank = exec_elementwise.swigluRank;
-    pub const gegluRank = exec_elementwise.gegluRank;
-    pub const splitSwiGluAxisRank = exec_elementwise.splitSwiGluAxisRank;
-    pub const relposShiftRank3 = exec_gather_scatter.relposShiftRank3;
+    pub const max = exec_elementwise.max;
+    pub const min = exec_elementwise.min;
+    pub const divTrunc = exec_elementwise.divTrunc;
+    pub const divFloor = exec_elementwise.divFloor;
+    pub const rem = exec_elementwise.rem;
+    pub const mod = exec_elementwise.mod;
+    pub const bitwise = exec_elementwise.bitwise;
+    pub const gated = exec_elementwise.gated;
+    pub const glu = exec_elementwise.glu;
+    pub const swiglu = exec_elementwise.swiglu;
+    pub const geglu = exec_elementwise.geglu;
+    pub const splitSwiGlu = exec_elementwise.splitSwiGlu;
+    pub const relposShift = exec_gather_scatter.relposShift;
 
     // ----------------------------------------------------------------------
     // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub const splitGluAxisRank = exec_elementwise.splitGluAxisRank;
-    pub const splitSwiGluBackwardAxisRank = exec_elementwise.splitSwiGluBackwardAxisRank;
-    pub const splitGluBackwardAxisRank = exec_elementwise.splitGluBackwardAxisRank;
+    pub const splitGlu = exec_elementwise.splitGlu;
+    pub const splitSwiGluBackward = exec_elementwise.splitSwiGluBackward;
+    pub const splitGluBackward = exec_elementwise.splitGluBackward;
     pub const addInPlace = exec_elementwise.addInPlace;
     pub const subInPlace = exec_elementwise.subInPlace;
     pub const mulInPlace = exec_elementwise.mulInPlace;
@@ -316,37 +280,32 @@ pub const ExecContext = struct {
     pub const addScalar = exec_elementwise.addScalar;
     pub const powScalar = exec_elementwise.powScalar;
     pub const where = exec_elementwise.where;
-    pub const whereTyped = exec_elementwise.whereTyped;
     pub const maskedFill = exec_elementwise.maskedFill;
-    pub const maskedFillTyped = exec_elementwise.maskedFillTyped;
     pub const compare = exec_elementwise.compare;
     pub const compareScalar = exec_elementwise.compareScalar;
-    pub const compareIntTyped = exec_elementwise.compareIntTyped;
-    pub const compareIntScalarTyped = exec_elementwise.compareIntScalarTyped;
-    pub const logicalTyped = exec_elementwise.logicalTyped;
-    pub const logicalNotTyped = exec_elementwise.logicalNotTyped;
+    pub const logical = exec_elementwise.logical;
+    pub const logicalNot = exec_elementwise.logicalNot;
     pub const addScaledInPlace = exec_elementwise.addScaledInPlace;
-    pub const addAxisVectorInPlaceRank = exec_elementwise.addAxisVectorInPlaceRank;
-    pub const addAxisVectorUnaryInPlaceRank = exec_elementwise.addAxisVectorUnaryInPlaceRank;
+    pub const addAxisVectorInPlace = exec_elementwise.addAxisVectorInPlace;
+    pub const addAxisVectorUnaryInPlace = exec_elementwise.addAxisVectorUnaryInPlace;
     pub const dropoutForward = exec_elementwise.dropoutForward;
     pub const dropoutBackward = exec_elementwise.dropoutBackward;
 
     // ----------------------------------------------------------------------
     // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
     // ----------------------------------------------------------------------
-    pub const castTyped = exec_convert.castTyped;
+    pub const cast = exec_convert.cast;
     pub const castF32RowsToF16Into = exec_convert.castF32RowsToF16Into;
     pub const quantizeF32RowsToQ8_0Into = exec_convert.quantizeF32RowsToQ8_0Into;
     pub const dequantizeQ8_0RowsInto = exec_convert.dequantizeQ8_0RowsInto;
-    pub const scaleTyped = exec_convert.scaleTyped;
 
     // ----------------------------------------------------------------------
     // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)
     // ----------------------------------------------------------------------
-    pub const causalDepthwiseConv1dAxisRank = exec_conv.causalDepthwiseConv1dAxisRank;
-    pub const causalDepthwiseConv1dBackwardInputAxisRank = exec_conv.causalDepthwiseConv1dBackwardInputAxisRank;
-    pub const causalDepthwiseConv1dBackwardKernelAxisRank = exec_conv.causalDepthwiseConv1dBackwardKernelAxisRank;
-    pub const causalConv1dAxisRank = exec_conv.causalConv1dAxisRank;
+    pub const causalDepthwiseConv1d = exec_conv.causalDepthwiseConv1d;
+    pub const causalDepthwiseConv1dBackwardInput = exec_conv.causalDepthwiseConv1dBackwardInput;
+    pub const causalDepthwiseConv1dBackwardKernel = exec_conv.causalDepthwiseConv1dBackwardKernel;
+    pub const causalConv1d = exec_conv.causalConv1d;
     pub const conv2d = exec_conv.conv2d;
     pub const conv2dRelu = exec_conv.conv2dRelu;
 
@@ -383,16 +342,16 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub const causalConv1dBackwardInputAxisRank = exec_conv.causalConv1dBackwardInputAxisRank;
-    pub const causalConv1dBackwardWeightAxisRank = exec_conv.causalConv1dBackwardWeightAxisRank;
-    pub const groupedCausalConv1dAxisRank = exec_conv.groupedCausalConv1dAxisRank;
-    pub const groupedCausalConv1dBackwardInputAxisRank = exec_conv.groupedCausalConv1dBackwardInputAxisRank;
-    pub const groupedCausalConv1dBackwardWeightAxisRank = exec_conv.groupedCausalConv1dBackwardWeightAxisRank;
-    pub const conv1dAxisRank = exec_conv.conv1dAxisRank;
-    pub const conv1dBackwardInputAxisRank = exec_conv.conv1dBackwardInputAxisRank;
-    pub const conv1dBackwardWeightAxisRank = exec_conv.conv1dBackwardWeightAxisRank;
-    pub const col2im1dAxisRank = exec_conv.col2im1dAxisRank;
-    pub const col2im1dBackwardAxisRank = exec_conv.col2im1dBackwardAxisRank;
+    pub const causalConv1dBackwardInput = exec_conv.causalConv1dBackwardInput;
+    pub const causalConv1dBackwardWeight = exec_conv.causalConv1dBackwardWeight;
+    pub const groupedCausalConv1d = exec_conv.groupedCausalConv1d;
+    pub const groupedCausalConv1dBackwardInput = exec_conv.groupedCausalConv1dBackwardInput;
+    pub const groupedCausalConv1dBackwardWeight = exec_conv.groupedCausalConv1dBackwardWeight;
+    pub const conv1d = exec_conv.conv1d;
+    pub const conv1dBackwardInput = exec_conv.conv1dBackwardInput;
+    pub const conv1dBackwardWeight = exec_conv.conv1dBackwardWeight;
+    pub const col2im1d = exec_conv.col2im1d;
+    pub const col2im1dBackward = exec_conv.col2im1dBackward;
     pub const convTranspose1d = exec_conv.convTranspose1d;
 
     // ----------------------------------------------------------------------
@@ -423,104 +382,95 @@ pub const ExecContext = struct {
     // reduce: sums, products, means, argmin/argmax, scans (exec/reduce.zig)
     // ----------------------------------------------------------------------
     pub const sum = exec_reduce.sum;
-    pub const sumTyped = exec_reduce.sumTyped;
-    pub const sumAxisRank = exec_reduce.sumAxisRank;
-    pub const sumAxisRankTyped = exec_reduce.sumAxisRankTyped;
-    pub const cumsumAxisRank = exec_reduce.cumsumAxisRank;
-    pub const prodAxisRank = exec_reduce.prodAxisRank;
-    pub const cumprodAxisRank = exec_reduce.cumprodAxisRank;
-    pub const cumsumReverseAxisRank = exec_reduce.cumsumReverseAxisRank;
-    pub const segmentSumAxisRank = exec_reduce.segmentSumAxisRank;
-    pub const segmentBroadcastAxisRank = exec_reduce.segmentBroadcastAxisRank;
-    pub const linearRecurrenceAxisRank = exec_reduce.linearRecurrenceAxisRank;
-    pub const linearRecurrenceBackwardAxisRank = exec_reduce.linearRecurrenceBackwardAxisRank;
-    pub const meanAxisRank = exec_reduce.meanAxisRank;
-    pub const sumMaskedAxisRank = exec_reduce.sumMaskedAxisRank;
-    pub const meanMaskedAxisRank = exec_reduce.meanMaskedAxisRank;
-    pub const meanAxisRankTyped = exec_reduce.meanAxisRankTyped;
+    pub const sumAxis = exec_reduce.sumAxis;
+    pub const cumsum = exec_reduce.cumsum;
+    pub const prod = exec_reduce.prod;
+    pub const cumprod = exec_reduce.cumprod;
+    pub const cumsumReverse = exec_reduce.cumsumReverse;
+    pub const segmentSum = exec_reduce.segmentSum;
+    pub const segmentBroadcast = exec_reduce.segmentBroadcast;
+    pub const linearRecurrence = exec_reduce.linearRecurrence;
+    pub const linearRecurrenceBackward = exec_reduce.linearRecurrenceBackward;
+    pub const meanAxis = exec_reduce.meanAxis;
+    pub const sumMasked = exec_reduce.sumMasked;
+    pub const meanMasked = exec_reduce.meanMasked;
 
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)
     // ----------------------------------------------------------------------
-    pub const narrowAxisRank = exec_gather_scatter.narrowAxisRank;
-    pub const narrowAxisRankTyped = exec_gather_scatter.narrowAxisRankTyped;
-    pub const concatAxisRank = exec_gather_scatter.concatAxisRank;
-    pub const concatAxisRankTyped = exec_gather_scatter.concatAxisRankTyped;
-    pub const concatQuantizedRowsTyped = exec_gather_scatter.concatQuantizedRowsTyped;
-    pub const padAxisRank = exec_gather_scatter.padAxisRank;
-    pub const gatherAxisRank = exec_gather_scatter.gatherAxisRank;
-    pub const gatherAxisRankTyped = exec_gather_scatter.gatherAxisRankTyped;
-    pub const setSliceAxisRank = exec_gather_scatter.setSliceAxisRank;
-    pub const setSliceAxisRankTyped = exec_gather_scatter.setSliceAxisRankTyped;
-    pub const setRowsAxisRank = exec_gather_scatter.setRowsAxisRank;
-    pub const setRowsAxisRankTyped = exec_gather_scatter.setRowsAxisRankTyped;
-    pub const zeroSliceAxisRank = exec_gather_scatter.zeroSliceAxisRank;
-    pub const zeroRowsAxisRank = exec_gather_scatter.zeroRowsAxisRank;
-    pub const sliceGradientAxisRank = exec_gather_scatter.sliceGradientAxisRank;
+    pub const narrowAxis = exec_gather_scatter.narrowAxis;
+    pub const concatAxis = exec_gather_scatter.concatAxis;
+    pub const concatQuantizedRows = exec_gather_scatter.concatQuantizedRows;
+    pub const pad = exec_gather_scatter.pad;
+    pub const gatherAxis = exec_gather_scatter.gatherAxis;
+    pub const setSliceAxis = exec_gather_scatter.setSliceAxis;
+    pub const setRows = exec_gather_scatter.setRows;
+    pub const zeroSlice = exec_gather_scatter.zeroSlice;
+    pub const zeroRows = exec_gather_scatter.zeroRows;
+    pub const sliceGradient = exec_gather_scatter.sliceGradient;
 
     // ----------------------------------------------------------------------
     // stats: normalization statistics, standardize, moments (exec/stats.zig)
     // ----------------------------------------------------------------------
-    pub const argmaxAxisRank = exec_stats.argmaxAxisRank;
-    pub const maxAxisRank = exec_stats.maxAxisRank;
-    pub const minAxisRank = exec_stats.minAxisRank;
-    pub const maxMaskedAxisRank = exec_stats.maxMaskedAxisRank;
-    pub const minMaskedAxisRank = exec_stats.minMaskedAxisRank;
-    pub const varAxisRank = exec_stats.varAxisRank;
-    pub const standardizeAxisRank = exec_stats.standardizeAxisRank;
-    pub const standardizeAxisValidPrefixRank = exec_stats.standardizeAxisValidPrefixRank;
-    pub const standardizeBackwardAxisRank = exec_stats.standardizeBackwardAxisRank;
-    pub const topKAxisRank = exec_stats.topKAxisRank;
-    pub const sortAxisRank = exec_stats.sortAxisRank;
+    pub const argmax = exec_stats.argmax;
+    pub const maxAxis = exec_stats.maxAxis;
+    pub const minAxis = exec_stats.minAxis;
+    pub const maxMasked = exec_stats.maxMasked;
+    pub const minMasked = exec_stats.minMasked;
+    pub const varAxis = exec_stats.varAxis;
+    pub const standardize = exec_stats.standardize;
+    pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
+    pub const standardizeBackward = exec_stats.standardizeBackward;
+    pub const topK = exec_stats.topK;
+    pub const sort = exec_stats.sort;
     pub const routerTopK = exec_topk.routerTopK;
 
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)  [continued]
     // ----------------------------------------------------------------------
-    pub const scatterAddAxisRank = exec_gather_scatter.scatterAddAxisRank;
-    pub const takeAlongAxisRank = exec_gather_scatter.takeAlongAxisRank;
-    pub const scatterAddAlongAxisRank = exec_gather_scatter.scatterAddAlongAxisRank;
-    pub const scatterAlongAxisRank = exec_gather_scatter.scatterAlongAxisRank;
+    pub const scatterAdd = exec_gather_scatter.scatterAdd;
+    pub const takeAlong = exec_gather_scatter.takeAlong;
+    pub const scatterAddAlong = exec_gather_scatter.scatterAddAlong;
+    pub const scatterAlong = exec_gather_scatter.scatterAlong;
 
     // ----------------------------------------------------------------------
     // softmax family (exec/softmax.zig)
     // ----------------------------------------------------------------------
-    pub const softmaxAxisRank = exec_softmax.softmaxAxisRank;
-    pub const logsumexpAxisRank = exec_softmax.logsumexpAxisRank;
-    pub const logSoftmaxAxisRank = exec_softmax.logSoftmaxAxisRank;
-    pub const softmaxExtAxisRank = exec_softmax.softmaxExtAxisRank;
-    pub const softmaxBackwardAxisRank = exec_softmax.softmaxBackwardAxisRank;
-    pub const softmaxExtBackwardAxisRank = exec_softmax.softmaxExtBackwardAxisRank;
+    pub const softmax = exec_softmax.softmax;
+    pub const logsumexp = exec_softmax.logsumexp;
+    pub const logSoftmax = exec_softmax.logSoftmax;
+    pub const softmaxExt = exec_softmax.softmaxExt;
+    pub const softmaxBackward = exec_softmax.softmaxBackward;
 
     // ----------------------------------------------------------------------
     // norm: RMS/layer/group normalization and their fused arms (exec/norm.zig)
     // ----------------------------------------------------------------------
-    pub const rmsNormAxisRank = exec_norm.rmsNormAxisRank;
-    pub const rmsNormMulAxisRank = exec_norm.rmsNormMulAxisRank;
-    pub const rmsNormMulAddAxisRank = exec_norm.rmsNormMulAddAxisRank;
-    pub const rmsNormMulBackwardInputAxisRank = exec_norm.rmsNormMulBackwardInputAxisRank;
-    pub const rmsNormMulBackwardWeightAxisRank = exec_norm.rmsNormMulBackwardWeightAxisRank;
-    pub const rmsNormMulRopeAxisRankWithTable = exec_norm.rmsNormMulRopeAxisRankWithTable;
-    pub const rmsNormBackwardAxisRank = exec_norm.rmsNormBackwardAxisRank;
+    pub const rmsNorm = exec_norm.rmsNorm;
+    pub const rmsNormMul = exec_norm.rmsNormMul;
+    pub const rmsNormMulAdd = exec_norm.rmsNormMulAdd;
+    pub const rmsNormMulBackwardInput = exec_norm.rmsNormMulBackwardInput;
+    pub const rmsNormMulBackwardWeight = exec_norm.rmsNormMulBackwardWeight;
+    pub const rmsNormMulRopeWithTable = exec_norm.rmsNormMulRopeWithTable;
+    pub const rmsNormBackward = exec_norm.rmsNormBackward;
     pub const layerNormAffineRows = exec_norm.layerNormAffineRows;
-    pub const layerNormAxisRank = exec_norm.layerNormAxisRank;
-    pub const groupNormAxisRank = exec_norm.groupNormAxisRank;
-    pub const groupNormBackwardAxisRank = exec_norm.groupNormBackwardAxisRank;
-    pub const layerNormAffineAxisRank = exec_norm.layerNormAffineAxisRank;
-    pub const layerNormBackwardAxisRank = exec_norm.layerNormBackwardAxisRank;
-    pub const layerNormAffineBackwardAxisRank = exec_norm.layerNormAffineBackwardAxisRank;
+    pub const layerNorm = exec_norm.layerNorm;
+    pub const groupNorm = exec_norm.groupNorm;
+    pub const groupNormBackward = exec_norm.groupNormBackward;
+    pub const layerNormAffine = exec_norm.layerNormAffine;
+    pub const layerNormBackward = exec_norm.layerNormBackward;
+    pub const layerNormAffineBackward = exec_norm.layerNormAffineBackward;
 
     // ----------------------------------------------------------------------
     // loss: cross-entropy family and reductions (exec/loss.zig)
     // ----------------------------------------------------------------------
-    pub const crossEntropyLossAxisRank = exec_loss.crossEntropyLossAxisRank;
-    pub const crossEntropyLossExAxisRank = exec_loss.crossEntropyLossExAxisRank;
-    pub const crossEntropyLossExStatsAxisRank = exec_loss.crossEntropyLossExStatsAxisRank;
-    pub const crossEntropyBackwardAxisRank = exec_loss.crossEntropyBackwardAxisRank;
-    pub const crossEntropyBackwardExAxisRank = exec_loss.crossEntropyBackwardExAxisRank;
-    pub const crossEntropyBackwardExStatsAxisRank = exec_loss.crossEntropyBackwardExStatsAxisRank;
-    pub const crossEntropyBackwardExUpstreamAxisRank = exec_loss.crossEntropyBackwardExUpstreamAxisRank;
-    pub const crossEntropyBackwardExUpstreamStatsAxisRank = exec_loss.crossEntropyBackwardExUpstreamStatsAxisRank;
+    pub const crossEntropyLoss = exec_loss.crossEntropyLoss;
+    pub const crossEntropyLossEx = exec_loss.crossEntropyLossEx;
+    pub const crossEntropyLossExStats = exec_loss.crossEntropyLossExStats;
+    pub const crossEntropyBackward = exec_loss.crossEntropyBackward;
+    pub const crossEntropyBackwardEx = exec_loss.crossEntropyBackwardEx;
+    pub const crossEntropyBackwardExStats = exec_loss.crossEntropyBackwardExStats;
+    pub const crossEntropyBackwardExUpstream = exec_loss.crossEntropyBackwardExUpstream;
+    pub const crossEntropyBackwardExUpstreamStats = exec_loss.crossEntropyBackwardExUpstreamStats;
     pub const linearCrossEntropyBackwardUpstream = exec_loss.linearCrossEntropyBackwardUpstream;
     pub const linearDistillLossStats = exec_loss.linearDistillLossStats;
     pub const linearDistillBackwardUpstream = exec_loss.linearDistillBackwardUpstream;
@@ -536,16 +486,16 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // rope: rotary tables and their fused application (exec/rope.zig)
     // ----------------------------------------------------------------------
-    pub const ropeAxisRank = exec_rope.ropeAxisRank;
+    pub const rope = exec_rope.rope;
     pub const prepareRopeTable = exec_rope.prepareRopeTable;
     pub const prepareRopeTableFactors = exec_rope.prepareRopeTableFactors;
     pub const prepareRopeTableRange = exec_rope.prepareRopeTableRange;
     pub const prepareRopeTableFactorsRange = exec_rope.prepareRopeTableFactorsRange;
     pub const prepareRopeTableInvFreqsF64 = exec_rope.prepareRopeTableInvFreqsF64;
     pub const yarnBlendInvFreqsF64 = exec_rope.yarnBlendInvFreqsF64;
-    pub const ropeAxisRankWithTable = exec_rope.ropeAxisRankWithTable;
-    pub const ropePartialAxisRank = exec_rope.ropePartialAxisRank;
-    pub const ropePartialAxisRankWithTable = exec_rope.ropePartialAxisRankWithTable;
+    pub const ropeWithTable = exec_rope.ropeWithTable;
+    pub const ropePartial = exec_rope.ropePartial;
+    pub const ropePartialWithTable = exec_rope.ropePartialWithTable;
 
     // ----------------------------------------------------------------------
     // attention: the fused forward/backward kernels (exec/attention.zig)
@@ -553,32 +503,25 @@ pub const ExecContext = struct {
     pub const groupedAttention = exec_attention.groupedAttention;
     pub const groupedAttentionBackward = exec_attention.groupedAttentionBackward;
     pub const dot = exec_matmul.dot;
-    pub const dotTyped = exec_matmul.dotTyped;
-    pub const matmul = exec_matmul.matmul2D;
-    pub const matmulTyped = exec_matmul.matmul2DTyped;
-    pub const matmul2D = exec_matmul.matmul2D;
+    pub const matmul = exec_matmul.matmul;
     pub const matmul2DAdd = exec_matmul.matmul2DAdd;
     pub const kdaRecurrent = delta_attention.kdaRecurrent;
 
     // ----------------------------------------------------------------------
     // matmul: dense contractions, batched and packed (exec/matmul.zig)
     // ----------------------------------------------------------------------
-    pub const matmul2DTyped = exec_matmul.matmul2DTyped;
-    pub const packMatmulRhsTyped = exec_matmul.packMatmulRhsTyped;
-    pub const packDenseMatmulRhsTyped = exec_matmul.packDenseMatmulRhsTyped;
+    pub const packDenseMatmulRhs = exec_matmul.packDenseMatmulRhs;
     pub const matmul2DWithPackedDenseRhs = exec_matmul.matmul2DWithPackedDenseRhs;
     pub const matmul2DWithPackedDenseRhsInto = exec_matmul.matmul2DWithPackedDenseRhsInto;
-    pub const matmul2DWithPackedRhsTyped = exec_matmul.matmul2DWithPackedRhsTyped;
+    pub const matmul2DWithPackedRhs = exec_matmul.matmul2DWithPackedRhs;
 
     // ----------------------------------------------------------------------
     // quantized matmul: dense, packed and fused arms (exec/quant_matmul.zig)
     // ----------------------------------------------------------------------
-    pub const dequantizeTensorTyped = exec_quant_matmul.dequantizeTensorTyped;
-    pub const getRowsQuantizedTyped = exec_quant_matmul.getRowsQuantizedTyped;
+    pub const dequantizeTensor = exec_quant_matmul.dequantizeTensor;
+    pub const getRowsQuantized = exec_quant_matmul.getRowsQuantized;
     pub const matmul2DWithQuantizedTensorRhs = exec_quant_matmul.matmul2DWithQuantizedTensorRhs;
-    pub const matmul2DWithQuantizedTensorRhsOptions = exec_quant_matmul.matmul2DWithQuantizedTensorRhsOptions;
     pub const matmul2DWithQuantizedBlocksRhs = exec_quant_matmul.matmul2DWithQuantizedBlocksRhs;
-    pub const matmul2DWithQuantizedBlocksRhsOptions = exec_quant_matmul.matmul2DWithQuantizedBlocksRhsOptions;
     pub const packMatmulRhs = exec_quant_matmul.packMatmulRhs;
     pub const packMatmulRhsAs = exec_quant_matmul.packMatmulRhsAs;
     pub const matmulPacked = exec_quant_matmul.matmulPacked;

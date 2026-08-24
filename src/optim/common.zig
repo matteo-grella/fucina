@@ -445,7 +445,7 @@ pub fn takeGrad(ctx: *ExecContext, param: *const Param) !?RawTensor {
     errdefer view.deinit();
     if (view.len() != param.len()) return OptimError.GradShapeMismatch;
     if (view.isContiguous()) return view;
-    const out = try ctx.materialize(&view);
+    const out = try ctx.materialize(.f32, &view);
     view.deinit();
     return out;
 }
@@ -479,7 +479,7 @@ pub fn scaleParamGrad(ctx: *ExecContext, param: *const Param, factor: f32) !void
     }
     // Rare: a non-contiguous accumulated gradient. Materialize, scale, and
     // swap it into the GradState (which owns and frees the old one).
-    var owned = ctx.materialize(&view) catch |err| {
+    var owned = ctx.materialize(.f32, &view) catch |err| {
         view.deinit();
         return err;
     };

@@ -78,7 +78,7 @@ const Bench = struct {
 };
 
 fn filledTensor(ctx: *fucina.ExecContext, comptime spec: anytype, comptime rank: usize, shape: [rank]usize, seed: usize) !fucina.Tensor(spec) {
-    var value = try ctx.emptyRank(rank, shape);
+    var value = try ctx.empty(.f32, shape);
     fillPattern(&value, seed);
     return fucina.Tensor(spec).fromTensor(ctx, value);
 }

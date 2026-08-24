@@ -6,8 +6,8 @@
 //! checkpoint (safetensors + config.json): every component reproduces the
 //! reference equations and is pinned against reference activations by the
 //! golden tests. Heavy lifting goes through the exec ops (`matmulTransB`,
-//! `causalDepthwiseConv1dAxisRank`, `kdaRecurrent`, `gatedRank(.situ)`,
-//! `rmsNormMulAxisRank`); the depth-mixture and the tiny MLA core are
+//! `causalDepthwiseConv1d`, `kdaRecurrent`, `gated(.situ)`,
+//! `rmsNormMul`); the depth-mixture and the tiny MLA core are
 //! model-local routines. A serving-scale variant (GGUF weights, packed/
 //! quant routes, fused attention, KV/state caches) builds on the same
 //! layout when real K3-family checkpoints become a target.
@@ -369,7 +369,7 @@ pub const Model = struct {
             const values = try self.slice(name);
             defer self.allocator.free(values);
             const info = try self.file.tensor(name);
-            return self.ctx.fromSlice(info.shape, values);
+            return self.ctx.fromSlice(.f32, info.shape, values);
         }
 
         fn attn(self: *Loader, buf: []u8, layer_idx: usize, comptime leaf: []const u8) !Tensor {
@@ -384,7 +384,7 @@ pub const Model = struct {
             const values = try self.slice(name);
             defer self.allocator.free(values);
             const info = try self.file.tensor(name);
-            return self.ctx.fromSlice(&.{ info.shape[0], info.shape[2] }, values);
+            return self.ctx.fromSlice(.f32, &.{ info.shape[0], info.shape[2] }, values);
         }
     };
 
@@ -411,7 +411,7 @@ pub const Model = struct {
         const allocator = self.allocator;
 
         // Embedding rows, gathered straight into the residual tensor.
-        var x = try ctx.empty(&.{ seq, d });
+        var x = try ctx.empty(.f32, &.{ seq, d });
         {
             const x_values = x.data();
             for (tokens, 0..) |token, t| {
@@ -447,7 +447,7 @@ pub const Model = struct {
                 boundary = true;
             }
 
-            var normed = try ctx.rmsNormMulAxisRank(2, &hidden, &layer.input_norm, 1, cfg.rms_norm_eps);
+            var normed = try ctx.rmsNormMul(2, &hidden, &layer.input_norm, 1, cfg.rms_norm_eps);
             defer normed.deinit();
             if (probe) |pr| pr.emit("input_layernorm", layer_idx, normed.dataConst());
             var attn_out = switch (layer.attn) {
@@ -462,13 +462,13 @@ pub const Model = struct {
             var prefix = if (boundary)
                 try attn_out.cloneView()
             else
-                try ctx.add(&x, &attn_out);
+                try ctx.elementwise(.add, &x, &attn_out);
             errdefer prefix.deinit();
             x.deinit();
 
             var mixed2 = try self.applyAttnRes(ctx, &prefix, bank.items, layer.mlp_res_norm, layer.mlp_res_proj);
             defer mixed2.deinit();
-            var normed2 = try ctx.rmsNormMulAxisRank(2, &mixed2, &layer.post_norm, 1, cfg.rms_norm_eps);
+            var normed2 = try ctx.rmsNormMul(2, &mixed2, &layer.post_norm, 1, cfg.rms_norm_eps);
             defer normed2.deinit();
             var ffn_out = switch (layer.ffn) {
                 .dense => |*w| try self.denseMlp(ctx, &normed2, w),
@@ -476,14 +476,14 @@ pub const Model = struct {
             };
             defer ffn_out.deinit();
 
-            x = try ctx.add(&prefix, &ffn_out);
+            x = try ctx.elementwise(.add, &prefix, &ffn_out);
             prefix.deinit();
         }
 
         var final_mix = try self.applyAttnRes(ctx, &x, bank.items, self.out_res_norm, self.out_res_proj);
         x.deinit();
         defer final_mix.deinit();
-        var final_normed = try ctx.rmsNormMulAxisRank(2, &final_mix, &self.final_norm, 1, cfg.rms_norm_eps);
+        var final_normed = try ctx.rmsNormMul(2, &final_mix, &self.final_norm, 1, cfg.rms_norm_eps);
         defer final_normed.deinit();
         return ctx.matmulTransB(&final_normed, &self.lm_head);
     }
@@ -498,7 +498,7 @@ pub const Model = struct {
         const seq = cur.len / d;
         const candidates = bank.len + 1;
 
-        var out = try ctx.empty(&.{ seq, d });
+        var out = try ctx.empty(.f32, &.{ seq, d });
         errdefer out.deinit();
         const out_values = out.data();
 
@@ -565,7 +565,7 @@ pub const Model = struct {
         defer result.deinit();
 
         // o_norm: per-head RMSNorm(o)·weight × sigmoid(full-rank gate).
-        var o_normed = try ctx.rmsNormMulAxisRank(3, &result.o, &w.o_norm, 2, cfg.rms_norm_eps);
+        var o_normed = try ctx.rmsNormMul(3, &result.o, &w.o_norm, 2, cfg.rms_norm_eps);
         defer o_normed.deinit();
         var gate = try ctx.matmulTransB(h, &w.g_proj);
         defer gate.deinit();
@@ -573,7 +573,7 @@ pub const Model = struct {
         defer gate3.deinit();
         var gate_sig = try ctx.sigmoid(&gate3);
         defer gate_sig.deinit();
-        var gated = try ctx.mul(&o_normed, &gate_sig);
+        var gated = try ctx.elementwise(.mul, &o_normed, &gate_sig);
         defer gated.deinit();
         var flat = try gated.reshape(&.{ seq, heads * head_dim });
         defer flat.deinit();
@@ -584,7 +584,7 @@ pub const Model = struct {
         _ = self;
         var projected = try ctx.matmulTransB(h, proj);
         defer projected.deinit();
-        var convolved = try ctx.causalDepthwiseConv1dAxisRank(2, &projected, conv, 0, 1, 1, null);
+        var convolved = try ctx.causalDepthwiseConv1d(2, &projected, conv, 0, 1, 1, null);
         defer convolved.deinit();
         return ctx.unary(.silu, &convolved);
     }
@@ -607,7 +607,7 @@ pub const Model = struct {
 
         var q_low = try ctx.matmulTransB(h, &w.q_a);
         defer q_low.deinit();
-        var q_low_n = try ctx.rmsNormMulAxisRank(2, &q_low, &w.q_a_norm, 1, cfg.rms_norm_eps);
+        var q_low_n = try ctx.rmsNormMul(2, &q_low, &w.q_a_norm, 1, cfg.rms_norm_eps);
         defer q_low_n.deinit();
         var q_full = try ctx.matmulTransB(&q_low_n, &w.q_b);
         defer q_full.deinit();
@@ -618,7 +618,7 @@ pub const Model = struct {
 
         // Split compressed kv into the lora half (normalized, expanded by
         // kv_b) and the shared rope-slot half (used raw — NoPE).
-        var kv_low = try ctx.empty(&.{ seq, kv_lora });
+        var kv_low = try ctx.empty(.f32, &.{ seq, kv_lora });
         defer kv_low.deinit();
         {
             const kv_low_values = kv_low.data();
@@ -626,7 +626,7 @@ pub const Model = struct {
                 @memcpy(kv_low_values[t * kv_lora ..][0..kv_lora], ckv_data[t * (kv_lora + rope) ..][0..kv_lora]);
             }
         }
-        var kv_low_n = try ctx.rmsNormMulAxisRank(2, &kv_low, &w.kv_a_norm, 1, cfg.rms_norm_eps);
+        var kv_low_n = try ctx.rmsNormMul(2, &kv_low, &w.kv_a_norm, 1, cfg.rms_norm_eps);
         defer kv_low_n.deinit();
         var kv_full = try ctx.matmulTransB(&kv_low_n, &w.kv_b);
         defer kv_full.deinit();
@@ -636,7 +636,7 @@ pub const Model = struct {
         const kv_data = kv_full.dataConst(); // [seq, heads*(nope+v)]
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q_dim)));
 
-        var attn = try ctx.empty(&.{ seq, heads * v_dim });
+        var attn = try ctx.empty(.f32, &.{ seq, heads * v_dim });
         defer attn.deinit();
         const attn_values = attn.data();
         const row_scores = try allocator.alloc(f32, seq);
@@ -675,7 +675,7 @@ pub const Model = struct {
         defer gate.deinit();
         var gate_sig = try ctx.sigmoid(&gate);
         defer gate_sig.deinit();
-        var gated = try ctx.mul(&attn, &gate_sig);
+        var gated = try ctx.elementwise(.mul, &attn, &gate_sig);
         defer gated.deinit();
         return ctx.matmulTransB(&gated, &w.o_proj);
     }
@@ -686,7 +686,7 @@ pub const Model = struct {
         defer gate.deinit();
         var up = try ctx.matmulTransB(h, &w.up);
         defer up.deinit();
-        var act = try ctx.gatedRank(2, .situ, &up, &gate);
+        var act = try ctx.gated(2, .situ, &up, &gate);
         defer act.deinit();
         return ctx.matmulTransB(&act, &w.down);
     }
@@ -723,13 +723,13 @@ pub const Model = struct {
             defer gate.deinit();
             var up = try ctx.matmulTransB(&lat, &expert.w3);
             defer up.deinit();
-            var act = try ctx.gatedRank(2, .situ, &up, &gate);
+            var act = try ctx.gated(2, .situ, &up, &gate);
             defer act.deinit();
             out.* = try ctx.matmulTransB(&act, &expert.w2);
             built += 1;
         }
 
-        var routed = try ctx.empty(&.{ seq, latent });
+        var routed = try ctx.empty(.f32, &.{ seq, latent });
         defer routed.deinit();
         const routed_values = routed.data();
         @memset(routed_values, 0);
@@ -763,14 +763,14 @@ pub const Model = struct {
             }
         }
 
-        var routed_n = try ctx.rmsNormMulAxisRank(2, &routed, &w.latent_norm, 1, cfg.rms_norm_eps);
+        var routed_n = try ctx.rmsNormMul(2, &routed, &w.latent_norm, 1, cfg.rms_norm_eps);
         defer routed_n.deinit();
         var up_out = try ctx.matmulTransB(&routed_n, &w.up_proj);
         defer up_out.deinit();
 
         var shared_out = try self.denseMlp(ctx, h, &w.shared);
         defer shared_out.deinit();
-        return ctx.add(&up_out, &shared_out);
+        return ctx.elementwise(.add, &up_out, &shared_out);
     }
 };
 

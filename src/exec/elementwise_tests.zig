@@ -34,9 +34,9 @@ test "exec context applies unary ops through materialized inputs" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSlice(&.{ 1, 3 }, &.{ -1, 2, -3 });
+    var x = try ctx.fromSlice(.f32, &.{ 1, 3 }, &.{ -1, 2, -3 });
     defer x.deinit();
-    var broadcast = try ctx.broadcastToRank(2, &x, .{ 2, 3 });
+    var broadcast = try ctx.broadcastTo(&x, .{ 2, 3 });
     defer broadcast.deinit();
 
     var y = try ctx.unary(.relu, &broadcast);
@@ -56,17 +56,17 @@ test "exec context exposes fixed-rank construction and elementwise execution" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(3, .{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, .{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(3, .{ 2, 1, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
+    var b = try ctx.fromSlice(.f32, .{ 2, 1, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer b.deinit();
 
-    var c = try ctx.addRank(3, &a, &b);
+    var c = try ctx.add(.f32, 3, &a, &b);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 1, 3 }, c.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 44, 55, 66 }, c.dataConst());
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.addRank(2, &a, &b));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.add(.f32, 2, &a, &b));
 }
 
 test "exec context applies explicit tail broadcast without materializing the view" {
@@ -75,9 +75,9 @@ test "exec context applies explicit tail broadcast without materializing the vie
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var bias = try ctx.fromSlice(&.{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, &.{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
     var broadcast = try ctx.broadcastTo(&bias, &.{ 2, 3 });
     defer broadcast.deinit();
@@ -85,16 +85,16 @@ test "exec context applies explicit tail broadcast without materializing the vie
     try std.testing.expect(broadcast.buffer == bias.buffer);
     try std.testing.expectEqual(LayoutClass.tail_broadcast, ctx.classify(&broadcast));
 
-    var y = try ctx.add(&x, &broadcast);
+    var y = try ctx.elementwise(.add, &x, &broadcast);
     defer y.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 14, 25, 36 }, y.dataConst());
 
-    var z = try ctx.sub(&x, &broadcast);
+    var z = try ctx.elementwise(.sub, &x, &broadcast);
     defer z.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -6, -15, -24 }, z.dataConst());
 
-    var m = try ctx.mul(&x, &broadcast);
+    var m = try ctx.elementwise(.mul, &x, &broadcast);
     defer m.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 10, 40, 90, 40, 100, 180 }, m.dataConst());
 }
@@ -105,13 +105,13 @@ test "exec context applies in-place elementwise ops with contiguous and broadcas
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
-    var gate = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var gate = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer gate.deinit();
-    var broadcast = try ctx.broadcastToRank(2, &bias, .{ 2, 3 });
+    var broadcast = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer broadcast.deinit();
 
     try ctx.addInPlace(&x, &broadcast);
@@ -127,10 +127,10 @@ test "exec context take elementwise reuses unique contiguous input" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
-    var broadcast = try ctx.broadcastToRank(2, &bias, .{ 2, 3 });
+    var broadcast = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer broadcast.deinit();
 
     const original_buffer = x.buffer;
@@ -147,7 +147,7 @@ test "exec context take unary and scale reuse unique contiguous input" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSlice(&.{4}, &.{ -1, 2, -3, 4 });
+    var x = try ctx.fromSlice(.f32, &.{4}, &.{ -1, 2, -3, 4 });
     const original_buffer = x.buffer;
 
     var y = try ctx.takeRelu(&x);
@@ -166,10 +166,10 @@ test "exec context take elementwise falls back for shared buffers" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var x = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer x.deinit();
     var shared = try x.cloneView();
-    var b = try ctx.fromSlice(&.{3}, &.{ 10, 20, 30 });
+    var b = try ctx.fromSlice(.f32, &.{3}, &.{ 10, 20, 30 });
     defer b.deinit();
 
     var y = try ctx.takeMul(&shared, &b);
@@ -186,10 +186,10 @@ test "exec context take elementwise falls back for views and preserves input on 
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var source = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var source = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer source.deinit();
     var broadcast = try ctx.broadcastTo(&source, &.{ 2, 3 });
-    var x = try ctx.fromSlice(&.{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
+    var x = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer x.deinit();
 
     var y = try ctx.takeSub(&broadcast, &x);
@@ -198,9 +198,9 @@ test "exec context take elementwise falls back for views and preserves input on 
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -39, -48, -57 }, y.dataConst());
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, source.dataConst());
 
-    var a = try ctx.fromSlice(&.{2}, &.{ 1, 2 });
+    var a = try ctx.fromSlice(.f32, &.{2}, &.{ 1, 2 });
     defer a.deinit();
-    var b = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var b = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer b.deinit();
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.takeAdd(&a, &b));
     try std.testing.expectEqualSlices(f32, &.{ 1, 2 }, a.dataConst());
@@ -212,14 +212,14 @@ test "exec context combines fixed-rank ops with explicit broadcast views" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
-    var broadcast = try ctx.broadcastToRank(2, &bias, .{ 2, 3 });
+    var broadcast = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer broadcast.deinit();
 
-    var y = try ctx.addRank(2, &x, &broadcast);
+    var y = try ctx.add(.f32, 2, &x, &broadcast);
     defer y.deinit();
 
     try std.testing.expect(broadcast.buffer == bias.buffer);
@@ -232,30 +232,30 @@ test "exec context handles broadcast operands on both sides of elementwise ops" 
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
-    var bias_b = try ctx.broadcastToRank(2, &bias, .{ 2, 3 });
+    var bias_b = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer bias_b.deinit();
-    var scalar_value = try ctx.scalar(2);
+    var scalar_value = try ctx.scalar(.f32, 2);
     defer scalar_value.deinit();
-    var scalar_b = try ctx.broadcastToRank(2, &scalar_value, .{ 2, 3 });
+    var scalar_b = try ctx.broadcastTo(&scalar_value, .{ 2, 3 });
     defer scalar_b.deinit();
 
-    var left_sub = try ctx.subRank(2, &bias_b, &x);
+    var left_sub = try ctx.sub(.f32, 2, &bias_b, &x);
     defer left_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 9, 18, 27, 6, 15, 24 }, left_sub.dataConst());
 
-    var right_sub = try ctx.subRank(2, &x, &bias_b);
+    var right_sub = try ctx.sub(.f32, 2, &x, &bias_b);
     defer right_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -6, -15, -24 }, right_sub.dataConst());
 
-    var both_broadcast_sub = try ctx.subRank(2, &bias_b, &scalar_b);
+    var both_broadcast_sub = try ctx.sub(.f32, 2, &bias_b, &scalar_b);
     defer both_broadcast_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 8, 18, 28, 8, 18, 28 }, both_broadcast_sub.dataConst());
 
-    var both_broadcast_mul = try ctx.mulRank(2, &bias_b, &scalar_b);
+    var both_broadcast_mul = try ctx.mul(.f32, 2, &bias_b, &scalar_b);
     defer both_broadcast_mul.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 20, 40, 60, 20, 40, 60 }, both_broadcast_mul.dataConst());
 }
@@ -266,20 +266,20 @@ test "exec context rank-specializes elementwise ops above rank four" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(5, .{ 1, 1, 1, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, .{ 1, 1, 1, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(5, .{ 1, 1, 1, 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
+    var b = try ctx.fromSlice(.f32, .{ 1, 1, 1, 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer b.deinit();
 
-    var sum = try ctx.add(&a, &b);
+    var sum = try ctx.elementwise(.add, &a, &b);
     defer sum.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 44, 55, 66 }, sum.dataConst());
 
-    var diff = try ctx.subRank(5, &b, &a);
+    var diff = try ctx.sub(.f32, 5, &b, &a);
     defer diff.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 9, 18, 27, 36, 45, 54 }, diff.dataConst());
 
-    var product = try ctx.mulRank(5, &a, &b);
+    var product = try ctx.mul(.f32, 5, &a, &b);
     defer product.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 10, 40, 90, 160, 250, 360 }, product.dataConst());
 }
@@ -290,7 +290,7 @@ test "exec context reduces broadcast gradient to source shape" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var gy = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 1, 1, 1, 1, 1 });
+    var gy = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 1, 1, 1, 1, 1 });
     defer gy.deinit();
 
     var reduced = try ctx.reduceBroadcast(&gy, &.{3});
@@ -305,26 +305,26 @@ test "exec context handles scalar broadcast and non-tail broadcast fallback" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var scalar_value = try ctx.scalar(10);
+    var scalar_value = try ctx.scalar(.f32, 10);
     defer scalar_value.deinit();
     var scalar_b = try ctx.broadcastTo(&scalar_value, &.{ 2, 3 });
     defer scalar_b.deinit();
 
-    var y = try ctx.add(&x, &scalar_b);
+    var y = try ctx.elementwise(.add, &x, &scalar_b);
     defer y.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 11, 12, 13, 14, 15, 16 }, y.dataConst());
 
-    var middle = try ctx.fromSlice(&.{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var middle = try ctx.fromSlice(.f32, &.{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer middle.deinit();
     var middle_b = try ctx.broadcastTo(&middle, &.{ 2, 4, 3 });
     defer middle_b.deinit();
     try std.testing.expectEqual(LayoutClass.arbitrary, ctx.classify(&middle_b));
 
-    var zeros = try ctx.zeros(&.{ 2, 4, 3 });
+    var zeros = try ctx.zeros(.f32, &.{ 2, 4, 3 });
     defer zeros.deinit();
-    var copied = try ctx.add(&zeros, &middle_b);
+    var copied = try ctx.elementwise(.add, &zeros, &middle_b);
     defer copied.deinit();
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
@@ -338,58 +338,58 @@ test "exec context runs typed float forward math kernels" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRankTyped(.f64, 2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var a = try ctx.fromSlice(.f64, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer a.deinit();
-    var b = try ctx.fromSliceRankTyped(.f64, 2, .{ 2, 2 }, &.{ 10, 20, 30, 40 });
+    var b = try ctx.fromSlice(.f64, .{ 2, 2 }, &.{ 10, 20, 30, 40 });
     defer b.deinit();
 
-    var sum = try ctx.addRankTyped(.f64, 2, &a, &b);
+    var sum = try ctx.add(.f64, 2, &a, &b);
     defer sum.deinit();
     try std.testing.expectEqualSlices(f64, &.{ 11, 22, 33, 44 }, sum.dataConst());
 
-    var reduced = try ctx.sumAxisRankTyped(.f64, 2, &sum, 1);
+    var reduced = try ctx.sumAxis(.f64, 2, &sum, 1);
     defer reduced.deinit();
     try std.testing.expectEqualSlices(f64, &.{ 33, 77 }, reduced.dataConst());
 
-    var dot64 = try ctx.dotTyped(.f64, &a, &b);
+    var dot64 = try ctx.dot(.f64, &a, &b);
     defer dot64.deinit();
     try std.testing.expectEqual(@as(f64, 300), dot64.dataConst()[0]);
 
-    var matmul64 = try ctx.matmul2DTyped(.f64, &a, &b);
+    var matmul64 = try ctx.matmul(.f64, &a, &b);
     defer matmul64.deinit();
     try std.testing.expectEqualSlices(f64, &.{ 70, 100, 150, 220 }, matmul64.dataConst());
 
-    var h1 = try ctx.fromSliceRankTyped(.f16, 2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var h1 = try ctx.fromSlice(.f16, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer h1.deinit();
-    var h2 = try ctx.fromSliceRankTyped(.f16, 2, .{ 2, 2 }, &.{ 2, 3, 4, 5 });
+    var h2 = try ctx.fromSlice(.f16, .{ 2, 2 }, &.{ 2, 3, 4, 5 });
     defer h2.deinit();
-    var hmul = try ctx.mulRankTyped(.f16, 2, &h1, &h2);
+    var hmul = try ctx.mul(.f16, 2, &h1, &h2);
     defer hmul.deinit();
     try std.testing.expectEqualSlices(f16, &.{ 2, 6, 12, 20 }, hmul.dataConst());
 
-    var hsum = try ctx.sumAxisRankTyped(.f16, 2, &hmul, 1);
+    var hsum = try ctx.sumAxis(.f16, 2, &hmul, 1);
     defer hsum.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 8, 32 }, hsum.dataConst());
 
-    var hdot = try ctx.dotTyped(.f16, &h1, &h2);
+    var hdot = try ctx.dot(.f16, &h1, &h2);
     defer hdot.deinit();
     try std.testing.expectEqual(@as(f16, 40), hdot.dataConst()[0]);
 
-    var hleft = try ctx.fromSliceRankTyped(.f16, 2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var hleft = try ctx.fromSlice(.f16, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer hleft.deinit();
-    var hright = try ctx.fromSliceRankTyped(.f16, 2, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
+    var hright = try ctx.fromSlice(.f16, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer hright.deinit();
-    var hproduct = try ctx.matmul2DTyped(.f16, &hleft, &hright);
+    var hproduct = try ctx.matmul(.f16, &hleft, &hright);
     defer hproduct.deinit();
     try std.testing.expectEqualSlices(f16, &.{ 58, 64, 139, 154 }, hproduct.dataConst());
 
-    var packed_rhs = try ctx.packMatmulRhsTyped(.f16, &hright);
+    var packed_rhs = try ctx.packMatmulRhs(.f16, &hright);
     defer packed_rhs.deinit();
-    var packed_product = try ctx.matmul2DWithPackedRhsTyped(.f16, &hleft, &packed_rhs);
+    var packed_product = try ctx.matmul2DWithPackedRhs(.f16, &hleft, &packed_rhs);
     defer packed_product.deinit();
     try std.testing.expectEqualSlices(f16, hproduct.dataConst(), packed_product.dataConst());
 
-    var left = try ctx.fromSliceRankTyped(.bf16, 2, .{ 2, 3 }, &.{
+    var left = try ctx.fromSlice(.bf16, .{ 2, 3 }, &.{
         dtype_mod.f32ToBf16(1),
         dtype_mod.f32ToBf16(2),
         dtype_mod.f32ToBf16(3),
@@ -398,11 +398,11 @@ test "exec context runs typed float forward math kernels" {
         dtype_mod.f32ToBf16(6),
     });
     defer left.deinit();
-    var bf16_sum = try ctx.sumTyped(.bf16, &left);
+    var bf16_sum = try ctx.sum(.bf16, &left);
     defer bf16_sum.deinit();
     try std.testing.expectEqualSlices(f32, &.{21}, bf16_sum.dataConst());
 
-    var right = try ctx.fromSliceRankTyped(.bf16, 2, .{ 3, 2 }, &.{
+    var right = try ctx.fromSlice(.bf16, .{ 3, 2 }, &.{
         dtype_mod.f32ToBf16(7),
         dtype_mod.f32ToBf16(8),
         dtype_mod.f32ToBf16(9),
@@ -411,18 +411,18 @@ test "exec context runs typed float forward math kernels" {
         dtype_mod.f32ToBf16(12),
     });
     defer right.deinit();
-    var product = try ctx.matmul2DTyped(.bf16, &left, &right);
+    var product = try ctx.matmul(.bf16, &left, &right);
     defer product.deinit();
     try std.testing.expectEqual(@as(f32, 58), dtype_mod.bf16ToF32(product.dataConst()[0]));
     try std.testing.expectEqual(@as(f32, 154), dtype_mod.bf16ToF32(product.dataConst()[3]));
 
-    var bf16_packed_rhs = try ctx.packMatmulRhsTyped(.bf16, &right);
+    var bf16_packed_rhs = try ctx.packMatmulRhs(.bf16, &right);
     defer bf16_packed_rhs.deinit();
-    var bf16_packed_product = try ctx.matmul2DWithPackedRhsTyped(.bf16, &left, &bf16_packed_rhs);
+    var bf16_packed_product = try ctx.matmul2DWithPackedRhs(.bf16, &left, &bf16_packed_rhs);
     defer bf16_packed_product.deinit();
     try std.testing.expectEqualSlices(u16, product.dataConst(), bf16_packed_product.dataConst());
 
-    var cast = try ctx.castTyped(.bf16, .f32, &product);
+    var cast = try ctx.cast(.bf16, .f32, &product);
     defer cast.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 58, 64, 139, 154 }, cast.dataConst());
 }
@@ -441,7 +441,7 @@ test "exec dropout applies the counter-based mask with exact inverted scaling" {
     defer allocator.free(data);
     for (data) |*value| value.* = random.floatNorm(f32) + 0.5;
 
-    var x = try ctx.fromSliceRank(2, .{ 64, 64 }, data);
+    var x = try ctx.fromSlice(.f32, .{ 64, 64 }, data);
     defer x.deinit();
 
     for ([_]f32{ 0.25, 0.5 }) |p| {
@@ -499,9 +499,9 @@ test "exec dropout parallel path is bitwise identical across the threshold" {
     defer allocator.free(data);
     for (data) |*value| value.* = random.floatNorm(f32);
 
-    var x_par = try ctx.fromSliceRank(1, .{par_len}, data);
+    var x_par = try ctx.fromSlice(.f32, .{par_len}, data);
     defer x_par.deinit();
-    var x_ser = try ctx.fromSliceRank(1, .{ser_len}, data[0..ser_len]);
+    var x_ser = try ctx.fromSlice(.f32, .{ser_len}, data[0..ser_len]);
     defer x_ser.deinit();
 
     var y_par = try ctx.dropoutForward(&x_par, p, seed);
@@ -553,7 +553,7 @@ test "exec context reduces higher-rank and scalar broadcast gradients" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var gy = try ctx.fromSlice(&.{ 2, 2, 3 }, &.{
+    var gy = try ctx.fromSlice(.f32, &.{ 2, 2, 3 }, &.{
         1,  2,  3,
         4,  5,  6,
         7,  8,  9,
@@ -561,11 +561,11 @@ test "exec context reduces higher-rank and scalar broadcast gradients" {
     });
     defer gy.deinit();
 
-    var tail = try exec_elementwise.reduceBroadcastRank(&ctx, 1, &gy, .{3});
+    var tail = try exec_elementwise.reduceBroadcast(&ctx, &gy, .{3});
     defer tail.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 22, 26, 30 }, tail.dataConst());
 
-    var exact = try exec_elementwise.reduceBroadcastRank(&ctx, 3, &gy, .{ 2, 2, 3 });
+    var exact = try exec_elementwise.reduceBroadcast(&ctx, &gy, .{ 2, 2, 3 });
     defer exact.deinit();
     try std.testing.expectEqualSlices(f32, gy.dataConst(), exact.dataConst());
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
@@ -574,15 +574,15 @@ test "exec context reduces higher-rank and scalar broadcast gradients" {
     defer scalar_reduced.deinit();
     try std.testing.expectEqual(@as(f32, 78), scalar_reduced.item());
 
-    var singleton_middle = try exec_elementwise.reduceBroadcastRank(&ctx, 3, &gy, .{ 2, 1, 3 });
+    var singleton_middle = try exec_elementwise.reduceBroadcast(&ctx, &gy, .{ 2, 1, 3 });
     defer singleton_middle.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9, 17, 19, 21 }, singleton_middle.dataConst());
 
-    var singleton_prefix = try exec_elementwise.reduceBroadcastRank(&ctx, 2, &gy, .{ 1, 3 });
+    var singleton_prefix = try exec_elementwise.reduceBroadcast(&ctx, &gy, .{ 1, 3 });
     defer singleton_prefix.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 22, 26, 30 }, singleton_prefix.dataConst());
 
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, exec_elementwise.reduceBroadcastRank(&ctx, 2, &gy, .{ 2, 2 }));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, exec_elementwise.reduceBroadcast(&ctx, &gy, .{ 2, 2 }));
     try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.reduceBroadcast(&gy, &.{ 0, 3 }));
 }
 
@@ -592,11 +592,11 @@ test "snake: hand-computed per-channel activation + shape rejection" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 0.5, -1.0, 2.0, 0.0 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 0.5, -1.0, 2.0, 0.0 });
     defer x.deinit();
-    var alpha = try ctx.fromSliceRank(1, .{2}, &.{ 1.0, 2.0 });
+    var alpha = try ctx.fromSlice(.f32, .{2}, &.{ 1.0, 2.0 });
     defer alpha.deinit();
-    var inv_b = try ctx.fromSliceRank(1, .{2}, &.{ 1.0, 0.5 });
+    var inv_b = try ctx.fromSlice(.f32, .{2}, &.{ 1.0, 0.5 });
     defer inv_b.deinit();
 
     var y = try ctx.snakeRows(&x, &alpha, &inv_b);
@@ -615,7 +615,7 @@ test "snake: hand-computed per-channel activation + shape rejection" {
         try std.testing.expectApproxEqAbs(w, g, 1e-6);
     }
 
-    var short_alpha = try ctx.fromSliceRank(1, .{1}, &.{1.0});
+    var short_alpha = try ctx.fromSlice(.f32, .{1}, &.{1.0});
     defer short_alpha.deinit();
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.snakeRows(&x, &short_alpha, &inv_b));
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.snakeRows(&x, &alpha, &short_alpha));
@@ -632,13 +632,13 @@ test "snake backward: hand-computed gradients + shape rejection" {
     const a_vals = [_]f32{ 1.0, 2.0 };
     const ib_vals = [_]f32{ 1.0, 0.5 };
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 2 }, &x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 2, 2 }, &x_vals);
     defer x.deinit();
-    var gy = try ctx.fromSliceRank(2, .{ 2, 2 }, &gy_vals);
+    var gy = try ctx.fromSlice(.f32, .{ 2, 2 }, &gy_vals);
     defer gy.deinit();
-    var alpha = try ctx.fromSliceRank(1, .{2}, &a_vals);
+    var alpha = try ctx.fromSlice(.f32, .{2}, &a_vals);
     defer alpha.deinit();
-    var inv_b = try ctx.fromSliceRank(1, .{2}, &ib_vals);
+    var inv_b = try ctx.fromSlice(.f32, .{2}, &ib_vals);
     defer inv_b.deinit();
 
     var gx = try ctx.snakeRowsBackwardInput(&x, &gy, &alpha, &inv_b);
@@ -666,10 +666,10 @@ test "snake backward: hand-computed gradients + shape rejection" {
     for (want_gib, params.inv_b.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
 
     // gy must match x; the channel vectors must be [C].
-    var bad_gy = try ctx.fromSliceRank(2, .{ 1, 2 }, &.{ 1, 2 });
+    var bad_gy = try ctx.fromSlice(.f32, .{ 1, 2 }, &.{ 1, 2 });
     defer bad_gy.deinit();
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.snakeRowsBackwardInput(&x, &bad_gy, &alpha, &inv_b));
-    var short_alpha = try ctx.fromSliceRank(1, .{1}, &.{1.0});
+    var short_alpha = try ctx.fromSlice(.f32, .{1}, &.{1.0});
     defer short_alpha.deinit();
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.snakeRowsBackwardInput(&x, &gy, &short_alpha, &inv_b));
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.snakeRowsBackwardParams(&x, &gy, &alpha, &short_alpha));
@@ -681,7 +681,7 @@ test "exec context applies elu and gelu_erf unary ops" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(1, .{4}, &.{ -1.0, 0.0, 1.0, 2.0 });
+    var x = try ctx.fromSlice(.f32, .{4}, &.{ -1.0, 0.0, 1.0, 2.0 });
     defer x.deinit();
 
     var elu_y = try ctx.unary(.elu, &x);
@@ -708,45 +708,45 @@ test "exec compare and compareScalar produce IEEE 0/1 masks (NaN false except ne
     const nan = std.math.nan(f32);
     // torch: torch.eq/ne/lt/le/gt/ge(a, b).float() with a NaN lane — every
     // comparison involving NaN is false except ne, which is true.
-    var a = try ctx.fromSliceRank(1, .{4}, &.{ 1, 2, nan, -3 });
+    var a = try ctx.fromSlice(.f32, .{4}, &.{ 1, 2, nan, -3 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(1, .{4}, &.{ 1, 5, nan, -4 });
+    var b = try ctx.fromSlice(.f32, .{4}, &.{ 1, 5, nan, -4 });
     defer b.deinit();
 
-    var eq = try ctx.compare(.eq, &a, &b);
+    var eq = try ctx.compare(.f32, .eq, &a, &b);
     defer eq.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, false, false, false }, eq.dataConst());
-    var ne = try ctx.compare(.ne, &a, &b);
+    var ne = try ctx.compare(.f32, .ne, &a, &b);
     defer ne.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, true, true, true }, ne.dataConst());
-    var lt = try ctx.compare(.lt, &a, &b);
+    var lt = try ctx.compare(.f32, .lt, &a, &b);
     defer lt.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, lt.dataConst());
-    var le = try ctx.compare(.le, &a, &b);
+    var le = try ctx.compare(.f32, .le, &a, &b);
     defer le.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, true, false, false }, le.dataConst());
-    var gt = try ctx.compare(.gt, &a, &b);
+    var gt = try ctx.compare(.f32, .gt, &a, &b);
     defer gt.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, true }, gt.dataConst());
-    var ge = try ctx.compare(.ge, &a, &b);
+    var ge = try ctx.compare(.f32, .ge, &a, &b);
     defer ge.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, false, false, true }, ge.dataConst());
 
     // Scalar RHS: x > 1.5 -> {0, 1, 0, 0}; x != 1.5 with the NaN lane true.
-    var gt_s = try ctx.compareScalar(.gt, &a, 1.5);
+    var gt_s = try ctx.compareScalar(.f32, .gt, &a, 1.5);
     defer gt_s.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, true, false, false }, gt_s.dataConst());
-    var ne_s = try ctx.compareScalar(.ne, &a, 1.5);
+    var ne_s = try ctx.compareScalar(.f32, .ne, &a, 1.5);
     defer ne_s.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, true, true, true }, ne_s.dataConst());
-    var eq_s = try ctx.compareScalar(.eq, &a, nan);
+    var eq_s = try ctx.compareScalar(.f32, .eq, &a, nan);
     defer eq_s.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, false }, eq_s.dataConst());
 
     // Same-shape contract, like where.
-    var short = try ctx.fromSliceRank(1, .{2}, &.{ 1, 2 });
+    var short = try ctx.fromSlice(.f32, .{2}, &.{ 1, 2 });
     defer short.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.compare(.eq, &a, &short));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.compare(.f32, .eq, &a, &short));
 }
 
 test "exec logical ops use != 0 truthiness with 0/1 outputs" {
@@ -756,26 +756,26 @@ test "exec logical ops use != 0 truthiness with 0/1 outputs" {
 
     // Nonzero (incl. negatives and NaN) is true; 0 is false.
     const nan = std.math.nan(f32);
-    var a = try ctx.fromSliceRank(1, .{4}, &.{ 0, 2, 0, -3 });
+    var a = try ctx.fromSlice(.f32, .{4}, &.{ 0, 2, 0, -3 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(1, .{4}, &.{ 0, 0, nan, 5 });
+    var b = try ctx.fromSlice(.f32, .{4}, &.{ 0, 0, nan, 5 });
     defer b.deinit();
 
-    var land = try ctx.logicalTyped(.l_and, .f32, .f32, &a, &b);
+    var land = try ctx.logical(.l_and, .f32, .f32, &a, &b);
     defer land.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, true }, land.dataConst());
-    var lor = try ctx.logicalTyped(.l_or, .f32, .f32, &a, &b);
+    var lor = try ctx.logical(.l_or, .f32, .f32, &a, &b);
     defer lor.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, true, true, true }, lor.dataConst());
-    var lxor = try ctx.logicalTyped(.l_xor, .f32, .f32, &a, &b);
+    var lxor = try ctx.logical(.l_xor, .f32, .f32, &a, &b);
     defer lxor.deinit();
     try std.testing.expectEqualSlices(bool, &.{ false, true, true, false }, lxor.dataConst());
-    var lnot = try ctx.logicalNotTyped(.f32, &a);
+    var lnot = try ctx.logicalNot(.f32, &a);
     defer lnot.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, false, true, false }, lnot.dataConst());
 
     // Same-shape contract, like where.
-    var short = try ctx.fromSliceRank(1, .{2}, &.{ 1, 0 });
+    var short = try ctx.fromSlice(.f32, .{2}, &.{ 1, 0 });
     defer short.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.logicalTyped(.l_and, .f32, .f32, &a, &short));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.logical(.l_and, .f32, .f32, &a, &short));
 }

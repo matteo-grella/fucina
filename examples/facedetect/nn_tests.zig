@@ -20,7 +20,7 @@ test "avgPool2x2 / maxPool2x2 on a 4x4x1 map (hand-computed)" {
 
     var data: [16]f32 = undefined;
     for (0..16) |i| data[i] = @floatFromInt(i);
-    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(&.{ 4, 4, 1 }, &data));
+    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 4, 4, 1 }, &data));
     defer x.deinit();
 
     var avg = try nn.avgPool2x2(&ctx, &x);
@@ -45,7 +45,7 @@ test "upsample2xNearest on a 2x2x1 map (hand-computed)" {
     defer ctx.deinit();
 
     var data = [_]f32{ 1, 2, 3, 4 };
-    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(&.{ 2, 2, 1 }, &data));
+    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 2, 1 }, &data));
     defer x.deinit();
 
     var up = try nn.upsample2xNearest(&ctx, &x);
@@ -70,10 +70,10 @@ test "prelu with per-channel learnable slope (vs max(x,0)+a*min(x,0))" {
     defer ctx.deinit();
 
     var data = [_]f32{ -4, 3, 2, -6 };
-    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1, 2 }, &data));
+    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 1, 2 }, &data));
     defer x.deinit();
     var adata = [_]f32{ 0.25, 0.5 };
-    var alpha = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(&.{2}, &adata));
+    var alpha = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &adata));
     defer alpha.deinit();
 
     var y = try nn.prelu(&ctx, &x, &alpha);
@@ -93,19 +93,19 @@ test "batchNormInfer per-channel affine vs (x-mu)/sqrt(var+eps)*gamma+beta" {
     defer ctx.deinit();
 
     var xd = [_]f32{ 3, 2, -1, 4 };
-    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1, 2 }, &xd));
+    var x = try fucina.Tensor(.{ .h, .w, .c }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 1, 2 }, &xd));
     defer x.deinit();
     var gd = [_]f32{ 2, 6 };
-    var gamma = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(&.{2}, &gd));
+    var gamma = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &gd));
     defer gamma.deinit();
     var bd = [_]f32{ 0.5, 1 };
-    var beta = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(&.{2}, &bd));
+    var beta = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &bd));
     defer beta.deinit();
     var md = [_]f32{ 1, 0 };
-    var mean = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(&.{2}, &md));
+    var mean = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &md));
     defer mean.deinit();
     var vd = [_]f32{ 3, 8 };
-    var variance = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(&.{2}, &vd));
+    var variance = try fucina.Tensor(.{.c}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &vd));
     defer variance.deinit();
 
     var y = try nn.batchNormInfer(&ctx, &x, &gamma, &beta, &mean, &variance, 1.0);

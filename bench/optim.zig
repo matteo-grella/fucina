@@ -65,7 +65,7 @@ const BlockParams = struct {
             for (data) |*value| value.* = random.floatNorm(f32) * 0.02;
             self.mats[i] = try Tensor(.{ .out, .in }).variableFromSlice(ctx, shape, data);
             for (data) |*value| value.* = random.floatNorm(f32) * 1e-3;
-            self.grads[grad_i] = try ctx.fromSliceRank(2, shape, data);
+            self.grads[grad_i] = try ctx.fromSlice(.f32, shape, data);
             grad_i += 1;
             self.count += shape[0] * shape[1];
         }
@@ -74,7 +74,7 @@ const BlockParams = struct {
             for (&norm_data) |*value| value.* = 1 + random.floatNorm(f32) * 0.01;
             self.norms[i] = try Tensor(.{.d}).variableFromSlice(ctx, .{hidden}, &norm_data);
             for (&norm_data) |*value| value.* = random.floatNorm(f32) * 1e-3;
-            self.grads[grad_i] = try ctx.fromSliceRank(1, .{hidden}, &norm_data);
+            self.grads[grad_i] = try ctx.fromSlice(.f32, .{hidden}, &norm_data);
             grad_i += 1;
             self.count += hidden;
         }
@@ -182,7 +182,7 @@ fn benchEmbedding(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     var embed = try Tensor(.{ .vocab, .d }).variableFromSlice(ctx, .{ vocab, hidden }, data);
     defer embed.deinit();
     for (data) |*value| value.* = random.floatNorm(f32) * 1e-3;
-    var grad = try ctx.fromSliceRank(2, .{ vocab, hidden }, data);
+    var grad = try ctx.fromSlice(.f32, .{ vocab, hidden }, data);
     defer grad.deinit();
 
     inline for (.{

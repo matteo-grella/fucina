@@ -407,7 +407,7 @@ is the canonical in-tree name for allowed-raw zones.
 
 The substrate functions that operate on these fields (lifecycle, scopes,
 worker team, tensor allocation primitives) are free functions in
-`src/exec/runtime.zig`; the struct body aliases them, so `ctx.empty(...)`
+`src/exec/runtime.zig`; the struct body aliases them, so `ctx.empty(.f32, ...)`
 and `exec_runtime.empty(ctx, ...)` are the same call.
 
 The execution context is responsible for allocating outputs, reusing buffers,
@@ -425,7 +425,7 @@ Important execution paths:
   tail-broadcast paths avoid materializing simple broadcast views.
 - `take*` APIs reuse unique contiguous inputs in place when safe.
 - Reductions, narrow/concat/gather/scatter-add, set-slice/set-rows,
-  argmax/topK, softmax/`softmaxExtAxisRank` (score scaling, additive masks,
+  argmax/topK, softmax/`softmaxExt` (score scaling, additive masks,
   sink mass, ALiBi-style `max_bias`; broadcast masks read by stride), RMSNorm
   (+ fused mul/add and backward variants), LayerNorm/statistics, RoPE (with
   precomputed `RopeTable`), convolutions, and cross-entropy execute as
@@ -515,7 +515,7 @@ The allocation contract, precisely scoped:
   preparation (x4/x8 lane packs) allocates at load time, not per matmul.
   The exec-tier packed-LHS scratch above this seam is pooled
   (`BufferPool.acquireScratch` byte-slab leases; the pool's byte-slab arm
-  also backs all non-f32 `emptyTyped` transients); pooling the backend-tier
+  also backs all non-f32 `empty` transients); pooling the backend-tier
   scratch below the seam remains an open, bench-gated design task.
 - Direct native vector kernels accept a `ParallelConfig` so the execution
   context controls thread-pool ownership.
@@ -597,8 +597,8 @@ operands align to an output-derived order as zero-copy views, each side
 picks its plain or transposed GEMM/BMM layout at runtime by contiguity, and
 the batch group collapses into one bmm axis; `taggedDot` is its
 single-contract-tag special case — plus the shared dtype-generic
-shape/validation helpers (`pointwiseShapeOf`, `dotResultShapeOf`,
-`einsumResultShapeOf`, ...). The public autograd `Tensor` (`ag/tensor.zig`)
+shape/validation helpers (`pointwiseShape`, `dotResultShape`,
+`einsumResultShape`, ...). The public autograd `Tensor` (`ag/tensor.zig`)
 implements the named-op surface once and calls into this library; the VJPs
 (`ag/backward/`) call the same functions directly on raw gradients.
 

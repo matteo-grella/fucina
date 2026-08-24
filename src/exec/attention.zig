@@ -1766,13 +1766,13 @@ pub fn groupedAttentionBackward(
         if (kv_head_i >= kv_heads) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var qq = try self.prepareContiguous(q);
+    var qq = try self.prepareContiguous(.f32, q);
     defer qq.deinit();
-    var kk = try self.prepareContiguous(k);
+    var kk = try self.prepareContiguous(.f32, k);
     defer kk.deinit();
-    var vv = try self.prepareContiguous(v);
+    var vv = try self.prepareContiguous(.f32, v);
     defer vv.deinit();
-    var ggy = try self.prepareContiguous(gy);
+    var ggy = try self.prepareContiguous(.f32, gy);
     defer ggy.deinit();
 
     const q_data = qq.tensor().dataConst();
@@ -1782,9 +1782,9 @@ pub fn groupedAttentionBackward(
 
     var result = GroupedCausalAttentionBackwardResult{};
     errdefer result.deinit();
-    if (need_q) result.q = try self.zerosRank(3, .{ q_seq, heads, d });
-    if (need_k) result.k = try self.zerosRank(3, .{ kv_seq, kv_heads, d });
-    if (need_v) result.v = try self.zerosRank(3, .{ kv_seq, kv_heads, d });
+    if (need_q) result.q = try self.zeros(.f32, .{ q_seq, heads, d });
+    if (need_k) result.k = try self.zeros(.f32, .{ kv_seq, kv_heads, d });
+    if (need_v) result.v = try self.zeros(.f32, .{ kv_seq, kv_heads, d });
     const q_grad: ?[]f32 = if (result.q) |*value| value.data() else null;
     const k_grad: ?[]f32 = if (result.k) |*value| value.data() else null;
     const v_grad: ?[]f32 = if (result.v) |*value| value.data() else null;
@@ -2033,10 +2033,10 @@ fn groupedCausalAttentionQ8KvImpl(
         if (kv_head_i >= kv_heads) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var qq = try self.prepareContiguous(q);
+    var qq = try self.prepareContiguous(.f32, q);
     defer qq.deinit();
 
-    var out = try self.emptyRank(2, .{ q_seq, heads * d });
+    var out = try self.empty(.f32, .{ q_seq, heads * d });
     errdefer out.deinit();
     try groupedCausalAttentionDispatch(self, BlockQ8_0, qq.tensor().dataConst(), k_blocks, v_blocks, out.data(), kv_head_for_head, q_seq, kv_seq, heads, d, kv_heads, scale_value, window, true, null, null);
     return out;
@@ -2170,10 +2170,10 @@ fn groupedCausalAttentionMultiImpl(
         lens_sum +|= len_s;
     }
 
-    var qq = try self.prepareContiguous(q);
+    var qq = try self.prepareContiguous(.f32, q);
     defer qq.deinit();
 
-    var out = try self.emptyRank(2, .{ n, heads * d });
+    var out = try self.empty(.f32, .{ n, heads * d });
     errdefer out.deinit();
 
     const can_pair = hasAdjacentKvHeadPairs(kv_head_for_head, heads, kv_heads);
@@ -2396,11 +2396,11 @@ fn groupedCausalAttentionImpl(
         if (kv_head_i >= kv_heads) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var qq = try self.prepareContiguous(q);
+    var qq = try self.prepareContiguous(.f32, q);
     defer qq.deinit();
-    var kk = try self.prepareContiguousTyped(kv_dtype, k);
+    var kk = try self.prepareContiguous(kv_dtype, k);
     defer kk.deinit();
-    var vv = try self.prepareContiguousTyped(kv_dtype, v);
+    var vv = try self.prepareContiguous(kv_dtype, v);
     defer vv.deinit();
 
     // The optional additive bias is validated to [q_seq, kv_seq] here and
@@ -2410,7 +2410,7 @@ fn groupedCausalAttentionImpl(
     const bias_data: ?[]const f32 = if (bias) |bias_tensor| blk: {
         const bias_view = try bias_tensor.rankView(2);
         if (bias_view.shape[0] != q_seq or bias_view.shape[1] != kv_seq) return tensor.TensorError.InvalidShape;
-        bias_prepared = try self.prepareContiguous(bias_tensor);
+        bias_prepared = try self.prepareContiguous(.f32, bias_tensor);
         break :blk bias_prepared.?.tensor().dataConst();
     } else null;
 
@@ -2422,7 +2422,7 @@ fn groupedCausalAttentionImpl(
         if (values.len != heads * q_seq * 2) return tensor.TensorError.InvalidDataLength;
     }
 
-    var out = try self.emptyRank(2, .{ q_seq, heads * d });
+    var out = try self.empty(.f32, .{ q_seq, heads * d });
     errdefer out.deinit();
 
     // GPU tier: providers with the attention-forward arm take

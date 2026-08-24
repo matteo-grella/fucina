@@ -245,37 +245,38 @@ pub fn batchTensorView(t: *const Tensor, offset_in_elems: usize) BatchTensorView
     };
 }
 
-pub fn dot(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    var aa = try self.prepareContiguous(a);
+fn dotF32(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguous(b);
+    var bb = try self.prepareContiguous(.f32, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
     const bp = bb.tensor();
     try tensor.requireSameShape(ap, bp);
 
-    var out = try self.scalar(0);
+    var out = try self.scalar(.f32, 0);
     errdefer out.deinit();
     self.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
     try kernels.dotInto(self.pc(), &out, ap, bp);
     return out;
 }
 
-pub fn dotTyped(
+/// Full dot product of two same-shape tensors, a scalar tensor result.
+pub fn dot(
     self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-    if (comptime dtype == .f32) return dot(self, a, b);
+    if (comptime dtype == .f32) return dotF32(self, a, b);
     comptime ensureForwardFloatMath(dtype);
     const compute_dtype = comptime dtype_mod.computeDType(.matmul, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.matmul, dtype);
 
-    var aa = try self.prepareContiguousTyped(dtype, a);
+    var aa = try self.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguousTyped(dtype, b);
+    var bb = try self.prepareContiguous(dtype, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
@@ -283,17 +284,11 @@ pub fn dotTyped(
     try tensor.requireSameShapeOf(dtype, ap, bp);
 
     _ = compute_dtype;
-    var out = try scalarTyped(self, output_dtype, dtype_mod.zero(output_dtype));
+    var out = try self.scalar(output_dtype, dtype_mod.zero(output_dtype));
     errdefer out.deinit();
     self.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
     try kernels.dotIntoTyped(self.pc(), dtype, &out, ap, bp);
     return out;
-}
-
-/// Strict 2-D `a[m,k] @ b[k,n]`; `matmul` is the same entry under the
-/// torch-familiar name.
-pub fn matmul2D(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return matmul2DDispatch(self, .plain, a, b);
 }
 
 /// `a[k,m]ᵀ @ b[k,n]` without materializing the transpose.
@@ -309,17 +304,17 @@ pub fn matmulTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Ten
 pub fn matmul2DDispatch(self: *ExecContext, kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(kind, a, b);
 
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguous(b);
+    var bb = try self.prepareContiguous(.f32, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
     const bp = bb.tensor();
 
-    var out = try self.emptyRank(2, .{ info.m, info.n });
+    var out = try self.empty(.f32, .{ info.m, info.n });
     errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(info.m, info.n, info.k);
+    self.enableNativeMatmulPoolForWork(.f32, info.m, info.n, info.k);
     switch (kind) {
         .plain => kernels.matmul2DIntoUnchecked(self.pc(), &out, ap, bp, info.m, info.n, info.k),
         .trans_a => kernels.matmulTransA2DIntoUnchecked(self.pc(), &out, ap, bp, info.m, info.n, info.k),
@@ -337,19 +332,20 @@ pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base:
     const basev = try base.rankView(2);
     if (basev.dim(0) != info.m or basev.dim(1) != info.n) return tensor.TensorError.ShapeMismatch;
 
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguous(b);
+    var bb = try self.prepareContiguous(.f32, b);
     defer bb.deinit();
 
-    var out = try self.materialize(base);
+    var out = try self.materialize(.f32, base);
     errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(info.m, info.n, info.k);
+    self.enableNativeMatmulPoolForWork(.f32, info.m, info.n, info.k);
     kernels.matmul2DAccIntoUnchecked(self.pc(), &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
     return out;
 }
 
-pub fn matmul2DTyped(
+/// Strict 2-D `a[m,k] @ b[k,n]`.
+pub fn matmul(
     self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
@@ -361,28 +357,21 @@ pub fn matmul2DTyped(
 
     const info = try analyzeMatmul2D(.plain, a, b);
 
-    var aa = try self.prepareContiguousTyped(dtype, a);
+    var aa = try self.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguousTyped(dtype, b);
+    var bb = try self.prepareContiguous(dtype, b);
     defer bb.deinit();
 
-    var out = try self.emptyRankTyped(output_dtype, 2, .{ info.m, info.n });
+    var out = try self.empty(output_dtype, .{ info.m, info.n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(info.m, info.n, info.k);
+    self.enableNativeMatmulPoolForWork(dtype, info.m, info.n, info.k);
     kernels.matmul2DIntoUncheckedTyped(self.pc(), dtype, &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
     return out;
 }
 
-pub fn packMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedMatmulRhsFor(dtype) {
+pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
     _ = try rhs.rankView(2);
-    var rr = try self.prepareContiguousTyped(dtype, rhs);
-    defer rr.deinit();
-    return kernels.packMatmulRhsTyped(dtype, self.allocator, rr.tensor());
-}
-
-pub fn packDenseMatmulRhsTyped(self: *ExecContext, comptime dtype: DType, rhs: *const tensor.TensorOf(dtype)) !backend_mod.PackedDenseRhs {
-    _ = try rhs.rankView(2);
-    var rr = try self.prepareContiguousTyped(dtype, rhs);
+    var rr = try self.prepareContiguous(dtype, rhs);
     defer rr.deinit();
     return kernels.packDenseMatmulRhsTyped(dtype, self.allocator, rr.tensor());
 }
@@ -397,11 +386,11 @@ pub fn matmul2DWithPackedDenseRhs(
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
 
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var out = try self.emptyRank(2, .{ m, rhs.n });
+    var out = try self.empty(.f32, .{ m, rhs.n });
     errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(m, rhs.n, k);
+    self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
     try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
@@ -423,14 +412,14 @@ pub fn matmul2DWithPackedDenseRhsInto(
     if (k != rhs.k or ov.dim(0) != m or ov.dim(1) != rhs.n) return tensor.TensorError.ShapeMismatch;
     if (!out.isContiguous()) return tensor.TensorError.UnsupportedView;
 
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    self.enableNativeMatmulPoolForWork(m, rhs.n, k);
+    self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
     try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), out, aa.tensor(), rhs, m, rhs.n, k);
     _ = try out.dataConstChecked();
 }
 
-pub fn matmul2DWithPackedRhsTyped(
+pub fn matmul2DWithPackedRhs(
     self: *ExecContext,
     comptime dtype: DType,
     a: *const tensor.TensorOf(dtype),
@@ -444,12 +433,12 @@ pub fn matmul2DWithPackedRhsTyped(
     const k = av.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
 
-    var aa = try self.prepareContiguousTyped(dtype, a);
+    var aa = try self.prepareContiguous(dtype, a);
     defer aa.deinit();
 
-    var out = try self.emptyRankTyped(output_dtype, 2, .{ m, rhs.n });
+    var out = try self.empty(output_dtype, .{ m, rhs.n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
+    self.enableNativeMatmulPoolForWork(dtype, m, rhs.n, k);
     try kernels.matmul2DIntoUncheckedPackedRhsTyped(self.pc(), dtype, self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
@@ -559,8 +548,8 @@ fn matmulTransB2DViaShadow(
         return null;
     };
     defer b32.deinit();
-    var out = self.emptyRank(2, .{ m, n }) catch return null;
-    self.enableNativeMatmulPoolForWork(m, n, k);
+    var out = self.empty(.f32, .{ m, n }) catch return null;
+    self.enableNativeMatmulPoolForWork(.f32, m, n, k);
     kernels.matmulTransB2DIntoUnchecked(self.pc(), &out, a_contig, &b32, m, n, k);
     return out;
 }
@@ -573,9 +562,9 @@ pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const 
     const n = bv.dim(0);
     if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
 
-    var aa_f32 = try self.prepareContiguous(a);
+    var aa_f32 = try self.prepareContiguous(.f32, a);
     defer aa_f32.deinit();
-    var bb = try self.prepareContiguousTyped(.f16, b);
+    var bb = try self.prepareContiguous(.f16, b);
     defer bb.deinit();
 
     // Opt-in cached-shadow BLAS arm for prefill-shaped GEMMs (see the
@@ -589,10 +578,10 @@ pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const 
         }
     }
 
-    var aa = try exec_convert.castTyped(self, .f32, .f16, aa_f32.tensor());
+    var aa = try exec_convert.cast(self, .f32, .f16, aa_f32.tensor());
     defer aa.deinit();
 
-    var out = try self.emptyRank(2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
     // Deliberately no default BLAS arm here: sgemm would need both operands
     // widened to f32, and a PER-CALL RHS widen alone costs an order of
@@ -600,7 +589,7 @@ pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const 
     // shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
     // cached widened copy is unsound when f16 weights are trained in place,
     // which is why the shadow arm above is opt-in.
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(.f16, m, n, k);
     kernels.matmulTransB2DIntoUncheckedF16Operands(self.pc(), &out, &aa, bb.tensor(), m, n, k);
     return out;
 }
@@ -616,9 +605,9 @@ pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const
     const n = bv.dim(0);
     if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
 
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguousTyped(.bf16, b);
+    var bb = try self.prepareContiguous(.bf16, b);
     defer bb.deinit();
 
     // Opt-in cached-shadow BLAS arm (see FUCINA_CPU_F32_SHADOW above); the
@@ -631,9 +620,9 @@ pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const
         }
     }
 
-    var out = try self.emptyRank(2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(.bf16, m, n, k);
     kernels.matmulTransB2DIntoUncheckedBf16Rhs(self.pc(), &out, aa.tensor(), bb.tensor(), m, n, k);
     return out;
 }
@@ -698,10 +687,10 @@ fn bmmFastPathSharedB(
     var a_2d = try a.reshape(&.{ fused_m, info.k });
     defer a_2d.deinit();
 
-    var out_2d = try self.emptyRank(2, .{ fused_m, info.n });
+    var out_2d = try self.empty(.f32, .{ fused_m, info.n });
     errdefer out_2d.deinit();
 
-    self.enableNativeMatmulPoolForWork(fused_m, info.n, info.k);
+    self.enableNativeMatmulPoolForWork(.f32, fused_m, info.n, info.k);
     switch (kind) {
         .plain => kernels.matmul2DIntoUnchecked(self.pc(), &out_2d, &a_2d, b, fused_m, info.n, info.k),
         .trans_b => kernels.matmulTransB2DIntoUnchecked(self.pc(), &out_2d, &a_2d, b, fused_m, info.n, info.k),
@@ -721,15 +710,15 @@ fn bmmLoop(
     info: BmmShape,
     out_shape: []const usize,
 ) !Tensor {
-    var aa = try self.prepareContiguous(a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguous(b);
+    var bb = try self.prepareContiguous(.f32, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
     const bp = bb.tensor();
 
-    var out = try self.empty(out_shape);
+    var out = try self.empty(.f32, out_shape);
     errdefer out.deinit();
 
     const stride_c = info.m * info.n;
@@ -945,10 +934,4 @@ fn ensureForwardFloatMath(comptime dtype: DType) void {
     if (!dtype_mod.supportsForwardFloatMath(dtype)) {
         @compileError("forward math is currently supported only for floating dtypes");
     }
-}
-
-fn scalarTyped(self: *ExecContext, comptime dtype: DType, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    var out = try self.emptyRankTyped(dtype, 1, .{1});
-    out.data()[0] = value;
-    return out;
 }

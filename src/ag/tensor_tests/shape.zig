@@ -259,7 +259,7 @@ test "tagged autograd split and merge axes keep gradients as views" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try Tensor(.{ .batch, .flat }).variable(&ctx, try ctx.fromSlice(&.{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }));
+    var x = try Tensor(.{ .batch, .flat }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }));
     defer x.deinit();
 
     var split = try x.split(&ctx, .flat, .{ .row, .col }, .{ 2, 3 });
@@ -285,7 +285,7 @@ test "tagged autograd squeeze can produce a scalar-tag value" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try Tensor(.{.singleton}).variable(&ctx, try ctx.fromSlice(&.{1}, &.{2}));
+    var x = try Tensor(.{.singleton}).variable(&ctx, try ctx.fromSlice(.f32, &.{1}, &.{2}));
     defer x.deinit();
 
     var y = try x.squeeze(&ctx, .singleton);
@@ -309,7 +309,7 @@ test "tagged autograd broadcasts scalar-tag values as raw scalar tensors" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try Tensor(.{}).variable(&ctx, try ctx.scalar(2));
+    var x = try Tensor(.{}).variable(&ctx, try ctx.scalar(.f32, 2));
     defer x.deinit();
 
     var y = try x.broadcastTo(&ctx, .{}, .{});

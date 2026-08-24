@@ -247,7 +247,7 @@ pub fn Ops(comptime Self: type) type {
                 }
             }
 
-            var value = try ctx.causalDepthwiseConv1dAxisRank(tag_rank, self.asRawTensor(), kernel.asRawTensor(), time_axis, channel_axis, dilation, state);
+            var value = try ctx.causalDepthwiseConv1d(tag_rank, self.asRawTensor(), kernel.asRawTensor(), time_axis, channel_axis, dilation, state);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or kernel.requiresGrad(), CausalDepthwiseConv1dBackward(tags, .{ channel_tag, tap_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, kernel.grad_state, self.asRawTensor(), kernel.asRawTensor(), dilation, state });
         }
@@ -281,7 +281,7 @@ pub fn Ops(comptime Self: type) type {
                 }
             }
 
-            var value = try ctx.causalConv1dAxisRank(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, state);
+            var value = try ctx.causalConv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, state);
             errdefer value.deinit();
             return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), CausalConv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), dilation, state });
         }
@@ -312,7 +312,7 @@ pub fn Ops(comptime Self: type) type {
                 }
             }
 
-            var value = try ctx.groupedCausalConv1dAxisRank(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, groups, state);
+            var value = try ctx.groupedCausalConv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, groups, state);
             errdefer value.deinit();
             return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), GroupedCausalConv1dBackward(tags, .{ tap_tag, in_per_group_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), dilation, groups, state });
         }
@@ -348,7 +348,7 @@ pub fn Ops(comptime Self: type) type {
                 }
             }
 
-            var value = try ctx.conv1dAxisRank(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, stride, padding, dilation, groups);
+            var value = try ctx.conv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, stride, padding, dilation, groups);
             errdefer value.deinit();
             return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), Conv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), stride, padding, dilation, groups });
         }

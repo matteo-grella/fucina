@@ -91,7 +91,7 @@ pub fn Ops(comptime Self: type) type {
 
         fn sumUnmasked(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
-            var value = try ctx.sumAxisRank(tag_rank, self.asRawTensor(), axis(tag));
+            var value = try ctx.sumAxis(.f32, tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), SumBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value });
         }
@@ -99,7 +99,7 @@ pub fn Ops(comptime Self: type) type {
         fn meanUnmasked(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.meanAxisRank(tag_rank, self.asRawTensor(), reduce_axis);
+            var value = try ctx.meanAxis(.f32, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), MeanBackward(tags, result_tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
         }
@@ -132,7 +132,7 @@ pub fn Ops(comptime Self: type) type {
             const Mask = TensorObject(@TypeOf(opts.mask));
             comptime validateMaskType(Mask, "sum");
             const result_tags = removeTag(tags, tag);
-            var value = try ctx.sumMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
+            var value = try ctx.sumMasked(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), MaskedSumBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor() });
         }
@@ -156,7 +156,7 @@ pub fn Ops(comptime Self: type) type {
             const Mask = TensorObject(@TypeOf(opts.mask));
             comptime validateMaskType(Mask, "mean");
             const result_tags = removeTag(tags, tag);
-            var raw = try ctx.meanMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
+            var raw = try ctx.meanMasked(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();
             defer raw.counts.deinit();
@@ -172,7 +172,7 @@ pub fn Ops(comptime Self: type) type {
         /// deterministic for any thread count.
         pub fn cumsum(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.cumsumAxisRank(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.cumsum(tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
         }
@@ -189,7 +189,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn segmentSum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, offsets: []const usize) !Self {
             const seg_axis = comptime axis(tag);
             const n = self.dim(tag);
-            var value = try ctx.segmentSumAxisRank(tag_rank, self.asRawTensor(), seg_axis, offsets);
+            var value = try ctx.segmentSum(tag_rank, self.asRawTensor(), seg_axis, offsets);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), SegmentSumBackward(tags, seg_axis), .{ ctx.allocator, self.grad_state, offsets, n });
         }
@@ -243,7 +243,7 @@ pub fn Ops(comptime Self: type) type {
 
             var tagged_shape: [tag_count]usize = undefined;
             inline for (tags, 0..) |t, i| tagged_shape[i] = self.dim(t);
-            var a_view = try tag_ops.broadcastTensorTo(Decay.axis_tags, decay_ptr.asRawTensor(), tags, tagged_shape);
+            var a_view = try tag_ops.broadcastTensorTo(.f32, Decay.axis_tags, decay_ptr.asRawTensor(), tags, tagged_shape);
             defer a_view.deinit();
 
             var any_grad = self.requiresGrad() or decay_ptr.requiresGrad();
@@ -264,7 +264,7 @@ pub fn Ops(comptime Self: type) type {
                 any_grad = any_grad or init_ptr.requiresGrad();
             }
 
-            var value = try ctx.linearRecurrenceAxisRank(tag_rank, self.asRawTensor(), &a_view, time_axis, initial_raw);
+            var value = try ctx.linearRecurrence(tag_rank, self.asRawTensor(), &a_view, time_axis, initial_raw);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, any_grad, LinearRecurrenceBackward(tags, Decay.axis_tags, time_axis), .{ ctx.allocator, self.grad_state, decay_ptr.grad_state, initial_grad, &a_view, &value, initial_raw, decay_ptr.asRawTensor() });
         }
@@ -277,7 +277,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn prod(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.prodAxisRank(tag_rank, self.asRawTensor(), reduce_axis);
+            var value = try ctx.prod(tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), ProdBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
         }
@@ -289,13 +289,13 @@ pub fn Ops(comptime Self: type) type {
         /// the exact division-free O(n²) expansion (torch semantics).
         pub fn cumprod(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.cumprodAxisRank(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.cumprod(tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), CumprodBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
 
         pub fn sumAll(self: *const Self, ctx: *ExecContext) !Tensor(.{}) {
-            var value = try ctx.sum(self.asRawTensor());
+            var value = try ctx.sum(.f32, self.asRawTensor());
             errdefer value.deinit();
             return finishOp(.{}, ctx, value, self.requiresGrad(), SumBackward(tags, .{}), .{ ctx.allocator, self.grad_state, &self.value });
         }

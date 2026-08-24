@@ -1196,7 +1196,7 @@ pub fn moeExpertFfn(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try ctx.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.empty(.f32, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
     const scatter_start = moeBatchProfileStart(profile_enabled, io);
@@ -1977,7 +1977,7 @@ pub fn moeExpertFfnBatch(
     // Token-major split over the pool: disjoint destination rows with the
     // per-row k-order preserved, bit-identical to the serial loop.
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try ctx.emptyRank(2, .{ seq, hidden });
+    var out = try ctx.empty(.f32, .{ seq, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 

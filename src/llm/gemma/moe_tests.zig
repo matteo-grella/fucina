@@ -120,7 +120,7 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
     const x_data = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(x_data);
     for (x_data) |*x| x.* = random.floatNorm(f32);
-    var x = try ctx.fromSliceRank(2, .{ seq, hidden }, x_data);
+    var x = try ctx.fromSlice(.f32, .{ seq, hidden }, x_data);
     defer x.deinit();
     var xt = try fucina.Tensor(.{ .seq, .embed }).fromSlice(&ctx, .{ seq, hidden }, x_data);
     defer xt.deinit();
@@ -161,7 +161,7 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
     try expectGemmaMoeClose(x4_out.dataConst(), gpu_out.dataConst(), 3e-2, 2e-2, "gpu batch");
 
     // decode (seq == 1): raw plain-block GEMVs vs the x4 decode
-    var x1 = try ctx.fromSliceRank(2, .{ 1, hidden }, x_data[0..hidden]);
+    var x1 = try ctx.fromSlice(.f32, .{ 1, hidden }, x_data[0..hidden]);
     defer x1.deinit();
     var x1t = try fucina.Tensor(.{ .seq, .embed }).fromSlice(&ctx, .{ 1, hidden }, x_data[0..hidden]);
     defer x1t.deinit();

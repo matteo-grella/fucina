@@ -420,7 +420,7 @@ test "tagged public tensor general causal conv dilated gradients" {
     try std.testing.expectEqualSlices(f32, &.{ 303, 10 }, gw.asRawTensor().dataConst());
 }
 
-test "public Tensor conv1d facade matches ctx.conv1dAxisRank" {
+test "public Tensor conv1d facade matches ctx.conv1d" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     var ctx: ExecContext = undefined;
@@ -455,11 +455,11 @@ const Conv1dFdContext = struct {
 };
 
 fn conv1dFdLoss(c: Conv1dFdContext) anyerror!f32 {
-    var x = try c.ctx.fromSlice(&.{ c.seq, c.in_ch }, c.x_vals);
+    var x = try c.ctx.fromSlice(.f32, &.{ c.seq, c.in_ch }, c.x_vals);
     defer x.deinit();
-    var w = try c.ctx.fromSlice(&.{ c.taps, c.ipg, c.out_ch }, c.w_vals);
+    var w = try c.ctx.fromSlice(.f32, &.{ c.taps, c.ipg, c.out_ch }, c.w_vals);
     defer w.deinit();
-    var y = try c.ctx.conv1dAxisRank(2, &x, &w, 0, 1, c.stride, c.pad, c.dilation, c.groups);
+    var y = try c.ctx.conv1d(2, &x, &w, 0, 1, c.stride, c.pad, c.dilation, c.groups);
     defer y.deinit();
     return fdWeightedSum(y.dataConst(), c.coef);
 }
@@ -515,11 +515,11 @@ test "tagged autograd conv1d matches finite differences across stride/pad/dilati
         defer allocator.free(coef);
         fdFillPattern(coef, 2.9);
 
-        var x = try Tensor(.{ .time, .cin }).variable(&ctx, try ctx.fromSlice(&.{ seq, in_ch }, x_vals));
+        var x = try Tensor(.{ .time, .cin }).variable(&ctx, try ctx.fromSlice(.f32, &.{ seq, in_ch }, x_vals));
         defer x.deinit();
-        var w = try Tensor(.{ .tap, .cin, .cout }).variable(&ctx, try ctx.fromSlice(&.{ taps, ipg, out_ch }, w_vals));
+        var w = try Tensor(.{ .tap, .cin, .cout }).variable(&ctx, try ctx.fromSlice(.f32, &.{ taps, ipg, out_ch }, w_vals));
         defer w.deinit();
-        var coef_t = try Tensor(.{ .time, .cout }).fromTensor(&ctx, try ctx.fromSlice(&.{ out_len, out_ch }, coef));
+        var coef_t = try Tensor(.{ .time, .cout }).fromTensor(&ctx, try ctx.fromSlice(.f32, &.{ out_len, out_ch }, coef));
         defer coef_t.deinit();
 
         var y = try x.conv1d(&ctx, .time, .cin, .tap, .cout, &w, stride, pad, dilation, groups);
@@ -592,11 +592,11 @@ const ConvTranspose1dFdContext = struct {
 };
 
 fn convTranspose1dFdLoss(c: ConvTranspose1dFdContext) anyerror!f32 {
-    var x = try c.ctx.fromSlice(&.{ c.t_in, c.in_ch }, c.x_vals);
+    var x = try c.ctx.fromSlice(.f32, &.{ c.t_in, c.in_ch }, c.x_vals);
     defer x.deinit();
-    var w2 = try c.ctx.fromSlice(&.{ c.taps * c.out_ch, c.in_ch }, c.w_vals);
+    var w2 = try c.ctx.fromSlice(.f32, &.{ c.taps * c.out_ch, c.in_ch }, c.w_vals);
     defer w2.deinit();
-    var bias: ?RawTensor = if (c.b_vals) |bv| try c.ctx.fromSlice(&.{c.out_ch}, bv) else null;
+    var bias: ?RawTensor = if (c.b_vals) |bv| try c.ctx.fromSlice(.f32, &.{c.out_ch}, bv) else null;
     defer if (bias) |*b| b.deinit();
     var y = try c.ctx.convTranspose1d(&x, &w2, if (bias) |*b| b else null, c.out_ch, c.taps, c.stride, c.pad, c.output_pad);
     defer y.deinit();
@@ -641,13 +641,13 @@ test "tagged autograd convTranspose1d matches finite differences at DAC configs"
             defer allocator.free(coef);
             fdFillPattern(coef, 7.4);
 
-            var x = try Tensor(.{ .time, .cin }).variable(&ctx, try ctx.fromSlice(&.{ t_in, in_ch }, x_vals));
+            var x = try Tensor(.{ .time, .cin }).variable(&ctx, try ctx.fromSlice(.f32, &.{ t_in, in_ch }, x_vals));
             defer x.deinit();
-            var w2 = try Tensor(.{ .kout, .cin }).variable(&ctx, try ctx.fromSlice(&.{ taps * out_ch, in_ch }, w_vals));
+            var w2 = try Tensor(.{ .kout, .cin }).variable(&ctx, try ctx.fromSlice(.f32, &.{ taps * out_ch, in_ch }, w_vals));
             defer w2.deinit();
-            var bias: ?Tensor(.{.cout}) = if (with_bias) try Tensor(.{.cout}).variable(&ctx, try ctx.fromSlice(&.{out_ch}, b_vals)) else null;
+            var bias: ?Tensor(.{.cout}) = if (with_bias) try Tensor(.{.cout}).variable(&ctx, try ctx.fromSlice(.f32, &.{out_ch}, b_vals)) else null;
             defer if (bias) |*b| b.deinit();
-            var coef_t = try Tensor(.{ .time, .cout }).fromTensor(&ctx, try ctx.fromSlice(&.{ out_len, out_ch }, coef));
+            var coef_t = try Tensor(.{ .time, .cout }).fromTensor(&ctx, try ctx.fromSlice(.f32, &.{ out_len, out_ch }, coef));
             defer coef_t.deinit();
 
             var y = try x.convTranspose1d(&ctx, .time, .cin, .kout, .cout, &w2, if (bias) |*b| b else null, out_ch, taps, stride, pad, output_pad);
@@ -728,11 +728,11 @@ const SnakeFdContext = struct {
 };
 
 fn snakeFdLoss(c: SnakeFdContext) anyerror!f32 {
-    var x = try c.ctx.fromSlice(&.{ c.rows, c.cols }, c.x_vals);
+    var x = try c.ctx.fromSlice(.f32, &.{ c.rows, c.cols }, c.x_vals);
     defer x.deinit();
-    var alpha = try c.ctx.fromSlice(&.{c.cols}, c.a_vals);
+    var alpha = try c.ctx.fromSlice(.f32, &.{c.cols}, c.a_vals);
     defer alpha.deinit();
-    var inv_b = try c.ctx.fromSlice(&.{c.cols}, c.ib_vals);
+    var inv_b = try c.ctx.fromSlice(.f32, &.{c.cols}, c.ib_vals);
     defer inv_b.deinit();
     var y = try c.ctx.snakeRows(&x, &alpha, &inv_b);
     defer y.deinit();
@@ -766,13 +766,13 @@ test "tagged autograd snake matches finite differences for input alpha and inv_b
     defer allocator.free(coef);
     fdFillPattern(coef, 5.8);
 
-    var x = try Tensor(.{ .time, .ch }).variable(&ctx, try ctx.fromSlice(&.{ rows, cols }, x_vals));
+    var x = try Tensor(.{ .time, .ch }).variable(&ctx, try ctx.fromSlice(.f32, &.{ rows, cols }, x_vals));
     defer x.deinit();
-    var alpha = try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(&.{cols}, a_vals));
+    var alpha = try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(.f32, &.{cols}, a_vals));
     defer alpha.deinit();
-    var inv_b = try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(&.{cols}, ib_vals));
+    var inv_b = try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(.f32, &.{cols}, ib_vals));
     defer inv_b.deinit();
-    var coef_t = try Tensor(.{ .time, .ch }).fromTensor(&ctx, try ctx.fromSlice(&.{ rows, cols }, coef));
+    var coef_t = try Tensor(.{ .time, .ch }).fromTensor(&ctx, try ctx.fromSlice(.f32, &.{ rows, cols }, coef));
     defer coef_t.deinit();
 
     var y = try x.snake(&ctx, .ch, &alpha, &inv_b);

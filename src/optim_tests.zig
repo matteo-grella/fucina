@@ -189,7 +189,7 @@ test "optim Muon Newton-Schulz preserves diagonal structure and lands near unit 
     // diagonal entries ARE its singular values (up to sign). The tuned quintic
     // does not converge them to exactly 1; Keller documents ~(0.5, 1.5) for
     // well-scaled inputs. Signs must be preserved (O ~ U*V^T = sign(d)).
-    var u = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 0.8, 0, 0, -1.6 });
+    var u = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 0.8, 0, 0, -1.6 });
     defer u.deinit();
     var o = try optim.newtonSchulz5(&ctx, &u, 5);
     defer o.deinit();
@@ -200,7 +200,7 @@ test "optim Muon Newton-Schulz preserves diagonal structure and lands near unit 
     try std.testing.expect(od[3] < -0.3 and od[3] > -1.7);
 
     // Tall input exercises the transpose trick; output shape must match input.
-    var tall = try ctx.fromSliceRank(2, .{ 3, 2 }, &.{ 0.5, 0.1, -0.2, 0.4, 0.3, -0.6 });
+    var tall = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 0.5, 0.1, -0.2, 0.4, 0.3, -0.6 });
     defer tall.deinit();
     var ot = try optim.newtonSchulz5(&ctx, &tall, 5);
     defer ot.deinit();
@@ -934,7 +934,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         defer opt.deinit();
         try opt.addParam(&w);
         // Inject the fixed projection used by the golden run (tall: P is (rank, cols)).
-        opt.slots.items[0].proj = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 0.4, -0.7, 0.2, -0.3, 0.6, 0.9 });
+        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 0.4, -0.7, 0.2, -0.3, 0.6, 0.9 });
         opt.slots.items[0].proj_chunk = 0;
 
         const grads = [_][12]f32{
@@ -966,7 +966,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         defer opt.deinit();
         try opt.addParam(&w);
         // Wide: P is (rows, rank).
-        opt.slots.items[0].proj = try ctx.fromSliceRank(2, .{ 3, 2 }, &.{ 0.3, -0.5, 0.8, 0.1, -0.6, 0.4 });
+        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 0.3, -0.5, 0.8, 0.1, -0.6, 0.4 });
         opt.slots.items[0].proj_chunk = 0;
 
         const grads = [_][15]f32{
@@ -995,7 +995,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         var opt = optim.Apollo.init(allocator, config);
         defer opt.deinit();
         try opt.addParam(&w);
-        opt.slots.items[0].proj = try ctx.fromSliceRank(2, .{ 1, 3 }, &.{ 0.7, -0.2, 0.5 });
+        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 1, 3 }, &.{ 0.7, -0.2, 0.5 });
         opt.slots.items[0].proj_chunk = 0;
 
         const grads = [_][12]f32{
@@ -1643,7 +1643,7 @@ test "optim bf16 state: Muon momentum kernel matches the widen-narrow reference 
             m_bits[i] = f32ToBf16(m1);
             u_vals[i] = if (beta < 0.5) gi + beta * (m1 - gi) else m1 - (m1 - gi) * lerp_w;
         }
-        var u = try ctx.fromSliceRank(2, .{ 5, 2 }, &u_vals);
+        var u = try ctx.fromSlice(.f32, .{ 5, 2 }, &u_vals);
         defer u.deinit();
         var ortho = try optim.newtonSchulz5(&ctx, &u, 5);
         defer ortho.deinit();

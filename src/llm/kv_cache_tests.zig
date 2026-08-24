@@ -52,9 +52,9 @@ test "cached decode matches full causal attention per position (f16)" {
     // applies the identical f32->f16 cast, so the incremental decode output must
     // be bit-identical to the matching row of this reference — this isolates the
     // cache mechanism (append offset, source_offset causal mask) from f16 error.
-    var k_all_f16 = try ctx.castTyped(.f32, .f16, k_all.asRawTensor());
+    var k_all_f16 = try ctx.cast(.f32, .f16, k_all.asRawTensor());
     defer k_all_f16.deinit();
-    var v_all_f16 = try ctx.castTyped(.f32, .f16, v_all.asRawTensor());
+    var v_all_f16 = try ctx.cast(.f32, .f16, v_all.asRawTensor());
     defer v_all_f16.deinit();
     var full = try ctx.groupedAttention(q_all.asRawTensor(), .{ .f16 = .{ .k = &k_all_f16, .v = &v_all_f16 } }, &kv_head_for_head, scale, .{});
     defer full.deinit();

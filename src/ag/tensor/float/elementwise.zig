@@ -59,13 +59,13 @@ pub fn Ops(comptime Self: type) type {
         /// last axis `axis_tag`, mutating `self`.
         pub fn addAxisVectorInPlace(self: *Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !void {
             if (self.requiresGrad()) return error.UnsupportedGradient;
-            try ctx.addAxisVectorInPlaceRank(tensor_rank, &self.value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorInPlace(tensor_rank, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place fused bias-add + unary activation `op`, mutating `self`.
         pub fn addAxisVectorUnaryInPlace(self: *Self, ctx: *ExecContext, comptime op: UnaryOp, bias: []const f32, comptime axis_tag: Tag) !void {
             if (self.requiresGrad()) return error.UnsupportedGradient;
-            try ctx.addAxisVectorUnaryInPlaceRank(tensor_rank, op, &self.value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorUnaryInPlace(tensor_rank, op, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place scaled residual `self += alpha · other` (same shape).
@@ -80,7 +80,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn biasAdd(self: *const Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !Self {
             var value = try self.value.clone(ctx.allocator);
             errdefer value.deinit();
-            try ctx.addAxisVectorInPlaceRank(tensor_rank, &value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorInPlace(tensor_rank, &value, bias, comptime Self.axis(axis_tag));
             return finishOp(tags, ctx, value, self.requiresGrad(), IdentityBackward(tags), .{ ctx.allocator, self.grad_state });
         }
 
@@ -96,7 +96,7 @@ pub fn Ops(comptime Self: type) type {
                 if (Cond.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Cond.dtype))
                     @compileError("where takes a .bool or float condition; cast integer masks explicitly");
             }
-            var value = try ctx.whereTyped(Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
+            var value = try ctx.where(Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags, Cond.dtype), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
         }
@@ -111,7 +111,7 @@ pub fn Ops(comptime Self: type) type {
                 if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
                     @compileError("maskedFill takes a .bool or float mask; cast integer masks explicitly");
             }
-            var v = try ctx.maskedFillTyped(Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
+            var v = try ctx.maskedFill(Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
             errdefer v.deinit();
             return finishOp(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags, Mask.dtype), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
         }
@@ -130,12 +130,12 @@ pub fn Ops(comptime Self: type) type {
             const BoolT = Tensor(.{ .dtype = .bool, .tags = tags });
             const OtherT = @TypeOf(other);
             if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
-                var value = try ctx.compareScalar(op, self.asRawTensor(), other);
+                var value = try ctx.compareScalar(.f32, op, self.asRawTensor(), other);
                 errdefer value.deinit();
                 return BoolT.fromTensor(ctx, value);
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try ctx.compare(op, self.asRawTensor(), other_ptr.asRawTensor());
+            var value = try ctx.compare(.f32, op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return BoolT.fromTensor(ctx, value);
         }
@@ -166,7 +166,7 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("logical ops take .bool or float operands; cast integer masks explicitly");
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try ctx.logicalTyped(op, .f32, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
+            var value = try ctx.logical(op, .f32, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }
@@ -174,7 +174,7 @@ pub fn Ops(comptime Self: type) type {
         /// Elementwise logical NOT over truthiness (see `logicalAnd`):
         /// a `.bool` tensor, true where `self` is zero.
         pub fn logicalNot(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
-            var value = try ctx.logicalNotTyped(.f32, self.asRawTensor());
+            var value = try ctx.logicalNot(.f32, self.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }
@@ -236,7 +236,7 @@ pub fn Ops(comptime Self: type) type {
             if (comptime (target_dtype != .f32 and target_dtype != .f16 and target_dtype != .bf16)) {
                 if (self.requiresGrad()) return error.GradientCastUnsupported;
             }
-            var value = try ctx.castTyped(.f32, target_dtype, self.asRawTensor());
+            var value = try ctx.cast(.f32, target_dtype, self.asRawTensor());
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
                 return finishOp(tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
@@ -267,7 +267,7 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            var value = try ctx.scale(self.asRawTensor(), scalar_value);
+            var value = try ctx.scale(.f32, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
         }
@@ -434,12 +434,12 @@ pub fn Ops(comptime Self: type) type {
             switch (comptime op) {
                 .swiglu_clamp10 => @compileError("splitGated has no swiglu_clamp10 kernel (inference-only op)"),
                 .swiglu => {
-                    var value = try ctx.splitSwiGluAxisRank(tag_rank, self.asRawTensor(), split_axis);
+                    var value = try ctx.splitSwiGlu(tag_rank, self.asRawTensor(), split_axis);
                     errdefer value.deinit();
                     return finishOp(result_tags, ctx, value, self.requiresGrad(), SplitSwiGluBackward(tags, split_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor() });
                 },
                 .glu => {
-                    var value = try ctx.splitGluAxisRank(tag_rank, self.asRawTensor(), split_axis);
+                    var value = try ctx.splitGlu(tag_rank, self.asRawTensor(), split_axis);
                     errdefer value.deinit();
                     return finishOp(result_tags, ctx, value, self.requiresGrad(), SplitGluBackward(tags, split_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor() });
                 },

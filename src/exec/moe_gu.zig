@@ -319,7 +319,7 @@ pub fn decodePacked(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try ctx.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.empty(.f32, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 
@@ -1310,7 +1310,7 @@ pub fn decodeRaw(
     }
 
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try ctx.emptyRank(2, .{ 1, hidden });
+    var out = try ctx.empty(.f32, .{ 1, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 
@@ -1655,7 +1655,7 @@ fn scatterGrouped(
 ) !Tensor {
     const profile_enabled = profile != null;
     const out_alloc_start = moeBatchProfileStart(profile_enabled, io);
-    var out = try ctx.emptyRank(2, .{ seq, hidden });
+    var out = try ctx.empty(.f32, .{ seq, hidden });
     errdefer out.deinit();
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(out_alloc_start, io);
 

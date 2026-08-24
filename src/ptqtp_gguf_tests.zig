@@ -843,7 +843,7 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
 
     // ...and the served expert FFN is bit-identical (gate/up/down all fx4).
     const x_vals = testWeightValues(t_in, 5);
-    var x = try ctx.fromSliceRank(2, .{ 1, t_in }, &x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_in }, &x_vals);
     defer x.deinit();
     const pairs = [2]usize{ 0, 2 };
     const routing = [_]f32{ 0.7, 0.3 };

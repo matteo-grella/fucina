@@ -69,22 +69,22 @@ pub fn PointwiseBackward(
         /// on both sides (IEEE compares are false; the torch formula).
         fn winnerWeightGrad(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, comptime favored: Side) !RawTensor {
             const result_shape = taggedShapeArray(result_tags, rawShapeArray(result_tags, gy));
-            var left_view = try tag_ops.broadcastTensorTo(left_tags, &self.left_value.?, result_tags, result_shape);
+            var left_view = try tag_ops.broadcastTensorTo(.f32, left_tags, &self.left_value.?, result_tags, result_shape);
             defer left_view.deinit();
-            var right_view = try tag_ops.broadcastTensorTo(right_tags, &self.right_value.?, result_tags, result_shape);
+            var right_view = try tag_ops.broadcastTensorTo(.f32, right_tags, &self.right_value.?, result_tags, result_shape);
             defer right_view.deinit();
             const win_op: exec_mod.CompareOp = comptime if ((op == .max) == (favored == .left)) .gt else .lt;
-            var wins_mask = try ctx.compare(win_op, &left_view, &right_view);
+            var wins_mask = try ctx.compare(.f32, win_op, &left_view, &right_view);
             defer wins_mask.deinit();
-            var wins = try ctx.castTyped(.bool, .f32, &wins_mask);
+            var wins = try ctx.cast(.bool, .f32, &wins_mask);
             defer wins.deinit();
-            var ties_mask = try ctx.compare(.eq, &left_view, &right_view);
+            var ties_mask = try ctx.compare(.f32, .eq, &left_view, &right_view);
             defer ties_mask.deinit();
-            var ties = try ctx.castTyped(.bool, .f32, &ties_mask);
+            var ties = try ctx.cast(.bool, .f32, &ties_mask);
             defer ties.deinit();
-            var half_ties = try ctx.scale(&ties, 0.5);
+            var half_ties = try ctx.scale(.f32, &ties, 0.5);
             defer half_ties.deinit();
-            var weight = try ctx.add(&wins, &half_ties);
+            var weight = try ctx.elementwise(.add, &wins, &half_ties);
             defer weight.deinit();
             return tag_ops.pointwise(.mul, result_tags, gy, ctx, result_tags, &weight);
         }
@@ -109,7 +109,7 @@ pub fn PointwiseBackward(
             if (needs_grad.len > 1 and needs_grad[1]) {
                 var g = switch (op) {
                     .add => try gy.cloneView(),
-                    .sub => try ctx.scale(gy, -1),
+                    .sub => try ctx.scale(.f32, gy, -1),
                     .mul => try tag_ops.pointwise(.mul, result_tags, gy, ctx, left_tags, &self.left_value.?),
                     .div => blk: {
                         const num_tags = comptime pointwiseResultTags(result_tags, left_tags);
@@ -119,7 +119,7 @@ pub fn PointwiseBackward(
                         defer denominator.deinit();
                         var quotient = try tag_ops.pointwise(.div, num_tags, &numerator, ctx, right_tags, &denominator);
                         defer quotient.deinit();
-                        const neg = try ctx.scale(&quotient, -1);
+                        const neg = try ctx.scale(.f32, &quotient, -1);
                         break :blk neg;
                     },
                     .max, .min => try self.winnerWeightGrad(ctx, gy, .right),
@@ -186,7 +186,7 @@ pub const ReluBackward = struct {
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
 
-        var gx = try ctx.empty(x.shape.slice());
+        var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
         for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
             dst.* = if (value > 0) grad else 0;
@@ -226,7 +226,7 @@ pub const LeakyReluBackward = struct {
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
 
-        var gx = try ctx.empty(x.shape.slice());
+        var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
         for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
             dst.* = if (value > 0) grad else grad * self.negative_slope;
@@ -278,7 +278,7 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
 
-            var gx = try ctx.empty(x.shape.slice());
+            var gx = try ctx.empty(.f32, x.shape.slice());
             errdefer gx.deinit();
             const xs = x.dataConst();
             const gys = gy_ready.dataConst();
@@ -355,7 +355,7 @@ pub fn ScaleBackward(comptime tags: anytype) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.scale(gy, self.scalar_value);
+            out[0] = try ctx.scale(.f32, gy, self.scalar_value);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -419,7 +419,7 @@ pub const ClampBackward = struct {
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
 
-        var gx = try ctx.empty(x.shape.slice());
+        var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
         for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
             dst.* = if (value >= self.min_value and value <= self.max_value) grad else 0;
@@ -481,9 +481,9 @@ pub fn GatedBackward(
             const gyd = gy_ready.dataConst();
 
             const result_tagged_shape = taggedShapeArray(result_tags, self.result_shape);
-            var left_b = try tag_ops.broadcastTensorTo(left_tags, &self.left_value, result_tags, result_tagged_shape);
+            var left_b = try tag_ops.broadcastTensorTo(.f32, left_tags, &self.left_value, result_tags, result_tagged_shape);
             defer left_b.deinit();
-            var right_b = try tag_ops.broadcastTensorTo(right_tags, &self.right_value, result_tags, result_tagged_shape);
+            var right_b = try tag_ops.broadcastTensorTo(.f32, right_tags, &self.right_value, result_tags, result_tagged_shape);
             defer right_b.deinit();
             var left_ready = try contiguousForRead(ctx, &left_b);
             defer left_ready.deinit();
@@ -493,7 +493,7 @@ pub fn GatedBackward(
             const right_data = right_ready.dataConst();
 
             if (needs_grad.len > 0 and needs_grad[0]) {
-                var g = try ctx.empty(self.result_shape[0..]);
+                var g = try ctx.empty(.f32, self.result_shape[0..]);
                 if (comptime gatedSourceIsIdentity(op)) {
                     for (gyd, right_data, g.data()) |grad, gate, *dst| {
                         dst.* = grad * gatedActivation(op, gate);
@@ -508,7 +508,7 @@ pub fn GatedBackward(
             }
 
             if (needs_grad.len > 1 and needs_grad[1]) {
-                var g = try ctx.empty(self.result_shape[0..]);
+                var g = try ctx.empty(.f32, self.result_shape[0..]);
                 for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
                     dst.* = grad * gatedSource(op, left) * gatedActivationDerivative(op, gate);
                 }
@@ -544,7 +544,7 @@ pub fn SplitSwiGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.splitSwiGluBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis);
+            out[0] = try ctx.splitSwiGluBackward(rawRank(tags.len), &self.input, gy, axis);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -573,7 +573,7 @@ pub fn SplitGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.splitGluBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis);
+            out[0] = try ctx.splitGluBackward(rawRank(tags.len), &self.input, gy, axis);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -602,7 +602,7 @@ pub fn AddScalarBackward(comptime tags: anytype) type {
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.scale(gy, 1); // identity passthrough as a fresh owned tensor
+            out[0] = try ctx.scale(.f32, gy, 1); // identity passthrough as a fresh owned tensor
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -632,7 +632,7 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
 
-            var gx = try ctx.empty(x.shape.slice());
+            var gx = try ctx.empty(.f32, x.shape.slice());
             errdefer gx.deinit();
             const c = self.exponent;
             for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
@@ -669,7 +669,7 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
             defer m.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
-            var gx = try ctx.empty(m.shape.slice());
+            var gx = try ctx.empty(.f32, m.shape.slice());
             errdefer gx.deinit();
             for (m.dataConst(), gy_ready.dataConst(), gx.data()) |mv, grad, *dst| {
                 dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) 0 else grad;
@@ -707,7 +707,7 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
             if (needs_grad.len > 0 and needs_grad[0]) {
-                var gx = try ctx.empty(c.shape.slice());
+                var gx = try ctx.empty(.f32, c.shape.slice());
                 errdefer gx.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gx.data()) |cv, grad, *dst| {
                     dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) grad else 0;
@@ -715,7 +715,7 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
                 out[0] = gx;
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                var gyy = try ctx.empty(c.shape.slice());
+                var gyy = try ctx.empty(.f32, c.shape.slice());
                 errdefer gyy.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gyy.data()) |cv, grad, *dst| {
                     dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) 0 else grad;
@@ -985,7 +985,7 @@ pub const ChannelAffineBackward = struct {
             out[0] = try ctx.channelAffine(gy, &self.scale_value, null);
         }
         if (needs_grad.len > 1 and needs_grad[1]) {
-            var prod = try ctx.mul(gy, &self.input_value);
+            var prod = try ctx.elementwise(.mul, gy, &self.input_value);
             defer prod.deinit();
             out[1] = try ctx.reduceBroadcast(&prod, &.{self.channels});
         }

@@ -63,7 +63,7 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
 
             var expanded = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
             defer expanded.deinit();
-            out[0] = try ctx.scale(&expanded, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
+            out[0] = try ctx.scale(.f32, &expanded, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -158,7 +158,7 @@ pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: a
             var counts_ready = try contiguousForRead(ctx, &self.counts);
             defer counts_ready.deinit();
 
-            var scaled = try ctx.empty(gy_ready.shape.slice());
+            var scaled = try ctx.empty(.f32, gy_ready.shape.slice());
             defer scaled.deinit();
             for (gy_ready.dataConst(), counts_ready.dataConst(), scaled.data()) |g, count, *dst| {
                 dst.* = if (count == 0) 0 else g / count;
@@ -179,7 +179,7 @@ pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: a
 
 /// VJP for `cumsum` over an axis: gx[i] = Σ_{j >= i} gy[j] along the axis —
 /// the REVERSED cumulative (suffix) sum of the upstream gradient, computed by
-/// the dedicated serial `cumsumReverseAxisRank` exec helper (deterministic:
+/// the dedicated serial `cumsumReverse` exec helper (deterministic:
 /// one serial pass per row, same order for any thread count).
 pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type {
     return struct {
@@ -195,7 +195,7 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.cumsumReverseAxisRank(rawRank(source_tags.len), gy, axis);
+            out[0] = try ctx.cumsumReverse(rawRank(source_tags.len), gy, axis);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -226,7 +226,7 @@ pub fn SegmentSumBackward(comptime source_tags: anytype, comptime axis: usize) t
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.segmentBroadcastAxisRank(rawRank(source_tags.len), gy, axis, self.offsets, self.n);
+            out[0] = try ctx.segmentBroadcast(rawRank(source_tags.len), gy, axis, self.offsets, self.n);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -281,7 +281,7 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
             const need_init = needs_grad.len > 2 and needs_grad[2];
             if (!need_b and !need_a and !need_init) return;
             const initial_ptr: ?*const RawTensor = if (self.initial_value) |*ini| ini else null;
-            var grads = try ctx.linearRecurrenceBackwardAxisRank(rawRank(source_tags.len), gy, &self.a_view, &self.h_value, initial_ptr, axis, need_a, need_init);
+            var grads = try ctx.linearRecurrenceBackward(rawRank(source_tags.len), gy, &self.a_view, &self.h_value, initial_ptr, axis, need_a, need_init);
             errdefer grads.gb.deinit();
             errdefer if (grads.da) |*t| t.deinit();
             errdefer if (grads.dinitial) |*t| t.deinit();
@@ -340,7 +340,7 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
             const g = gy_ready.dataConst();
 
             const source_shape = rawShapeArray(source_tags, &self.input);
-            var gx = try ctx.emptyRank(rank, source_shape);
+            var gx = try ctx.empty(.f32, source_shape);
             errdefer gx.deinit();
             const gxd = gx.data();
 
@@ -416,7 +416,7 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
             const g = gy_ready.dataConst();
 
             const source_shape = rawShapeArray(source_tags, &self.input);
-            var gx = try ctx.emptyRank(rank, source_shape);
+            var gx = try ctx.empty(.f32, source_shape);
             errdefer gx.deinit();
             const gxd = gx.data();
 

@@ -90,7 +90,7 @@ test "tagged public tensor leakyRelu forward and backward" {
 
     var x = try Tensor(.{.d}).variable(
         &ctx,
-        try ctx.fromSlice(&.{3}, &.{ -2, 0, 3 }),
+        try ctx.fromSlice(.f32, &.{3}, &.{ -2, 0, 3 }),
     );
     defer x.deinit();
 
@@ -142,7 +142,7 @@ test "tagged public tensor fastTanh forward and backward" {
 
     var x = try Tensor(.{.d}).variable(
         &ctx,
-        try ctx.fromSlice(&.{4}, &.{ -2, -0.25, 0, 3 }),
+        try ctx.fromSlice(.f32, &.{4}, &.{ -2, -0.25, 0, 3 }),
     );
     defer x.deinit();
 

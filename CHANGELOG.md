@@ -113,6 +113,108 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+`ExecContext` carries exactly one spelling per op: the `*Rank`, `*AxisRank`,
+and `*Typed` variant suffixes are gone from the exec surface (`src/exec.zig`
+and the `src/exec/` bodies), and `src/tag_ops.zig` drops its `*Of` split.
+Kernels, routing, and numerics are unchanged; comptime rank/axis
+monomorphization is preserved everywhere. Rewrite table, grouped by rule:
+
+- **Shape argument carries the rank (creation ops).** `shape` is `anytype`:
+  a `[rank]usize` array or a tuple of sizes takes the comptime-rank arm, a
+  `[]const usize` slice the runtime-rank arm. Each op also takes a leading
+  comptime `DType` (f32 call sites pass `.f32`).
+  `empty`/`emptyRank`/`emptyTyped`/`emptyRankTyped` are `empty(dt, shape)`;
+  the same collapse applies to `zeros`, `ones`, `full` (`fullTyped`),
+  `scalar` (`scalarTyped`), `fromSlice` (`fromSliceRank`, `fromSliceTyped`,
+  `fromSliceRankTyped`), `fromBorrowedSlice` (`fromBorrowedSliceRank`,
+  `fromBorrowedSliceRankTyped`), `fromStorageSlice`
+  (`fromStorageSliceRankTyped`), and `fromBorrowedStorageSlice`
+  (`fromBorrowedStorageSliceRankTyped`). `broadcastTo`/`broadcastToRank`
+  are `broadcastTo(x, shape)`; `reduceBroadcast`/`reduceBroadcastRank` are
+  `reduceBroadcast(x, target_shape)`.
+- **Dtype is an explicit comptime parameter, once.** Where an f32 spelling
+  and a `*Typed` spelling coexisted, the generic survives under the base
+  name and every f32 call site gains an explicit `.f32`:
+  `materialize(dt, x)` (`materializeTyped`), `clone(dt, x)` (`cloneTyped`),
+  `prepareContiguous(dt, x)` (`prepareContiguousTyped`),
+  `cast(src_dt, dst_dt, x)` (`castTyped`), `scale(dt, x, s)` (`scaleTyped`),
+  `sum(dt, x)` (`sumTyped`), `dot(dt, a, b)` (`dotTyped`),
+  `matmul(dt, a, b)` (`matmul2D`, `matmul2DTyped`, `matmulTyped`; the
+  duplicate `matmul2D` alias is deleted),
+  `where(cond_dt, x, cond, y)` (`whereTyped`),
+  `maskedFill(mask_dt, x, mask, v)` (`maskedFillTyped`),
+  `compare(dt, op, a, b)` (`compareIntTyped`),
+  `compareScalar(dt, op, x, v)` (`compareIntScalarTyped`),
+  `logical` (`logicalTyped`), `logicalNot` (`logicalNotTyped`),
+  `add`/`sub`/`mul`/`div`/`max`/`min` `(dt, rank, a, b)`
+  (`addRank`/`addRankTyped` and kin),
+  `divTrunc`/`divFloor`/`rem`/`mod`/`bitwise` `(dt, rank, a, b)`
+  (`divTruncRankTyped`, `divFloorRankTyped`, `remRankTyped`,
+  `modRankTyped`, `bitwiseRankTyped`),
+  `sumAxis`/`meanAxis` `(dt, rank, x, axis)` (`sumAxisRank`,
+  `sumAxisRankTyped`, `meanAxisRank`, `meanAxisRankTyped`),
+  `narrowAxis`, `concatAxis`, `gatherAxis`, `setSliceAxis`, `setRows`
+  (their `AxisRank`/`AxisRankTyped` pairs),
+  `dequantizeTensor` (`dequantizeTensorTyped`), `getRowsQuantized`
+  (`getRowsQuantizedTyped`), `concatQuantizedRows`
+  (`concatQuantizedRowsTyped`), `packDenseMatmulRhs`
+  (`packDenseMatmulRhsTyped`), `matmul2DWithPackedRhs`
+  (`matmul2DWithPackedRhsTyped`), and
+  `enableNativeMatmulPoolForWork(dt, m, n, k)`
+  (`enableNativeTypedMatmulPoolForWork`; `dt` names the storage the kernel
+  walks, and the f32 dense arm keeps its BLAS bail).
+  `packMatmulRhsTyped` folds into `packMatmulRhs(dt, rhs)`, whose result
+  container is dtype-selected (`PackedMatmulRhsContainer`): the 16-bit
+  streaming pack for `.f16`/`.bf16`, the quantized block pack otherwise.
+- **`AxisRank` dropped; the comptime rank/axis parameters stay.**
+  `softmax`, `logsumexp`, `logSoftmax`, `softmaxExt`, `rmsNorm`,
+  `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulBackwardInput`,
+  `rmsNormMulBackwardWeight`, `rmsNormMulRopeWithTable`, `rmsNormBackward`,
+  `layerNorm`, `layerNormAffine`, `layerNormBackward`,
+  `layerNormAffineBackward`, `groupNorm`, `groupNormBackward`,
+  `crossEntropyLoss` (+`Ex`, `ExStats`), `crossEntropyBackward` (+`Ex`,
+  `ExStats`, `ExUpstream`, `ExUpstreamStats`), `rope`, `ropeWithTable`,
+  `ropePartial`, `ropePartialWithTable`, `cumsum`, `cumsumReverse`,
+  `cumprod`, `prod`, `segmentSum`, `segmentBroadcast`, `linearRecurrence`,
+  `linearRecurrenceBackward`, `sumMasked`, `meanMasked`, `pad`, `setRows`,
+  `zeroSlice`, `zeroRows`, `sliceGradient`, `scatterAdd`, `takeAlong`,
+  `scatterAddAlong`, `scatterAlong`, `argmax`, `maxAxis`, `minAxis`,
+  `maxMasked`, `minMasked`, `varAxis`, `standardize`,
+  `standardizeValidPrefix`, `standardizeBackward`, `topK`, `sort`,
+  `conv1d`, `conv1dBackwardInput`, `conv1dBackwardWeight`, `causalConv1d`
+  (+`BackwardInput`, `BackwardWeight`), `causalDepthwiseConv1d`
+  (+`BackwardInput`, `BackwardKernel`), `groupedCausalConv1d`
+  (+`BackwardInput`, `BackwardWeight`), `col2im1d`, `col2im1dBackward`,
+  `splitSwiGlu`, `splitGlu`, `splitSwiGluBackward`, `splitGluBackward`,
+  `addAxisVectorInPlace`, `addAxisVectorUnaryInPlace`, `gated`, `glu`,
+  `swiglu`, `geglu` (from `gatedRank`/`gluRank`/`swigluRank`/`gegluRank`),
+  and `relposShift` (`relposShiftRank3`; the rank-3 contract is documented,
+  not spelled). Base-name decisions where a whole-tensor sibling exists:
+  `sum` stays the all-elements reduction and the axis form is `sumAxis`
+  (likewise `meanAxis`, `narrowAxis`, `concatAxis`, `gatherAxis`,
+  `setSliceAxis`); `maxAxis`/`minAxis`/`varAxis` keep `Axis` because
+  `max`/`min` are the elementwise binaries and `var` is a keyword.
+- **Runtime-rank elementwise entry.** `ctx.add(&a, &b)` and kin (runtime
+  rank dispatch) are `ctx.elementwise(.add, &a, &b)` with
+  `op: ElementwiseOp`; the base names `add`/`sub`/`mul`/`div`/`max`/`min`
+  are the comptime-rank generics above. Same kernels either way.
+- **Absorbed variants.** `softmaxBackward(rank, y, gy, axis, scale)`
+  absorbs `softmaxExtBackwardAxisRank` (plain callers pass `1`);
+  `matmul2DWithQuantizedTensorRhs` and `matmul2DWithQuantizedBlocksRhs`
+  absorb their zero-caller `*Options` twins (the options struct is now the
+  trailing parameter); `conv2dExt`/`conv2dPreparedExt` are folded into the
+  private shared implementation behind the four public conv2d entries.
+  `softmaxExt` stays a separate op: its masked/sink/ALiBi row kernel is not
+  the plain softmax kernel.
+- **`tag_ops`: the dtype-explicit form holds the base name.** The `*Of`
+  spellings are renamed and the f32 convenience twins are deleted; callers
+  of the old convenience forms pass `.f32` first. The 11 renames:
+  `splitAxisViewOf`, `mergeAxesViewOf`, `flattenTensorOf`,
+  `alignTensorToOf`, `broadcastTensorToOf`, `pointwiseShapeOf`,
+  `validateTensorRankOf`, `contiguousForReshapeOf`, `dotResultShapeOf`,
+  `einsumResultShapeOf`, `productRangeOf`, each to the same name without
+  `Of`.
+
 - `Model.initKvCache` is `Model.initCache` on every family (runner/qwen3,
   gemma4, diffusion_gemma, SHINE's `AdaptedModel`), and every family's
   cache constructor takes `(self, ctx, capacity)` (deepseek2, glm4moe,

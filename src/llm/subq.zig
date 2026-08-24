@@ -527,9 +527,9 @@ pub const State = struct {
             @memcpy(diag[off * d ..][0 .. n * d], plan.diag_resid[0 .. n * d]);
             @memcpy(vmean[off * d ..][0 .. n * d], plan.vmean[0 .. n * d]);
         }
-        cat.centroid_t = try ctx.fromSliceRank(2, .{ total, d }, centroid);
-        if (rank > 0) cat.eig_t = try ctx.fromSliceRank(2, .{ total * rank, d }, eig);
-        cat.diag_t = try ctx.fromSliceRank(2, .{ total, d }, diag);
+        cat.centroid_t = try ctx.fromSlice(.f32, .{ total, d }, centroid);
+        if (rank > 0) cat.eig_t = try ctx.fromSlice(.f32, .{ total * rank, d }, eig);
+        cat.diag_t = try ctx.fromSlice(.f32, .{ total, d }, diag);
     }
 
     /// Second-cumulant priorities for every query head of the layer in three
@@ -540,7 +540,7 @@ pub const State = struct {
         const rank = self.config.rank;
         const cat = &self.cats[layer_i];
         const total = cat.total_c;
-        var qt = try ctx.fromSliceRank(2, .{ self.q_heads, d }, q[0 .. self.q_heads * d]);
+        var qt = try ctx.fromSlice(.f32, .{ self.q_heads, d }, q[0 .. self.q_heads * d]);
         defer qt.deinit();
         var a_t = try ctx.matmulTransB(&qt, &cat.centroid_t.?);
         defer a_t.deinit();
@@ -549,7 +549,7 @@ pub const State = struct {
         if (rank > 0) p_t = try ctx.matmulTransB(&qt, &cat.eig_t.?);
         const qq = self.qq[0 .. self.q_heads * d];
         for (qq, q[0 .. self.q_heads * d]) |*o, x| o.* = x * x;
-        var qq_t = try ctx.fromSliceRank(2, .{ self.q_heads, d }, qq);
+        var qq_t = try ctx.fromSlice(.f32, .{ self.q_heads, d }, qq);
         defer qq_t.deinit();
         var dv_t = try ctx.matmulTransB(&qq_t, &cat.diag_t.?);
         defer dv_t.deinit();
@@ -1714,9 +1714,9 @@ fn segmentSumRows(
     offsets: []const usize,
     allocator: Allocator,
 ) ![]f32 {
-    var x = try ctx.fromSliceRank(2, .{ n, d }, rows);
+    var x = try ctx.fromSlice(.f32, .{ n, d }, rows);
     defer x.deinit();
-    var summed = try ctx.segmentSumAxisRank(2, &x, 0, offsets);
+    var summed = try ctx.segmentSum(2, &x, 0, offsets);
     defer summed.deinit();
     const out = try allocator.alloc(f32, (offsets.len - 1) * d);
     @memcpy(out, summed.dataConst());

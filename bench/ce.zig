@@ -29,7 +29,7 @@ fn randomLogits(ctx: *ExecContext, allocator: std.mem.Allocator, rows: usize, co
     const data = try allocator.alloc(f32, rows * cols);
     defer allocator.free(data);
     fillRandom(data, seed);
-    return ctx.fromSliceRank(2, .{ rows, cols }, data);
+    return ctx.fromSlice(.f32, .{ rows, cols }, data);
 }
 
 fn randomLabels(allocator: std.mem.Allocator, count: usize, class_count: usize, seed: u64) ![]usize {
@@ -45,12 +45,12 @@ fn benchSoftmaxForward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.softmaxAxisRank(2, &x, 1);
+        var y = try ctx.softmax(2, &x, 1);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.softmaxAxisRank(2, &x, 1);
+        var y = try ctx.softmax(2, &x, 1);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -64,12 +64,12 @@ fn benchSoftmaxForwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Al
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.softmaxAxisRank(2, &x, 0);
+        var y = try ctx.softmax(2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.softmaxAxisRank(2, &x, 0);
+        var y = try ctx.softmax(2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -81,12 +81,12 @@ fn benchLogSoftmaxAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Alloca
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.logSoftmaxAxisRank(2, &x, 0);
+        var y = try ctx.logSoftmax(2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.logSoftmaxAxisRank(2, &x, 0);
+        var y = try ctx.logSoftmax(2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -98,12 +98,12 @@ fn benchLogsumexpAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.logsumexpAxisRank(2, &x, 0);
+        var y = try ctx.logsumexp(2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.logsumexpAxisRank(2, &x, 0);
+        var y = try ctx.logsumexp(2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -113,18 +113,18 @@ fn benchLogsumexpAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
 fn benchSoftmaxBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xa3c0 + rows);
     defer x.deinit();
-    var y = try ctx.softmaxAxisRank(2, &x, 0);
+    var y = try ctx.softmax(2, &x, 0);
     defer y.deinit();
     var gy = try randomLogits(ctx, allocator, rows, cols, 0xa4c0 + rows);
     defer gy.deinit();
 
     for (0..2) |_| {
-        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 0);
+        var gx = try ctx.softmaxBackward(2, &y, &gy, 0, 1);
         gx.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 0);
+        var gx = try ctx.softmaxBackward(2, &y, &gy, 0, 1);
         gx.deinit();
     }
     const ns = timer.read() / iters;
@@ -141,12 +141,12 @@ fn benchLayerNormBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem
     const eps: f32 = 1e-5;
 
     for (0..2) |_| {
-        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 0, eps, true, true, true);
+        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 0, eps, true, true, true);
         grads.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 0, eps, true, true, true);
+        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 0, eps, true, true, true);
         grads.deinit();
     }
     const ns = timer.read() / iters;
@@ -156,18 +156,18 @@ fn benchLayerNormBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem
 fn benchSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xbcd0 + rows);
     defer x.deinit();
-    var y = try ctx.softmaxAxisRank(2, &x, 1);
+    var y = try ctx.softmax(2, &x, 1);
     defer y.deinit();
     var gy = try randomLogits(ctx, allocator, rows, cols, 0xcde0 + rows);
     defer gy.deinit();
 
     for (0..2) |_| {
-        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 1);
+        var gx = try ctx.softmaxBackward(2, &y, &gy, 1, 1);
         gx.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var gx = try ctx.softmaxBackwardAxisRank(2, &y, &gy, 1);
+        var gx = try ctx.softmaxBackward(2, &y, &gy, 1, 1);
         gx.deinit();
     }
     const ns = timer.read() / iters;
@@ -181,24 +181,24 @@ fn benchCrossEntropy(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator
     defer allocator.free(labels);
 
     for (0..2) |_| {
-        var loss = try ctx.crossEntropyLossAxisRank(2, &logits, 1, labels);
+        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels);
         loss.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var loss = try ctx.crossEntropyLossAxisRank(2, &logits, 1, labels);
+        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels);
         loss.deinit();
     }
     const fwd_ns = timer.read() / iters;
     try printRow(stdout, "cross-entropy fwd", rows, cols, fwd_ns, iters);
 
     for (0..2) |_| {
-        var grad = try ctx.crossEntropyBackwardAxisRank(2, &logits, 1, labels, 1);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, 1);
         grad.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grad = try ctx.crossEntropyBackwardAxisRank(2, &logits, 1, labels, 1);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, 1);
         grad.deinit();
     }
     const bwd_ns = timer.read() / iters;
@@ -208,15 +208,15 @@ fn benchCrossEntropy(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator
     // node takes (bitwise identical to the recompute row above).
     const stats = try allocator.alloc(f32, 2 * rows);
     defer allocator.free(stats);
-    var stats_loss = try ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, labels, .{}, stats);
+    var stats_loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, stats);
     stats_loss.deinit();
     for (0..2) |_| {
-        var grad = try ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, labels, .{}, 1, null, stats);
+        var grad = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, stats);
         grad.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grad = try ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, labels, .{}, 1, null, stats);
+        var grad = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, stats);
         grad.deinit();
     }
     const stats_ns = timer.read() / iters;
@@ -240,24 +240,24 @@ fn benchLinearCe(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, st
 
     var logits = try ctx.matmulTransB(&x, &w);
     defer logits.deinit();
-    var loss = try ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, labels, .{}, row_stats);
+    var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, row_stats);
     loss.deinit();
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
 
     for (0..2) |_| {
-        var dlogits = try ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
         defer dlogits.deinit();
-        var dx = try ctx.matmul2D(&dlogits, &w);
+        var dx = try ctx.matmul(.f32, &dlogits, &w);
         dx.deinit();
         var dw = try ctx.matmulTransA(&dlogits, &x);
         dw.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var dlogits = try ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
         defer dlogits.deinit();
-        var dx = try ctx.matmul2D(&dlogits, &w);
+        var dx = try ctx.matmul(.f32, &dlogits, &w);
         dx.deinit();
         var dw = try ctx.matmulTransA(&dlogits, &x);
         dw.deinit();
@@ -311,7 +311,7 @@ fn randomRow(ctx: *ExecContext, allocator: std.mem.Allocator, cols: usize, seed:
     const data = try allocator.alloc(f32, cols);
     defer allocator.free(data);
     fillRandom(data, seed);
-    return ctx.fromSliceRank(1, .{cols}, data);
+    return ctx.fromSlice(.f32, .{cols}, data);
 }
 
 fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
@@ -326,24 +326,24 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     const eps: f32 = 1e-5;
 
     for (0..2) |_| {
-        var y = try ctx.layerNormAffineAxisRank(2, &x, &w, &b, 1, eps);
+        var y = try ctx.layerNormAffine(2, &x, &w, &b, 1, eps);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.layerNormAffineAxisRank(2, &x, &w, &b, 1, eps);
+        var y = try ctx.layerNormAffine(2, &x, &w, &b, 1, eps);
         y.deinit();
     }
     const fwd_ns = timer.read() / iters;
     try printRow(stdout, "layernorm-aff fwd", rows, cols, fwd_ns, iters);
 
     for (0..2) |_| {
-        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 1, eps, true, true, true);
+        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 1, eps, true, true, true);
         grads.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grads = try ctx.layerNormAffineBackwardAxisRank(2, &x, &w, &gy, 1, eps, true, true, true);
+        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 1, eps, true, true, true);
         grads.deinit();
     }
     const bwd_ns = timer.read() / iters;
@@ -352,28 +352,28 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     // rmsNormMul at the same shape: the sanity baseline (layerNorm should sit
     // within ~1.5-2x given the extra mean pass).
     for (0..2) |_| {
-        var y = try ctx.rmsNormMulAxisRank(2, &x, &w, 1, eps);
+        var y = try ctx.rmsNormMul(2, &x, &w, 1, eps);
         y.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var y = try ctx.rmsNormMulAxisRank(2, &x, &w, 1, eps);
+        var y = try ctx.rmsNormMul(2, &x, &w, 1, eps);
         y.deinit();
     }
     const rms_fwd_ns = timer.read() / iters;
     try printRow(stdout, "rmsnorm-mul fwd", rows, cols, rms_fwd_ns, iters);
 
     for (0..2) |_| {
-        var gx = try ctx.rmsNormMulBackwardInputAxisRank(2, &x, &w, &gy, 1, eps);
+        var gx = try ctx.rmsNormMulBackwardInput(2, &x, &w, &gy, 1, eps);
         gx.deinit();
-        var gw = try ctx.rmsNormMulBackwardWeightAxisRank(2, &x, &gy, 1, eps);
+        var gw = try ctx.rmsNormMulBackwardWeight(2, &x, &gy, 1, eps);
         gw.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var gx = try ctx.rmsNormMulBackwardInputAxisRank(2, &x, &w, &gy, 1, eps);
+        var gx = try ctx.rmsNormMulBackwardInput(2, &x, &w, &gy, 1, eps);
         gx.deinit();
-        var gw = try ctx.rmsNormMulBackwardWeightAxisRank(2, &x, &gy, 1, eps);
+        var gw = try ctx.rmsNormMulBackwardWeight(2, &x, &gy, 1, eps);
         gw.deinit();
     }
     const rms_bwd_ns = timer.read() / iters;

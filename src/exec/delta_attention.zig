@@ -208,20 +208,20 @@ pub fn kdaRecurrent(
     if (a_log.len != heads and a_log.len != k_dim) return tensor.TensorError.ShapeMismatch;
     if (dt_bias.len != heads * k_dim) return tensor.TensorError.ShapeMismatch;
 
-    var qq = try ctx.prepareContiguous(q);
+    var qq = try ctx.prepareContiguous(.f32, q);
     defer qq.deinit();
-    var kk = try ctx.prepareContiguous(k);
+    var kk = try ctx.prepareContiguous(.f32, k);
     defer kk.deinit();
-    var vvp = try ctx.prepareContiguous(v);
+    var vvp = try ctx.prepareContiguous(.f32, v);
     defer vvp.deinit();
-    var gg = try ctx.prepareContiguous(g_raw);
+    var gg = try ctx.prepareContiguous(.f32, g_raw);
     defer gg.deinit();
-    var bb = try ctx.prepareContiguous(beta_raw);
+    var bb = try ctx.prepareContiguous(.f32, beta_raw);
     defer bb.deinit();
 
-    var o = try ctx.emptyRank(3, .{ seq, heads, v_dim });
+    var o = try ctx.empty(.f32, .{ seq, heads, v_dim });
     errdefer o.deinit();
-    var state = try ctx.emptyRank(3, .{ heads, k_dim, v_dim });
+    var state = try ctx.empty(.f32, .{ heads, k_dim, v_dim });
     errdefer state.deinit();
 
     const base = KdaTask{

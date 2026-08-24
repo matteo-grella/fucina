@@ -359,7 +359,7 @@ pub const Apollo = struct {
         // U = G (elementwise) scaled per channel (rows for tall, cols for
         // wide); the optional front sqrt(scale) is fused (same per-element op
         // order as the reference's separate pass).
-        var update = try ctx.emptyRank(2, .{ rows, cols });
+        var update = try ctx.empty(.f32, .{ rows, cols });
         defer update.deinit();
         const ud = update.data();
         const sqrt_scale = @sqrt(config.scale);
@@ -475,7 +475,7 @@ pub const Apollo = struct {
         else
             .{ slot.param.rows, config.rank };
         if (slot.proj == null) {
-            slot.proj = try ctx.emptyRank(2, shape);
+            slot.proj = try ctx.empty(.f32, shape);
         }
         const inv_sqrt_rank = 1.0 / @sqrt(@as(f32, @floatFromInt(config.rank)));
         gaussianFill(slot.seed +% chunk *% 0x9E3779B97F4A7C15, slot.proj.?.data(), inv_sqrt_rank);

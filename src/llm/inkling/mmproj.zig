@@ -316,11 +316,11 @@ pub const MmProj = struct {
     fn packedLinear(ctx: *ExecContext, dense_rhs: *const fucina.PackedRhs(.f32), x: []const f32, rows: usize, in_dim: usize) ![]f32 {
         const allocator = ctx.allocator;
         std.debug.assert(dense_rhs.k == in_dim);
-        var input = try ctx.fromBorrowedSliceRank(2, .{ rows, in_dim }, @constCast(x));
+        var input = try ctx.fromBorrowedSlice(.f32, .{ rows, in_dim }, @constCast(x));
         defer input.deinit();
         const out = try allocator.alignedAlloc(f32, dense_alignment, rows * dense_rhs.n);
         errdefer allocator.free(out);
-        var output = try ctx.fromBorrowedSliceRank(2, .{ rows, dense_rhs.n }, out);
+        var output = try ctx.fromBorrowedSlice(.f32, .{ rows, dense_rhs.n }, out);
         defer output.deinit();
         try ctx.matmul2DWithPackedDenseRhsInto(&output, &input, dense_rhs);
         return out;

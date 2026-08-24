@@ -80,18 +80,18 @@ pub const SoftmaxExtOptions = struct {
 /// last-axis path runs the fused SIMD row kernel (`logsumexpRows`,
 /// task-parallel over rows like `softmax`); other axes run the streaming
 /// inner-lane kernel (`logsumexpInner`) with identical semantics.
-pub fn logsumexpAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+pub fn logsumexp(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(out_rank, out_shape);
+    var out = try ctx.empty(.f32, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -115,7 +115,7 @@ pub fn logsumexpAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tens
         return out;
     }
 
-    var scratch = try ctx.emptyRank(1, .{2 * inner});
+    var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
     dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
         .input = input,
@@ -132,19 +132,19 @@ pub fn logsumexpAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tens
 
 /// Log-softmax along `axis` (torch.log_softmax), shape-preserving:
 /// `(x - m) - log(Σ exp(x - m))` with the same guarded max as
-/// `logsumexpAxisRank`. Last-axis path is the fused SIMD row kernel
+/// `logsumexp`. Last-axis path is the fused SIMD row kernel
 /// (`logSoftmaxRows`, task-parallel over rows); other axes run the
 /// streaming inner-lane kernel (`logSoftmaxInner`).
-pub fn logSoftmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+pub fn logSoftmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -168,7 +168,7 @@ pub fn logSoftmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
         return out;
     }
 
-    var scratch = try ctx.emptyRank(1, .{2 * inner});
+    var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
     dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
         .input = input,
@@ -183,16 +183,16 @@ pub fn logSoftmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
     return out;
 }
 
-pub fn softmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+pub fn softmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -217,7 +217,7 @@ pub fn softmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor
         return out;
     }
 
-    var scratch = try ctx.emptyRank(1, .{2 * inner});
+    var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
     dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
         .input = input,
@@ -232,7 +232,7 @@ pub fn softmaxAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor
     return out;
 }
 
-pub fn softmaxExtAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, options: SoftmaxExtOptions) !Tensor {
+pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, options: SoftmaxExtOptions) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -267,11 +267,11 @@ pub fn softmaxExtAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
     if (mask_value) |*mask| mask.buffer.waitReady();
     const mask_ranked = if (mask_value) |*mask| try mask.rankView(rank) else null;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -324,24 +324,22 @@ pub fn softmaxExtAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
     return out;
 }
 
-pub fn softmaxBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    return softmaxExtBackwardAxisRank(ctx, rank, y, gy, axis, 1);
-}
-
-pub fn softmaxExtBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize, scale_value: f32) !Tensor {
+/// Softmax VJP along `axis`: `scale_value` folds the forward's logit
+/// scaling into the same pass (`1` for the plain softmax).
+pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize, scale_value: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(y, gy);
 
     const source = try y.rankView(rank);
-    var yy = try ctx.prepareContiguous(y);
+    var yy = try ctx.prepareContiguous(.f32, y);
     defer yy.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const yd = yy.tensor().dataConst();
     const gyd = ggy.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -368,7 +366,7 @@ pub fn softmaxExtBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, y: *c
         return out;
     }
 
-    var scratch = try ctx.emptyRank(1, .{inner});
+    var scratch = try ctx.empty(.f32, .{inner});
     defer scratch.deinit();
     dispatchInnerLanes(SoftmaxBackwardInnerTask, ctx, .{
         .y = yd,

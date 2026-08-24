@@ -55,9 +55,9 @@ fn crossEntropyExtScalarLossForTest(
     comptime options: exec_mod.CrossEntropyOptions,
     weights: []const f32,
 ) !f32 {
-    var logits = try ctx.fromSliceRank(2, .{ 4, 7 }, data);
+    var logits = try ctx.fromSlice(.f32, .{ 4, 7 }, data);
     defer logits.deinit();
-    var loss = try ctx.crossEntropyLossExAxisRank(2, &logits, 1, labels, options);
+    var loss = try ctx.crossEntropyLossEx(2, &logits, 1, labels, options);
     defer loss.deinit();
     if (comptime options.reduction == .none) {
         var acc: f32 = 0;

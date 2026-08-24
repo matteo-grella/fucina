@@ -67,13 +67,13 @@ the next same-size op returns `second.buffer == first_buffer`
 The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
-- **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty` / `emptyRank`
-  acquire from it (`src/exec/runtime.zig:270/:277`). In an LLM forward
+- **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty(.f32, ...)`
+  acquires from it (`src/exec/runtime.zig:321`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
-  slabs (`[]align(64) u8`). `emptyTyped` / `emptyRankTyped` route every
-  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:284-303`), which
+  slabs (`[]align(64) u8`). `empty` routes every
+  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:321-347`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
@@ -125,7 +125,7 @@ Every view operation retains the source buffer and releases it on `deinit`:
 The most important instance: per-step attention reads the KV cache via a
 **zero-copy `narrow`** (`src/llm/gemma/model.zig:1035`) that aliases a
 **session-lifetime, non-pooled f16 buffer** (`KvCache.k/v`, allocated once via
-`emptyRankTyped(.f16, ...)`, `src/llm/kv_cache.zig:185`; `reset()` only sets
+`empty(.f16, ...)`, `src/llm/kv_cache.zig:185`; `reset()` only sets
 `len = 0` and keeps the buffers, `:217-219`). A region-reset arena has no per-object
 lifetime to represent this — it would either free live KV memory (corruption) or
 have to carve KV out entirely (at which point it is no longer one arena).
@@ -237,7 +237,7 @@ inference frame helper is unchanged.
   allocations that never enter the pool — backend-tier LHS-quant scratch,
   load-time weight packs, tensors built via `fromSlice`-style constructors.
 - **Session-lifetime typed buffers are pool-retained at teardown.** KV-cache
-  f16 layers and resident-bf16 weights are `emptyTyped`-backed, so when a
+  f16 layers and resident-bf16 weights are backed by the non-f32 `empty` arm, so when a
   model/session is torn down (before the owning `ExecContext` dies) their
   slabs return to the free list — retained up to the cap instead of freed.
   This is deliberate (a feature for multi-session processes: the next session

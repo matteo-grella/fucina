@@ -7,6 +7,7 @@ const parallel = @import("../parallel.zig");
 const dtype_mod = @import("../dtype.zig");
 const exec_row_ops = @import("row_ops.zig");
 const exec_shape = @import("shape.zig");
+const exec_runtime = @import("runtime.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 const backend_ops = backend_mod.ops;
 const DType = tensor.DType;
@@ -452,27 +453,14 @@ pub fn tailBroadcastInfo(x: *const Tensor) ?TailBroadcastInfo {
     };
 }
 
-pub fn add(ctx: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRuntimeRank(ctx, .add, a, b);
+/// Runtime-rank elementwise binary op: dispatches over `a.shape.len` onto
+/// the same rank-monomorphized kernels the comptime-rank spellings
+/// (`add`/`sub`/`mul`/`div`/`max`/`min`) reach directly.
+pub fn elementwise(ctx: *ExecContext, comptime op: ElementwiseOp, a: *const Tensor, b: *const Tensor) !Tensor {
+    return dispatchRank(elementwiseRankDispatched, a.shape.len, .{ ctx, op, a, b });
 }
 
-pub fn sub(ctx: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRuntimeRank(ctx, .sub, a, b);
-}
-
-pub fn mul(ctx: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRuntimeRank(ctx, .mul, a, b);
-}
-
-pub fn div(ctx: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRuntimeRank(ctx, .div, a, b);
-}
-
-pub fn addRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .add, a, b);
-}
-
-pub fn addRankTyped(
+pub fn add(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -482,11 +470,7 @@ pub fn addRankTyped(
     return elementwiseRankTyped(ctx, dtype, rank, .add, a, b);
 }
 
-pub fn subRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .sub, a, b);
-}
-
-pub fn subRankTyped(
+pub fn sub(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -496,11 +480,7 @@ pub fn subRankTyped(
     return elementwiseRankTyped(ctx, dtype, rank, .sub, a, b);
 }
 
-pub fn mulRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .mul, a, b);
-}
-
-pub fn mulRankTyped(
+pub fn mul(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -510,11 +490,7 @@ pub fn mulRankTyped(
     return elementwiseRankTyped(ctx, dtype, rank, .mul, a, b);
 }
 
-pub fn divRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .div, a, b);
-}
-
-pub fn divRankTyped(
+pub fn div(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -524,80 +500,77 @@ pub fn divRankTyped(
     return elementwiseRankTyped(ctx, dtype, rank, .div, a, b);
 }
 
-pub fn maxRankTyped(
+/// Elementwise maximum. `.f32` runs the float kernel; integer dtypes run
+/// the exact integer path; other float dtypes widen through the facade.
+pub fn max(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    if (comptime dtype == .f32) return elementwiseRank(ctx, rank, .max, a, b);
     comptime {
         if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
     }
     return elementwiseRankTyped(ctx, dtype, rank, .max, a, b);
 }
 
-pub fn minRankTyped(
+/// Elementwise minimum (see `max`).
+pub fn min(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    if (comptime dtype == .f32) return elementwiseRank(ctx, rank, .min, a, b);
     comptime {
         if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
     }
     return elementwiseRankTyped(ctx, dtype, rank, .min, a, b);
 }
 
-pub fn maxRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .max, a, b);
-}
-
-pub fn minRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return elementwiseRank(ctx, rank, .min, a, b);
-}
-
-pub fn gatedRank(ctx: *ExecContext, comptime rank: usize, comptime op: GatedOp, a: *const Tensor, b: *const Tensor) !Tensor {
+pub fn gated(ctx: *ExecContext, comptime rank: usize, comptime op: GatedOp, a: *const Tensor, b: *const Tensor) !Tensor {
     const shape = try requireSameRankShape(rank, a, b);
-    var aa = try ctx.prepareContiguous(a);
+    var aa = try ctx.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(b);
+    var bb = try ctx.prepareContiguous(.f32, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
     const bp = bb.tensor();
-    var out = try ctx.emptyRank(rank, shape);
+    var out = try ctx.empty(.f32, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
     kernels.gatedContiguousIntoUnchecked(ctx.pc(), op, &out, ap, bp, ap.len());
     return out;
 }
 
-pub fn gluRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gatedRank(ctx, rank, .glu, a, b);
+pub fn glu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
+    return gated(ctx, rank, .glu, a, b);
 }
 
-pub fn swigluRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gatedRank(ctx, rank, .swiglu, a, b);
+pub fn swiglu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
+    return gated(ctx, rank, .swiglu, a, b);
 }
 
-pub fn gegluRank(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gatedRank(ctx, rank, .geglu, a, b);
+pub fn geglu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
+    return gated(ctx, rank, .geglu, a, b);
 }
 
-pub fn splitSwiGluAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return splitGatedAxisRankImpl(ctx, .swiglu, rank, x, axis);
+pub fn splitSwiGlu(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return splitGatedImpl(ctx, .swiglu, rank, x, axis);
 }
 
-pub fn splitGluAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return splitGatedAxisRankImpl(ctx, .glu, rank, x, axis);
+pub fn splitGlu(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+    return splitGatedImpl(ctx, .glu, rank, x, axis);
 }
 
 /// One split-gated forward for both conventions. The gate-half conventions
 /// are OPPOSITE (ggml parity): swiglu gates with the FIRST half
 /// (`silu(first) * second`), glu with the SECOND (`first * sigmoid(second)`).
-fn splitGatedAxisRankImpl(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+fn splitGatedImpl(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     const Task = switch (op) {
@@ -625,11 +598,11 @@ fn splitGatedAxisRankImpl(ctx: *ExecContext, comptime op: GatedOp, comptime rank
     var out_shape = source.shape;
     out_shape[axis] = axis_dim / 2;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, out_shape);
+    var out = try ctx.empty(.f32, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -670,7 +643,7 @@ fn splitGatedAxisRankImpl(ctx: *ExecContext, comptime op: GatedOp, comptime rank
     return out;
 }
 
-pub fn splitSwiGluBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
+pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -684,14 +657,14 @@ pub fn splitSwiGluBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *
     const grad_view = try gy.rankView(rank);
     if (!std.mem.eql(usize, grad_view.shape[0..], expected_grad_shape[0..])) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -738,7 +711,7 @@ pub fn splitSwiGluBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *
     return out;
 }
 
-pub fn splitGluBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
+pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -752,14 +725,14 @@ pub fn splitGluBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *con
     const grad_view = try gy.rankView(rank);
     if (!std.mem.eql(usize, grad_view.shape[0..], expected_grad_shape[0..])) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -843,7 +816,7 @@ pub fn takeScale(ctx: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor 
         return takeTensor(target);
     }
 
-    var result = try scale(ctx, target, scalar_value);
+    var result = try scale(ctx, .f32, target, scalar_value);
     errdefer result.deinit();
     return discardTakenInput(target, result);
 }
@@ -868,55 +841,76 @@ pub fn takeSilu(ctx: *ExecContext, target: *Tensor) !Tensor {
     return takeUnary(ctx, .silu, target);
 }
 
-pub fn scale(ctx: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(x);
-    defer xx.deinit();
+/// Multiply by a scalar. `.f32` runs the SIMD kernel; 16-bit floats run
+/// the widening loop with the pointwise compute/output dtype contract.
+pub fn scale(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    x: *const tensor.TensorOf(dtype),
+    scalar_value: dtype_mod.Accumulator(dtype),
+) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    if (comptime dtype == .f32) {
+        var xx = try ctx.prepareContiguous(.f32, x);
+        defer xx.deinit();
 
-    const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+        const xp = xx.tensor();
+        var out = try ctx.empty(.f32, xp.shape.slice());
+        errdefer out.deinit();
+        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+        try kernels.scaleInto(ctx.pc(), &out, xp, scalar_value);
+        return out;
+    }
+    comptime ensureForwardFloatMath(dtype);
+    const compute_dtype = comptime dtype_mod.computeDType(.pointwise, dtype);
+    const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
+
+    var xx = try ctx.prepareContiguous(dtype, x);
+    defer xx.deinit();
+    const input = xx.tensor().dataConst();
+
+    var out = try ctx.empty(output_dtype, x.shape.slice());
     errdefer out.deinit();
-    ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-    try kernels.scaleInto(ctx.pc(), &out, xp, scalar_value);
+    const output = out.data();
+    for (output, input) |*dst, value| {
+        const product = dtype_mod.castFloat(dtype, compute_dtype, value) * dtype_mod.castFloat(dtype, compute_dtype, dtype_mod.fromAccumulator(dtype, scalar_value));
+        dst.* = dtype_mod.castFloat(compute_dtype, output_dtype, product);
+    }
     return out;
 }
 
 pub fn addScalar(ctx: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |value, *dst| dst.* = value + scalar_value;
     return out;
 }
 
 pub fn powScalar(ctx: *ExecContext, x: *const Tensor, exponent: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |value, *dst| dst.* = std.math.pow(f32, value, exponent);
     return out;
 }
 
 /// Elementwise select: `out[i] = cond[i] != 0 ? x[i] : y[i]` (all same shape).
-pub fn where(ctx: *ExecContext, x: *const Tensor, cond: *const Tensor, y: *const Tensor) !Tensor {
-    return whereTyped(ctx, .f32, x, cond, y);
-}
-
 /// `cond ? x : y` with a `.bool` or float condition (truthiness `!= 0`).
-pub fn whereTyped(ctx: *ExecContext, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
+pub fn where(ctx: *ExecContext, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
     if (!std.mem.eql(usize, x.shape.slice(), cond.shape.slice())) return tensor.TensorError.ShapeMismatch;
     try tensor.requireSameShape(x, y);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var cc = try ctx.prepareContiguousTyped(cond_dtype, cond);
+    var cc = try ctx.prepareContiguous(cond_dtype, cond);
     defer cc.deinit();
-    var yy = try ctx.prepareContiguous(y);
+    var yy = try ctx.prepareContiguous(.f32, y);
     defer yy.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), cc.tensor().dataConst(), yy.tensor().dataConst(), out.data()) |xv, cv, yv, *dst| {
         dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) xv else yv;
@@ -925,18 +919,14 @@ pub fn whereTyped(ctx: *ExecContext, comptime cond_dtype: DType, x: *const Tenso
 }
 
 /// Elementwise masked fill: `out[i] = mask[i] truthy ? value : x[i]`.
-pub fn maskedFill(ctx: *ExecContext, x: *const Tensor, mask: *const Tensor, value: f32) !Tensor {
-    return maskedFillTyped(ctx, .f32, x, mask, value);
-}
-
-pub fn maskedFillTyped(ctx: *ExecContext, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
+pub fn maskedFill(ctx: *ExecContext, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
     if (!std.mem.eql(usize, x.shape.slice(), mask.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var mm = try ctx.prepareContiguousTyped(mask_dtype, mask);
+    var mm = try ctx.prepareContiguous(mask_dtype, mask);
     defer mm.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), mm.tensor().dataConst(), out.data()) |xv, mv, *dst| {
         dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) value else xv;
@@ -948,14 +938,21 @@ pub fn maskedFillTyped(ctx: *ExecContext, comptime mask_dtype: DType, x: *const 
 /// (same shape only, like `where`; no broadcasting). NaN semantics are IEEE:
 /// any comparison involving NaN is false — except `ne`, which is true — so
 /// eq(NaN, NaN) = 0 and ne(NaN, x) = 1.
-pub fn compare(ctx: *ExecContext, comptime op: CompareOp, a: *const Tensor, b: *const Tensor) !tensor.TensorOf(.bool) {
+pub fn compare(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime op: CompareOp,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(.bool) {
+    if (comptime dtype != .f32) return compareInt(ctx, dtype, op, a, b);
     try tensor.requireSameShape(a, b);
-    var aa = try ctx.prepareContiguous(a);
+    var aa = try ctx.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(b);
+    var bb = try ctx.prepareContiguous(.f32, b);
     defer bb.deinit();
     const ap = aa.tensor();
-    var out = try ctx.emptyTyped(.bool, ap.shape.slice());
+    var out = try ctx.empty(.bool, ap.shape.slice());
     errdefer out.deinit();
     for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
         dst.* = backend_ops.compareScalar(op, av, bv);
@@ -966,11 +963,18 @@ pub fn compare(ctx: *ExecContext, comptime op: CompareOp, a: *const Tensor, b: *
 /// Elementwise comparison mask vs a scalar RHS: a `.bool` tensor. Same
 /// IEEE NaN contract as `compare` (any comparison involving NaN is false
 /// except `ne`).
-pub fn compareScalar(ctx: *ExecContext, comptime op: CompareOp, x: *const Tensor, scalar_value: f32) !tensor.TensorOf(.bool) {
-    var xx = try ctx.prepareContiguous(x);
+pub fn compareScalar(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime op: CompareOp,
+    x: *const tensor.TensorOf(dtype),
+    scalar_value: dtype_mod.Scalar(dtype),
+) !tensor.TensorOf(.bool) {
+    if (comptime dtype != .f32) return compareIntScalar(ctx, dtype, op, x, scalar_value);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try ctx.emptyTyped(.bool, xp.shape.slice());
+    var out = try ctx.empty(.bool, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |xv, *dst| {
         dst.* = backend_ops.compareScalar(op, xv, scalar_value);
@@ -991,7 +995,7 @@ fn intCompare(comptime op: CompareOp, a: anytype, b: anytype) bool {
 
 /// Integer elementwise comparison: exact at any magnitude (no float
 /// bridge), `.bool` result. Same shape only.
-pub fn compareIntTyped(
+fn compareInt(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime op: CompareOp,
@@ -999,14 +1003,14 @@ pub fn compareIntTyped(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(.bool) {
     comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compareIntTyped requires an integer dtype");
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compare requires .f32 or an integer dtype");
     }
     if (!std.mem.eql(usize, a.shape.slice(), b.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    var aa = try ctx.prepareContiguousTyped(dtype, a);
+    var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(dtype, b);
+    var bb = try ctx.prepareContiguous(dtype, b);
     defer bb.deinit();
-    var out = try ctx.emptyTyped(.bool, a.shape.slice());
+    var out = try ctx.empty(.bool, a.shape.slice());
     errdefer out.deinit();
     for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
         dst.* = intCompare(op, av, bv);
@@ -1014,8 +1018,8 @@ pub fn compareIntTyped(
     return out;
 }
 
-/// Integer comparison against a scalar RHS (see `compareIntTyped`).
-pub fn compareIntScalarTyped(
+/// Integer comparison against a scalar RHS (see `compare`).
+fn compareIntScalar(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime op: CompareOp,
@@ -1023,11 +1027,11 @@ pub fn compareIntScalarTyped(
     scalar_value: dtype_mod.Scalar(dtype),
 ) !tensor.TensorOf(.bool) {
     comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compareIntScalarTyped requires an integer dtype");
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("compareScalar requires .f32 or an integer dtype");
     }
-    var xx = try ctx.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
-    var out = try ctx.emptyTyped(.bool, x.shape.slice());
+    var out = try ctx.empty(.bool, x.shape.slice());
     errdefer out.deinit();
     for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
         dst.* = intCompare(op, xv, scalar_value);
@@ -1040,7 +1044,7 @@ pub const LogicalOp = enum { l_and, l_or, l_xor };
 /// Elementwise logical AND/OR/XOR over truthiness (the repo-wide mask
 /// convention shared with `where`/`maskedFill`; NaN is truthy): a `.bool`
 /// tensor. Operands may mix `.bool` and float dtypes. Same shape only.
-pub fn logicalTyped(
+pub fn logical(
     ctx: *ExecContext,
     comptime op: LogicalOp,
     comptime a_dtype: DType,
@@ -1049,11 +1053,11 @@ pub fn logicalTyped(
     b: *const tensor.TensorOf(b_dtype),
 ) !tensor.TensorOf(.bool) {
     if (!std.mem.eql(usize, a.shape.slice(), b.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    var aa = try ctx.prepareContiguousTyped(a_dtype, a);
+    var aa = try ctx.prepareContiguous(a_dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(b_dtype, b);
+    var bb = try ctx.prepareContiguous(b_dtype, b);
     defer bb.deinit();
-    var out = try ctx.emptyTyped(.bool, a.shape.slice());
+    var out = try ctx.empty(.bool, a.shape.slice());
     errdefer out.deinit();
     for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
         const at = dtype_mod.isTruthy(a_dtype, av);
@@ -1067,11 +1071,11 @@ pub fn logicalTyped(
     return out;
 }
 
-/// Elementwise logical NOT over truthiness (see `logicalTyped`).
-pub fn logicalNotTyped(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
-    var xx = try ctx.prepareContiguousTyped(dtype, x);
+/// Elementwise logical NOT over truthiness (see `logical`).
+pub fn logicalNot(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(.bool) {
+    var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
-    var out = try ctx.emptyTyped(.bool, x.shape.slice());
+    var out = try ctx.empty(.bool, x.shape.slice());
     errdefer out.deinit();
     for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
         dst.* = !dtype_mod.isTruthy(dtype, xv);
@@ -1083,17 +1087,17 @@ pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tenso
     try tensor.requireSameShape(target, source);
     if (!target.isContiguous()) return tensor.TensorError.UnsupportedView;
 
-    var ss = try ctx.prepareContiguous(source);
+    var ss = try ctx.prepareContiguous(.f32, source);
     defer ss.deinit();
     ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
     kernels.addScaledSlice(target.data(), ss.tensor().dataConst(), scalar_value);
 }
 
-pub fn addAxisVectorInPlaceRank(ctx: *ExecContext, comptime rank: usize, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-    try addAxisVectorUnaryInPlaceRank(ctx, rank, null, target, row_vector, axis);
+pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
+    try addAxisVectorUnaryInPlace(ctx, rank, null, target, row_vector, axis);
 }
 
-pub fn addAxisVectorUnaryInPlaceRank(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
+pub fn addAxisVectorUnaryInPlace(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -1129,13 +1133,13 @@ fn channelRowsCols(x: *const Tensor, param_len: usize) !struct { rows: usize, co
 /// transients); arithmetic is value-identical to that composition.
 pub fn preluChannels(ctx: *ExecContext, x: *const Tensor, alpha: *const Tensor) !Tensor {
     const alpha_view = try alpha.rankView(1);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var aa = try ctx.prepareContiguous(alpha);
+    var aa = try ctx.prepareContiguous(.f32, alpha);
     defer aa.deinit();
     const rc = try channelRowsCols(xx.tensor(), alpha_view.shape[0]);
 
-    var out = try ctx.empty(xx.tensor().shape.slice());
+    var out = try ctx.empty(.f32, xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
     kernels.preluChannelsInto(ctx.pc(), out.data(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
@@ -1146,15 +1150,15 @@ pub fn preluChannels(ctx: *ExecContext, x: *const Tensor, alpha: *const Tensor) 
 pub fn preluChannelsBackwardInput(ctx: *ExecContext, gy: *const Tensor, x: *const Tensor, alpha: *const Tensor) !Tensor {
     try tensor.requireSameShape(gy, x);
     const alpha_view = try alpha.rankView(1);
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var aa = try ctx.prepareContiguous(alpha);
+    var aa = try ctx.prepareContiguous(.f32, alpha);
     defer aa.deinit();
     const rc = try channelRowsCols(xx.tensor(), alpha_view.shape[0]);
 
-    var out = try ctx.empty(xx.tensor().shape.slice());
+    var out = try ctx.empty(.f32, xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
     kernels.preluChannelsBackwardInputInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
@@ -1164,13 +1168,13 @@ pub fn preluChannelsBackwardInput(ctx: *ExecContext, gy: *const Tensor, x: *cons
 /// PReLU slope-VJP: `gα[c] = Σ_rows gy·min(x, 0)` → rank-1 `[C]`.
 pub fn preluChannelsBackwardAlpha(ctx: *ExecContext, gy: *const Tensor, x: *const Tensor, channels: usize) !Tensor {
     try tensor.requireSameShape(gy, x);
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const rc = try channelRowsCols(xx.tensor(), channels);
 
-    var out = try ctx.emptyRank(1, .{rc.cols});
+    var out = try ctx.empty(.f32, .{rc.cols});
     errdefer out.deinit();
     kernels.preluChannelsBackwardAlphaInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), rc.rows, rc.cols);
     return out;
@@ -1187,15 +1191,15 @@ pub fn channelAffine(ctx: *ExecContext, x: *const Tensor, scale_vec: *const Tens
         const shift_view = try t.rankView(1);
         if (scale_view.shape[0] != shift_view.shape[0]) return tensor.TensorError.ShapeMismatch;
     }
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ss = try ctx.prepareContiguous(scale_vec);
+    var ss = try ctx.prepareContiguous(.f32, scale_vec);
     defer ss.deinit();
-    var tt: ?ExecContext.PreparedTensor = if (shift_vec) |t| try ctx.prepareContiguous(t) else null;
+    var tt: ?ExecContext.PreparedTensor = if (shift_vec) |t| try ctx.prepareContiguous(.f32, t) else null;
     defer if (tt) |*p| p.deinit();
     const rc = try channelRowsCols(xx.tensor(), scale_view.shape[0]);
 
-    var out = try ctx.empty(xx.tensor().shape.slice());
+    var out = try ctx.empty(.f32, xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
     kernels.channelAffineInto(ctx.pc(), out.data(), xx.tensor().dataConst(), ss.tensor().dataConst(), if (tt) |*p| p.tensor().dataConst() else null, rc.rows, rc.cols);
@@ -1221,12 +1225,12 @@ pub fn dropoutBackward(ctx: *ExecContext, gy: *const Tensor, p: f32, seed: u64) 
 fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor {
     if (!(p >= 0 and p < 1)) return tensor.TensorError.InvalidShape;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
 
     const base_task: DropoutRangeTask = .{
@@ -1252,11 +1256,11 @@ fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor 
 }
 
 pub fn unary(ctx: *ExecContext, comptime op: UnaryOp, x: *const Tensor) !Tensor {
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.unaryContiguousIntoUnchecked(ctx.pc(), op, &out, xp, xp.len());
@@ -1268,11 +1272,11 @@ pub fn relu(ctx: *ExecContext, x: *const Tensor) !Tensor {
 }
 
 pub fn leakyRelu(ctx: *ExecContext, x: *const Tensor, negative_slope: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.leakyReluContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), negative_slope);
@@ -1344,14 +1348,14 @@ pub fn snakeRows(ctx: *ExecContext, x: *const Tensor, alpha: *const Tensor, inv_
     const inv_view = try inv_b.rankView(1);
     if (inv_view.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var aa = try ctx.prepareContiguous(alpha);
+    var aa = try ctx.prepareContiguous(.f32, alpha);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(inv_b);
+    var bb = try ctx.prepareContiguous(.f32, inv_b);
     defer bb.deinit();
 
-    var out = try ctx.emptyRank(2, .{ rows, cols });
+    var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
     kernels.snakeInto(ctx.pc(), &out, xx.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
@@ -1370,16 +1374,16 @@ pub fn snakeRowsBackwardInput(ctx: *ExecContext, x: *const Tensor, gy: *const Te
     const inv_view = try inv_b.rankView(1);
     if (inv_view.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var aa = try ctx.prepareContiguous(alpha);
+    var aa = try ctx.prepareContiguous(.f32, alpha);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(inv_b);
+    var bb = try ctx.prepareContiguous(.f32, inv_b);
     defer bb.deinit();
 
-    var out = try ctx.emptyRank(2, .{ rows, cols });
+    var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
     kernels.snakeBackwardInputInto(ctx.pc(), &out, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
@@ -1414,18 +1418,18 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
     const inv_view = try inv_b.rankView(1);
     if (inv_view.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
-    var aa = try ctx.prepareContiguous(alpha);
+    var aa = try ctx.prepareContiguous(.f32, alpha);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(inv_b);
+    var bb = try ctx.prepareContiguous(.f32, inv_b);
     defer bb.deinit();
 
-    var galpha = try ctx.emptyRank(1, .{cols});
+    var galpha = try ctx.empty(.f32, .{cols});
     errdefer galpha.deinit();
-    var ginv_b = try ctx.emptyRank(1, .{cols});
+    var ginv_b = try ctx.empty(.f32, .{cols});
     errdefer ginv_b.deinit();
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
     kernels.snakeBackwardParamsInto(ctx.pc(), &galpha, &ginv_b, xx.tensor(), gg.tensor(), aa.tensor().dataConst(), bb.tensor().dataConst(), rows, cols);
@@ -1435,30 +1439,28 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
 pub fn clamp(ctx: *ExecContext, x: *const Tensor, min_value: f32, max_value: f32) !Tensor {
     if (min_value > max_value) return tensor.TensorError.InvalidShape;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(xp.shape.slice());
+    var out = try ctx.empty(.f32, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.clampContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), min_value, max_value);
     return out;
 }
 
-pub fn reduceBroadcast(ctx: *ExecContext, x: *const Tensor, target_shape: []const usize) !Tensor {
+/// Sum-reduce `x` down to `target_shape` (array/tuple or slice), the
+/// broadcast VJP. An array or tuple shape carries its rank at comptime and
+/// skips the target-rank dispatch.
+pub fn reduceBroadcast(ctx: *ExecContext, x: *const Tensor, target_shape: anytype) !Tensor {
+    const maybe_rank = comptime exec_runtime.shapeComptimeRank(@TypeOf(target_shape));
+    if (comptime maybe_rank != null) {
+        const target_rank = comptime maybe_rank.?;
+        const shape_array = exec_runtime.shapeArray(target_rank, target_shape);
+        return dispatchRank(reduceBroadcastSourceDispatched, x.shape.len, .{ ctx, target_rank, x, shape_array });
+    }
     return dispatchRank(reduceBroadcastTargetDispatched, target_shape.len, .{ ctx, x, target_shape });
-}
-
-/// `pub` so the `exec.ExecContext` non-pub forwarder used by the inline
-/// Group-A tests (which drive `reduceBroadcastRank` deliberately) can reach it.
-pub fn reduceBroadcastRank(
-    ctx: *ExecContext,
-    comptime target_rank: usize,
-    x: *const Tensor,
-    target_shape: [target_rank]usize,
-) !Tensor {
-    return dispatchRank(reduceBroadcastSourceDispatched, x.shape.len, .{ ctx, target_rank, x, target_shape });
 }
 
 fn reduceBroadcastTargetDispatched(
@@ -1467,7 +1469,8 @@ fn reduceBroadcastTargetDispatched(
     x: *const Tensor,
     target_shape: []const usize,
 ) !Tensor {
-    return reduceBroadcastRank(ctx, target_rank, x, try shapeArrayFromSlice(target_rank, target_shape));
+    const shape_array = try shapeArrayFromSlice(target_rank, target_shape);
+    return dispatchRank(reduceBroadcastSourceDispatched, x.shape.len, .{ ctx, target_rank, x, shape_array });
 }
 
 fn reduceBroadcastSourceDispatched(
@@ -1494,11 +1497,11 @@ fn reduceBroadcastFromRankToRank(
         return x.cloneView();
     }
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const xp = xx.tensor();
 
-    var out = try ctx.zerosRank(target_rank, target_shape);
+    var out = try ctx.zeros(.f32, target_shape);
     errdefer out.deinit();
 
     const xd = xp.dataConst();
@@ -1559,18 +1562,9 @@ fn takeElementwise(
         return takeTensor(target);
     }
 
-    var result = try elementwiseRuntimeRank(ctx, op, target, other);
+    var result = try elementwise(ctx, op, target, other);
     errdefer result.deinit();
     return discardTakenInput(target, result);
-}
-
-fn elementwiseRuntimeRank(
-    ctx: *ExecContext,
-    comptime op: ElementwiseOp,
-    a: *const Tensor,
-    b: *const Tensor,
-) !Tensor {
-    return dispatchRank(elementwiseRankDispatched, a.shape.len, .{ ctx, op, a, b });
 }
 
 fn elementwiseRankDispatched(
@@ -1591,7 +1585,7 @@ fn elementwiseRank(
     b: *const Tensor,
 ) !Tensor {
     const shape = try requireSameRankShape(rank, a, b);
-    var out = try ctx.emptyRank(rank, shape);
+    var out = try ctx.empty(.f32, shape);
     errdefer out.deinit();
     try elementwiseRankInto(ctx, rank, op, &out, a, b, shape);
     return out;
@@ -1610,13 +1604,13 @@ fn elementwiseRankTyped(
         // Integer pointwise: a plain exec loop (the stats.zig precedent —
         // no backend kernel; integers are never the hot path). Wrapping
         // two's-complement arithmetic; `div` is a compile error (integer
-        // division is explicit: intDivRankTyped).
+        // division is explicit: intDiv).
         const shape = try requireSameRankShapeOf(dtype, rank, a, b);
-        var aa = try ctx.prepareContiguousTyped(dtype, a);
+        var aa = try ctx.prepareContiguous(dtype, a);
         defer aa.deinit();
-        var bb = try ctx.prepareContiguousTyped(dtype, b);
+        var bb = try ctx.prepareContiguous(dtype, b);
         defer bb.deinit();
-        var out = try ctx.emptyRankTyped(dtype, rank, shape);
+        var out = try ctx.empty(dtype, shape);
         errdefer out.deinit();
         for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
             o.* = switch (op) {
@@ -1634,12 +1628,12 @@ fn elementwiseRankTyped(
     const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
 
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);
-    var aa = try ctx.prepareContiguousTyped(dtype, a);
+    var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(dtype, b);
+    var bb = try ctx.prepareContiguous(dtype, b);
     defer bb.deinit();
 
-    var out = try ctx.emptyRankTyped(output_dtype, rank, shape);
+    var out = try ctx.empty(output_dtype, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(out.len(), parallel.vector_elementwise_len_threshold);
     kernels.elementwiseContiguousIntoTyped(ctx.pc(), dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
@@ -1653,7 +1647,7 @@ pub const IntDivMode = enum { trunc, floor };
 /// explicit). `.trunc` rounds toward zero (C semantics), `.floor` toward
 /// negative infinity (Python's //). A zero divisor is
 /// `error.DivisionByZero`.
-pub fn intDivRankTyped(
+pub fn intDiv(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -1662,14 +1656,14 @@ pub fn intDivRankTyped(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
     comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intDivRankTyped requires an integer dtype");
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intDiv requires an integer dtype");
     }
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);
-    var aa = try ctx.prepareContiguousTyped(dtype, a);
+    var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(dtype, b);
+    var bb = try ctx.prepareContiguous(dtype, b);
     defer bb.deinit();
-    var out = try ctx.emptyRankTyped(dtype, rank, shape);
+    var out = try ctx.empty(dtype, shape);
     errdefer out.deinit();
     const signed = comptime @typeInfo(dtype_mod.Scalar(dtype)).int.signedness == .signed;
     for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
@@ -1690,24 +1684,24 @@ pub fn intDivRankTyped(
     return out;
 }
 
-/// `intDivRankTyped` with `.trunc` (C semantics).
-pub fn divTruncRankTyped(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    return intDivRankTyped(ctx, dtype, rank, .trunc, a, b);
+/// `intDiv` with `.trunc` (C semantics).
+pub fn divTrunc(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    return intDiv(ctx, dtype, rank, .trunc, a, b);
 }
 
-/// `intDivRankTyped` with `.floor` (Python's `//`).
-pub fn divFloorRankTyped(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    return intDivRankTyped(ctx, dtype, rank, .floor, a, b);
+/// `intDiv` with `.floor` (Python's `//`).
+pub fn divFloor(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    return intDiv(ctx, dtype, rank, .floor, a, b);
 }
 
 pub const IntModMode = enum { rem, mod };
 
 /// Integer remainder as an explicit op, the modulus counterpart of
-/// `intDivRankTyped`: `.rem` pairs `divTrunc` (result takes the sign of the
+/// `intDiv`: `.rem` pairs `divTrunc` (result takes the sign of the
 /// dividend, C's `%`), `.mod` pairs `divFloor` (result takes the sign of
 /// the divisor, Python's `%` / numpy). A zero divisor is
 /// `error.DivisionByZero`; minInt % -1 is 0 (the wrapping-div contract).
-pub fn intModRankTyped(
+pub fn intMod(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -1716,14 +1710,14 @@ pub fn intModRankTyped(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
     comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intModRankTyped requires an integer dtype");
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intMod requires an integer dtype");
     }
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);
-    var aa = try ctx.prepareContiguousTyped(dtype, a);
+    var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(dtype, b);
+    var bb = try ctx.prepareContiguous(dtype, b);
     defer bb.deinit();
-    var out = try ctx.emptyRankTyped(dtype, rank, shape);
+    var out = try ctx.empty(dtype, shape);
     errdefer out.deinit();
     const signed = comptime @typeInfo(dtype_mod.Scalar(dtype)).int.signedness == .signed;
     for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
@@ -1745,21 +1739,21 @@ pub fn intModRankTyped(
     return out;
 }
 
-/// `intModRankTyped` with `.rem` (C's `%`).
-pub fn remRankTyped(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    return intModRankTyped(ctx, dtype, rank, .rem, a, b);
+/// `intMod` with `.rem` (C's `%`).
+pub fn rem(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    return intMod(ctx, dtype, rank, .rem, a, b);
 }
 
-/// `intModRankTyped` with `.mod` (Python's `%`).
-pub fn modRankTyped(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    return intModRankTyped(ctx, dtype, rank, .mod, a, b);
+/// `intMod` with `.mod` (Python's `%`).
+pub fn mod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, a: *const tensor.TensorOf(dtype), b: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    return intMod(ctx, dtype, rank, .mod, a, b);
 }
 
 pub const IntBitwiseOp = enum { b_and, b_or, b_xor };
 
 /// Bitwise combinators on the integer dtypes (two's-complement bit
 /// patterns; distinct from the `.bool` truthiness `logicalAnd/Or/Xor`).
-pub fn intBitwiseRankTyped(
+pub fn bitwise(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -1768,14 +1762,14 @@ pub fn intBitwiseRankTyped(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
     comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("intBitwiseRankTyped requires an integer dtype");
+        if (!dtype_mod.supportsIntMath(dtype)) @compileError("bitwise requires an integer dtype");
     }
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);
-    var aa = try ctx.prepareContiguousTyped(dtype, a);
+    var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguousTyped(dtype, b);
+    var bb = try ctx.prepareContiguous(dtype, b);
     defer bb.deinit();
-    var out = try ctx.emptyRankTyped(dtype, rank, shape);
+    var out = try ctx.empty(dtype, shape);
     errdefer out.deinit();
     for (out.data(), aa.tensor().dataConst(), bb.tensor().dataConst()) |*o, x, y| {
         o.* = switch (op) {
@@ -1810,9 +1804,9 @@ fn elementwiseRankInto(
         return;
     }
 
-    var aa = try ctx.prepareContiguous(a);
+    var aa = try ctx.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(b);
+    var bb = try ctx.prepareContiguous(.f32, b);
     defer bb.deinit();
     return backendElementwiseContiguousUnchecked(ctx, op, out, aa.tensor(), bb.tensor(), len);
 }
@@ -1834,9 +1828,9 @@ fn elementwiseInto(
         return;
     }
 
-    var aa = try ctx.prepareContiguous(a);
+    var aa = try ctx.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(b);
+    var bb = try ctx.prepareContiguous(.f32, b);
     defer bb.deinit();
     return backendElementwiseContiguousUnchecked(ctx, op, out, aa.tensor(), bb.tensor(), out.len());
 }
@@ -1861,7 +1855,7 @@ fn elementwiseInPlace(
         return;
     }
 
-    var materialized = try ctx.materialize(other);
+    var materialized = try ctx.materialize(.f32, other);
     defer materialized.deinit();
     return backendElementwiseContiguousUnchecked(ctx, op, target, target, &materialized, target.len());
 }

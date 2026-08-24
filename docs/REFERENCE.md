@@ -267,9 +267,9 @@ test "first program" {
     defer ctx.deinit();
 
     // x: [batch=1, in=2], w: [in=2, out=1]
-    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 1, 2 }, &.{ 2, 3 }));
     defer x.deinit();
-    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 1 }, &.{ 4, 5 }));
     defer w.deinit();
 
     var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]
@@ -1069,7 +1069,7 @@ unused, as in `constant`). Shape parameters are fixed-size arrays
 `[tensor_rank]usize`, so passing the wrong-rank literal is a compile error.
 
 **The core ownership contract.** `variable` and `constant` *consume* a raw
-tensor produced by the context (`ctx.fromSlice(...)` and friends, §6) **on
+tensor produced by the context (`ctx.fromSlice(.f32, ...)` and friends, §6) **on
 success**; on error, ownership stays with the caller. Every returned facade
 tensor is owned by the caller and must be released with `deinit()` (idiom:
 `var x = try ...; defer x.deinit();`). Constructor failures never leak: the
@@ -1112,7 +1112,7 @@ pub fn gumbel(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self
 Semantics:
 
 - `variable` allocates a leaf `GradState`; the tensor participates in
-  autograd (§5). `variableFromSlice` is `ctx.fromSliceRank` + `variable`.
+  autograd (§5). `variableFromSlice` is `ctx.fromSlice` + `variable`.
 - `fromSlice` **copies** `values` into context-owned storage.
 - `fromBorrowedSlice` **borrows** caller-owned mutable storage zero-copy:
   the slice must stay alive and unmoved until the tensor's `deinit`;
@@ -1166,12 +1166,10 @@ Semantics:
   `{0, …, n-1}` (`randpermFill`; single-tag types only). The `.bool`
   branch adds the `bandMask` attention-mask constructor (§4.6).
 - Constructors are the f32 branch's; the *initialization* entry points on
-  `ExecContext` they delegate to (`fromSlice`, `fromSliceRank`,
-  `fromBorrowedSliceRank`, `fromSliceTyped`, `fromSliceRankTyped`,
-  `fromBorrowedSliceRankTyped`, `fromStorageSliceRankTyped`,
-  `fromBorrowedStorageSliceRankTyped`, `empty`, `emptyRank`,
-  `emptyRankTyped`, `zeros`, `zerosTyped`, `ones`, `onesRank`, `onesTyped`,
-  `onesRankTyped`, `full`, `fullTyped`, `scalar`) are catalogued in §6.
+  `ExecContext` they delegate to (`fromSlice`, `fromBorrowedSlice`,
+  `fromStorageSlice`, `fromBorrowedStorageSlice`, `empty`, `zeros`, `ones`,
+  `full`, `scalar`, each taking a leading comptime `DType`) are catalogued
+  in §6.
 
 ```zig
 test "arange linspace and seed-deterministic random constructors" {
@@ -1232,7 +1230,7 @@ test "variable wraps a ctx-produced raw tensor" {
     defer ctx.deinit();
 
     var x = try fucina.Tensor(.{ .batch, .in })
-        .variable(&ctx, try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 }));
+        .variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 }));
     defer x.deinit();
     try std.testing.expect(x.requiresGrad());
     try std.testing.expectEqual(@as(usize, 3), x.dim(.in));
@@ -1906,7 +1904,7 @@ test "detach and cast rules" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var x = try fucina.Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(&.{2}, &.{ 1, 2 }));
+    var x = try fucina.Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(.f32, &.{2}, &.{ 1, 2 }));
     defer x.deinit();
     var frozen = try x.detach(&ctx); // shares storage, drops grad tracking
     defer frozen.deinit();
@@ -1959,7 +1957,7 @@ test "grad accessors on the facade" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var x = try fucina.Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 }));
+    var x = try fucina.Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 }));
     defer x.deinit();
     try std.testing.expect((try x.grad(&ctx)) == null); // no backward run yet
     var loss = try x.sumAll(&ctx);
@@ -2601,8 +2599,8 @@ returns the scalar `Tensor(.{})`.
   produce zero rows). The reduced axis keeps its tag at the new size
   `offsets.len - 1`. Differentiable: the gradient broadcasts each output
   row back over its segment. Rank-level entries on `ExecContext`:
-  `segmentSumAxisRank(rank, x, axis, offsets)` and its VJP helper
-  `segmentBroadcastAxisRank(rank, gy, axis, offsets, n)`.
+  `segmentSum(rank, x, axis, offsets)` and its VJP helper
+  `segmentBroadcast(rank, gy, axis, offsets, n)`.
 - `linearRecurrence(ctx, time_tag, decay, options)` — the first-order
   linear recurrence `h_t = a_t ⊙ h_{t-1} + b_t` along `time_tag`,
   shape-preserving: `self` supplies `b` (and the result shape), `decay`
@@ -4896,9 +4894,9 @@ const ScaledSquare = struct {
     pub const Output = fucina.Tensor(.{.d});
 
     pub fn forward(ctx: *fucina.ExecContext, extra: f32, inputs: []const *const RawTensor) !RawTensor {
-        var sq = try ctx.mulRank(1, inputs[0], inputs[0]);
+        var sq = try ctx.mul(.f32, 1, inputs[0], inputs[0]);
         defer sq.deinit();
-        return ctx.scale(&sq, extra); // y = extra * x^2
+        return ctx.scale(.f32, &sq, extra); // y = extra * x^2
     }
 
     pub fn backward(
@@ -4912,9 +4910,9 @@ const ScaledSquare = struct {
     ) !void {
         _ = output;
         if (needs_grad[0]) {
-            var slope = try ctx.scale(inputs[0], 2 * extra); // dy/dx = 2*extra*x
+            var slope = try ctx.scale(.f32, inputs[0], 2 * extra); // dy/dx = 2*extra*x
             defer slope.deinit();
-            out[0] = try ctx.mulRank(1, gy, &slope); // engine consumes out[0]
+            out[0] = try ctx.mul(.f32, 1, gy, &slope); // engine consumes out[0]
         }
     }
 };
@@ -5118,8 +5116,7 @@ fails this assertion in safety builds rather than silently leaking. After
 
 **Substrate methods** (everything else on `ExecContext` is an op, see §4;
 the signatures below are the `src/exec/runtime.zig` functions the struct
-aliases, except `classify`/`broadcastTo`/`broadcastToRank`, which are
-defined in `src/exec.zig` itself):
+aliases, except `classify`, which is defined in `src/exec.zig` itself):
 
 ```zig
 pub fn execScopeActive(self: *const ExecContext) bool
@@ -5138,14 +5135,14 @@ pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
 pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value)
-pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: []const usize) !Tensor
-pub fn broadcastToRank(self: *ExecContext, comptime rank: usize, x: *const Tensor, shape: [rank]usize) !Tensor
+pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: anytype) !Tensor
 ```
 
 `classify` buckets a raw tensor's layout into
 `LayoutClass = enum { contiguous, scalar, tail_broadcast, arbitrary }` — the
-dispatch key elementwise kernels use to pick a fast path. `broadcastTo` /
-`broadcastToRank` return zero-copy views (refcounted aliases, §6.2).
+dispatch key elementwise kernels use to pick a fast path. `broadcastTo`
+returns a zero-copy view (a refcounted alias, §6.2); `shape` is either a
+`[rank]usize` array/tuple (comptime rank) or a `[]const usize` slice.
 `setTuning` installs per-context tuning overrides (`fucina.tuning.Overrides`,
 §2.6): fields left null follow the process-wide FUCINA_* gates, so two
 contexts in one process can run different route policy (first consumer: the
@@ -5213,14 +5210,14 @@ test "deinit recycles transient buffers through the pool" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var a = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
 
-    var first = try ctx.add(&a, &a);
+    var first = try ctx.elementwise(.add, &a, &a);
     const first_ptr = first.dataConst().ptr;
     first.deinit(); // storage returns to the pool free list
 
-    var second = try ctx.add(&a, &a); // same size: the pool hands back the same address
+    var second = try ctx.elementwise(.add, &a, &a); // same size: the pool hands back the same address
     defer second.deinit();
     try std.testing.expectEqual(first_ptr, second.dataConst().ptr);
 }
@@ -5420,39 +5417,40 @@ These methods build *raw* tensors — the internal, tag-free, no-grad tensor
 type (§8; deliberately not exported at the `fucina` root). Application code
 normally uses the tagged facade constructors of §3, which wrap these; the
 raw helpers appear in public signatures wherever a facade constructor takes
-a `RawTensor` (e.g. `Tensor(spec).variable(&ctx, try ctx.fromSlice(...))`)
+a `RawTensor` (e.g. `Tensor(spec).variable(&ctx, try ctx.fromSlice(.f32, ...))`)
 and throughout runtime-extension code. Results are **always caller-owned and
 never scope-adopted**; pair each with `deinit` (or hand ownership to a
 facade constructor, which consumes the value on success and leaves it with
 the caller on error).
 
-Allocation (uninitialized / filled), all pool-backed:
+Every constructor takes a leading comptime `DType` and a `shape: anytype`:
+a `[rank]usize` array or a tuple of sizes carries the rank at comptime, a
+`[]const usize` slice takes the runtime-rank arm. Allocation
+(uninitialized / filled), all pool-backed:
 
 | Function | Result | Notes |
 |---|---|---|
-| `empty(shape)` / `emptyRank(rank, shape)` | f32, uninitialized | slice-shape vs comptime-rank array-shape variants |
-| `emptyRankTyped(dtype, rank, shape)` | `TensorOf(dtype)`, uninitialized | non-f32 dtypes route to the slab arm (§6.5) |
-| `zeros(shape)` / `zerosTyped(dtype, shape)` | zero-filled | |
-| `ones(shape)` / `onesRank(rank, shape)` / `onesTyped(dtype, shape)` / `onesRankTyped(dtype, rank, shape)` | one-filled | |
-| `full(shape, value)` / `fullTyped(dtype, shape, value)` | filled with `value` | typed variant takes `Scalar(dtype)` |
-| `scalar(value)` | shape `{1}` f32 | |
+| `empty(dtype, shape)` | `TensorOf(dtype)`, uninitialized | non-f32 dtypes route to the slab arm (§6.5) |
+| `zeros(dtype, shape)` | zero-filled | |
+| `ones(dtype, shape)` | one-filled | |
+| `full(dtype, shape, value)` | filled with `value: Scalar(dtype)` | |
+| `scalar(dtype, value)` | shape `{1}` | |
 
 Copy-in from caller data:
 
 | Function | Semantics |
 |---|---|
-| `fromSlice(shape, values)` / `fromSliceRank(rank, shape, values)` | copy `[]const f32` into pooled storage |
-| `fromSliceTyped(dtype, shape, values)` / `fromSliceRankTyped(dtype, rank, shape, values)` | copy `[]const Scalar(dtype)` |
-| `fromStorageSliceRankTyped(dtype, rank, shape, values)` | copy `[]const Storage(dtype)` (block-quantized payloads, §10) |
-| `fromBorrowedSliceRank(rank, shape, values)` | **zero-copy** wrap of caller-owned `[]f32`; the tensor borrows — keep the slice alive and unmoved until the tensor's `deinit`, which frees only the header |
-| `fromBorrowedSliceRankTyped(dtype, rank, shape, values)` / `fromBorrowedStorageSliceRankTyped(dtype, rank, shape, values)` | typed zero-copy wraps, same borrow contract |
+| `fromSlice(dtype, shape, values)` | copy `[]const Scalar(dtype)` into pooled storage |
+| `fromStorageSlice(dtype, shape, values)` | copy `[]const Storage(dtype)` (block-quantized payloads, §10) |
+| `fromBorrowedSlice(dtype, shape, values)` | **zero-copy** wrap of caller-owned `[]Scalar(dtype)`; the tensor borrows — keep the slice alive and unmoved until the tensor's `deinit`, which frees only the header |
+| `fromBorrowedStorageSlice(dtype, shape, values)` | zero-copy wrap of `[]Storage(dtype)`, same borrow contract |
 
 Copy/materialize existing tensors:
 
 | Function | Semantics |
 |---|---|
-| `materialize(x)` / `materializeTyped(dtype, x)` | contiguous pooled copy of a (possibly strided/broadcast) view |
-| `clone(x)` | alias for `materialize` |
+| `materialize(dtype, x)` | contiguous pooled copy of a (possibly strided/broadcast) view |
+| `clone(dtype, x)` | alias for `materialize` |
 
 Errors: `TensorError.InvalidDataLength` when `values.len` does not match the
 shape's element count; `TensorError.InvalidShape` for rank 0, rank above the
@@ -5462,43 +5460,46 @@ overflow; `error.OutOfMemory` from the pool. Borrowed wraps allocate only a
 buffer header and never enter the pool's free lists.
 
 ```zig
-test "fromSlice copies; fromBorrowedSliceRank wraps caller storage" {
+test "fromSlice copies; fromBorrowedSlice wraps caller storage" {
     const alloc = std.testing.allocator;
     var ctx: fucina.ExecContext = undefined;
     ctx.init(alloc);
     defer ctx.deinit();
 
     var source = [_]f32{ 1, 2, 3, 4 };
-    var copied = try ctx.fromSlice(&.{ 2, 2 }, &source); // pooled copy, caller-owned
+    var copied = try ctx.fromSlice(.f32, .{ 2, 2 }, &source); // pooled copy, caller-owned
     defer copied.deinit();
     source[0] = 99;
     try std.testing.expectEqual(@as(f32, 1), copied.dataConst()[0]);
 
-    var borrowed = try ctx.fromBorrowedSliceRank(2, .{ 2, 2 }, source[0..]); // zero-copy
+    var borrowed = try ctx.fromBorrowedSlice(.f32, .{ 2, 2 }, source[0..]); // zero-copy
     defer borrowed.deinit(); // frees only the header; `source` stays caller-owned
     try std.testing.expectEqual(@as(f32, 99), borrowed.dataConst()[0]);
 }
 ```
 
 Internal substrate helpers (aliased on `ExecContext` for the domain
-modules; not part of the op surface): `emptyTyped`, `scalarTyped`,
-`zerosRank`, `zerosRankTyped`, `cloneTyped`, `dispatchRange` /
-`dispatchRangeCapped`, the `enableNative*PoolForWork` pool gates, and the
-contiguity-preparation pair `prepareContiguous` / `prepareContiguousTyped`
-returning `PreparedTensor` / `PreparedTensorOf(dtype)` — a
-borrowed-or-owned union whose `deinit` is a no-op on the borrowed arm, so
-hot paths can `defer prepared.deinit()` unconditionally.
+modules; not part of the op surface): `dispatchRange` /
+`dispatchRangeCapped`, the `enableNative*PoolForWork` pool gates, and
+`prepareContiguous(dtype, x)` returning `PreparedTensorOf(dtype)`
+(`PreparedTensor` is the f32 instantiation) — a borrowed-or-owned union
+whose `deinit` is a no-op on the borrowed arm, so hot paths can
+`defer prepared.deinit()` unconditionally.
 
 **The raw op surface and its naming grammar.** Beyond these constructors,
-`ExecContext` carries the full raw op surface — roughly 300 `pub fn`s in
-`src/exec.zig`, whose recurring suffixes follow one grammar: `*Rank`
-entries take a comptime rank parameter first and raw-tensor pointers as
-arguments (`addRank`, `mulRank`, `gluRank`); `*AxisRank` entries add a
-comptime axis index
-(`splitSwiGluAxisRank`, `conv1dAxisRank`); `*Typed` entries take a comptime
-`DType` for non-f32 storage (`addRankTyped`, `castTyped`, `scaleTyped`); and
-`*Backward*` entries are the VJP kernels `src/ag/backward.zig` dispatches to
-(`conv2dBackwardInput`, `dropoutBackward`, `splitSwiGluBackwardAxisRank`).
+`ExecContext` carries the full raw op surface — one spelling per op in
+`src/exec.zig`. Ops whose storage is dtype-generic take an explicit
+comptime `DType` first (`add(.f32, rank, a, b)`, `cast(.f32, .f16, x)`,
+`sumAxis(.f32, rank, x, axis)`); ops whose kernels monomorphize on rank or
+axis keep those comptime parameters (`softmax(rank, x, axis)`,
+`conv1d(rank, ...)`). The surviving suffixes each mark a real contract
+difference: `*Backward*` entries are the VJP kernels `src/ag/backward.zig`
+dispatches to (`conv2dBackwardInput`, `dropoutBackward`,
+`splitSwiGluBackward`); `*InPlace` mutates its target; `*Masked` computes
+different (mask-selected) math; `*Prepared` consumes precomputed weights;
+`*WithTable` / `*Into` encode an extra argument (a precomputed table, a
+caller-supplied output). A whole-tensor and an axis form of the same
+reduction are distinct ops (`sum` vs `sumAxis`, `mean` has only `meanAxis`).
 This is the surface `customVjp` forward/backward specs (§5.6) are written
 against. `src/exec.zig` is the source of truth for the names; the domain
 modules under `src/exec/` the alias lines resolve to are not public API.
@@ -6233,9 +6234,8 @@ All failures are recoverable Zig errors; nothing in this layer panics.
 Rank validation is shared:
 
 ```zig
-pub fn validateTensorRank(comptime tags: anytype, value: *const RawTensor) !void
-pub fn validateTensorRankOf(comptime tensor_dtype: DType, comptime tags: anytype,
-                            value: *const TensorOf(tensor_dtype)) !void
+pub fn validateTensorRank(comptime tensor_dtype: DType, comptime tags: anytype,
+                          value: *const TensorOf(tensor_dtype)) !void
 ```
 
 An empty tag tuple requires a scalar value (`value.isScalar()`, i.e.
@@ -6257,17 +6257,15 @@ Runtime error summary for the whole library:
 ### 7.6 Alignment, permutation, and broadcast views (`src/tag_ops.zig`)
 
 ```zig
-pub fn alignTensorTo(comptime source_tags: anytype, source: *const RawTensor,
-                     comptime target_tags: anytype) !RawTensor
-pub fn alignTensorToOf(comptime tensor_dtype: DType, comptime source_tags: anytype,
-                       source: *const TensorOf(tensor_dtype),
-                       comptime target_tags: anytype) !TensorOf(tensor_dtype)
+pub fn alignTensorTo(comptime tensor_dtype: DType, comptime source_tags: anytype,
+                     source: *const TensorOf(tensor_dtype),
+                     comptime target_tags: anytype) !TensorOf(tensor_dtype)
 pub fn permuteTensorTo(comptime source_tags: anytype, source: *const RawTensor,
                        comptime target_tags: anytype) !RawTensor
-pub fn broadcastTensorTo(comptime source_tags: anytype, source: *const RawTensor,
+pub fn broadcastTensorTo(comptime tensor_dtype: DType, comptime source_tags: anytype,
+                         source: *const TensorOf(tensor_dtype),
                          comptime target_tags: anytype,
-                         target_shape: [target_tags.len]usize) !RawTensor
-pub fn broadcastTensorToOf(comptime tensor_dtype: DType, ...) !TensorOf(tensor_dtype)
+                         target_shape: [target_tags.len]usize) !TensorOf(tensor_dtype)
 ```
 
 `alignTensorTo` is the workhorse view: it reorders axes into `target_tags`
@@ -6352,9 +6350,9 @@ runtime check. For each tag of `pointwiseResultTags(left_tags, right_tags)`
    `TensorError.ShapeMismatch`.
 
 Both operands are broadcast to the result shape as views, then the
-rank-matched ExecContext kernel runs (`addRank`/`subRank`/`mulRank`/`divRank`/
-`maxRank`/`minRank`,
-or `gatedRank` for `gatedPointwise`). `GatedOp` (§4) is
+rank-matched ExecContext kernel runs (`add`/`sub`/`mul`/`div`/`max`/`min`
+with an explicit `.f32`,
+or `gated` for `gatedPointwise`). `GatedOp` (§4) is
 `enum { glu, swiglu, geglu, swiglu_clamp10, situ }`; every member computes
 an `up`-side transform of `left` times a gate activation of `right`
 (`gatedSourceScalar` × `gatedActivationScalar`, `src/backend/ops.zig` —
@@ -6369,10 +6367,10 @@ is always a newly materialized contiguous tensor in result-tag order.
 The shape half is exposed separately for callers that need it (VJPs, facade):
 
 ```zig
-pub fn pointwiseShape(comptime result_tags: anytype,
-                      comptime left_tags: anytype, left: *const RawTensor,
-                      comptime right_tags: anytype, right: *const RawTensor) ![rawRank(result_tags.len)]usize
-pub fn pointwiseShapeOf(comptime tensor_dtype: DType, ...) ![rawRank(result_tags.len)]usize
+pub fn pointwiseShape(comptime tensor_dtype: DType, comptime result_tags: anytype,
+                      comptime left_tags: anytype, left: *const TensorOf(tensor_dtype),
+                      comptime right_tags: anytype,
+                      right: *const TensorOf(tensor_dtype)) ![rawRank(result_tags.len)]usize
 ```
 
 These report the **raw-rank** shape — a scalar result reports `{1}` — and
@@ -6480,7 +6478,7 @@ through the ExecContext first (owned result either way).
 **`sumManyTensor`** reduces away `reduce_tags` (comptime: unique, subset of
 `tags`). Fast paths: an empty reduce set returns a `cloneView`; reducing every
 tag lowers to the full reduction `ctx.sum` (scalar `{1}`). Otherwise it strips
-one axis per step with `ctx.sumAxisRank`, innermost-first via
+one axis per step with `ctx.sumAxis`, innermost-first via
 `reduceAxesDescending` (§7.3) so remaining axis indices stay valid.
 
 Facade equivalents (§4): `split`, `merge` (both differentiable view ops),
@@ -6558,7 +6556,7 @@ mathematical result — it only selects the kernel.
 Validation happens before any compute, via:
 
 ```zig
-pub fn dotResultShapeOf(comptime left_dtype: DType, comptime right_dtype: DType,
+pub fn dotResultShape(comptime left_dtype: DType, comptime right_dtype: DType,
                         comptime left_tags: anytype, left: *const TensorOf(left_dtype),
                         comptime right_tags: anytype, right: *const TensorOf(right_dtype),
                         comptime contract_tag: Tag) ![rawRank(dotResultTags(...).len)]usize
@@ -6652,7 +6650,7 @@ test "contracting the only tag yields a scalar tensor" {
 pub fn taggedEinsum(comptime left_tags: anytype, left: *const RawTensor, ctx: *ExecContext,
                     comptime right_tags: anytype, right: *const RawTensor,
                     comptime out_tags: anytype) !RawTensor
-pub fn einsumResultShapeOf(comptime left_dtype: DType, comptime right_dtype: DType,
+pub fn einsumResultShape(comptime left_dtype: DType, comptime right_dtype: DType,
                            comptime left_tags: anytype, left: *const TensorOf(left_dtype),
                            comptime right_tags: anytype, right: *const TensorOf(right_dtype),
                            comptime out_tags: anytype) ![rawRank(out_tags.len)]usize
@@ -6662,7 +6660,7 @@ pub fn einsumResultShapeOf(comptime left_dtype: DType, comptime right_dtype: DTy
 (§4.8) — `taggedDot` delegates here with the canonical dot result order as
 the equation. The output tag tuple is the whole equation, axis roles come
 from `einsumPartTags` (§7.4), and every shared dim is validated by
-`einsumResultShapeOf` before compute. The lowering, in order:
+`einsumResultShape` before compute. The lowering, in order:
 
 1. **Pre-sum** — operand-private dropped tags are reduced away with
    `sumManyTensor`, so every remaining axis is batch/free/contract.
@@ -6697,16 +6695,16 @@ einsum records).
 ### 7.10 Shared dtype-generic helpers (`src/tag_ops.zig`)
 
 ```zig
-pub fn contiguousForReshapeOf(comptime tensor_dtype: DType, ctx: *ExecContext,
-                              value: *const TensorOf(tensor_dtype)) !TensorOf(tensor_dtype)
-pub fn productRangeOf(comptime tensor_dtype: DType, value: *const TensorOf(tensor_dtype),
-                      comptime start: usize, comptime count: usize) usize
+pub fn contiguousForReshape(comptime tensor_dtype: DType, ctx: *ExecContext,
+                            value: *const TensorOf(tensor_dtype)) !TensorOf(tensor_dtype)
+pub fn productRange(comptime tensor_dtype: DType, value: *const TensorOf(tensor_dtype),
+                    comptime start: usize, comptime count: usize) usize
 ```
 
-`contiguousForReshapeOf` returns a `cloneView` when the value is already
+`contiguousForReshape` returns a `cloneView` when the value is already
 contiguous, otherwise a materialized copy via the ExecContext — an owned
 tensor either way, so callers can `defer deinit` unconditionally.
-`productRangeOf` multiplies a comptime-bounded run of dims; the dot paths use
+`productRange` multiplies a comptime-bounded run of dims; the dot paths use
 it to collapse free/batch axis groups. Both are used by the facade's typed dot
 paths (`ag/tensor.zig`) as well as the library itself.
 
@@ -6925,7 +6923,7 @@ Three rules fall out of the table:
   across operand dtypes: mixed-dtype pointwise math on the typed facade is a
   compile error (`"typed pointwise requires matching dtypes; cast
   explicitly"` in `src/ag/tensor.zig`). Casting is an explicit op — `to(ctx,
-  target_dtype)` on the public facade (§3), `castTyped` on `ExecContext`
+  target_dtype)` on the public facade (§3), `cast` on `ExecContext`
   (§6).
 
 The policy is visible directly in public result types:
@@ -7183,14 +7181,14 @@ pub fn broadcastToRank(self: *const Self, comptime target_rank: usize, target_sh
   matching element count (`InvalidShape`); the result is a retained view
   over the same storage, never a copy. Non-contiguous tensors must be
   materialized first (`clone`, or `ExecContext.materialize*` / the tagged
-  layer's `contiguousForReshapeOf`, §6/§7).
+  layer's `contiguousForReshape`, §6/§7).
 - `viewWithStrides` / `viewWithStridesOffset` — arbitrary strided
   (sub)views, **checked**: `strides.len` must match `shape.len`
   (`InvalidShape`) and the maximal reachable index
   `offset + offset_delta + Σ (dim-1)·stride` must lie inside the buffer
   (`InvalidDataLength`). `offset_delta` advances the view's start; this is
   the raw narrowing primitive (there is no dedicated `narrow` on the raw
-  type — `ExecContext.narrowAxisRank`/`narrowAxisRankTyped` in §6 and the
+  type — `ExecContext.narrowAxis` in §6 and the
   facade's `narrow` in §4 are built on it).
 - `broadcastTo` / `broadcastToRank` — zero-stride broadcast views,
   right-aligned like NumPy: the source rank must not exceed the target rank
@@ -8003,8 +8001,8 @@ two layout families, plus an older backend-only typed bridge:
   activation row directly against the packed f32 columns (column-parallel
   over the pool). This bridge preserves a same-dtype f16/bf16 result and is
   distinct from the public f32-lhs `PackedDenseRhs` panel. It is reached
-  through `ExecContext.packMatmulRhsTyped` / `matmul2DWithPackedRhsTyped`
-  (§6).
+  through `ExecContext.packMatmulRhs` (`.f16`/`.bf16`) /
+  `matmul2DWithPackedRhs` (§6).
 
 **Arch-gated int8 dot arms.** The K-quant/Q8 kernels select their inner dot
 at comptime: aarch64 `sdot` inline asm (all aarch64), aarch64 `smmla` behind
@@ -8655,7 +8653,7 @@ Packing and consuming happen on the facade:
   `[out, contract]` tensor as a `PackedDenseRhs` panel; f16/bf16 widen once. Logical
   output rows stay contiguous and the row count is padded to the four-output
   microkernel tile. Equivalent `ExecContext` entry:
-  `packDenseMatmulRhsTyped`.
+  `packDenseMatmulRhs`.
 - Quantized `w.packRhs(ctx)` / `w.packRhsAs(ctx, Rhs)` — pack a
   rank-2 contiguous tensor (`TensorError.UnsupportedView` when not
   contiguous). `packRhsAs` is the escape hatch to force a non-default
@@ -8743,10 +8741,9 @@ pub const QuantizedMatmulOptions = struct {
 ```
 
 The option rides on the `ExecContext` raw-tensor entry points —
-`matmul2DWithQuantizedTensorRhs` / `matmul2DWithQuantizedTensorRhsOptions`
-and `matmul2DWithQuantizedBlocksRhs` /
-`matmul2DWithQuantizedBlocksRhsOptions` (the blocks-slice variants accept
-q8_0/q4_k/q5_k/q6_k only). The facade `dot` always uses the default
+`matmul2DWithQuantizedTensorRhs` and `matmul2DWithQuantizedBlocksRhs`
+(the blocks-slice variant accepts q8_0/q4_k/q5_k/q6_k only), both taking a
+trailing `QuantizedMatmulOptions`. The facade `dot` always uses the default
 transient/`allow_gpu`-when-not-training options — a `.transient` RHS may
 still use the provider's blocking GPU path, but no address-keyed wrap survives
 the call and the borrowed bytes cannot be retained by an async command.
@@ -9976,7 +9973,7 @@ test "state_dict: named save/load round-trip" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    var w = try fucina.Tensor(.{ .out, .in }).constant(&ctx, try ctx.fromSlice(&.{ 2, 2 }, &.{ 3, -1, 4, 1 }));
+    var w = try fucina.Tensor(.{ .out, .in }).constant(&ctx, try ctx.fromSlice(.f32, &.{ 2, 2 }, &.{ 3, -1, 4, 1 }));
     defer w.deinit();
 
     var buf: [4096]u8 = undefined;
@@ -9985,7 +9982,7 @@ test "state_dict: named save/load round-trip" {
         try fucina.state_dict.NamedTensor.of("enc.w", &w),
     });
 
-    var dst = try fucina.Tensor(.{ .out, .in }).constant(&ctx, try ctx.zeros(&.{ 2, 2 }));
+    var dst = try fucina.Tensor(.{ .out, .in }).constant(&ctx, try ctx.zeros(.f32, &.{ 2, 2 }));
     defer dst.deinit();
     var reader = std.Io.Reader.fixed(writer.buffered());
     try fucina.state_dict.loadStateDict(alloc, &reader, &.{
@@ -14723,8 +14720,8 @@ schedule, `Config.deinit(allocator)` frees the list) and
 `<dir>/model.safetensors` (`safetensors.File.loadMmap`).
 
 Heavy lifting goes through the shared exec ops — `matmulTransB`,
-`causalDepthwiseConv1dAxisRank`, `kdaRecurrent` (§4.13),
-`gatedRank(.situ)`, `rmsNormMulAxisRank` — while the depth mixture and the
+`causalDepthwiseConv1d`, `kdaRecurrent` (§4.13),
+`gated(.situ)`, `rmsNormMul` — while the depth mixture and the
 small MLA core are model-local routines. Model surface: `load`, `deinit`,
 `forward(ctx, tokens)` (full-sequence forward: token ids, `[]const u32`,
 to `[seq, vocab]` logits) and `forwardProbed(ctx, tokens, probe)` with

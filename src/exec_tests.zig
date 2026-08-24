@@ -116,16 +116,16 @@ test "exec context reuses released output buffers" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var a = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
-    var b = try ctx.fromSlice(&.{3}, &.{ 4, 5, 6 });
+    var b = try ctx.fromSlice(.f32, &.{3}, &.{ 4, 5, 6 });
     defer b.deinit();
 
-    var first = try ctx.add(&a, &b);
+    var first = try ctx.elementwise(.add, &a, &b);
     const first_buffer = first.buffer;
     first.deinit();
 
-    var second = try ctx.add(&a, &b);
+    var second = try ctx.elementwise(.add, &a, &b);
     defer second.deinit();
 
     try std.testing.expect(second.buffer == first_buffer);
@@ -139,13 +139,13 @@ test "exec context wraps borrowed ranked slices without copying" {
     defer ctx.deinit();
 
     var values = [_]f32{ 1, 2, 3, 4 };
-    var x = try ctx.fromBorrowedSliceRank(2, .{ 2, 2 }, values[0..]);
+    var x = try ctx.fromBorrowedSlice(.f32, .{ 2, 2 }, values[0..]);
     defer x.deinit();
 
     values[3] = 40;
     try std.testing.expectEqual(@as(f32, 40), x.dataConst()[3]);
 
-    var doubled = try ctx.add(&x, &x);
+    var doubled = try ctx.elementwise(.add, &x, &x);
     defer doubled.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 4, 6, 80 }, doubled.dataConst());
 }
@@ -156,13 +156,13 @@ test "buffer pool reuses bucket-rounded buffers across many small temporaries" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{3}, &.{ 1, 2, 3 });
+    var a = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
-    var b = try ctx.fromSlice(&.{3}, &.{ 4, 5, 6 });
+    var b = try ctx.fromSlice(.f32, &.{3}, &.{ 4, 5, 6 });
     defer b.deinit();
 
     for (0..100) |_| {
-        var y = try ctx.add(&a, &b);
+        var y = try ctx.elementwise(.add, &a, &b);
         try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9 }, y.dataConst());
         y.deinit();
     }
@@ -195,9 +195,9 @@ test "exec context cross entropy ex matches a naive reference across options" {
                 for (data) |*value| value.* = random.floatNorm(f32) * 3;
 
                 var logits = if (inner == 1)
-                    try ctx.fromSliceRank(2, .{ outer, class_count }, data)
+                    try ctx.fromSlice(.f32, .{ outer, class_count }, data)
                 else
-                    try ctx.fromSliceRank(3, .{ outer, class_count, inner }, data);
+                    try ctx.fromSlice(.f32, .{ outer, class_count, inner }, data);
                 defer logits.deinit();
 
                 const labels = try allocator.alloc(usize, position_count);
@@ -221,7 +221,7 @@ test "exec context cross entropy ex matches a naive reference across options" {
                             var ref = try testNaiveCrossEntropy(allocator, data, outer, class_count, inner, labels, options, upstream, per_row);
                             defer ref.deinit(allocator);
 
-                            var loss = try ctx.crossEntropyLossExAxisRank(rank, &logits, 1, labels, options);
+                            var loss = try ctx.crossEntropyLossEx(rank, &logits, 1, labels, options);
                             defer loss.deinit();
                             if (reduction == .none) {
                                 const losses = loss.dataConst();
@@ -233,7 +233,7 @@ test "exec context cross entropy ex matches a naive reference across options" {
                                 try expectCloseToF64(ref.loss, loss.item(), 2e-4, 2e-5);
                             }
 
-                            var grad = try ctx.crossEntropyBackwardExAxisRank(
+                            var grad = try ctx.crossEntropyBackwardEx(
                                 rank,
                                 &logits,
                                 1,
@@ -283,9 +283,9 @@ test "exec cross entropy backward with saved stats is bitwise identical to recom
                 for (data) |*value| value.* = random.floatNorm(f32) * 3;
 
                 var logits = if (inner == 1)
-                    try ctx.fromSliceRank(2, .{ outer, class_count }, data)
+                    try ctx.fromSlice(.f32, .{ outer, class_count }, data)
                 else
-                    try ctx.fromSliceRank(3, .{ outer, class_count, inner }, data);
+                    try ctx.fromSlice(.f32, .{ outer, class_count, inner }, data);
                 defer logits.deinit();
 
                 const labels = try allocator.alloc(usize, position_count);
@@ -310,15 +310,15 @@ test "exec cross entropy backward with saved stats is bitwise identical to recom
                             };
                             const per_row_arg: ?[]const f32 = if (reduction == .none) per_row else null;
 
-                            var plain_loss = try ctx.crossEntropyLossExAxisRank(rank, &logits, 1, labels, options);
+                            var plain_loss = try ctx.crossEntropyLossEx(rank, &logits, 1, labels, options);
                             defer plain_loss.deinit();
-                            var stats_loss = try ctx.crossEntropyLossExStatsAxisRank(rank, &logits, 1, labels, options, row_stats);
+                            var stats_loss = try ctx.crossEntropyLossExStats(rank, &logits, 1, labels, options, row_stats);
                             defer stats_loss.deinit();
                             try std.testing.expectEqualSlices(f32, plain_loss.dataConst(), stats_loss.dataConst());
 
-                            var grad_recompute = try ctx.crossEntropyBackwardExAxisRank(rank, &logits, 1, labels, options, upstream, per_row_arg);
+                            var grad_recompute = try ctx.crossEntropyBackwardEx(rank, &logits, 1, labels, options, upstream, per_row_arg);
                             defer grad_recompute.deinit();
-                            var grad_stats = try ctx.crossEntropyBackwardExStatsAxisRank(rank, &logits, 1, labels, options, upstream, per_row_arg, row_stats);
+                            var grad_stats = try ctx.crossEntropyBackwardExStats(rank, &logits, 1, labels, options, upstream, per_row_arg, row_stats);
                             defer grad_stats.deinit();
                             try std.testing.expectEqualSlices(f32, grad_recompute.dataConst(), grad_stats.dataConst());
                         }
@@ -329,11 +329,11 @@ test "exec cross entropy backward with saved stats is bitwise identical to recom
     }
 
     // Stats length is validated (must be 2 * position count).
-    var logits = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var logits = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer logits.deinit();
     var short_stats = [_]f32{ 0, 0 };
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, &.{ 0, 1 }, .{}, &short_stats));
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, &.{ 0, 1 }, .{}, 1, null, &.{ 0, 0, 0 }));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyLossExStats(2, &logits, 1, &.{ 0, 1 }, .{}, &short_stats));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardExStats(2, &logits, 1, &.{ 0, 1 }, .{}, 1, null, &.{ 0, 0, 0 }));
 }
 
 test "exec fused linear cross-entropy backward matches the composed two-GEMM path" {
@@ -364,9 +364,9 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         defer allocator.free(w_data);
         for (w_data) |*value| value.* = random.floatNorm(f32) * 0.3;
 
-        var x = try ctx.fromSliceRank(2, .{ rows, in_dim }, x_data);
+        var x = try ctx.fromSlice(.f32, .{ rows, in_dim }, x_data);
         defer x.deinit();
-        var w = try ctx.fromSliceRank(2, .{ class_count, in_dim }, w_data);
+        var w = try ctx.fromSlice(.f32, .{ class_count, in_dim }, w_data);
         defer w.deinit();
 
         const labels = try allocator.alloc(usize, rows);
@@ -392,17 +392,17 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                     // Fresh logits per case: the fused VJP consumes them.
                     var logits = try ctx.matmulTransB(&x, &w);
                     defer logits.deinit();
-                    var loss = try ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, labels, options, row_stats);
+                    var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, options, row_stats);
                     loss.deinit();
 
                     var gy = if (reduction == .none)
-                        try ctx.fromSliceRank(1, .{rows}, per_row)
+                        try ctx.fromSlice(.f32, .{rows}, per_row)
                     else
-                        try ctx.fromSliceRank(1, .{1}, &.{0.75});
+                        try ctx.fromSlice(.f32, .{1}, &.{0.75});
                     defer gy.deinit();
 
                     // Composed reference (before the fused call eats logits).
-                    var dlogits = try ctx.crossEntropyBackwardExStatsAxisRank(
+                    var dlogits = try ctx.crossEntropyBackwardExStats(
                         2,
                         &logits,
                         1,
@@ -413,7 +413,7 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                         row_stats,
                     );
                     defer dlogits.deinit();
-                    var dx_ref = try ctx.matmul2D(&dlogits, &w);
+                    var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
                     defer dx_ref.deinit();
                     var dw_ref = try ctx.matmulTransA(&dlogits, &x);
                     defer dw_ref.deinit();
@@ -437,13 +437,13 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         defer keeper.deinit();
         const before = try allocator.dupe(f32, logits.dataConst());
         defer allocator.free(before);
-        var loss = try ctx.crossEntropyLossExStatsAxisRank(2, &logits, 1, labels, .{}, row_stats);
+        var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, row_stats);
         loss.deinit();
-        var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+        var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
         defer gy.deinit();
-        var dlogits = try ctx.crossEntropyBackwardExStatsAxisRank(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
         defer dlogits.deinit();
-        var dx_ref = try ctx.matmul2D(&dlogits, &w);
+        var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
         defer dx_ref.deinit();
         var grads = try ctx.linearCrossEntropyBackwardUpstream(&x, &w, &logits, labels, .{}, &gy, row_stats, true, true);
         defer grads.deinit();
@@ -470,7 +470,7 @@ test "exec context cross entropy ex handles ignored labels and validation" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var logits = try ctx.fromSliceRank(2, .{ 3, 5 }, &.{
+    var logits = try ctx.fromSlice(.f32, .{ 3, 5 }, &.{
         1,  2, 3,  4, 5,
         -1, 0, 1,  2, 3,
         2,  2, -2, 0, 1,
@@ -480,46 +480,46 @@ test "exec context cross entropy ex handles ignored labels and validation" {
     // Every position ignored (in-range ignore_index): loss 0, grads exactly 0.
     // (Deliberate divergence from PyTorch's NaN.)
     const all_ignored = CrossEntropyOptions{ .ignore_index = 2, .reduction = .mean };
-    var loss = try ctx.crossEntropyLossExAxisRank(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored);
+    var loss = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored);
     defer loss.deinit();
     try std.testing.expectEqual(@as(f32, 0), loss.item());
-    var grad = try ctx.crossEntropyBackwardExAxisRank(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored, 1, null);
+    var grad = try ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored, 1, null);
     defer grad.deinit();
     for (grad.dataConst()) |value| try std.testing.expectEqual(@as(f32, 0), value);
 
     // An in-range ignore_index drops exactly the matching positions, and the
     // mean denominator counts only the remaining ones.
-    var partial = try ctx.crossEntropyLossExAxisRank(2, &logits, 1, &.{ 4, 2, 0 }, all_ignored);
+    var partial = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 4, 2, 0 }, all_ignored);
     defer partial.deinit();
-    var row0 = try ctx.fromSliceRank(2, .{ 1, 5 }, &.{ 1, 2, 3, 4, 5 });
+    var row0 = try ctx.fromSlice(.f32, .{ 1, 5 }, &.{ 1, 2, 3, 4, 5 });
     defer row0.deinit();
-    var row2 = try ctx.fromSliceRank(2, .{ 1, 5 }, &.{ 2, 2, -2, 0, 1 });
+    var row2 = try ctx.fromSlice(.f32, .{ 1, 5 }, &.{ 2, 2, -2, 0, 1 });
     defer row2.deinit();
-    var loss0 = try ctx.crossEntropyLossExAxisRank(2, &row0, 1, &.{4}, .{ .reduction = .sum });
+    var loss0 = try ctx.crossEntropyLossEx(2, &row0, 1, &.{4}, .{ .reduction = .sum });
     defer loss0.deinit();
-    var loss2 = try ctx.crossEntropyLossExAxisRank(2, &row2, 1, &.{0}, .{ .reduction = .sum });
+    var loss2 = try ctx.crossEntropyLossEx(2, &row2, 1, &.{0}, .{ .reduction = .sum });
     defer loss2.deinit();
     try std.testing.expectApproxEqAbs((loss0.item() + loss2.item()) / 2, partial.item(), 1e-6);
 
     // Labels must be < class_count or == ignore_index.
-    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyLossExAxisRank(2, &logits, 1, &.{ 0, 5, 1 }, .{}));
-    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyBackwardExAxisRank(2, &logits, 1, &.{ 0, 9, 1 }, .{ .ignore_index = 7 }, 1, null));
+    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyLossEx(2, &logits, 1, &.{ 0, 5, 1 }, .{}));
+    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 9, 1 }, .{ .ignore_index = 7 }, 1, null));
     // label_smoothing must be in [0, 1).
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.crossEntropyLossExAxisRank(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.crossEntropyLossEx(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
     // .none requires a per-row upstream of matching length; mean/sum forbid it.
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardExAxisRank(2, &logits, 1, &.{ 0, 1, 2 }, .{ .reduction = .none }, 1, null));
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardExAxisRank(2, &logits, 1, &.{ 0, 1, 2 }, .{}, 1, &.{ 1, 1, 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 1, 2 }, .{ .reduction = .none }, 1, null));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 1, 2 }, .{}, 1, &.{ 1, 1, 1 }));
 
     // Default options keep the legacy behavior: mean over all positions.
-    var legacy = try ctx.crossEntropyLossAxisRank(2, &logits, 1, &.{ 4, 2, 0 });
+    var legacy = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 4, 2, 0 });
     defer legacy.deinit();
-    var ex_default = try ctx.crossEntropyLossExAxisRank(2, &logits, 1, &.{ 4, 2, 0 }, .{});
+    var ex_default = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 4, 2, 0 }, .{});
     defer ex_default.deinit();
     try std.testing.expectEqual(legacy.item(), ex_default.item());
 }
 
-// These drive the substrate alloc primitives (ctx.zerosRank,
-// ctx.scalarTyped) and the elementwise reduce-broadcast VJP directly, so they
+// These drive the substrate alloc primitives (ctx.zeros,
+// ctx.scalar) and the elementwise reduce-broadcast VJP directly, so they
 // belong beside the other exec_tests rather than inline in exec.zig.
 test "exec context reuses buffers for arbitrary broadcast materialization" {
     const allocator = std.testing.allocator;
@@ -527,18 +527,18 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.zerosRank(3, .{ 2, 4, 3 });
+    var x = try ctx.zeros(.f32, .{ 2, 4, 3 });
     defer x.deinit();
-    var middle = try ctx.fromSliceRank(3, .{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var middle = try ctx.fromSlice(.f32, .{ 2, 1, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer middle.deinit();
-    var middle_b = try ctx.broadcastToRank(3, &middle, .{ 2, 4, 3 });
+    var middle_b = try ctx.broadcastTo(&middle, .{ 2, 4, 3 });
     defer middle_b.deinit();
 
     try std.testing.expectEqual(LayoutClass.arbitrary, ctx.classify(&middle_b));
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
     try std.testing.expectEqual(@as(usize, 0), ctx.buffers.cachedBuffers());
 
-    var first = try ctx.addRank(3, &x, &middle_b);
+    var first = try ctx.add(.f32, 3, &x, &middle_b);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
         4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6,
@@ -551,7 +551,7 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     const cached_after_first = ctx.buffers.cachedBuffers();
     try std.testing.expect(cached_after_first >= 2);
 
-    var second = try ctx.addRank(3, &x, &middle_b);
+    var second = try ctx.add(.f32, 3, &x, &middle_b);
     second.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
@@ -564,16 +564,16 @@ test "exec context allocates typed non-f32 tensors without using f32 kernels" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var ids = try ctx.fromSliceRankTyped(.u16, 2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var ids = try ctx.fromSlice(.u16, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer ids.deinit();
     try std.testing.expect(@TypeOf(ids).dtype == .u16);
     try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3, 4, 5, 6 }, ids.dataConst());
 
-    var flags = try ctx.onesTyped(.bool, &.{3});
+    var flags = try ctx.ones(.bool, &.{3});
     defer flags.deinit();
     try std.testing.expectEqualSlices(bool, &.{ true, true, true }, flags.dataConst());
 
-    var scalar_id = try ctx.scalarTyped(.i64, 42);
+    var scalar_id = try ctx.scalar(.i64, 42);
     defer scalar_id.deinit();
     try std.testing.expectEqual(@as(i64, 42), scalar_id.item());
 }
@@ -589,13 +589,13 @@ test "materialize of a large permuted view goes through the chunked parallel cop
     // materialize threshold, innermost axis strided.
     const rows: usize = 768;
     const cols: usize = 512;
-    var x = try ctx.emptyRank(2, .{ rows, cols });
+    var x = try ctx.empty(.f32, .{ rows, cols });
     defer x.deinit();
     for (x.data(), 0..) |*v, i| v.* = @floatFromInt(i % 1013);
     var t = try x.viewWithStrides(&.{ cols, rows }, &.{ 1, cols });
     defer t.deinit();
 
-    var m = try ctx.materialize(&t);
+    var m = try ctx.materialize(.f32, &t);
     defer m.deinit();
     try std.testing.expect(m.isContiguous());
     try std.testing.expectEqualSlices(usize, &.{ cols, rows }, m.shape.slice());

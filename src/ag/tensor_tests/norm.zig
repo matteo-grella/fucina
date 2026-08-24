@@ -524,13 +524,13 @@ const GroupNormFdContext = struct {
 };
 
 fn groupNormFdLoss(c: GroupNormFdContext) anyerror!f32 {
-    var x = try c.ctx.fromSlice(&.{ c.rows, c.cols }, c.x_vals);
+    var x = try c.ctx.fromSlice(.f32, &.{ c.rows, c.cols }, c.x_vals);
     defer x.deinit();
-    var weight: ?RawTensor = if (c.w_vals) |wv| try c.ctx.fromSlice(&.{c.cols}, wv) else null;
+    var weight: ?RawTensor = if (c.w_vals) |wv| try c.ctx.fromSlice(.f32, &.{c.cols}, wv) else null;
     defer if (weight) |*w| w.deinit();
-    var bias: ?RawTensor = if (c.b_vals) |bv| try c.ctx.fromSlice(&.{c.cols}, bv) else null;
+    var bias: ?RawTensor = if (c.b_vals) |bv| try c.ctx.fromSlice(.f32, &.{c.cols}, bv) else null;
     defer if (bias) |*b| b.deinit();
-    var y = try c.ctx.groupNormAxisRank(&x, c.groups, c.eps, if (weight) |*w| w else null, if (bias) |*b| b else null);
+    var y = try c.ctx.groupNorm(&x, c.groups, c.eps, if (weight) |*w| w else null, if (bias) |*b| b else null);
     defer y.deinit();
     return fdWeightedSum(y.dataConst(), c.coef);
 }
@@ -570,13 +570,13 @@ test "tagged autograd groupNorm matches finite differences across group configur
         defer allocator.free(coef);
         fdFillPattern(coef, 4.7);
 
-        var x = try Tensor(.{ .time, .ch }).variable(&ctx, try ctx.fromSlice(&.{ rows, cols }, x_vals));
+        var x = try Tensor(.{ .time, .ch }).variable(&ctx, try ctx.fromSlice(.f32, &.{ rows, cols }, x_vals));
         defer x.deinit();
-        var weight: ?Tensor(.{.ch}) = if (cfg.affine) try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(&.{cols}, w_vals)) else null;
+        var weight: ?Tensor(.{.ch}) = if (cfg.affine) try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(.f32, &.{cols}, w_vals)) else null;
         defer if (weight) |*w| w.deinit();
-        var bias: ?Tensor(.{.ch}) = if (cfg.affine) try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(&.{cols}, b_vals)) else null;
+        var bias: ?Tensor(.{.ch}) = if (cfg.affine) try Tensor(.{.ch}).variable(&ctx, try ctx.fromSlice(.f32, &.{cols}, b_vals)) else null;
         defer if (bias) |*b| b.deinit();
-        var coef_t = try Tensor(.{ .time, .ch }).fromTensor(&ctx, try ctx.fromSlice(&.{ rows, cols }, coef));
+        var coef_t = try Tensor(.{ .time, .ch }).fromTensor(&ctx, try ctx.fromSlice(.f32, &.{ rows, cols }, coef));
         defer coef_t.deinit();
 
         var y = try x.groupNorm(&ctx, .ch, cfg.groups, eps, if (weight) |*w| w else null, if (bias) |*b| b else null);

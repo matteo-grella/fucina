@@ -62,15 +62,15 @@ test "kdaRecurrent matches the reference fused_recurrent_kda goldens" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var q_t = try ctx.fromSlice(&.{ T, H, K }, q);
+    var q_t = try ctx.fromSlice(.f32, &.{ T, H, K }, q);
     defer q_t.deinit();
-    var k_t = try ctx.fromSlice(&.{ T, H, K }, k);
+    var k_t = try ctx.fromSlice(.f32, &.{ T, H, K }, k);
     defer k_t.deinit();
-    var v_t = try ctx.fromSlice(&.{ T, H, V }, v);
+    var v_t = try ctx.fromSlice(.f32, &.{ T, H, V }, v);
     defer v_t.deinit();
-    var g_t = try ctx.fromSlice(&.{ T, H, K }, g);
+    var g_t = try ctx.fromSlice(.f32, &.{ T, H, K }, g);
     defer g_t.deinit();
-    var beta_t = try ctx.fromSlice(&.{ T, H }, beta);
+    var beta_t = try ctx.fromSlice(.f32, &.{ T, H }, beta);
     defer beta_t.deinit();
 
     var result = try ctx.kdaRecurrent(&q_t, &k_t, &v_t, &g_t, &beta_t, a_log, dt_bias, null, 0);

@@ -43,7 +43,7 @@ pub fn RopeBackward(
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.ropeAxisRank(rawRank(tags.len), gy, position_axis, feature_axis, self.positions, self.theta_base, mode, true);
+            out[0] = try ctx.rope(rawRank(tags.len), gy, position_axis, feature_axis, self.positions, self.theta_base, mode, true);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -86,7 +86,7 @@ pub fn RopeTableBackward(
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // Mirrors the forward: the partial entry self-falls-back to the
             // full kernel when the table spans the whole feature axis.
-            out[0] = try ctx.ropePartialAxisRankWithTable(rawRank(tags.len), gy, position_axis, feature_axis, &self.inverse_table, mode);
+            out[0] = try ctx.ropePartialWithTable(rawRank(tags.len), gy, position_axis, feature_axis, &self.inverse_table, mode);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {

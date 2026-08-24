@@ -62,7 +62,7 @@ pub const RopeTable = struct {
     }
 };
 
-pub fn ropeAxisRank(
+pub fn rope(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -77,7 +77,7 @@ pub fn ropeAxisRank(
     const feature_dim = source.shape[feature_axis];
     var table = try prepareRopeTable(ctx, positions, feature_dim, theta_base, inverse);
     defer table.deinit();
-    return ropeAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
+    return ropeWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
 }
 
 pub fn prepareRopeTable(ctx: *ExecContext, positions: []const i32, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
@@ -343,7 +343,7 @@ fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_ro
     }
 }
 
-pub fn ropeAxisRankWithTable(
+pub fn ropeWithTable(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -362,11 +362,11 @@ pub fn ropeAxisRankWithTable(
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
     if (table.feature_dim != feature_dim) return tensor.TensorError.InvalidShape;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -427,7 +427,7 @@ pub fn ropeAxisRankWithTable(
     return out;
 }
 
-pub fn ropePartialAxisRank(
+pub fn ropePartial(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -441,10 +441,10 @@ pub fn ropePartialAxisRank(
 ) !Tensor {
     var table = try prepareRopeTable(ctx, positions, rotary_dim, theta_base, inverse);
     defer table.deinit();
-    return ropePartialAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
+    return ropePartialWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
 }
 
-pub fn ropePartialAxisRankWithTable(
+pub fn ropePartialWithTable(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -462,13 +462,13 @@ pub fn ropePartialAxisRankWithTable(
     const rotary_dim = table.feature_dim;
     if (rotary_dim == 0 or rotary_dim > feature_dim or rotary_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
-    if (rotary_dim == feature_dim) return ropeAxisRankWithTable(ctx, rank, x, position_axis, feature_axis, table, mode);
+    if (rotary_dim == feature_dim) return ropeWithTable(ctx, rank, x, position_axis, feature_axis, table, mode);
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
     @memcpy(output, input);

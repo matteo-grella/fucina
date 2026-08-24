@@ -647,10 +647,10 @@ fn transformerForward(
             @memcpy(v_dst[t * d ..][0..d], qkvd[t * 3 * d + 2 * d ..][0..d]);
         }
 
-        const q_raw = try ctx.ropeAxisRankWithTable(3, q3.asRawTensor(), 0, 2, &rope_table, .interleaved);
+        const q_raw = try ctx.ropeWithTable(3, q3.asRawTensor(), 0, 2, &rope_table, .interleaved);
         var q_rope = try fucina.Tensor(.{ .seq, .head, .d }).fromTensor(ctx, q_raw);
         defer q_rope.deinit();
-        const k_raw = try ctx.ropeAxisRankWithTable(3, k3.asRawTensor(), 0, 2, &rope_table, .interleaved);
+        const k_raw = try ctx.ropeWithTable(3, k3.asRawTensor(), 0, 2, &rope_table, .interleaved);
         var k_rope = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromTensor(ctx, k_raw);
         defer k_rope.deinit();
 

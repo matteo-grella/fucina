@@ -48,7 +48,7 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
             // allocated (contiguous) i64 tensor.
             const idxd = self.indices.dataConst();
 
-            var gx = try ctx.zeros(self.source_shape[0..]);
+            var gx = try ctx.zeros(.f32, self.source_shape[0..]);
             errdefer gx.deinit();
             const gyd = gy_ready.dataConst();
             const gxd = gx.data();

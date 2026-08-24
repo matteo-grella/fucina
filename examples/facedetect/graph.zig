@@ -36,13 +36,13 @@ fn loadConvWRaw(ctx: *ExecContext, allocator: std.mem.Allocator, file: *const gg
     for (0..cout) |co| for (0..kh) |y| for (0..kw) |x| for (0..cin) |ci| {
         buf[((co * kh + y) * kw + x) * cin + ci] = raw[((co * cin + ci) * kh + y) * kw + x];
     };
-    return ctx.fromSlice(&.{ cout, kh, kw, cin }, buf);
+    return ctx.fromSlice(.f32, &.{ cout, kh, kw, cin }, buf);
 }
 
 fn loadVecRaw(ctx: *ExecContext, allocator: std.mem.Allocator, file: *const gguf.File, name: []const u8) !RawTensor {
     const data = try rec.toF32(allocator, try rec.info(file, name));
     defer allocator.free(data);
-    return ctx.fromSlice(&.{data.len}, data);
+    return ctx.fromSlice(.f32, &.{data.len}, data);
 }
 
 /// MatMul weight: ggml ne `[out,in]` (reversed ONNX `[in,out]`) → raw `[in,out]`.
@@ -50,7 +50,7 @@ fn loadMatmulWRaw(ctx: *ExecContext, allocator: std.mem.Allocator, file: *const 
     const t = try rec.info(file, name);
     const data = try rec.toF32(allocator, t);
     defer allocator.free(data);
-    return ctx.fromSlice(&.{ t.dims[1], t.dims[0] }, data);
+    return ctx.fromSlice(.f32, &.{ t.dims[1], t.dims[0] }, data);
 }
 
 /// Gemm(transB=1) weight: stored ONNX B `[out,in]` → ggml ne `[in,out]`. The mul
@@ -66,7 +66,7 @@ fn loadGemmWRaw(ctx: *ExecContext, allocator: std.mem.Allocator, file: *const gg
     for (0..in) |i| for (0..out) |o| {
         buf[i * out + o] = data[i + in * o];
     };
-    return ctx.fromSlice(&.{ in, out }, buf);
+    return ctx.fromSlice(.f32, &.{ in, out }, buf);
 }
 
 // --- node parsing ----------------------------------------------------------
@@ -169,11 +169,11 @@ fn bnFoldRaw(ctx: *ExecContext, g: *const RawTensor, b: *const RawTensor, m: *co
     defer ve.deinit();
     var sd = try ctx.sqrt(&ve);
     defer sd.deinit();
-    var scale = try ctx.div(g, &sd);
+    var scale = try ctx.elementwise(.div, g, &sd);
     errdefer scale.deinit();
-    var ms = try ctx.mul(m, &scale);
+    var ms = try ctx.elementwise(.mul, m, &scale);
     defer ms.deinit();
-    const shift = try ctx.sub(b, &ms);
+    const shift = try ctx.elementwise(.sub, b, &ms);
     return .{ .scale = scale, .shift = shift };
 }
 
@@ -325,9 +325,9 @@ pub const Compiled = struct {
 
     fn applyBin(ctx: *ExecContext, kind: BinKind, a: *const RawTensor, b: *const RawTensor) !RawTensor {
         return switch (kind) {
-            .add => ctx.add(a, b),
-            .sub => ctx.sub(a, b),
-            .mul => ctx.mul(a, b),
+            .add => ctx.elementwise(.add, a, b),
+            .sub => ctx.elementwise(.sub, a, b),
+            .mul => ctx.elementwise(.mul, a, b),
         };
     }
 
@@ -357,11 +357,11 @@ pub const Compiled = struct {
         const c = sh[2];
         var s1 = try ctx.reduceBroadcast(x, &.{ w, c });
         defer s1.deinit();
-        var m1 = try ctx.scale(&s1, 1.0 / @as(f32, @floatFromInt(h)));
+        var m1 = try ctx.scale(.f32, &s1, 1.0 / @as(f32, @floatFromInt(h)));
         defer m1.deinit();
         var s2 = try ctx.reduceBroadcast(&m1, &.{c});
         defer s2.deinit();
-        var m2 = try ctx.scale(&s2, 1.0 / @as(f32, @floatFromInt(w)));
+        var m2 = try ctx.scale(.f32, &s2, 1.0 / @as(f32, @floatFromInt(w)));
         defer m2.deinit();
         return m2.reshape(&.{ 1, 1, c });
     }
@@ -399,16 +399,16 @@ pub const Compiled = struct {
                 for (0..h) |yy| for (0..w) |xx| for (0..c) |cc| {
                     buf[cc * (h * w) + yy * w + xx] = xd[(yy * w + xx) * c + cc];
                 };
-                return ctx.fromSlice(&.{ 1, h * w * c }, buf);
+                return ctx.fromSlice(.f32, &.{ 1, h * w * c }, buf);
             },
             .matmul => |*p| {
                 const x = try act(vals, n.ins[0]);
                 var xr = try x.reshape(&.{ 1, x.len() }); // [1,in]
                 defer xr.deinit();
-                var y = try ctx.matmul(&xr, &p.w); // [1,out]
+                var y = try ctx.matmul(.f32, &xr, &p.w); // [1,out]
                 if (p.b) |*b| {
                     errdefer y.deinit();
-                    try ctx.addAxisVectorInPlaceRank(2, &y, b.dataConst(), 1);
+                    try ctx.addAxisVectorInPlace(2, &y, b.dataConst(), 1);
                 }
                 return y;
             },

@@ -290,23 +290,23 @@ const Base = struct {
     gy2: Tensor,
 
     fn init(ctx: *ExecContext, case: Case) !Base {
-        var x = try ctx.emptyRank(2, .{ case.batch, case.d });
+        var x = try ctx.empty(.f32, .{ case.batch, case.d });
         errdefer x.deinit();
         fillPattern(&x, 1);
 
-        var w1 = try ctx.emptyRank(2, .{ case.d, case.out });
+        var w1 = try ctx.empty(.f32, .{ case.d, case.out });
         errdefer w1.deinit();
         fillPattern(&w1, 2);
 
-        var w2 = try ctx.emptyRank(2, .{ case.d, case.out });
+        var w2 = try ctx.empty(.f32, .{ case.d, case.out });
         errdefer w2.deinit();
         fillPattern(&w2, 3);
 
-        var gy1 = try ctx.emptyRank(2, .{ case.batch, case.out });
+        var gy1 = try ctx.empty(.f32, .{ case.batch, case.out });
         errdefer gy1.deinit();
         fillPattern(&gy1, 4);
 
-        var gy2 = try ctx.emptyRank(2, .{ case.batch, case.out });
+        var gy2 = try ctx.empty(.f32, .{ case.batch, case.out });
         errdefer gy2.deinit();
         fillPattern(&gy2, 5);
 

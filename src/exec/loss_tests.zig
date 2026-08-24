@@ -32,9 +32,9 @@ test "exec mseLoss matches torch F.mse_loss across reductions and both gradients
 
     // torch: F.mse_loss(x, t, reduction) with per-element (x - t)^2;
     // d = x - t = {0.5, -0.5, 1.5, 0} -> losses {0.25, 0.25, 2.25, 0}.
-    var input = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var input = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer input.deinit();
-    var target = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 0.5, 2.5, 1.5, 4 });
+    var target = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 0.5, 2.5, 1.5, 4 });
     defer target.deinit();
 
     var mean_loss = try ctx.mseLoss(&input, &target, .{});
@@ -51,7 +51,7 @@ test "exec mseLoss matches torch F.mse_loss across reductions and both gradients
     try expectSliceClose(&.{ 0.25, 0.25, 2.25, 0 }, none_loss.dataConst());
 
     // .mean upstream 0.75: d/dx = 2·d·0.75/4 = d·0.375; d/dt = -d/dx.
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{0.75});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{0.75});
     defer gy.deinit();
     var gx = try ctx.mseBackwardUpstream(&input, &target, .{}, &gy, .input);
     defer gx.deinit();
@@ -61,7 +61,7 @@ test "exec mseLoss matches torch F.mse_loss across reductions and both gradients
     try expectSliceClose(&.{ -0.1875, 0.1875, -0.5625, 0 }, gt.dataConst());
 
     // .none upstream {1, 2, 3, 4}: d/dx_i = 2·d_i·gy_i.
-    var gy_none = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var gy_none = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer gy_none.deinit();
     var gx_none = try ctx.mseBackwardUpstream(&input, &target, .{ .reduction = .none }, &gy_none, .input);
     defer gx_none.deinit();
@@ -77,9 +77,9 @@ test "exec huberLoss matches torch F.huber_loss (quadratic/linear arms) and vali
     // delta·(|d| - 0.5·delta) otherwise. d = {0.5, -2, 1.5, 0}:
     // {0.125, 1.5·(2 - 0.75) = 1.875, 0.5·2.25 = 1.125 (boundary is
     // quadratic), 0}. sum = 3.125, mean = 0.78125.
-    var input = try ctx.fromSliceRank(1, .{4}, &.{ 0.5, -2, 1.5, 0 });
+    var input = try ctx.fromSlice(.f32, .{4}, &.{ 0.5, -2, 1.5, 0 });
     defer input.deinit();
-    var target = try ctx.fromSliceRank(1, .{4}, &.{ 0, 0, 0, 0 });
+    var target = try ctx.fromSlice(.f32, .{4}, &.{ 0, 0, 0, 0 });
     defer target.deinit();
     const options = exec_mod.HuberOptions{ .delta = 1.5 };
 
@@ -96,7 +96,7 @@ test "exec huberLoss matches torch F.huber_loss (quadratic/linear arms) and vali
     try expectSliceClose(&.{ 0.125, 1.875, 1.125, 0 }, none_loss.dataConst());
 
     // .sum upstream 1: d/dx = d for |d| <= delta else delta·sign(d).
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
     var gx = try ctx.huberBackwardUpstream(&input, &target, .{ .delta = 1.5, .reduction = .sum }, &gy, .input);
     defer gx.deinit();
@@ -119,9 +119,9 @@ test "exec bceLoss from_logits matches torch F.binary_cross_entropy_with_logits"
     // torch: loss_i = max(x,0) - x·y + log1p(exp(-|x|)) for
     // x = {0, 2, -3, 1}, y = {0, 1, 0, 0.5}:
     //   {ln 2, log1p(e^-2), log1p(e^-3), 0.5 + log1p(e^-1)}.
-    var input = try ctx.fromSliceRank(1, .{4}, &.{ 0, 2, -3, 1 });
+    var input = try ctx.fromSlice(.f32, .{4}, &.{ 0, 2, -3, 1 });
     defer input.deinit();
-    var target = try ctx.fromSliceRank(1, .{4}, &.{ 0, 1, 0, 0.5 });
+    var target = try ctx.fromSlice(.f32, .{4}, &.{ 0, 1, 0, 0.5 });
     defer target.deinit();
     const options = exec_mod.BceOptions{ .from_logits = true };
 
@@ -139,7 +139,7 @@ test "exec bceLoss from_logits matches torch F.binary_cross_entropy_with_logits"
     try expectClose(0.42048105767372086, mean_loss.item());
 
     // .mean upstream 1: d/dx = (sigmoid(x) - y)/4; d/dy = -x/4.
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
     var gx = try ctx.bceBackwardUpstream(&input, &target, options, &gy, .input);
     defer gx.deinit();
@@ -161,9 +161,9 @@ test "exec bceLoss probability arm matches torch F.binary_cross_entropy and clam
 
     // torch: loss_i = -(y·ln p + (1-y)·ln(1-p)) for p = {0.25, 0.5, 0.9, 0.02},
     // y = {0, 1, 0.5, 1} (all p inside the clamp interval).
-    var input = try ctx.fromSliceRank(1, .{4}, &.{ 0.25, 0.5, 0.9, 0.02 });
+    var input = try ctx.fromSlice(.f32, .{4}, &.{ 0.25, 0.5, 0.9, 0.02 });
     defer input.deinit();
-    var target = try ctx.fromSliceRank(1, .{4}, &.{ 0, 1, 0.5, 1 });
+    var target = try ctx.fromSlice(.f32, .{4}, &.{ 0, 1, 0.5, 1 });
     defer target.deinit();
 
     var none_loss = try ctx.bceLoss(&input, &target, .{ .reduction = .none });
@@ -180,7 +180,7 @@ test "exec bceLoss probability arm matches torch F.binary_cross_entropy and clam
     try expectClose(6.096825062766, sum_loss.item());
 
     // .sum upstream 1: d/dp = (p - y)/(p·(1-p)); d/dy = ln(1-p) - ln p.
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
     var gx = try ctx.bceBackwardUpstream(&input, &target, .{ .reduction = .sum }, &gy, .input);
     defer gx.deinit();
@@ -197,9 +197,9 @@ test "exec bceLoss probability arm matches torch F.binary_cross_entropy and clam
     // Boundary probabilities: the forward clamps to [bce_eps, 1-bce_eps]
     // (loss ~ -ln(1-eps) ~ 1.2e-7, not inf/NaN) and the input gradient is
     // exactly 0 where the clamp saturates.
-    var boundary = try ctx.fromSliceRank(1, .{2}, &.{ 0, 1 });
+    var boundary = try ctx.fromSlice(.f32, .{2}, &.{ 0, 1 });
     defer boundary.deinit();
-    var boundary_target = try ctx.fromSliceRank(1, .{2}, &.{ 0, 1 });
+    var boundary_target = try ctx.fromSlice(.f32, .{2}, &.{ 0, 1 });
     defer boundary_target.deinit();
     var boundary_loss = try ctx.bceLoss(&boundary, &boundary_target, .{ .reduction = .none });
     defer boundary_loss.deinit();
@@ -219,9 +219,9 @@ test "exec klDivLoss matches torch F.kl_div for probability and log targets" {
 
     // torch: F.kl_div(x, t) with x = log-probs of {0.7, 0.2, 0.1} and
     // t = {0.5, 0.25, 0.25}: loss_i = t·(ln t - x).
-    var input = try ctx.fromSliceRank(1, .{3}, &.{ -0.35667494393873245, -1.6094379124341003, -2.3025850929940455 });
+    var input = try ctx.fromSlice(.f32, .{3}, &.{ -0.35667494393873245, -1.6094379124341003, -2.3025850929940455 });
     defer input.deinit();
-    var target = try ctx.fromSliceRank(1, .{3}, &.{ 0.5, 0.25, 0.25 });
+    var target = try ctx.fromSlice(.f32, .{3}, &.{ 0.5, 0.25, 0.25 });
     defer target.deinit();
 
     const row_losses = [_]f64{ -0.16823611831060643, 0.05578588782855243, 0.22907268296853872 };
@@ -240,7 +240,7 @@ test "exec klDivLoss matches torch F.kl_div for probability and log targets" {
     try expectClose(0.03887415082882824, mean_loss.item());
 
     // .sum upstream 1: d/dx = -t; d/dt = ln t + 1 - x.
-    var gy = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
     var gx = try ctx.klDivBackwardUpstream(&input, &target, .{ .reduction = .sum }, &gy, .input);
     defer gx.deinit();
@@ -251,7 +251,7 @@ test "exec klDivLoss matches torch F.kl_div for probability and log targets" {
 
     // Zero-mass target entry: zero forward contribution (xlogy convention)
     // and zero gradients for both operands.
-    var zero_target = try ctx.fromSliceRank(1, .{3}, &.{ 0, 0.5, 0.5 });
+    var zero_target = try ctx.fromSlice(.f32, .{3}, &.{ 0, 0.5, 0.5 });
     defer zero_target.deinit();
     var zero_loss = try ctx.klDivLoss(&input, &zero_target, .{ .reduction = .none });
     defer zero_loss.deinit();
@@ -262,7 +262,7 @@ test "exec klDivLoss matches torch F.kl_div for probability and log targets" {
 
     // log_target arm: t holds ln{0.5, 0.25, 0.25}; identical losses,
     // d/dx = -exp(t), d/dt = exp(t)·(t - x + 1).
-    var log_target = try ctx.fromSliceRank(1, .{3}, &.{ -0.6931471805599453, -1.3862943611198906, -1.3862943611198906 });
+    var log_target = try ctx.fromSlice(.f32, .{3}, &.{ -0.6931471805599453, -1.3862943611198906, -1.3862943611198906 });
     defer log_target.deinit();
     const log_options = exec_mod.KlDivOptions{ .log_target = true, .reduction = .sum };
     var log_none = try ctx.klDivLoss(&input, &log_target, .{ .log_target = true, .reduction = .none });
@@ -281,11 +281,11 @@ test "exec elementwise losses validate operand and upstream shapes" {
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var input = try ctx.fromSliceRank(1, .{4}, &.{ 1, 2, 3, 4 });
+    var input = try ctx.fromSlice(.f32, .{4}, &.{ 1, 2, 3, 4 });
     defer input.deinit();
-    var short = try ctx.fromSliceRank(1, .{3}, &.{ 1, 2, 3 });
+    var short = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     defer short.deinit();
-    var target = try ctx.fromSliceRank(1, .{4}, &.{ 0, 0, 0, 0 });
+    var target = try ctx.fromSlice(.f32, .{4}, &.{ 0, 0, 0, 0 });
     defer target.deinit();
 
     try std.testing.expectError(TensorError.ShapeMismatch, ctx.mseLoss(&input, &short, .{}));
@@ -293,9 +293,9 @@ test "exec elementwise losses validate operand and upstream shapes" {
 
     // `.mean`/`.sum` upstream must be scalar; `.none` upstream must be
     // input-shaped.
-    var gy_vec = try ctx.fromSliceRank(1, .{4}, &.{ 1, 1, 1, 1 });
+    var gy_vec = try ctx.fromSlice(.f32, .{4}, &.{ 1, 1, 1, 1 });
     defer gy_vec.deinit();
-    var gy_scalar = try ctx.fromSliceRank(1, .{1}, &.{1});
+    var gy_scalar = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy_scalar.deinit();
     try std.testing.expectError(TensorError.ShapeMismatch, ctx.mseBackwardUpstream(&input, &target, .{}, &gy_vec, .input));
     try std.testing.expectError(TensorError.ShapeMismatch, ctx.mseBackwardUpstream(&input, &target, .{ .reduction = .none }, &gy_scalar, .input));

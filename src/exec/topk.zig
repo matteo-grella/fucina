@@ -33,7 +33,7 @@ pub fn routerTopK(
     if (k > experts) return tensor.TensorError.IndexOutOfBounds;
     if (selected.len != rows * k or weights.len != rows * k) return tensor.TensorError.InvalidDataLength;
 
-    var ll = try ctx.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(.f32, logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
     for (0..rows) |row| {

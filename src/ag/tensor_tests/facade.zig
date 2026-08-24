@@ -255,6 +255,7 @@ test "tagged autograd numeric rank uses generated axis tags" {
     var x = try Tensor(3).variable(
         &ctx,
         try ctx.fromSlice(
+            .f32,
             &.{ 2, 3, 2 },
             &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
         ),
@@ -295,7 +296,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer s.deinit();
     var sm = try s.softmax(&ctx, .k, .{ .scale = 0.5 });
     defer sm.deinit();
-    var sm_want = try ctx.softmaxExtAxisRank(3, s.asRawTensor(), 2, .{ .scale = 0.5 });
+    var sm_want = try ctx.softmaxExt(3, s.asRawTensor(), 2, .{ .scale = 0.5 });
     defer sm_want.deinit();
     try std.testing.expectEqualSlices(f32, sm_want.dataConst(), sm.asRawTensor().dataConst());
 
@@ -308,7 +309,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer bln.deinit();
     var lno = try ln.layerNorm(&ctx, .c, 1e-5, .{ .weight = wln, .bias = bln });
     defer lno.deinit();
-    var lno_want = try ctx.layerNormAffineAxisRank(2, ln.asRawTensor(), wln.asRawTensor(), bln.asRawTensor(), 1, 1e-5);
+    var lno_want = try ctx.layerNormAffine(2, ln.asRawTensor(), wln.asRawTensor(), bln.asRawTensor(), 1, 1e-5);
     defer lno_want.deinit();
     try std.testing.expectEqualSlices(f32, lno_want.dataConst(), lno.asRawTensor().dataConst());
 
@@ -317,7 +318,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer g.deinit();
     var gg = try g.splitGated(&ctx, .glu, .d, .d);
     defer gg.deinit();
-    var gg_want = try ctx.splitGluAxisRank(2, g.asRawTensor(), 1);
+    var gg_want = try ctx.splitGlu(2, g.asRawTensor(), 1);
     defer gg_want.deinit();
     try std.testing.expectEqualSlices(f32, gg_want.dataConst(), gg.asRawTensor().dataConst());
 
@@ -328,7 +329,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer ker.deinit();
     var cc = try cin.causalDepthwiseConv1d(&ctx, .time, .channel, .taps, &ker, 1, null);
     defer cc.deinit();
-    var cc_want = try ctx.causalDepthwiseConv1dAxisRank(2, cin.asRawTensor(), ker.asRawTensor(), 0, 1, 1, null);
+    var cc_want = try ctx.causalDepthwiseConv1d(2, cin.asRawTensor(), ker.asRawTensor(), 0, 1, 1, null);
     defer cc_want.deinit();
     try std.testing.expectEqualSlices(f32, cc_want.dataConst(), cc.asRawTensor().dataConst());
 

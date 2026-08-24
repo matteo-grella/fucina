@@ -39,7 +39,7 @@ pub fn Ops(comptime Self: type) type {
         /// No-grad: copy of `self` with `[start, start+length)` along `axis_tag` zeroed.
         pub fn zeroSlice(self: *const Self, ctx: *ExecContext, comptime axis_tag: Tag, start: usize, length: usize) !Self {
             const zero_axis = comptime Self.axis(axis_tag);
-            var value = try ctx.zeroSliceAxisRank(tensor_rank, self.asRawTensor(), zero_axis, start, length);
+            var value = try ctx.zeroSlice(tensor_rank, self.asRawTensor(), zero_axis, start, length);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), ZeroSliceBackward(tags, zero_axis), .{ ctx.allocator, self.grad_state, start, length });
         }
@@ -47,7 +47,7 @@ pub fn Ops(comptime Self: type) type {
         /// No-grad: copy of `self` with the given `indices` along `axis_tag` zeroed.
         pub fn zeroRows(self: *const Self, ctx: *ExecContext, comptime axis_tag: Tag, indices: []const usize) !Self {
             const zero_axis = comptime Self.axis(axis_tag);
-            var value = try ctx.zeroRowsAxisRank(tensor_rank, self.asRawTensor(), zero_axis, indices);
+            var value = try ctx.zeroRows(tensor_rank, self.asRawTensor(), zero_axis, indices);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), ZeroRowsBackward(tags, zero_axis), .{ ctx.allocator, self.grad_state, indices });
         }
@@ -58,7 +58,7 @@ pub fn Ops(comptime Self: type) type {
         /// form of the relpos pad/reshape/view remap; differentiable (scatter VJP).
         /// `out_tags` names the result axes.
         pub fn relposShift(self: *const Self, ctx: *ExecContext, t_k: usize, comptime out_tags: anytype) !Tensor(out_tags) {
-            var value = try ctx.relposShiftRank3(self.asRawTensor(), t_k);
+            var value = try ctx.relposShift(self.asRawTensor(), t_k);
             errdefer value.deinit();
             return finishOp(out_tags, ctx, value, self.requiresGrad(), RelposShiftBackward, .{ ctx.allocator, self.grad_state, self.value.shape.slice()[2] });
         }
@@ -72,7 +72,7 @@ pub fn Ops(comptime Self: type) type {
         ) !Tensor(replaceTag(tags, tag, out_tag)) {
             const result_tags = replaceTag(tags, tag, out_tag);
             const gather_axis = comptime axis(tag);
-            var value = try ctx.gatherAxisRank(tag_rank, self.asRawTensor(), gather_axis, indices);
+            var value = try ctx.gatherAxis(.f32, tag_rank, self.asRawTensor(), gather_axis, indices);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), GatherBackward(tags, gather_axis), .{ ctx.allocator, self.grad_state, &self.value, indices });
         }
@@ -240,14 +240,14 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn setSlice(self: *const Self, ctx: *ExecContext, comptime tag: Tag, start: usize, update: *const Self) !Self {
             const slice_axis = comptime axis(tag);
-            var value = try ctx.setSliceAxisRank(tag_rank, self.asRawTensor(), update.asRawTensor(), slice_axis, start);
+            var value = try ctx.setSliceAxis(.f32, tag_rank, self.asRawTensor(), update.asRawTensor(), slice_axis, start);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetSliceBackward(tags, slice_axis), .{ ctx.allocator, self.grad_state, update.grad_state, update.asRawTensor(), start });
         }
 
         pub fn setRows(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const Self) !Self {
             const rows_axis = comptime axis(tag);
-            var value = try ctx.setRowsAxisRank(tag_rank, self.asRawTensor(), update.asRawTensor(), rows_axis, indices);
+            var value = try ctx.setRows(.f32, tag_rank, self.asRawTensor(), update.asRawTensor(), rows_axis, indices);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetRowsBackward(tags, rows_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
         }
@@ -261,9 +261,9 @@ pub fn Ops(comptime Self: type) type {
         /// gathers the addressed rows of the upstream gradient.
         pub fn indexAdd(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const Self) !Self {
             const add_axis = comptime axis(tag);
-            var scattered = try ctx.scatterAddAxisRank(tag_rank, update.asRawTensor(), self.shape(), add_axis, indices);
+            var scattered = try ctx.scatterAdd(tag_rank, update.asRawTensor(), self.shape(), add_axis, indices);
             defer scattered.deinit();
-            var value = try ctx.add(self.asRawTensor(), &scattered);
+            var value = try ctx.elementwise(.add, self.asRawTensor(), &scattered);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), IndexAddBackward(tags, add_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
         }
@@ -303,7 +303,7 @@ pub fn Ops(comptime Self: type) type {
             }
             const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), raw.shape.at(take_axis));
             defer ctx.allocator.free(idx_buf);
-            var value = try ctx.takeAlongAxisRank(tag_rank, raw, take_axis, idx_buf, idx_raw.shape.at(take_axis));
+            var value = try ctx.takeAlong(tag_rank, raw, take_axis, idx_buf, idx_raw.shape.at(take_axis));
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), TakeAlongBackward(tags, take_axis), .{ ctx.allocator, self.grad_state, &self.value, idx_buf });
         }
@@ -347,9 +347,9 @@ pub fn Ops(comptime Self: type) type {
             const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), raw.shape.at(scatter_axis));
             defer ctx.allocator.free(idx_buf);
             var value = if (comptime accumulate)
-                try ctx.scatterAddAlongAxisRank(tag_rank, raw, src_raw, scatter_axis, idx_buf)
+                try ctx.scatterAddAlong(tag_rank, raw, src_raw, scatter_axis, idx_buf)
             else
-                try ctx.scatterAlongAxisRank(tag_rank, raw, src_raw, scatter_axis, idx_buf);
+                try ctx.scatterAlong(tag_rank, raw, src_raw, scatter_axis, idx_buf);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or src.requiresGrad(), ScatterAlongBackward(tags, scatter_axis, accumulate), .{ ctx.allocator, self.grad_state, src.grad_state, idx_buf, src_raw.shape.at(scatter_axis) });
         }

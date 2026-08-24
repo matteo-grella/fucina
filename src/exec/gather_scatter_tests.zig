@@ -21,7 +21,7 @@ const LayoutClass = exec.LayoutClass;
 const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 
-/// Serial reference for `scatterAddAxisRank` with axis == 0: dense zeros plus
+/// Serial reference for `scatterAdd` with axis == 0: dense zeros plus
 /// row accumulation in index order — the exact algorithm of the serial path,
 /// so parity assertions against it are BITWISE.
 fn scatterAddAxis0Reference(expected: []f32, grad: []const f32, row_len: usize, indices: []const usize) void {
@@ -39,26 +39,26 @@ test "exec context optimizes last-axis concat and updates" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var a = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
+    var b = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer b.deinit();
 
     var inputs = [_]*const Tensor{ &a, &b };
-    var joined = try ctx.concatAxisRank(2, &inputs, 1);
+    var joined = try ctx.concatAxis(.f32, 2, &inputs, 1);
     defer joined.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, joined.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 10, 20, 30, 3, 4, 40, 50, 60 }, joined.dataConst());
 
-    var update = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 7, 8, 9, 10 });
+    var update = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 7, 8, 9, 10 });
     defer update.deinit();
-    var sliced = try ctx.setSliceAxisRank(2, &joined, &update, 1, 1);
+    var sliced = try ctx.setSliceAxis(.f32, 2, &joined, &update, 1, 1);
     defer sliced.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 7, 8, 20, 30, 3, 9, 10, 50, 60 }, sliced.dataConst());
 
-    var row_update = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 100, 200, 300, 400 });
+    var row_update = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 100, 200, 300, 400 });
     defer row_update.deinit();
-    var rows = try ctx.setRowsAxisRank(2, &joined, &row_update, 1, &.{ 4, 0 });
+    var rows = try ctx.setRows(.f32, 2, &joined, &row_update, 1, &.{ 4, 0 });
     defer rows.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 200, 2, 10, 20, 100, 400, 4, 40, 50, 300 }, rows.dataConst());
 }
@@ -69,14 +69,14 @@ test "exec context zeros indexed rows on non-leading axes" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer x.deinit();
 
-    var middle = try ctx.zeroRowsAxisRank(3, &x, 1, &.{ 2, 0 });
+    var middle = try ctx.zeroRows(3, &x, 1, &.{ 2, 0 });
     defer middle.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 3, 4, 0, 0, 0, 0, 9, 10, 0, 0 }, middle.dataConst());
 
-    var last = try ctx.zeroRowsAxisRank(3, &x, 2, &.{1});
+    var last = try ctx.zeroRows(3, &x, 2, &.{1});
     defer last.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 0, 3, 0, 5, 0, 7, 0, 9, 0, 11, 0 }, last.dataConst());
 }
@@ -87,35 +87,35 @@ test "exec context runs typed data movement and indexing kernels" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var ids = try ctx.fromSliceRankTyped(.u16, 2, .{ 3, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+    var ids = try ctx.fromSlice(.u16, .{ 3, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 });
     defer ids.deinit();
 
-    var rows = try ctx.gatherAxisRankTyped(.u16, 2, &ids, 0, &.{ 2, 0 });
+    var rows = try ctx.gatherAxis(.u16, 2, &ids, 0, &.{ 2, 0 });
     defer rows.deinit();
     try std.testing.expectEqualSlices(u16, &.{ 7, 8, 9, 1, 2, 3 }, rows.dataConst());
 
-    var narrowed = try ctx.narrowAxisRankTyped(.u16, 2, &ids, 1, 1, 2);
+    var narrowed = try ctx.narrowAxis(.u16, 2, &ids, 1, 1, 2);
     defer narrowed.deinit();
     var narrowed_data: [6]u16 = undefined;
     try narrowed.copyTo(&narrowed_data);
     try std.testing.expectEqualSlices(u16, &.{ 2, 3, 5, 6, 8, 9 }, &narrowed_data);
 
-    var extra = try ctx.fromSliceRankTyped(.u16, 2, .{ 3, 1 }, &.{ 10, 11, 12 });
+    var extra = try ctx.fromSlice(.u16, .{ 3, 1 }, &.{ 10, 11, 12 });
     defer extra.deinit();
     var concat_inputs = [_]*const tensor.TensorOf(.u16){ &ids, &extra };
-    var joined = try ctx.concatAxisRankTyped(.u16, 2, &concat_inputs, 1);
+    var joined = try ctx.concatAxis(.u16, 2, &concat_inputs, 1);
     defer joined.deinit();
     try std.testing.expectEqualSlices(u16, &.{ 1, 2, 3, 10, 4, 5, 6, 11, 7, 8, 9, 12 }, joined.dataConst());
 
-    var update = try ctx.fromSliceRankTyped(.u16, 2, .{ 3, 2 }, &.{ 20, 21, 22, 23, 24, 25 });
+    var update = try ctx.fromSlice(.u16, .{ 3, 2 }, &.{ 20, 21, 22, 23, 24, 25 });
     defer update.deinit();
-    var sliced = try ctx.setSliceAxisRankTyped(.u16, 2, &joined, &update, 1, 1);
+    var sliced = try ctx.setSliceAxis(.u16, 2, &joined, &update, 1, 1);
     defer sliced.deinit();
     try std.testing.expectEqualSlices(u16, &.{ 1, 20, 21, 10, 4, 22, 23, 11, 7, 24, 25, 12 }, sliced.dataConst());
 
-    var row_update = try ctx.fromSliceRankTyped(.u16, 2, .{ 2, 4 }, &.{ 30, 31, 32, 33, 40, 41, 42, 43 });
+    var row_update = try ctx.fromSlice(.u16, .{ 2, 4 }, &.{ 30, 31, 32, 33, 40, 41, 42, 43 });
     defer row_update.deinit();
-    var replaced = try ctx.setRowsAxisRankTyped(.u16, 2, &joined, &row_update, 0, &.{ 2, 0 });
+    var replaced = try ctx.setRows(.u16, 2, &joined, &row_update, 0, &.{ 2, 0 });
     defer replaced.deinit();
     try std.testing.expectEqualSlices(u16, &.{ 40, 41, 42, 43, 4, 5, 6, 11, 30, 31, 32, 33 }, replaced.dataConst());
 }
@@ -144,19 +144,19 @@ test "scatter add axis0 parallel path matches serial reference bitwise" {
         index.* = if (i % 2 == 0) random.uintLessThan(usize, rows) else 100 + random.uintLessThan(usize, 13);
     }
 
-    var grad = try ctx.fromSliceRank(2, .{ index_count, row_len }, grad_data);
+    var grad = try ctx.fromSlice(.f32, .{ index_count, row_len }, grad_data);
     defer grad.deinit();
 
     const expected = try allocator.alloc(f32, rows * row_len);
     defer allocator.free(expected);
     scatterAddAxis0Reference(expected, grad_data, row_len, indices);
 
-    var out = try ctx.scatterAddAxisRank(2, &grad, .{ rows, row_len }, 0, indices);
+    var out = try ctx.scatterAdd(2, &grad, .{ rows, row_len }, 0, indices);
     defer out.deinit();
     try std.testing.expectEqualSlices(f32, expected, out.dataConst());
 
     // Determinism: a second run is bitwise identical.
-    var out2 = try ctx.scatterAddAxisRank(2, &grad, .{ rows, row_len }, 0, indices);
+    var out2 = try ctx.scatterAdd(2, &grad, .{ rows, row_len }, 0, indices);
     defer out2.deinit();
     try std.testing.expectEqualSlices(f32, out.dataConst(), out2.dataConst());
 }
@@ -183,13 +183,13 @@ test "scatter add axis0 single repeated index and more indices than rows" {
         defer allocator.free(indices);
         @memset(indices, 7);
 
-        var grad = try ctx.fromSliceRank(2, .{ index_count, row_len }, grad_data);
+        var grad = try ctx.fromSlice(.f32, .{ index_count, row_len }, grad_data);
         defer grad.deinit();
         const expected = try allocator.alloc(f32, rows * row_len);
         defer allocator.free(expected);
         scatterAddAxis0Reference(expected, grad_data, row_len, indices);
 
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ rows, row_len }, 0, indices);
+        var out = try ctx.scatterAdd(2, &grad, .{ rows, row_len }, 0, indices);
         defer out.deinit();
         try std.testing.expectEqualSlices(f32, expected, out.dataConst());
     }
@@ -206,13 +206,13 @@ test "scatter add axis0 single repeated index and more indices than rows" {
         defer allocator.free(indices);
         for (indices) |*index| index.* = random.uintLessThan(usize, rows);
 
-        var grad = try ctx.fromSliceRank(2, .{ index_count, row_len }, grad_data);
+        var grad = try ctx.fromSlice(.f32, .{ index_count, row_len }, grad_data);
         defer grad.deinit();
         const expected = try allocator.alloc(f32, rows * row_len);
         defer allocator.free(expected);
         scatterAddAxis0Reference(expected, grad_data, row_len, indices);
 
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ rows, row_len }, 0, indices);
+        var out = try ctx.scatterAdd(2, &grad, .{ rows, row_len }, 0, indices);
         defer out.deinit();
         try std.testing.expectEqualSlices(f32, expected, out.dataConst());
     }
@@ -240,13 +240,13 @@ test "scatter add axis0 parallel threshold boundary is bitwise seamless" {
         defer allocator.free(indices);
         for (indices) |*index| index.* = random.uintLessThan(usize, rows);
 
-        var grad = try ctx.fromSliceRank(2, .{ index_count, 1 }, grad_data);
+        var grad = try ctx.fromSlice(.f32, .{ index_count, 1 }, grad_data);
         defer grad.deinit();
         const expected = try allocator.alloc(f32, rows);
         defer allocator.free(expected);
         scatterAddAxis0Reference(expected, grad_data, 1, indices);
 
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ rows, 1 }, 0, indices);
+        var out = try ctx.scatterAdd(2, &grad, .{ rows, 1 }, 0, indices);
         defer out.deinit();
         try std.testing.expectEqualSlices(f32, expected, out.dataConst());
     }
@@ -273,22 +273,22 @@ test "scatter add rank3 axis0 parallel and axis1 generic paths" {
         defer allocator.free(indices);
         for (indices) |*index| index.* = random.uintLessThan(usize, rows);
 
-        var grad = try ctx.fromSliceRank(3, .{ index_count, 32, 256 }, grad_data);
+        var grad = try ctx.fromSlice(.f32, .{ index_count, 32, 256 }, grad_data);
         defer grad.deinit();
         const expected = try allocator.alloc(f32, rows * row_len);
         defer allocator.free(expected);
         scatterAddAxis0Reference(expected, grad_data, row_len, indices);
 
-        var out = try ctx.scatterAddAxisRank(3, &grad, .{ rows, 32, 256 }, 0, indices);
+        var out = try ctx.scatterAdd(3, &grad, .{ rows, 32, 256 }, 0, indices);
         defer out.deinit();
         try std.testing.expectEqualSlices(f32, expected, out.dataConst());
     }
 
     // axis != 0 keeps the generic strided path (small reference check).
     {
-        var grad = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 10, 20, 30 });
+        var grad = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 10, 20, 30 });
         defer grad.deinit();
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ 2, 2 }, 1, &.{ 1, 0, 1 });
+        var out = try ctx.scatterAdd(2, &grad, .{ 2, 2 }, 1, &.{ 1, 0, 1 });
         defer out.deinit();
         try std.testing.expectEqualSlices(f32, &.{ 2, 4, 20, 40 }, out.dataConst());
     }
@@ -299,23 +299,23 @@ test "exec pad places the body at offset before and fills the rest" {
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer x.deinit();
 
     // torch F.pad(x, (1, 2), value=9): last axis grows 2 -> 5.
-    var last = try ctx.padAxisRank(2, &x, 1, 1, 2, 9);
+    var last = try ctx.pad(2, &x, 1, 1, 2, 9);
     defer last.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, last.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 9, 1, 2, 9, 9, 9, 3, 4, 9, 9 }, last.dataConst());
 
     // torch F.pad(x, (0, 0, 2, 1), value=0): first axis 2 -> 5.
-    var first = try ctx.padAxisRank(2, &x, 0, 2, 1, 0);
+    var first = try ctx.pad(2, &x, 0, 2, 1, 0);
     defer first.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 5, 2 }, first.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 1, 2, 3, 4, 0, 0 }, first.dataConst());
 
     // before == after == 0 is an identity copy.
-    var same = try ctx.padAxisRank(2, &x, 1, 0, 0, 7);
+    var same = try ctx.pad(2, &x, 1, 0, 0, 7);
     defer same.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, same.dataConst());
 }

@@ -33,18 +33,18 @@ const runScatterAddRowsTask = exec_row_ops.runScatterAddRowsTask;
 /// `out[h,qi,kj] = bd[h, qi, kj + (Tq-1) - qi]` — the closed form of the NeMo
 /// relpos pad/reshape/view remap (and parakeet.cpp's skew). `P` must be
 /// `>= Tk + Tq - 1`. Differentiable via `RelposShiftBackward` (scatter VJP).
-pub fn relposShiftRank3(ctx: *ExecContext, bd: *const Tensor, t_k: usize) !Tensor {
+pub fn relposShift(ctx: *ExecContext, bd: *const Tensor, t_k: usize) !Tensor {
     const v = try bd.rankView(3);
     const h = v.shape[0];
     const t_q = v.shape[1];
     const p = v.shape[2];
     if (t_q == 0 or t_k == 0 or p < t_k + t_q - 1) return tensor.TensorError.InvalidShape;
 
-    var bb = try ctx.prepareContiguous(bd);
+    var bb = try ctx.prepareContiguous(.f32, bd);
     defer bb.deinit();
     const input = bb.tensor().dataConst();
 
-    var out = try ctx.emptyRank(3, .{ h, t_q, t_k });
+    var out = try ctx.empty(.f32, .{ h, t_q, t_k });
     errdefer out.deinit();
     const output = out.data();
 
@@ -58,11 +58,7 @@ pub fn relposShiftRank3(ctx: *ExecContext, bd: *const Tensor, t_k: usize) !Tenso
     return out;
 }
 
-pub fn narrowAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
-    return narrowAxisRankTyped(ctx, .f32, rank, x, axis, start, length);
-}
-
-pub fn narrowAxisRankTyped(
+pub fn narrowAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -85,11 +81,7 @@ pub fn narrowAxisRankTyped(
     return x.viewWithStridesOffset(out_shape[0..], source.strides[0..], offset_delta);
 }
 
-pub fn concatAxisRank(ctx: *ExecContext, comptime rank: usize, inputs: []const *const Tensor, comptime axis: usize) !Tensor {
-    return concatAxisRankTyped(ctx, .f32, rank, inputs, axis);
-}
-
-pub fn concatAxisRankTyped(
+pub fn concatAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -112,7 +104,7 @@ pub fn concatAxisRankTyped(
     }
     if (out_shape[axis] == 0) return tensor.TensorError.InvalidShape;
 
-    var out = try ctx.emptyRankTyped(dtype, rank, out_shape);
+    var out = try ctx.empty(dtype, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -145,7 +137,7 @@ pub fn concatAxisRankTyped(
     var axis_offset: usize = 0;
     for (inputs) |input| {
         const view = try input.rankView(rank);
-        var prepared = try ctx.prepareContiguousTyped(dtype, input);
+        var prepared = try ctx.prepareContiguous(dtype, input);
         defer prepared.deinit();
         const input_data = prepared.tensor().dataConst();
         const copy_len = view.shape[axis] * inner;
@@ -160,12 +152,12 @@ pub fn concatAxisRankTyped(
     return out;
 }
 
-pub fn concatQuantizedRowsTyped(
+pub fn concatQuantizedRows(
     ctx: *ExecContext,
     comptime dtype: DType,
     inputs: []const *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
-    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("concatQuantizedRowsTyped requires a block-quantized dtype");
+    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("concatQuantizedRows requires a block-quantized dtype");
     if (inputs.len == 0) return tensor.TensorError.InvalidShape;
 
     const first = try inputs[0].rankView(2);
@@ -180,7 +172,7 @@ pub fn concatQuantizedRowsTyped(
     }
     if (rows == 0) return tensor.TensorError.InvalidShape;
 
-    var out = try ctx.emptyRankTyped(dtype, 2, .{ rows, cols });
+    var out = try ctx.empty(dtype, .{ rows, cols });
     errdefer out.deinit();
     const output = out.data();
 
@@ -199,7 +191,7 @@ pub fn concatQuantizedRowsTyped(
 /// dim): the output grows by `before + after` on that axis, the body is
 /// copied at offset `before`, and the pad positions hold `fill`. The VJP is
 /// a narrow of the upstream gradient at offset `before` (`PadBackward`).
-pub fn padAxisRank(
+pub fn pad(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -215,11 +207,11 @@ pub fn padAxisRank(
     var out_shape = source.shape;
     out_shape[axis] = try std.math.add(usize, source.shape[axis], try std.math.add(usize, before, after));
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, out_shape);
+    var out = try ctx.empty(.f32, out_shape);
     errdefer out.deinit();
     const output = out.data();
     @memset(output, fill);
@@ -235,11 +227,7 @@ pub fn padAxisRank(
     return out;
 }
 
-pub fn gatherAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-    return gatherAxisRankTyped(ctx, .f32, rank, x, axis, indices);
-}
-
-pub fn gatherAxisRankTyped(
+pub fn gatherAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -259,12 +247,12 @@ pub fn gatherAxisRankTyped(
     var out_shape = source.shape;
     out_shape[axis] = indices.len;
 
-    var xx = try ctx.prepareContiguousTyped(dtype, x);
+    var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try ctx.emptyRankTyped(dtype, rank, out_shape);
+    var out = try ctx.empty(dtype, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -295,11 +283,7 @@ pub fn gatherAxisRankTyped(
     return out;
 }
 
-pub fn setSliceAxisRank(ctx: *ExecContext, comptime rank: usize, base: *const Tensor, update: *const Tensor, comptime axis: usize, start: usize) !Tensor {
-    return setSliceAxisRankTyped(ctx, .f32, rank, base, update, axis, start);
-}
-
-pub fn setSliceAxisRankTyped(
+pub fn setSliceAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -316,17 +300,13 @@ pub fn setSliceAxisRankTyped(
         if (dim != axis and uv.shape[dim] != source.shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
 
-    var out = try ctx.materializeTyped(dtype, base);
+    var out = try ctx.materialize(dtype, base);
     errdefer out.deinit();
-    try writeSliceAxisRankTyped(ctx, dtype, rank, &out, update, axis, start);
+    try writeSliceAxis(ctx, dtype, rank, &out, update, axis, start);
     return out;
 }
 
-pub fn setRowsAxisRank(ctx: *ExecContext, comptime rank: usize, base: *const Tensor, update: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-    return setRowsAxisRankTyped(ctx, .f32, rank, base, update, axis, indices);
-}
-
-pub fn setRowsAxisRankTyped(
+pub fn setRows(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -344,9 +324,9 @@ pub fn setRowsAxisRankTyped(
     }
     try validateUniqueIndices(ctx, indices, source.shape[axis]);
 
-    var out = try ctx.materializeTyped(dtype, base);
+    var out = try ctx.materialize(dtype, base);
     errdefer out.deinit();
-    try writeRowsAxisRankTyped(ctx, dtype, rank, &out, update, axis, indices);
+    try writeRowsAxis(ctx, dtype, rank, &out, update, axis, indices);
     return out;
 }
 
@@ -384,7 +364,7 @@ fn runTakeAlongTask(task: *const TakeAlongTask) void {
 /// slices (disjoint writes; bitwise identical for any thread count).
 /// Out-of-range entries error with `IndexOutOfBounds` (validated up
 /// front, before dispatch).
-pub fn takeAlongAxisRank(
+pub fn takeAlong(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -406,11 +386,11 @@ pub fn takeAlongAxisRank(
         if (index >= axis_dim) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, out_shape);
+    var out = try ctx.empty(.f32, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -438,7 +418,7 @@ pub fn takeAlongAxisRank(
 /// src[..., i, ...]`. `src` matches `base` except along `axis`; `indices`
 /// is the flat row-major index buffer of `src`'s shape. Duplicate indices
 /// accumulate. Serial in row-major order (deterministic).
-pub fn scatterAddAlongAxisRank(
+pub fn scatterAddAlong(
     ctx: *ExecContext,
     comptime rank: usize,
     base: *const Tensor,
@@ -446,15 +426,15 @@ pub fn scatterAddAlongAxisRank(
     comptime axis: usize,
     indices: []const usize,
 ) !Tensor {
-    return scatterAlongAxisRankImpl(ctx, rank, base, src, axis, indices, .add);
+    return scatterAlongImpl(ctx, rank, base, src, axis, indices, .add);
 }
 
 /// Copy of `base` with `src` written at per-element positions along
 /// `axis` (torch.scatter with a tensor source): like
-/// `scatterAddAlongAxisRank` but overwriting — duplicate indices resolve
+/// `scatterAddAlong` but overwriting — duplicate indices resolve
 /// deterministically to the LAST write in row-major `src` order (torch
 /// leaves duplicate order unspecified; this pins it).
-pub fn scatterAlongAxisRank(
+pub fn scatterAlong(
     ctx: *ExecContext,
     comptime rank: usize,
     base: *const Tensor,
@@ -462,10 +442,10 @@ pub fn scatterAlongAxisRank(
     comptime axis: usize,
     indices: []const usize,
 ) !Tensor {
-    return scatterAlongAxisRankImpl(ctx, rank, base, src, axis, indices, .write);
+    return scatterAlongImpl(ctx, rank, base, src, axis, indices, .write);
 }
 
-fn scatterAlongAxisRankImpl(
+fn scatterAlongImpl(
     ctx: *ExecContext,
     comptime rank: usize,
     base: *const Tensor,
@@ -489,11 +469,11 @@ fn scatterAlongAxisRankImpl(
         if (index >= axis_dim) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var ss = try ctx.prepareContiguous(src);
+    var ss = try ctx.prepareContiguous(.f32, src);
     defer ss.deinit();
     const source = ss.tensor().dataConst();
 
-    var out = try ctx.materialize(base);
+    var out = try ctx.materialize(.f32, base);
     errdefer out.deinit();
     const output = out.data();
 
@@ -558,14 +538,14 @@ fn runScatterAlongTask(comptime mode: ScatterMode) fn (*const ScatterAlongTask(m
     }.run;
 }
 
-pub fn zeroSliceAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
+pub fn zeroSlice(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     if (length == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
     if (start > source.shape[axis] or length > source.shape[axis] - start) return tensor.TensorError.IndexOutOfBounds;
 
-    var out = try ctx.materialize(x);
+    var out = try ctx.materialize(.f32, x);
     errdefer out.deinit();
     const output = out.data();
     const inner = productAfterAxis(rank, source.shape, axis);
@@ -578,7 +558,7 @@ pub fn zeroSliceAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tens
     return out;
 }
 
-pub fn zeroRowsAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
+pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
@@ -587,7 +567,7 @@ pub fn zeroRowsAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
         if (index >= source.shape[axis]) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var out = try ctx.materialize(x);
+    var out = try ctx.materialize(.f32, x);
     errdefer out.deinit();
     const output = out.data();
     if (comptime axis == 0) {
@@ -619,7 +599,7 @@ pub fn zeroRowsAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
     return out;
 }
 
-pub fn sliceGradientAxisRank(ctx: *ExecContext, comptime rank: usize, grad: *const Tensor, source_shape: [rank]usize, comptime axis: usize, start: usize) !Tensor {
+pub fn sliceGradient(ctx: *ExecContext, comptime rank: usize, grad: *const Tensor, source_shape: [rank]usize, comptime axis: usize, start: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     _ = try tensor.elementCountArray(rank, source_shape);
@@ -629,14 +609,14 @@ pub fn sliceGradientAxisRank(ctx: *ExecContext, comptime rank: usize, grad: *con
         if (dim != axis and gv.shape[dim] != source_shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
 
-    // One fused pass instead of zerosRank + writeSliceAxisRank: per outer
+    // One fused pass instead of zeros + writeSliceAxis: per outer
     // block, memset the gap before the slice, copy the slice rows, memset
     // the gap after — every output byte is touched exactly once, threaded
     // over outer blocks. With recycled (non-fresh) buffers the two-pass
     // form pays a full extra memory walk.
-    var out = try ctx.emptyRank(rank, source_shape);
+    var out = try ctx.empty(.f32, source_shape);
     errdefer out.deinit();
-    var gg = try ctx.prepareContiguous(grad);
+    var gg = try ctx.prepareContiguous(.f32, grad);
     defer gg.deinit();
     const base = SliceGradientFillTask{
         .input = gg.tensor().dataConst(),
@@ -692,7 +672,7 @@ fn runSliceGradientFillTask(task: *const SliceGradientFillTask) void {
     }
 }
 
-pub fn scatterAddAxisRank(
+pub fn scatterAdd(
     ctx: *ExecContext,
     comptime rank: usize,
     grad: *const Tensor,
@@ -713,7 +693,7 @@ pub fn scatterAddAxisRank(
         if (index >= source_shape[axis]) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var gg = try ctx.prepareContiguous(grad);
+    var gg = try ctx.prepareContiguous(.f32, grad);
     defer gg.deinit();
     const input = gg.tensor().dataConst();
 
@@ -731,7 +711,7 @@ pub fn scatterAddAxisRank(
         // identical to the serial path below (see ScatterAddRowsTask).
         const total_work = source_len +| input.len;
         if (rows > 1 and total_work >= parallel.vector_elementwise_len_threshold) {
-            var out = try ctx.emptyRank(rank, source_shape);
+            var out = try ctx.empty(.f32, source_shape);
             errdefer out.deinit();
             const base_task: ScatterAddRowsTask = .{
                 .grad = input,
@@ -746,7 +726,7 @@ pub fn scatterAddAxisRank(
             return out;
         }
 
-        var out = try ctx.zerosRank(rank, source_shape);
+        var out = try ctx.zeros(.f32, source_shape);
         errdefer out.deinit();
         const output = out.data();
         for (indices, 0..) |index, row| {
@@ -757,7 +737,7 @@ pub fn scatterAddAxisRank(
         return out;
     }
 
-    var out = try ctx.zerosRank(rank, source_shape);
+    var out = try ctx.zeros(.f32, source_shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -778,11 +758,11 @@ pub fn scatterAddAxisRank(
     return out;
 }
 
-fn writeSliceAxisRank(ctx: *ExecContext, comptime rank: usize, target: *Tensor, update: *const Tensor, comptime axis: usize, start: usize) !void {
-    return writeSliceAxisRankTyped(ctx, .f32, rank, target, update, axis, start);
+fn writeSliceAxisF32(ctx: *ExecContext, comptime rank: usize, target: *Tensor, update: *const Tensor, comptime axis: usize, start: usize) !void {
+    return writeSliceAxis(ctx, .f32, rank, target, update, axis, start);
 }
 
-fn writeSliceAxisRankTyped(
+fn writeSliceAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -799,7 +779,7 @@ fn writeSliceAxisRankTyped(
         if (dim != axis and uv.shape[dim] != tv.shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
 
-    var uu = try ctx.prepareContiguousTyped(dtype, update);
+    var uu = try ctx.prepareContiguous(dtype, update);
     defer uu.deinit();
     const input = uu.tensor().dataConst();
     const output = target.data();
@@ -824,7 +804,7 @@ fn writeSliceAxisRankTyped(
     }
 }
 
-fn writeRowsAxisRankTyped(
+fn writeRowsAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime rank: usize,
@@ -844,7 +824,7 @@ fn writeRowsAxisRankTyped(
         if (index >= tv.shape[axis]) return tensor.TensorError.IndexOutOfBounds;
     }
 
-    var uu = try ctx.prepareContiguousTyped(dtype, update);
+    var uu = try ctx.prepareContiguous(dtype, update);
     defer uu.deinit();
     const input = uu.tensor().dataConst();
     const output = target.data();

@@ -105,7 +105,7 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
         pub fn forward(ctx: *ExecContext, extra: Extra, inputs: []const *const RawTensor) !RawTensor {
             var x = try contiguousForRead(ctx, inputs[0]);
             defer x.deinit();
-            var out = try ctx.empty(inputs[0].shape.slice());
+            var out = try ctx.empty(.f32, inputs[0].shape.slice());
             errdefer out.deinit();
             const Body = struct {
                 out: []f32,
@@ -144,7 +144,7 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
             defer y.deinit();
             var g = try contiguousForRead(ctx, gy);
             defer g.deinit();
-            var gx = try ctx.empty(inputs[0].shape.slice());
+            var gx = try ctx.empty(.f32, inputs[0].shape.slice());
             errdefer gx.deinit();
             const Body = struct {
                 gx: []f32,
@@ -188,12 +188,12 @@ fn BinarySpec(
         pub const Output = OutputT;
 
         pub fn forward(ctx: *ExecContext, extra: Extra, inputs: []const *const RawTensor) !RawTensor {
-            const result_shape = try tag_ops.pointwiseShape(result_tags, left_tags, inputs[0], right_tags, inputs[1]);
+            const result_shape = try tag_ops.pointwiseShape(.f32, result_tags, left_tags, inputs[0], right_tags, inputs[1]);
             var a = try broadcastContiguous(left_tags, inputs[0], result_shape, ctx);
             defer a.deinit();
             var b = try broadcastContiguous(right_tags, inputs[1], result_shape, ctx);
             defer b.deinit();
-            var out = try ctx.empty(result_shape[0..]);
+            var out = try ctx.empty(.f32, result_shape[0..]);
             errdefer out.deinit();
             const Body = struct {
                 out: []f32,
@@ -230,7 +230,7 @@ fn BinarySpec(
             needs_grad: []const bool,
             out: []?RawTensor,
         ) !void {
-            const result_shape = try tag_ops.pointwiseShape(result_tags, left_tags, inputs[0], right_tags, inputs[1]);
+            const result_shape = try tag_ops.pointwiseShape(.f32, result_tags, left_tags, inputs[0], right_tags, inputs[1]);
             var a = try broadcastContiguous(left_tags, inputs[0], result_shape, ctx);
             defer a.deinit();
             var b = try broadcastContiguous(right_tags, inputs[1], result_shape, ctx);
@@ -273,13 +273,13 @@ fn BinarySpec(
             };
 
             if (needs_grad[0]) {
-                var full = try ctx.empty(result_shape[0..]);
+                var full = try ctx.empty(.f32, result_shape[0..]);
                 defer full.deinit();
                 dispatchElemental(Body, .{ .grad = full.data(), .a = a.dataConst(), .b = b.dataConst(), .y = y.dataConst(), .g = g.dataConst(), .extra = extra, .which = .a }, ctx);
                 out[0] = try reduceGradientToTags(result_tags, left_tags, ctx, &full, shapeOf(rawRank(left_tags.len), inputs[0]));
             }
             if (needs_grad[1]) {
-                var full = try ctx.empty(result_shape[0..]);
+                var full = try ctx.empty(.f32, result_shape[0..]);
                 defer full.deinit();
                 dispatchElemental(Body, .{ .grad = full.data(), .a = a.dataConst(), .b = b.dataConst(), .y = y.dataConst(), .g = g.dataConst(), .extra = extra, .which = .b }, ctx);
                 out[1] = try reduceGradientToTags(result_tags, right_tags, ctx, &full, shapeOf(rawRank(right_tags.len), inputs[1]));
@@ -293,7 +293,7 @@ fn BinarySpec(
             ctx: *ExecContext,
         ) !RawTensor {
             if (comptime result_tags.len == 0) return contiguousForRead(ctx, source);
-            var view = try tag_ops.broadcastTensorTo(source_tags, source, result_tags, result_shape);
+            var view = try tag_ops.broadcastTensorTo(.f32, source_tags, source, result_tags, result_shape);
             defer view.deinit();
             return contiguousForRead(ctx, &view);
         }

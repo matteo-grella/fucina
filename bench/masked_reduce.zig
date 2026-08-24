@@ -35,7 +35,7 @@ fn randomRows(ctx: *ExecContext, allocator: std.mem.Allocator, rows: usize, cols
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
     for (data) |*value| value.* = random.floatNorm(f32) * 2;
-    return ctx.fromSliceRank(2, .{ rows, cols }, data);
+    return ctx.fromSlice(.f32, .{ rows, cols }, data);
 }
 
 /// `keep_fraction` of the entries select, drawn deterministically so the two
@@ -46,7 +46,7 @@ fn randomMask(ctx: *ExecContext, allocator: std.mem.Allocator, rows: usize, cols
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
     for (data) |*value| value.* = random.float(f32) < keep_fraction;
-    return ctx.fromSliceRankTyped(.bool, 2, .{ rows, cols }, data);
+    return ctx.fromSlice(.bool, .{ rows, cols }, data);
 }
 
 fn invert(ctx: *ExecContext, mask: *const BoolTensor, allocator: std.mem.Allocator) !BoolTensor {
@@ -54,7 +54,7 @@ fn invert(ctx: *ExecContext, mask: *const BoolTensor, allocator: std.mem.Allocat
     const data = try allocator.alloc(bool, source.len);
     defer allocator.free(data);
     for (data, source) |*dst, keep| dst.* = !keep;
-    return ctx.fromSliceRankTyped(.bool, 2, .{ mask.shape.at(0), mask.shape.at(1) }, data);
+    return ctx.fromSlice(.bool, .{ mask.shape.at(0), mask.shape.at(1) }, data);
 }
 
 fn report(stdout: anytype, label: []const u8, ns: u64, iterations: usize) !void {
@@ -84,21 +84,21 @@ fn benchAxis(
 
     // Warm the pool so the first timed iteration is not the one that allocates.
     {
-        var warm = try ctx.sumMaskedAxisRank(.bool, 2, &x, &mask, axis, null);
+        var warm = try ctx.sumMasked(.bool, 2, &x, &mask, axis, null);
         warm.deinit();
     }
 
     var timer = try Timer.start(io);
     for (0..iterations) |_| {
-        var out = try ctx.sumAxisRank(2, &x, axis);
+        var out = try ctx.sumAxis(.f32, 2, &x, axis);
         out.deinit();
     }
     try report(stdout, "unmasked", timer.read(), iterations);
 
     timer.reset();
     for (0..iterations) |_| {
-        var zeroed = try ctx.maskedFillTyped(.bool, &x, &drop, 0);
-        var out = try ctx.sumAxisRank(2, &zeroed, axis);
+        var zeroed = try ctx.maskedFill(.bool, &x, &drop, 0);
+        var out = try ctx.sumAxis(.f32, 2, &zeroed, axis);
         out.deinit();
         zeroed.deinit();
     }
@@ -106,7 +106,7 @@ fn benchAxis(
 
     timer.reset();
     for (0..iterations) |_| {
-        var out = try ctx.sumMaskedAxisRank(.bool, 2, &x, &mask, axis, null);
+        var out = try ctx.sumMasked(.bool, 2, &x, &mask, axis, null);
         out.deinit();
     }
     try report(stdout, "fused", timer.read(), iterations);

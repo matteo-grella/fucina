@@ -66,16 +66,16 @@ pub const LayerNormAffineBackwardResult = struct {
     }
 };
 
-pub fn rmsNormAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn rmsNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -101,7 +101,7 @@ pub fn rmsNormAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor
     return out;
 }
 
-pub fn rmsNormMulAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -110,14 +110,14 @@ pub fn rmsNormMulAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
     const axis_dim = source.shape[axis];
     if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
     const input = xx.tensor().dataConst();
     const weights = ww.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -163,7 +163,7 @@ pub fn rmsNormMulAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Ten
     return out;
 }
 
-pub fn rmsNormMulAddAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, residual);
@@ -173,17 +173,17 @@ pub fn rmsNormMulAddAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const 
     const axis_dim = source.shape[axis];
     if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
-    var rr = try ctx.prepareContiguous(residual);
+    var rr = try ctx.prepareContiguous(.f32, residual);
     defer rr.deinit();
     const input = xx.tensor().dataConst();
     const weights = ww.tensor().dataConst();
     const residual_data = rr.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -230,7 +230,7 @@ pub fn rmsNormMulAddAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const 
     return out;
 }
 
-pub fn rmsNormMulBackwardInputAxisRank(
+pub fn rmsNormMulBackwardInput(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -248,17 +248,17 @@ pub fn rmsNormMulBackwardInputAxisRank(
     const axis_dim = source.shape[axis];
     if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const weights = ww.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -309,7 +309,7 @@ pub fn rmsNormMulBackwardInputAxisRank(
     return out;
 }
 
-pub fn rmsNormMulBackwardWeightAxisRank(
+pub fn rmsNormMulBackwardWeight(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -324,14 +324,14 @@ pub fn rmsNormMulBackwardWeightAxisRank(
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
-    var out = try ctx.zerosRank(1, .{axis_dim});
+    var out = try ctx.zeros(.f32, .{axis_dim});
     errdefer out.deinit();
     const output = out.data();
 
@@ -409,7 +409,7 @@ pub fn rmsNormMulBackwardWeightAxisRank(
 /// normalized-and-scaled values directly (no intermediate normalized
 /// tensor). Positions come from the precomputed sin/cos table; the fused
 /// form matches the composed pair to f32 roundoff, not bitwise.
-pub fn rmsNormMulRopeAxisRankWithTable(
+pub fn rmsNormMulRopeWithTable(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -430,13 +430,13 @@ pub fn rmsNormMulRopeAxisRankWithTable(
     if (table.feature_dim != feature_dim or table.positions.len != source.shape[position_axis]) return tensor.TensorError.ShapeMismatch;
     if (feature_dim % 2 != 0) return tensor.TensorError.InvalidShape;
 
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
     @constCast(x.buffer).waitReady();
     const input = x.buffer.data;
     const weights = ww.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -585,20 +585,20 @@ pub fn rmsNormMulRopeAxisRankWithTable(
     return out;
 }
 
-pub fn rmsNormBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
 
     const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const gyd = ggy.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -646,7 +646,7 @@ pub fn layerNormAffineRows(
     if (input.len != rows * cols) return tensor.TensorError.InvalidDataLength;
     if (weight.len != cols or bias.len != cols) return tensor.TensorError.ShapeMismatch;
 
-    var out = try ctx.emptyRank(2, .{ rows, cols });
+    var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     const base_task: LayerNormRowsTask = .{
         .input = input,
@@ -668,13 +668,13 @@ pub fn layerNormAffineRows(
     return out;
 }
 
-pub fn layerNormAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn layerNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     return layerNormDispatchAxisRank(ctx, rank, x, null, null, axis, eps);
 }
 
-/// Fused affine LayerNorm: layerNormAxisRank followed by `* weight + bias`
+/// Fused affine LayerNorm: layerNorm followed by `* weight + bias`
 /// (both rank-1 of the axis length) in the same row pass.
-pub fn layerNormAffineAxisRank(
+pub fn layerNormAffine(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -690,9 +690,9 @@ pub fn layerNormAffineAxisRank(
     const bias_view = try bias.rankView(1);
     if (bias_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
 
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
-    var bb = try ctx.prepareContiguous(bias);
+    var bb = try ctx.prepareContiguous(.f32, bias);
     defer bb.deinit();
     return layerNormDispatchAxisRank(ctx, rank, x, ww.tensor().dataConst(), bb.tensor().dataConst(), axis, eps);
 }
@@ -710,11 +710,11 @@ fn layerNormDispatchAxisRank(
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
@@ -776,7 +776,7 @@ fn layerNormDispatchAxisRank(
 /// applied in f32 (eps INSIDE the sqrt; the 1/sqrt scale is computed in f32,
 /// matching ggml). Optional per-channel affine `y = y*weight[c] + bias[c]`
 /// (`[C]` each) is applied AFTER normalization.
-pub fn groupNormAxisRank(
+pub fn groupNorm(
     ctx: *ExecContext,
     x: *const Tensor,
     groups: usize,
@@ -796,7 +796,7 @@ pub fn groupNormAxisRank(
     if (weight) |w| {
         const wv = try w.rankView(1);
         if (wv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        ww = try ctx.prepareContiguous(w);
+        ww = try ctx.prepareContiguous(.f32, w);
         weight_slice = ww.?.tensor().dataConst();
     }
     var bb: ?ExecContext.PreparedTensor = null;
@@ -805,14 +805,14 @@ pub fn groupNormAxisRank(
     if (bias) |b| {
         const bv = try b.rankView(1);
         if (bv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        bb = try ctx.prepareContiguous(b);
+        bb = try ctx.prepareContiguous(.f32, b);
         bias_slice = bb.?.tensor().dataConst();
     }
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
 
-    var out = try ctx.emptyRank(2, .{ rows, cols });
+    var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
     kernels.groupNormInto(ctx.pc(), &out, xx.tensor(), weight_slice, bias_slice, rows, cols, groups, eps);
@@ -832,7 +832,7 @@ pub const GroupNormBackwardResult = struct {
     }
 };
 
-/// VJP of groupNormAxisRank. Computes only the requested gradients:
+/// VJP of groupNorm. Computes only the requested gradients:
 ///   dx = (1/σ_g)·(ĝ − mean_G(ĝ) − x̂·mean_G(ĝ·x̂)) per group, with
 ///        ĝ = gy⊙weight (or gy when the forward had no affine weight) and
 ///        the group statistics RECOMPUTED from `x` with the forward's exact
@@ -843,7 +843,7 @@ pub const GroupNormBackwardResult = struct {
 /// null otherwise. One backend kernel fills all requested outputs, parallel
 /// over whole groups (disjoint column slices ⇒ bitwise identical for any
 /// thread count).
-pub fn groupNormBackwardAxisRank(
+pub fn groupNormBackward(
     ctx: *ExecContext,
     x: *const Tensor,
     gy: *const Tensor,
@@ -867,20 +867,20 @@ pub fn groupNormBackwardAxisRank(
     if (weight) |w| {
         const wv = try w.rankView(1);
         if (wv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        ww = try ctx.prepareContiguous(w);
+        ww = try ctx.prepareContiguous(.f32, w);
         weight_slice = ww.?.tensor().dataConst();
     }
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var gg = try ctx.prepareContiguous(gy);
+    var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
 
     var result = GroupNormBackwardResult{};
     errdefer result.deinit();
-    if (need_input) result.input = try ctx.emptyRank(2, .{ rows, cols });
-    if (need_weight) result.weight = try ctx.emptyRank(1, .{cols});
-    if (need_bias) result.bias = try ctx.emptyRank(1, .{cols});
+    if (need_input) result.input = try ctx.empty(.f32, .{ rows, cols });
+    if (need_weight) result.weight = try ctx.empty(.f32, .{cols});
+    if (need_bias) result.bias = try ctx.empty(.f32, .{cols});
     if (!need_input and !need_weight and !need_bias) return result;
 
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
@@ -900,21 +900,21 @@ pub fn groupNormBackwardAxisRank(
     return result;
 }
 
-/// VJP of layerNormAxisRank (dx only):
+/// VJP of layerNorm (dx only):
 /// dx = (1/σ)(gy − mean(gy) − x̂·mean(gy·x̂)) with x̂ = (x−μ)/σ.
-pub fn layerNormBackwardAxisRank(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+pub fn layerNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     const result = try layerNormBackwardDispatchAxisRank(ctx, rank, x, null, gy, axis, eps, true, false, false);
     return result.input.?;
 }
 
-/// VJP of layerNormAffineAxisRank. Computes only the requested gradients:
-/// dx as in layerNormBackwardAxisRank with g' = gy⊙weight in place of gy,
+/// VJP of layerNormAffine. Computes only the requested gradients:
+/// dx as in layerNormBackward with g' = gy⊙weight in place of gy,
 /// dweight = Σ_rows gy⊙x̂, dbias = Σ_rows gy. The dweight/dbias row
 /// reduction always accumulates each column in row order — serially for
 /// small inputs (layerNormAffineParamGradRows), column-partitioned across
 /// the pool for large ones (layerNormParamGradColumns) — so it is bitwise
 /// identical for any thread count.
-pub fn layerNormAffineBackwardAxisRank(
+pub fn layerNormAffineBackward(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -930,7 +930,7 @@ pub fn layerNormAffineBackwardAxisRank(
     const weight_view = try weight.rankView(1);
     if (weight_view.dim(0) != source.shape[axis]) return tensor.TensorError.ShapeMismatch;
 
-    var ww = try ctx.prepareContiguous(weight);
+    var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
     return layerNormBackwardDispatchAxisRank(ctx, rank, x, ww.tensor().dataConst(), gy, axis, eps, need_input, need_weight, need_bias);
 }
@@ -954,18 +954,18 @@ fn layerNormBackwardDispatchAxisRank(
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
 
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(gy);
+    var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
     var result = LayerNormAffineBackwardResult{};
     errdefer result.deinit();
-    if (need_input) result.input = try ctx.emptyRank(rank, source.shape);
-    if (need_weight) result.weight = try ctx.zerosRank(1, .{axis_dim});
-    if (need_bias) result.bias = try ctx.zerosRank(1, .{axis_dim});
+    if (need_input) result.input = try ctx.empty(.f32, source.shape);
+    if (need_weight) result.weight = try ctx.zeros(.f32, .{axis_dim});
+    if (need_bias) result.bias = try ctx.zeros(.f32, .{axis_dim});
     if (!need_input and !need_weight and !need_bias) return result;
 
     const inner = productAfterAxis(rank, source.shape, axis);
@@ -1066,7 +1066,7 @@ fn layerNormBackwardDispatchAxisRank(
 
     // Generic inner>1 arm: the streaming inner-lane kernel (serial — the
     // dweight/dbias accumulation crosses lanes).
-    var scratch = try ctx.emptyRank(1, .{4 * inner});
+    var scratch = try ctx.empty(.f32, .{4 * inner});
     defer scratch.deinit();
     exec_row_ops.layerNormBackwardInner(.{
         .input = input,

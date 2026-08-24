@@ -1,6 +1,6 @@
 //! Scatter-add (embedding-gradient) kernel benchmark (`zig build bench-scatter`).
 //!
-//! Times `scatterAddAxisRank` axis==0 at the embedding-gradient shape: the
+//! Times `scatterAdd` axis==0 at the embedding-gradient shape: the
 //! GatherBackward VJP scatters a (tokens, dim) gradient into a zeroed
 //! (vocab, dim) table — for Qwen3 0.6B that is a 151936x1024 f32 output
 //! (622 MB zero-fill) plus per-index row accumulation. Index distributions
@@ -32,7 +32,7 @@ fn randomGrad(ctx: *ExecContext, allocator: std.mem.Allocator, rows: usize, cols
     const data = try allocator.alloc(f32, rows * cols);
     defer allocator.free(data);
     fillRandom(data, seed);
-    return ctx.fromSliceRank(2, .{ rows, cols }, data);
+    return ctx.fromSlice(.f32, .{ rows, cols }, data);
 }
 
 /// `band == 0` draws uniform over the whole vocab; otherwise all indices land
@@ -65,12 +65,12 @@ fn benchScatterAdd(
     defer allocator.free(indices);
 
     for (0..2) |_| {
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ vocab, dim }, 0, indices);
+        var out = try ctx.scatterAdd(2, &grad, .{ vocab, dim }, 0, indices);
         out.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var out = try ctx.scatterAddAxisRank(2, &grad, .{ vocab, dim }, 0, indices);
+        var out = try ctx.scatterAdd(2, &grad, .{ vocab, dim }, 0, indices);
         out.deinit();
     }
     const ns = timer.read() / iters;

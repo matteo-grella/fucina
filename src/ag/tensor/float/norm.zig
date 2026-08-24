@@ -37,7 +37,7 @@ pub fn Ops(comptime Self: type) type {
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
         /// GroupNorm over `[time, channel]` rows (ggml semantics; see
-        /// `groupNormAxisRank`): per group of channel columns, f64-accumulated
+        /// `groupNorm`): per group of channel columns, f64-accumulated
         /// mean + biased variance over all time × (C/groups) elements, then
         /// `y = (x − mean)/sqrt(var + eps)` in f32 (eps inside the sqrt), with
         /// the optional per-channel affine `y*weight + bias` applied AFTER
@@ -72,28 +72,28 @@ pub fn Ops(comptime Self: type) type {
                 break :blk b.asRawTensor();
             } else null;
 
-            var value = try ctx.groupNormAxisRank(self.asRawTensor(), groups, eps, weight_raw, bias_raw);
+            var value = try ctx.groupNorm(self.asRawTensor(), groups, eps, weight_raw, bias_raw);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, any_grad, GroupNormBackward(tags), .{ ctx.allocator, self.grad_state, weight_parent, bias_parent, self.asRawTensor(), weight_raw, groups, eps });
         }
 
         pub fn rmsNorm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNormAxisRank(tag_rank, self.asRawTensor(), norm_axis, eps);
+            var value = try ctx.rmsNorm(tag_rank, self.asRawTensor(), norm_axis, eps);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), RmsNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
         }
 
         pub fn rmsNormMul(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Tensor(.{tag}), eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNormMulAxisRank(tag_rank, self.asRawTensor(), weight.asRawTensor(), norm_axis, eps);
+            var value = try ctx.rmsNormMul(tag_rank, self.asRawTensor(), weight.asRawTensor(), norm_axis, eps);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or weight.requiresGrad(), RmsNormMulBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
         }
 
         pub fn rmsNormMulAdd(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Tensor(.{tag}), residual: *const Self, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNormMulAddAxisRank(tag_rank, self.asRawTensor(), weight.asRawTensor(), residual.asRawTensor(), norm_axis, eps);
+            var value = try ctx.rmsNormMulAdd(tag_rank, self.asRawTensor(), weight.asRawTensor(), residual.asRawTensor(), norm_axis, eps);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad(), RmsNormMulAddBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, residual.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
         }
@@ -109,7 +109,7 @@ pub fn Ops(comptime Self: type) type {
         ) !Self {
             const position_axis = comptime axis(position_tag);
             const feature_axis = comptime axis(feature_tag);
-            var value = try ctx.rmsNormMulRopeAxisRankWithTable(
+            var value = try ctx.rmsNormMulRopeWithTable(
                 tag_rank,
                 self.asRawTensor(),
                 weight.asRawTensor(),
@@ -151,7 +151,7 @@ pub fn Ops(comptime Self: type) type {
                 }
                 const weight_ptr = tensorObjectPtrFrom(@TypeOf(options.weight), &options.weight);
                 const bias_ptr = tensorObjectPtrFrom(@TypeOf(options.bias), &options.bias);
-                var value = try ctx.layerNormAffineAxisRank(tag_rank, self.asRawTensor(), weight_ptr.asRawTensor(), bias_ptr.asRawTensor(), norm_axis, eps);
+                var value = try ctx.layerNormAffine(tag_rank, self.asRawTensor(), weight_ptr.asRawTensor(), bias_ptr.asRawTensor(), norm_axis, eps);
                 errdefer value.deinit();
                 return finishOp(
                     tags,
@@ -162,7 +162,7 @@ pub fn Ops(comptime Self: type) type {
                     .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, bias_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), eps },
                 );
             }
-            var value = try ctx.layerNormAxisRank(tag_rank, self.asRawTensor(), norm_axis, eps);
+            var value = try ctx.layerNorm(tag_rank, self.asRawTensor(), norm_axis, eps);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), LayerNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
         }

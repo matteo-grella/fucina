@@ -50,7 +50,7 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
             const g = gy_ready.dataConst();
 
             const source_shape = rawShapeArray(source_tags, &self.input);
-            var gx = try ctx.emptyRank(rank, source_shape);
+            var gx = try ctx.empty(.f32, source_shape);
             errdefer gx.deinit();
             const gxd = gx.data();
 
@@ -110,7 +110,7 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
             const g = gy_ready.dataConst();
 
             const source_shape = rawShapeArray(source_tags, &self.output);
-            var gx = try ctx.emptyRank(rank, source_shape);
+            var gx = try ctx.empty(.f32, source_shape);
             errdefer gx.deinit();
             const gxd = gx.data();
 
@@ -158,7 +158,7 @@ pub fn SoftmaxBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.softmaxBackwardAxisRank(rawRank(tags.len), &self.output, gy, axis);
+            out[0] = try ctx.softmaxBackward(rawRank(tags.len), &self.output, gy, axis, 1);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -189,7 +189,7 @@ pub fn SoftmaxExtBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.softmaxExtBackwardAxisRank(rawRank(tags.len), &self.output, gy, axis, self.scale);
+            out[0] = try ctx.softmaxBackward(rawRank(tags.len), &self.output, gy, axis, self.scale);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {

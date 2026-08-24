@@ -36,8 +36,8 @@ const distillBackwardRows = exec_row_ops.distillBackwardRows;
 
 pub const Reduction = enum { mean, sum, none };
 
-/// PyTorch-parity cross-entropy options for `crossEntropyLossExAxisRank` /
-/// `crossEntropyBackwardExAxisRank`.
+/// PyTorch-parity cross-entropy options for `crossEntropyLossEx` /
+/// `crossEntropyBackwardEx`.
 pub const CrossEntropyOptions = struct {
     /// A position whose label equals this index contributes zero loss and zero
     /// gradient and is excluded from the `.mean` denominator. Labels must be
@@ -112,8 +112,8 @@ pub const LossWrt = enum { input, target };
 /// (returning huge boundary gradients rather than 0).
 pub const bce_eps: f32 = 1e-7;
 
-pub fn crossEntropyLossAxisRank(ctx: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
-    return crossEntropyLossExAxisRank(ctx, rank, logits, axis, labels, .{});
+pub fn crossEntropyLoss(ctx: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
+    return crossEntropyLossEx(ctx, rank, logits, axis, labels, .{});
 }
 
 /// Validates labels against `class_count` / `options.ignore_index` and
@@ -137,7 +137,7 @@ fn validateCrossEntropyLabels(labels: []const usize, position_count: usize, clas
 /// per-position losses shaped like the logits with the class axis removed.
 /// The `.mean`/`.sum` reduction is one serial sum over per-row losses in
 /// row order, so the result is bitwise identical for any thread count.
-pub fn crossEntropyLossExAxisRank(
+pub fn crossEntropyLossEx(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -145,16 +145,16 @@ pub fn crossEntropyLossExAxisRank(
     labels: []const usize,
     options: CrossEntropyOptions,
 ) !Tensor {
-    return crossEntropyLossExStatsAxisRank(ctx, rank, logits, axis, labels, options, null);
+    return crossEntropyLossExStats(ctx, rank, logits, axis, labels, options, null);
 }
 
-/// As `crossEntropyLossExAxisRank`, additionally writing the per-position
+/// As `crossEntropyLossEx`, additionally writing the per-position
 /// softmax statistics {max, sum_exp} (interleaved f32 pairs, length
 /// 2 * position count) into `row_stats` when non-null. Feeding them to
-/// `crossEntropyBackwardExUpstreamStatsAxisRank` makes the backward a
+/// `crossEntropyBackwardExUpstreamStats` makes the backward a
 /// single pass with bitwise-identical gradients (the stats are the exact
 /// f32 values the backward would recompute). Ignored positions get {0, 1}.
-pub fn crossEntropyLossExStatsAxisRank(
+pub fn crossEntropyLossExStats(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -176,7 +176,7 @@ pub fn crossEntropyLossExStatsAxisRank(
         if (stats.len != 2 * position_count) return tensor.TensorError.InvalidDataLength;
     }
 
-    var ll = try ctx.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(.f32, logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
 
@@ -185,7 +185,7 @@ pub fn crossEntropyLossExStatsAxisRank(
     // serially below.
     const out_rank = if (rank == 1) 1 else rank - 1;
     var none_out: ?Tensor = if (options.reduction == .none)
-        try ctx.emptyRank(out_rank, shapeWithoutAxis(rank, out_rank, source.shape, axis))
+        try ctx.empty(.f32, shapeWithoutAxis(rank, out_rank, source.shape, axis))
     else
         null;
     errdefer if (none_out) |*value| value.deinit();
@@ -269,12 +269,12 @@ pub fn crossEntropyLossExStatsAxisRank(
                 // Deliberate divergence from PyTorch: all-ignored -> 0, not NaN.
                 loss = if (valid_count == 0) 0 else loss / @as(f32, @floatFromInt(valid_count));
             }
-            return ctx.scalar(loss);
+            return ctx.scalar(.f32, loss);
         },
     }
 }
 
-pub fn crossEntropyBackwardAxisRank(
+pub fn crossEntropyBackward(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -282,7 +282,7 @@ pub fn crossEntropyBackwardAxisRank(
     labels: []const usize,
     scale_value: f32,
 ) !Tensor {
-    return crossEntropyBackwardExAxisRank(ctx, rank, logits, axis, labels, .{}, scale_value, null);
+    return crossEntropyBackwardEx(ctx, rank, logits, axis, labels, .{}, scale_value, null);
 }
 
 /// Cross-entropy VJP with options. `scale_value` is the scalar upstream
@@ -290,7 +290,7 @@ pub fn crossEntropyBackwardAxisRank(
 /// per-position upstream gradient (length outer*inner, position order
 /// matching `labels`) and is additionally scaled by `scale_value`.
 /// Ignored positions get exactly zero gradient.
-pub fn crossEntropyBackwardExAxisRank(
+pub fn crossEntropyBackwardEx(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -300,15 +300,15 @@ pub fn crossEntropyBackwardExAxisRank(
     scale_value: f32,
     per_row_scale: ?[]const f32,
 ) !Tensor {
-    return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, scale_value, per_row_scale, null);
+    return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, scale_value, per_row_scale, null);
 }
 
-/// As `crossEntropyBackwardExAxisRank`, additionally taking the per-position
-/// {max, sum_exp} statistics saved by `crossEntropyLossExStatsAxisRank`
+/// As `crossEntropyBackwardEx`, additionally taking the per-position
+/// {max, sum_exp} statistics saved by `crossEntropyLossExStats`
 /// (interleaved f32 pairs, length 2 * position count). With stats the kernel
 /// emits final gradients in ONE pass over the logits — bitwise identical to
 /// the recompute path.
-pub fn crossEntropyBackwardExStatsAxisRank(
+pub fn crossEntropyBackwardExStats(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -337,11 +337,11 @@ pub fn crossEntropyBackwardExStatsAxisRank(
         if (stats.len != 2 * position_count) return tensor.TensorError.InvalidDataLength;
     }
 
-    var ll = try ctx.prepareContiguous(logits);
+    var ll = try ctx.prepareContiguous(.f32, logits);
     defer ll.deinit();
     const input = ll.tensor().dataConst();
 
-    var out = try ctx.emptyRank(rank, source.shape);
+    var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
     const grad_common: f32 = switch (options.reduction) {
@@ -425,11 +425,11 @@ pub fn crossEntropyBackwardExStatsAxisRank(
     return out;
 }
 
-/// As `crossEntropyBackwardExAxisRank`, taking the upstream gradient as a
+/// As `crossEntropyBackwardEx`, taking the upstream gradient as a
 /// tensor: scalar for `.mean`/`.sum`, per-position (logits shape with the
 /// class axis removed) for `.none`. This is the entry point the autograd
 /// VJP uses.
-pub fn crossEntropyBackwardExUpstreamAxisRank(
+pub fn crossEntropyBackwardExUpstream(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -438,12 +438,12 @@ pub fn crossEntropyBackwardExUpstreamAxisRank(
     options: CrossEntropyOptions,
     gy: *const Tensor,
 ) !Tensor {
-    return crossEntropyBackwardExUpstreamStatsAxisRank(ctx, rank, logits, axis, labels, options, gy, null);
+    return crossEntropyBackwardExUpstreamStats(ctx, rank, logits, axis, labels, options, gy, null);
 }
 
-/// As `crossEntropyBackwardExUpstreamAxisRank` with forward-saved
-/// {max, sum_exp} statistics (see `crossEntropyBackwardExStatsAxisRank`).
-pub fn crossEntropyBackwardExUpstreamStatsAxisRank(
+/// As `crossEntropyBackwardExUpstream` with forward-saved
+/// {max, sum_exp} statistics (see `crossEntropyBackwardExStats`).
+pub fn crossEntropyBackwardExUpstreamStats(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -459,12 +459,12 @@ pub fn crossEntropyBackwardExUpstreamStatsAxisRank(
         const expected_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
         const gv = try gy.rankView(out_rank);
         if (!std.mem.eql(usize, gv.shape[0..], expected_shape[0..])) return tensor.TensorError.ShapeMismatch;
-        var gg = try ctx.prepareContiguous(gy);
+        var gg = try ctx.prepareContiguous(.f32, gy);
         defer gg.deinit();
-        return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, 1, gg.tensor().dataConst(), row_stats);
+        return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, 1, gg.tensor().dataConst(), row_stats);
     }
     if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
-    return crossEntropyBackwardExStatsAxisRank(ctx, rank, logits, axis, labels, options, gy.item(), null, row_stats);
+    return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, gy.item(), null, row_stats);
 }
 
 // --- Fused linear + cross-entropy VJP --------------------------------------
@@ -533,14 +533,14 @@ pub fn linearCrossEntropyBackwardUpstream(
     if (row_stats.len != 2 * rows) return tensor.TensorError.InvalidDataLength;
     if (!need_x and !need_weight) return .{ .dx = null, .dweight = null };
 
-    // Upstream contract as crossEntropyBackwardExUpstreamStatsAxisRank.
+    // Upstream contract as crossEntropyBackwardExUpstreamStats.
     var scale_value: f32 = 1;
     var upstream: ?ExecContext.PreparedTensor = null;
     defer if (upstream) |*p| p.deinit();
     if (options.reduction == .none) {
         const gv = try gy.rankView(1);
         if (gv.shape[0] != rows) return tensor.TensorError.ShapeMismatch;
-        upstream = try ctx.prepareContiguous(gy);
+        upstream = try ctx.prepareContiguous(.f32, gy);
     } else {
         if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
         scale_value = gy.item();
@@ -553,7 +553,7 @@ pub fn linearCrossEntropyBackwardUpstream(
     };
 
     // dL destination: the logits buffer itself when exclusively owned.
-    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.emptyRank(2, .{ rows, class_count });
+    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.empty(.f32, .{ rows, class_count });
     defer if (dl_owned) |*value| value.deinit();
     const dl: *Tensor = if (dl_owned) |*value| value else logits;
 
@@ -685,10 +685,10 @@ pub fn linearDistillLossStats(
     }
 
     // Gather the supervised rows and project only them.
-    var xx = try ctx.prepareContiguous(x);
+    var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const x_data = xx.tensor().dataConst();
-    var x_sel = try ctx.emptyRank(2, .{ sel_rows.len, in_dim });
+    var x_sel = try ctx.empty(.f32, .{ sel_rows.len, in_dim });
     errdefer x_sel.deinit();
     const x_sel_data = x_sel.data();
     for (sel_rows, 0..) |row, j| {
@@ -717,7 +717,7 @@ pub fn linearDistillLossStats(
     if (options.reduction == .mean) total /= @as(f32, @floatFromInt(n));
     total *= options.loss_scale;
 
-    var value = try ctx.scalar(total);
+    var value = try ctx.scalar(.f32, total);
     errdefer value.deinit();
     return .{
         .value = value,
@@ -788,7 +788,7 @@ pub fn linearDistillBackwardUpstream(
     for (local_rows, probs) |local, prob| row_mass[local] += grad_common * prob;
 
     // dL destination: the logits buffer itself when exclusively owned.
-    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.emptyRank(2, .{ sel_count, class_count });
+    var dl_owned: ?Tensor = if (logits.canTakeInPlace()) null else try ctx.empty(.f32, .{ sel_count, class_count });
     defer if (dl_owned) |*value| value.deinit();
     const dl: *Tensor = if (dl_owned) |*value| value else logits;
 
@@ -813,7 +813,7 @@ pub fn linearDistillBackwardUpstream(
     if (need_x) {
         var dx_sel = try exec_matmul.matmul2DDispatch(ctx, .plain, dl, weight);
         defer dx_sel.deinit();
-        var full = try ctx.emptyRank(2, .{ row_count, in_dim });
+        var full = try ctx.empty(.f32, .{ row_count, in_dim });
         errdefer full.deinit();
         const full_data = full.data();
         @memset(full_data, 0);
@@ -841,15 +841,15 @@ pub fn linearDistillBackwardUpstream(
 /// applies `ops.loss` per element and reduces per `reduction`.
 fn elementwiseLossForward(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, reduction: Reduction, ops: anytype) !Tensor {
     try tensor.requireSameShape(input, target);
-    var xx = try ctx.prepareContiguous(input);
+    var xx = try ctx.prepareContiguous(.f32, input);
     defer xx.deinit();
-    var tt = try ctx.prepareContiguous(target);
+    var tt = try ctx.prepareContiguous(.f32, target);
     defer tt.deinit();
     const x = xx.tensor().dataConst();
     const t = tt.tensor().dataConst();
     switch (reduction) {
         .none => {
-            var out = try ctx.empty(xx.tensor().shape.slice());
+            var out = try ctx.empty(.f32, xx.tensor().shape.slice());
             errdefer out.deinit();
             for (x, t, out.data()) |xv, tv, *dst| dst.* = ops.loss(xv, tv);
             return out;
@@ -858,7 +858,7 @@ fn elementwiseLossForward(ctx: *ExecContext, input: *const Tensor, target: *cons
             var loss: f32 = 0;
             for (x, t) |xv, tv| loss += ops.loss(xv, tv);
             if (reduction == .mean) loss /= @as(f32, @floatFromInt(x.len));
-            return ctx.scalar(loss);
+            return ctx.scalar(.f32, loss);
         },
     }
 }
@@ -877,18 +877,18 @@ fn elementwiseLossBackwardUpstream(
     ops: anytype,
 ) !Tensor {
     try tensor.requireSameShape(input, target);
-    var xx = try ctx.prepareContiguous(input);
+    var xx = try ctx.prepareContiguous(.f32, input);
     defer xx.deinit();
-    var tt = try ctx.prepareContiguous(target);
+    var tt = try ctx.prepareContiguous(.f32, target);
     defer tt.deinit();
     const x = xx.tensor().dataConst();
     const t = tt.tensor().dataConst();
-    var out = try ctx.empty(xx.tensor().shape.slice());
+    var out = try ctx.empty(.f32, xx.tensor().shape.slice());
     errdefer out.deinit();
     switch (reduction) {
         .none => {
             try tensor.requireSameShape(input, gy);
-            var gg = try ctx.prepareContiguous(gy);
+            var gg = try ctx.prepareContiguous(.f32, gy);
             defer gg.deinit();
             for (x, t, gg.tensor().dataConst(), out.data()) |xv, tv, g, *dst| {
                 dst.* = ops.grad(xv, tv, wrt) * g;

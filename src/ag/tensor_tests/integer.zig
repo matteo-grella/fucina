@@ -53,13 +53,13 @@ test "public Tensor where / maskedFill / zeroSlice / zeroRows values" {
     defer m.deinit();
     var zs = try m.zeroSlice(&ctx, .n, 1, 1);
     defer zs.deinit();
-    var zs_want = try ctx.zeroSliceAxisRank(2, m.asRawTensor(), 1, 1, 1);
+    var zs_want = try ctx.zeroSlice(2, m.asRawTensor(), 1, 1, 1);
     defer zs_want.deinit();
     try std.testing.expectEqualSlices(f32, zs_want.dataConst(), zs.asRawTensor().dataConst());
 
     var zr = try m.zeroRows(&ctx, .batch, &.{1});
     defer zr.deinit();
-    var zr_want = try ctx.zeroRowsAxisRank(2, m.asRawTensor(), 0, &.{1});
+    var zr_want = try ctx.zeroRows(2, m.asRawTensor(), 0, &.{1});
     defer zr_want.deinit();
     try std.testing.expectEqualSlices(f32, zr_want.dataConst(), zr.asRawTensor().dataConst());
 }

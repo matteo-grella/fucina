@@ -277,12 +277,12 @@ test "tagged autograd dot contracts by tag and propagates gradients" {
 
     var a = try Tensor(.{ .batch, .m, .k }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }),
+        try ctx.fromSlice(.f32, &.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }),
     );
     defer a.deinit();
     var b = try Tensor(.{ .batch, .k, .n }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 2, 3, 2 }, &.{ 1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 6, 60 }),
+        try ctx.fromSlice(.f32, &.{ 2, 3, 2 }, &.{ 1, 10, 2, 20, 3, 30, 4, 40, 5, 50, 6, 60 }),
     );
     defer b.deinit();
 
@@ -313,12 +313,12 @@ test "tagged autograd dot handles non-physical axis order through raw graph ops"
 
     var a = try Tensor(.{ .batch, .m, .k }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }),
+        try ctx.fromSlice(.f32, &.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 }),
     );
     defer a.deinit();
     var b = try Tensor(.{ .n, .batch, .k }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 10, 20, 30, 40, 50, 60 }),
+        try ctx.fromSlice(.f32, &.{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 10, 20, 30, 40, 50, 60 }),
     );
     defer b.deinit();
 
@@ -616,7 +616,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer b.deinit();
     var got_nn = try a.matmul(&ctx, b, .plain, .{ .m, .n });
     defer got_nn.deinit();
-    var want_nn = try ctx.matmul2D(a.asRawTensor(), b.asRawTensor());
+    var want_nn = try ctx.matmul(.f32, a.asRawTensor(), b.asRawTensor());
     defer want_nn.deinit();
     try std.testing.expectEqualSlices(f32, want_nn.dataConst(), got_nn.asRawTensor().dataConst());
 

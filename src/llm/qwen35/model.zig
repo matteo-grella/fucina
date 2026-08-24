@@ -1474,7 +1474,7 @@ fn borrowedTaggedTensor(
     values: []f32,
 ) !fucina.Tensor(tags_spec) {
     // The public facade `fromBorrowedSlice` IS this borrow+wrap
-    // (ctx.fromBorrowedSliceRank → constant), no local raw bridging needed.
+    // (ctx.fromBorrowedSlice → constant), no local raw bridging needed.
     return fucina.Tensor(tags_spec).fromBorrowedSlice(ctx, raw_shape, values);
 }
 

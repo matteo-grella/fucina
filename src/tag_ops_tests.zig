@@ -51,7 +51,7 @@ test "tag library: integer rank specs normalize to positional tags and permute a
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer x.deinit();
 
     var permuted = try permuteTensorTo(.{ ._0, ._1, ._2 }, &x, .{ ._2, ._0, ._1 });
@@ -67,10 +67,10 @@ test "tag library: alignTensorTo reorders tags and injects singleton axes as vie
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
-    var y = try alignTensorTo(.{ .batch, .d }, &x, .{ .d, .batch, .channel });
+    var y = try alignTensorTo(.f32, .{ .batch, .d }, &x, .{ .d, .batch, .channel });
     defer y.deinit();
 
     try std.testing.expect(y.buffer == x.buffer);
@@ -88,9 +88,9 @@ test "tag library: pointwise broadcasts operands by tag" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
 
     comptime {
@@ -120,10 +120,10 @@ test "tag library: broadcastTensorTo expands by tag as a zero-stride view" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var bias = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var bias = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer bias.deinit();
 
-    var broadcast = try broadcastTensorTo(.{.d}, &bias, .{ .batch, .d }, .{ 2, 3 });
+    var broadcast = try broadcastTensorTo(.f32, .{.d}, &bias, .{ .batch, .d }, .{ 2, 3 });
     defer broadcast.deinit();
 
     try std.testing.expect(broadcast.buffer == bias.buffer);
@@ -141,7 +141,7 @@ test "tag library: permuteTensorTo exposes zero-copy tag-ordered views" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
     var y = try permuteTensorTo(.{ .batch, .d }, &x, .{ .d, .batch });
@@ -161,9 +161,9 @@ test "tag library: pointwise broadcasts scalars without materializing the source
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var scalar = try ctx.fromSliceRank(1, .{1}, &.{2});
+    var scalar = try ctx.fromSlice(.f32, .{1}, &.{2});
     defer scalar.deinit();
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
     var y = try pointwise(.mul, .{}, &scalar, &ctx, .{ .batch, .d }, &x);
@@ -179,13 +179,13 @@ test "tag library: rejects incompatible broadcast dimensions" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(1, .{3}, &.{ 1, 2, 3 });
+    var x = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     defer x.deinit();
-    var y = try ctx.fromSliceRank(1, .{2}, &.{ 10, 20 });
+    var y = try ctx.fromSlice(.f32, .{2}, &.{ 10, 20 });
     defer y.deinit();
 
     try std.testing.expectError(TensorError.ShapeMismatch, pointwise(.add, .{.d}, &x, &ctx, .{.d}, &y));
-    try std.testing.expectError(TensorError.ShapeMismatch, broadcastTensorTo(.{.d}, &x, .{.d}, .{2}));
+    try std.testing.expectError(TensorError.ShapeMismatch, broadcastTensorTo(.f32, .{.d}, &x, .{.d}, .{2}));
 }
 
 test "tag library: splitAxisView and mergeAxesView reshape compatible named axes as views" {
@@ -194,7 +194,7 @@ test "tag library: splitAxisView and mergeAxesView reshape compatible named axes
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer x.deinit();
 
     comptime {
@@ -208,13 +208,13 @@ test "tag library: splitAxisView and mergeAxesView reshape compatible named axes
         }
     }
 
-    var split = try splitAxisView(.{ .batch, .d_model }, &x, .d_model, .{ .head, .head_dim }, .{ 2, 3 });
+    var split = try splitAxisView(.f32, .{ .batch, .d_model }, &x, .d_model, .{ .head, .head_dim }, .{ 2, 3 });
     defer split.deinit();
     try std.testing.expect(split.buffer == x.buffer);
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 3 }, split.shape.slice());
     try std.testing.expectEqualSlices(usize, &.{ 6, 3, 1 }, split.strides.slice());
 
-    var merged = try mergeAxesView(.{ .batch, .head, .head_dim }, &split, .features, .{ .head, .head_dim });
+    var merged = try mergeAxesView(.f32, .{ .batch, .head, .head_dim }, &split, .features, .{ .head, .head_dim });
     defer merged.deinit();
     try std.testing.expect(merged.buffer == x.buffer);
     try std.testing.expectEqualSlices(usize, &.{ 2, 6 }, merged.shape.slice());
@@ -227,17 +227,17 @@ test "tag library: flattenTensor handles contiguous and strided sources" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ -1, 2, -3, 4, -5, 6 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ -1, 2, -3, 4, -5, 6 });
     defer x.deinit();
 
-    var flat = try flattenTensor(&ctx, &x);
+    var flat = try flattenTensor(.f32, &ctx, &x);
     defer flat.deinit();
     try std.testing.expectEqualSlices(usize, &.{6}, flat.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ -1, 2, -3, 4, -5, 6 }, flat.dataConst());
 
     var permuted = try permuteTensorTo(.{ .batch, .d }, &x, .{ .d, .batch });
     defer permuted.deinit();
-    var flat_strided = try flattenTensor(&ctx, &permuted);
+    var flat_strided = try flattenTensor(.f32, &ctx, &permuted);
     defer flat_strided.deinit();
     try std.testing.expectEqualSlices(usize, &.{6}, flat_strided.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ -1, 4, 2, -5, -3, 6 }, flat_strided.dataConst());
@@ -249,7 +249,7 @@ test "tag library: sumManyTensor reduces multiple named axes" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try ctx.fromSliceRank(3, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var x = try ctx.fromSlice(.f32, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer x.deinit();
 
     var summed = try sumManyTensor(.{ .batch, .seq, .d }, &x, &ctx, .{ .batch, .seq });
@@ -264,9 +264,9 @@ test "tag library: dot follows matrix multiplication tag ordering" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var weight = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var weight = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer weight.deinit();
-    var input = try ctx.fromSliceRank(1, .{3}, &.{ 10, 20, 30 });
+    var input = try ctx.fromSlice(.f32, .{3}, &.{ 10, 20, 30 });
     defer input.deinit();
 
     comptime {
@@ -287,9 +287,9 @@ test "tag library: dot treats shared non-contracted tags as batch axes" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(3, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var a = try ctx.fromSlice(.f32, .{ 2, 2, 3 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(3, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    var b = try ctx.fromSlice(.f32, .{ 2, 3, 2 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
     comptime {
@@ -312,9 +312,9 @@ test "tag library: dot contracts by tag regardless of physical axis order" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 7, 9, 11, 8, 10, 12 });
+    var b = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 7, 9, 11, 8, 10, 12 });
     defer b.deinit();
 
     var c = try taggedDot(.{ .m, .k }, &a, &ctx, .{ .n, .k }, &b, .k);
@@ -330,9 +330,9 @@ test "tag library: dot lowers transposed 2D layouts through matmul variants" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(2, .{ 3, 2 }, &.{ 1, 4, 2, 5, 3, 6 });
+    var a = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 1, 4, 2, 5, 3, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(2, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
+    var b = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
     var c = try taggedDot(.{ .k, .m }, &a, &ctx, .{ .k, .n }, &b, .k);
@@ -348,9 +348,9 @@ test "tag library: vector dot returns a scalar tensor" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(1, .{3}, &.{ 1, 2, 3 });
+    var a = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(1, .{3}, &.{ 4, 5, 6 });
+    var b = try ctx.fromSlice(.f32, .{3}, &.{ 4, 5, 6 });
     defer b.deinit();
 
     comptime {
@@ -371,9 +371,9 @@ test "tag library: dot rejects mismatched contract dimensions" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRank(1, .{2}, &.{ 7, 8 });
+    var b = try ctx.fromSlice(.f32, .{2}, &.{ 7, 8 });
     defer b.deinit();
 
     try std.testing.expectError(TensorError.ShapeMismatch, taggedDot(.{ .out, .d }, &a, &ctx, .{.d}, &b, .d));
@@ -394,7 +394,7 @@ fn einsumTestTensor(ctx: *ExecContext, comptime rank: usize, shape: [rank]usize,
         const q: u32 = (@as(u32, @intCast(i)) *% 2654435761 +% salt) % 13;
         v.* = @as(f32, @floatFromInt(q)) - 6.0;
     }
-    return ctx.fromSliceRank(rank, shape, data);
+    return ctx.fromSlice(.f32, shape, data);
 }
 
 /// Runs taggedEinsum and checks it bitwise against a full index-space
@@ -589,7 +589,7 @@ test "einsum: strided operand views take the generic path and stay exact" {
 
     // A transposed VIEW of b carries tags {.k, .n}: same math as contracting
     // the original with {.n, .k}, so both spellings must agree bitwise.
-    var b_view = try alignTensorTo(.{ .n, .k }, &b, .{ .k, .n });
+    var b_view = try alignTensorTo(.f32, .{ .n, .k }, &b, .{ .k, .n });
     defer b_view.deinit();
     try std.testing.expect(!b_view.isContiguous());
 
@@ -607,7 +607,7 @@ test "einsum: scalar operands scale the other side" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var s = try ctx.fromSliceRank(1, .{1}, &.{2.5});
+    var s = try ctx.fromSlice(.f32, .{1}, &.{2.5});
     defer s.deinit();
     var m = try einsumTestTensor(&ctx, 2, .{ 3, 4 }, 20);
     defer m.deinit();
@@ -769,7 +769,7 @@ test "einsum: strided-view sweep — permuted operands agree with their contiguo
     defer a.deinit();
     var b = try einsumTestTensor(&ctx, 2, .{ 5, 4 }, 61);
     defer b.deinit();
-    var b_kj = try alignTensorTo(.{ .j, .k }, &b, .{ .k, .j });
+    var b_kj = try alignTensorTo(.f32, .{ .j, .k }, &b, .{ .k, .j });
     defer b_kj.deinit();
     try std.testing.expect(!b_kj.isContiguous());
 
@@ -784,9 +784,9 @@ test "einsum: strided-view sweep — permuted operands agree with their contiguo
     defer q.deinit();
     var k = try einsumTestTensor(&ctx, 3, .{ 2, 5, 4 }, 63);
     defer k.deinit();
-    var q_perm = try alignTensorTo(.{ .b, .i, .d }, &q, .{ .i, .b, .d });
+    var q_perm = try alignTensorTo(.f32, .{ .b, .i, .d }, &q, .{ .i, .b, .d });
     defer q_perm.deinit();
-    var k_perm = try alignTensorTo(.{ .b, .j, .d }, &k, .{ .d, .b, .j });
+    var k_perm = try alignTensorTo(.f32, .{ .b, .j, .d }, &k, .{ .d, .b, .j });
     defer k_perm.deinit();
 
     var v1 = try taggedEinsum(.{ .i, .b, .d }, &q_perm, &ctx, .{ .d, .b, .j }, &k_perm, .{ .b, .i, .j });

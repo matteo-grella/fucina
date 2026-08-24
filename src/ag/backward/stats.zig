@@ -48,7 +48,7 @@ pub fn MaskedMinMaxBackward(comptime source_tags: anytype, comptime axis: usize)
             defer gy_ready.deinit();
             const idxd = self.indices.dataConst();
 
-            var gx = try ctx.zeros(self.source_shape[0..]);
+            var gx = try ctx.zeros(.f32, self.source_shape[0..]);
             errdefer gx.deinit();
             const gyd = gy_ready.dataConst();
             const gxd = gx.data();
@@ -110,7 +110,7 @@ pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {
             defer gy_ready.deinit();
 
             const source_shape = rawShapeArray(source_tags, &self.input);
-            var gx = try ctx.emptyRank(rank, source_shape);
+            var gx = try ctx.empty(.f32, source_shape);
             errdefer gx.deinit();
             const xd = x_ready.dataConst();
             const gyd = gy_ready.dataConst();
@@ -179,7 +179,7 @@ pub fn StandardizeBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.standardizeBackwardAxisRank(rawRank(tags.len), &self.input, gy, axis, self.valid_len, self.options);
+            out[0] = try ctx.standardizeBackward(rawRank(tags.len), &self.input, gy, axis, self.valid_len, self.options);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -230,7 +230,7 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             // allocated (contiguous) i64 tensor.
             const idxd = self.indices.dataConst();
 
-            var gx = try ctx.zeros(self.source_shape[0..]);
+            var gx = try ctx.zeros(.f32, self.source_shape[0..]);
             errdefer gx.deinit();
             const gyd = gy_ready.dataConst();
             const gxd = gx.data();

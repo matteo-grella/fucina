@@ -133,7 +133,7 @@ pattern, for an op that carries its own backward record (from
 
 ```zig
 pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-    var value = try ctx.scale(self.asRawTensor(), scalar_value);
+    var value = try ctx.scale(.f32, self.asRawTensor(), scalar_value);
     errdefer value.deinit();
     return finishOp(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
 }
@@ -170,8 +170,8 @@ pub fn pointwise(
     defer right_view.deinit();
 
     return switch (op) {
-        .add => ctx.addRank(rawRank(result_tags.len), &left_view, &right_view),
-        .sub => ctx.subRank(rawRank(result_tags.len), &left_view, &right_view),
+        .add => ctx.add(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .sub => ctx.sub(.f32, rawRank(result_tags.len), &left_view, &right_view),
         // ... abridged: .mul, .div, .max, .min follow the same shape
     };
 }

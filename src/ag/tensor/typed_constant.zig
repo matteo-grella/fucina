@@ -40,9 +40,9 @@ const dotResultTags = tags_mod.dotResultTags;
 const insertTagAt = tags_mod.insertTagAt;
 const splitTags = tags_mod.splitTags;
 const mergeTags = tags_mod.mergeTags;
-const broadcastTensorToOf = tag_ops.broadcastTensorToOf;
-const pointwiseShapeOf = tag_ops.pointwiseShapeOf;
-const validateTensorRankOf = tag_ops.validateTensorRankOf;
+const broadcastTensorTo = tag_ops.broadcastTensorTo;
+const pointwiseShape = tag_ops.pointwiseShape;
+const validateTensorRank = tag_ops.validateTensorRank;
 const PointwiseOp = backward.PointwiseOp;
 const CastBackward = backward.CastBackward;
 
@@ -85,7 +85,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub fn constant(ctx: *ExecContext, value: RawTypedTensor) !Self {
                     _ = ctx;
                     var v = value;
-                    try validateTensorRankOf(tensor_dtype, tags, &v);
+                    try validateTensorRank(tensor_dtype, tags, &v);
                     return .{ .value = v };
                 }
 
@@ -94,7 +94,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 }
 
                 pub fn fromBlocks(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-                    var value = try ctx.fromStorageSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, values);
+                    var value = try ctx.fromStorageSlice(tensor_dtype, raw_shape, values);
                     errdefer value.deinit();
                     return try Self.constant(ctx, value);
                 }
@@ -104,7 +104,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 }
 
                 pub fn fromBorrowedBlocks(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []Elem) !Self {
-                    var value = try ctx.fromBorrowedStorageSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, values);
+                    var value = try ctx.fromBorrowedStorageSlice(tensor_dtype, raw_shape, values);
                     errdefer value.deinit();
                     return try Self.constant(ctx, value);
                 }
@@ -167,7 +167,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
                 pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
                     comptime if (target_dtype != .f32) @compileError("block-quantized tensors can currently only be converted to f32");
-                    var value = try ctx.dequantizeTensorTyped(tensor_dtype, self.asRawTensor());
+                    var value = try ctx.dequantizeTensor(tensor_dtype, self.asRawTensor());
                     errdefer value.deinit();
                     return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
                 }
@@ -177,7 +177,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 }
 
                 pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
-                    var value = try ctx.materializeTyped(tensor_dtype, self.asRawTensor());
+                    var value = try ctx.materialize(tensor_dtype, self.asRawTensor());
                     errdefer value.deinit();
                     return Self.fromTensor(ctx, value);
                 }
@@ -194,7 +194,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                     raw_inputs[0] = self.asRawTensor();
                     for (others, 0..) |other, i| raw_inputs[i + 1] = other.asRawTensor();
 
-                    var value = try ctx.concatQuantizedRowsTyped(tensor_dtype, raw_inputs);
+                    var value = try ctx.concatQuantizedRows(tensor_dtype, raw_inputs);
                     errdefer value.deinit();
                     return Self.fromTensor(ctx, value);
                 }
@@ -236,7 +236,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                         if (axis(tag) != 0) @compileError("quantized getRows gathers rows from the first axis");
                     }
                     const result_tags = replaceTag(tags, tag, out_tag);
-                    var value = try ctx.getRowsQuantizedTyped(tensor_dtype, self.asRawTensor(), indices);
+                    var value = try ctx.getRowsQuantized(tensor_dtype, self.asRawTensor(), indices);
                     errdefer value.deinit();
                     return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
                 }
@@ -264,7 +264,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub fn constant(ctx: *ExecContext, value: RawTypedTensor) !SelfT {
                     _ = ctx;
                     var v = value;
-                    try validateTensorRankOf(tensor_dtype, tags, &v);
+                    try validateTensorRank(tensor_dtype, tags, &v);
                     return .{ .value = v };
                 }
 
@@ -273,7 +273,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 }
 
                 pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !SelfT {
-                    var value = try ctx.fromSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, values);
+                    var value = try ctx.fromSlice(tensor_dtype, raw_shape, values);
                     errdefer value.deinit();
                     return try @This().constant(ctx, value);
                 }
@@ -283,28 +283,28 @@ pub fn Mod(comptime ag_tensor: type) type {
                 /// borrow: `values` must outlive the tensor and must not be mutated
                 /// (see the f32 `fromBorrowedConstSlice` contract).
                 pub fn fromBorrowedConstSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !SelfT {
-                    var value = try ctx.fromBorrowedSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, @constCast(values));
+                    var value = try ctx.fromBorrowedSlice(tensor_dtype, raw_shape, @constCast(values));
                     errdefer value.deinit();
                     return try @This().constant(ctx, value);
                 }
 
                 /// Allocate an uninitialized no-grad typed tensor of the tag-implied rank.
                 pub fn empty(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !SelfT {
-                    var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, raw_shape);
+                    var value = try ctx.empty(tensor_dtype, raw_shape);
                     errdefer value.deinit();
                     return try @This().constant(ctx, value);
                 }
 
                 /// Allocate a zero-filled no-grad typed tensor.
                 pub fn zeros(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !SelfT {
-                    var value = try ctx.zerosTyped(tensor_dtype, &raw_shape);
+                    var value = try ctx.zeros(tensor_dtype, &raw_shape);
                     errdefer value.deinit();
                     return try @This().constant(ctx, value);
                 }
 
                 /// Allocate a one-filled no-grad typed tensor.
                 pub fn ones(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !SelfT {
-                    var value = try ctx.onesTyped(tensor_dtype, &raw_shape);
+                    var value = try ctx.ones(tensor_dtype, &raw_shape);
                     errdefer value.deinit();
                     return try @This().constant(ctx, value);
                 }
@@ -318,7 +318,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub fn randint(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, low: i64, high: i64) !SelfT {
                     comptime if (tensor_dtype != .i64) @compileError("randint is i64-only (the repo-wide index dtype); cast the result with to()");
                     if (low >= high) return TensorError.InvalidShape;
-                    var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, raw_shape);
+                    var value = try ctx.empty(tensor_dtype, raw_shape);
                     errdefer value.deinit();
                     rng.randintFill(seed, value.data(), low, high);
                     return try @This().constant(ctx, value);
@@ -335,7 +335,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                         if (tags.len != 1) @compileError("randperm builds a rank-1 tensor; use a single-tag Tensor type");
                     }
                     if (n == 0) return TensorError.InvalidShape;
-                    var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, .{n});
+                    var value = try ctx.empty(tensor_dtype, .{n});
                     errdefer value.deinit();
                     rng.randpermFill(seed, value.data());
                     return try @This().constant(ctx, value);
@@ -356,7 +356,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                         if (tensor_dtype != .bool) @compileError("bandMask is a .bool mask constructor; use a .bool Tensor type");
                         if (tags.len != 2) @compileError("bandMask builds a rank-2 [row, col] mask; use a two-tag Tensor type");
                     }
-                    var value = try ctx.emptyRankTyped(tensor_dtype, tensor_rank, raw_shape);
+                    var value = try ctx.empty(tensor_dtype, raw_shape);
                     errdefer value.deinit();
                     const out = value.data();
                     const cols = raw_shape[1];
@@ -546,7 +546,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub fn variable(ctx: *ExecContext, value: RawTypedTensor) !Self {
                     comptime requireHalfFloatGrad(tensor_dtype, "variable");
                     var v = value;
-                    try validateTensorRankOf(tensor_dtype, tags, &v);
+                    try validateTensorRank(tensor_dtype, tags, &v);
                     const state = try GradState.leaf(ctx.allocator);
                     errdefer state.deinit();
                     return .{ .value = v, .grad_state = state };
@@ -554,7 +554,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
                 pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Scalar(tensor_dtype)) !Self {
                     comptime requireHalfFloatGrad(tensor_dtype, "variableFromSlice");
-                    var value = try ctx.fromSliceRankTyped(tensor_dtype, tensor_rank, raw_shape, values);
+                    var value = try ctx.fromSlice(tensor_dtype, raw_shape, values);
                     errdefer value.deinit();
                     return try Self.variable(ctx, value);
                 }
@@ -639,7 +639,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                             @compileError("dense packRhs supports f32, f16, and bf16 weights");
                     }
                     if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
-                    return ctx.packDenseMatmulRhsTyped(tensor_dtype, self.asRawTensor());
+                    return ctx.packDenseMatmulRhs(tensor_dtype, self.asRawTensor());
                 }
 
                 // Structural ops (views / data movement; every typed float dtype).
@@ -751,7 +751,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn typedConstantMaterialize(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.materializeTyped(Self.dtype, self.asRawTensor());
+            var value = try ctx.materialize(Self.dtype, self.asRawTensor());
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -806,7 +806,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const target_tags = normalizeTags(target_tags_spec);
-            var value = try broadcastTensorToOf(Self.dtype, Self.axis_tags, self.asRawTensor(), target_tags, target_shape);
+            var value = try broadcastTensorTo(Self.dtype, Self.axis_tags, self.asRawTensor(), target_tags, target_shape);
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = target_tags }).fromTensor(ctx, value);
         }
@@ -821,7 +821,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const result_tags = replaceTag(Self.axis_tags, tag, out_tag);
-            var value = try ctx.gatherAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), indices);
+            var value = try ctx.gatherAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), indices);
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -829,7 +829,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn typedConstantNarrow(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize) !TensorObject(@TypeOf(self)) {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.narrowAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), start, length);
+            var value = try ctx.narrowAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), start, length);
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -845,7 +845,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             raw_inputs[0] = self.asRawTensor();
             for (others, 0..) |other, i| raw_inputs[i + 1] = other.asRawTensor();
 
-            var value = try ctx.concatAxisRankTyped(Self.dtype, Self.tag_count, raw_inputs, Self.axis(tag));
+            var value = try ctx.concatAxis(Self.dtype, Self.tag_count, raw_inputs, Self.axis(tag));
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -854,7 +854,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             try typedRequireNoGrad(update);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.setSliceAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), start);
+            var value = try ctx.setSliceAxis(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), start);
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -863,7 +863,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             try typedRequireNoGrad(update);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.setRowsAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), indices);
+            var value = try ctx.setRows(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), indices);
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -881,7 +881,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (comptime target_dtype != .f32) {
                 if (self.requiresGrad()) return error.GradientCastUnsupported;
             }
-            var value = try ctx.castTyped(Self.dtype, target_dtype, self.asRawTensor());
+            var value = try ctx.cast(Self.dtype, target_dtype, self.asRawTensor());
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
                 if (comptime @hasField(Self, "grad_state")) {
@@ -921,7 +921,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const result_tags = removeTag(Self.axis_tags, tag);
-            var value = try ctx.sumAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
+            var value = try ctx.sumAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, Self.dtype), .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -932,7 +932,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             const result_tags = removeTag(Self.axis_tags, tag);
-            var value = try ctx.meanAxisRankTyped(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
+            var value = try ctx.meanAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, Self.dtype), .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -940,7 +940,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn typedConstantSumAll(self: anytype, ctx: *ExecContext) !Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, TensorObject(@TypeOf(self)).dtype), .tags = .{} }) {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.sumTyped(Self.dtype, self.asRawTensor());
+            var value = try ctx.sum(Self.dtype, self.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, Self.dtype), .tags = .{} }).fromTensor(ctx, value);
         }
@@ -1028,7 +1028,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// Shared tail of the widened ops: narrow the f32 kernel result back to
         /// `tensor_dtype` and wrap it as a typed constant.
         pub fn typedFromWidened(comptime tensor_dtype: DType, comptime result_tags: anytype, ctx: *ExecContext, wide_value: *const RawTensor) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
-            var value = try ctx.castTyped(.f32, tensor_dtype, wide_value);
+            var value = try ctx.cast(.f32, tensor_dtype, wide_value);
             errdefer value.deinit();
             return Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1037,7 +1037,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "unary");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var wide_value = try ctx.unary(op, &wide);
             defer wide_value.deinit();
@@ -1056,7 +1056,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "leakyRelu");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var wide_value = try ctx.leakyRelu(&wide, negative_slope);
             defer wide_value.deinit();
@@ -1067,7 +1067,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "clamp");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var wide_value = try ctx.clamp(&wide, min_value, max_value);
             defer wide_value.deinit();
@@ -1077,7 +1077,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn typedConstantScale(self: anytype, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(TensorObject(@TypeOf(self)).dtype)) !TensorObject(@TypeOf(self)) {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.scaleTyped(Self.dtype, self.asRawTensor(), scalar_value);
+            var value = try ctx.scale(Self.dtype, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
             return Self.fromTensor(ctx, value);
         }
@@ -1086,7 +1086,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "addScalar");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var wide_value = try ctx.addScalar(&wide, scalar_value);
             defer wide_value.deinit();
@@ -1105,7 +1105,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "powScalar");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var wide_value = try ctx.powScalar(&wide, exponent);
             defer wide_value.deinit();
@@ -1128,9 +1128,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (Other.dtype != Self.dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
             const result_tags = pointwiseResultTags(Self.axis_tags, Other.axis_tags);
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide_left = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide_left.deinit();
-            var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+            var wide_right = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_right.deinit();
             var wide_value = try tag_ops.pointwise(op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
             defer wide_value.deinit();
@@ -1169,16 +1169,16 @@ pub fn Mod(comptime ag_tensor: type) type {
             const left = tensorObjectPtrFrom(@TypeOf(self), &self);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = pointwiseResultTags(left_tags, right_tags);
-            const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+            const result_shape = try pointwiseShape(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
 
-            var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+            var left_view = try broadcastTensorTo(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
             defer left_view.deinit();
-            var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+            var right_view = try broadcastTensorTo(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
             defer right_view.deinit();
 
             var value = switch (mode) {
-                .trunc => try ctx.divTruncRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .floor => try ctx.divFloorRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .trunc => try ctx.divTrunc(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .floor => try ctx.divFloor(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
             };
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
@@ -1213,16 +1213,16 @@ pub fn Mod(comptime ag_tensor: type) type {
             const left = tensorObjectPtrFrom(@TypeOf(self), &self);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = pointwiseResultTags(left_tags, right_tags);
-            const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+            const result_shape = try pointwiseShape(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
 
-            var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+            var left_view = try broadcastTensorTo(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
             defer left_view.deinit();
-            var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+            var right_view = try broadcastTensorTo(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
             defer right_view.deinit();
 
             var value = switch (mode) {
-                .rem => try ctx.remRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .mod => try ctx.modRankTyped(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .rem => try ctx.rem(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .mod => try ctx.mod(Self.dtype, rawRank(result_tags.len), &left_view, &right_view),
             };
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
@@ -1256,14 +1256,14 @@ pub fn Mod(comptime ag_tensor: type) type {
             const left = tensorObjectPtrFrom(@TypeOf(self), &self);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = pointwiseResultTags(left_tags, right_tags);
-            const result_shape = try pointwiseShapeOf(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+            const result_shape = try pointwiseShape(Self.dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
 
-            var left_view = try broadcastTensorToOf(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+            var left_view = try broadcastTensorTo(Self.dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
             defer left_view.deinit();
-            var right_view = try broadcastTensorToOf(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+            var right_view = try broadcastTensorTo(Self.dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
             defer right_view.deinit();
 
-            var value = try ctx.bitwiseRankTyped(Self.dtype, rawRank(result_tags.len), op, &left_view, &right_view);
+            var value = try ctx.bitwise(Self.dtype, rawRank(result_tags.len), op, &left_view, &right_view);
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1293,7 +1293,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                     @compileError("logical ops take .bool or float operands; cast integer masks explicitly");
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try ctx.logicalTyped(op, .bool, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
+            var value = try ctx.logical(op, .bool, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = Self.axis_tags }).fromTensor(ctx, value);
         }
@@ -1315,7 +1315,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             comptime {
                 if (Self.dtype != .bool) @compileError("logical ops on the typed branch are .bool-only; cast explicitly");
             }
-            var value = try ctx.logicalNotTyped(.bool, self.asRawTensor());
+            var value = try ctx.logicalNot(.bool, self.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = Self.axis_tags }).fromTensor(ctx, value);
         }
@@ -1334,9 +1334,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (Other.dtype != Self.dtype) @compileError("typed gated requires matching dtypes; cast explicitly");
             const result_tags = pointwiseResultTags(Self.axis_tags, Other.axis_tags);
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide_left = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide_left.deinit();
-            var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+            var wide_right = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_right.deinit();
             var wide_value = try tag_ops.gatedPointwise(op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
             defer wide_value.deinit();
@@ -1365,9 +1365,9 @@ pub fn Mod(comptime ag_tensor: type) type {
                     @compileError("typed softmax supports only plain .{} options; cast to f32 for the ext path (mask/sinks/causal/scale)");
                 }
             }
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.softmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var wide_value = try ctx.softmax(Self.tag_count, &wide, Self.axis(tag));
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1376,9 +1376,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "logSoftmax");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.logSoftmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var wide_value = try ctx.logSoftmax(Self.tag_count, &wide, Self.axis(tag));
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1387,9 +1387,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "rmsNorm");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.rmsNormAxisRank(Self.tag_count, &wide, Self.axis(tag), eps);
+            var wide_value = try ctx.rmsNorm(Self.tag_count, &wide, Self.axis(tag), eps);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1405,11 +1405,11 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(weight);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "rmsNormMul");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_weight = try ctx.castTyped(Self.dtype, .f32, weight.asRawTensor());
+            var wide_weight = try ctx.cast(Self.dtype, .f32, weight.asRawTensor());
             defer wide_weight.deinit();
-            var wide_value = try ctx.rmsNormMulAxisRank(Self.tag_count, &wide, &wide_weight, Self.axis(tag), eps);
+            var wide_value = try ctx.rmsNormMul(Self.tag_count, &wide, &wide_weight, Self.axis(tag), eps);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1424,9 +1424,9 @@ pub fn Mod(comptime ag_tensor: type) type {
                     @compileError("typed layerNorm supports only plain .{} options; cast to f32 for the affine path");
                 }
             }
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.layerNormAxisRank(Self.tag_count, &wide, Self.axis(tag), eps);
+            var wide_value = try ctx.layerNorm(Self.tag_count, &wide, Self.axis(tag), eps);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1438,9 +1438,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "logsumexp");
             const result_tags = removeTag(Self.axis_tags, tag);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var value = try ctx.logsumexpAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var value = try ctx.logsumexp(Self.tag_count, &wide, Self.axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1462,11 +1462,11 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "max/min");
             const result_tags = removeTag(Self.axis_tags, tag);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             var raw = switch (op) {
-                .max => try ctx.maxAxisRank(Self.tag_count, &wide, Self.axis(tag)),
-                .min => try ctx.minAxisRank(Self.tag_count, &wide, Self.axis(tag)),
+                .max => try ctx.maxAxis(Self.tag_count, &wide, Self.axis(tag)),
+                .min => try ctx.minAxis(Self.tag_count, &wide, Self.axis(tag)),
             };
             raw.indices.deinit();
             errdefer raw.values.deinit();
@@ -1477,9 +1477,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "argmax");
             const result_tags = removeTag(Self.axis_tags, tag);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var value = try ctx.argmaxAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var value = try ctx.argmax(Self.tag_count, &wide, Self.axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1489,9 +1489,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "prod");
             const result_tags = removeTag(Self.axis_tags, tag);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var value = try ctx.prodAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var value = try ctx.prod(Self.tag_count, &wide, Self.axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1501,9 +1501,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "variance");
             const result_tags = removeTag(Self.axis_tags, tag);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var value = try ctx.varAxisRank(Self.tag_count, &wide, Self.axis(tag), ddof);
+            var value = try ctx.varAxis(Self.tag_count, &wide, Self.axis(tag), ddof);
             errdefer value.deinit();
             return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1512,9 +1512,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "cumsum");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.cumsumAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var wide_value = try ctx.cumsum(Self.tag_count, &wide, Self.axis(tag));
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1523,9 +1523,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "cumprod");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.cumprodAxisRank(Self.tag_count, &wide, Self.axis(tag));
+            var wide_value = try ctx.cumprod(Self.tag_count, &wide, Self.axis(tag));
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1541,11 +1541,11 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (comptime Other.dtype != Self.dtype) @compileError("typed where requires matching dtypes; cast explicitly");
             const cond_ptr = tensorObjectPtrFrom(@TypeOf(cond), &cond);
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+            var wide_other = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_other.deinit();
-            var wide_value = try ctx.whereTyped(Cond.dtype, &wide, cond_ptr.asRawTensor(), &wide_other);
+            var wide_value = try ctx.where(Cond.dtype, &wide, cond_ptr.asRawTensor(), &wide_other);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1557,9 +1557,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Mask = TensorObject(@TypeOf(mask));
             if (comptime Mask.dtype != .bool and Mask.dtype != Self.dtype) @compileError("typed maskedFill takes a .bool or same-dtype mask; cast explicitly");
             const mask_ptr = tensorObjectPtrFrom(@TypeOf(mask), &mask);
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.maskedFillTyped(Mask.dtype, &wide, mask_ptr.asRawTensor(), value);
+            var wide_value = try ctx.maskedFill(Mask.dtype, &wide, mask_ptr.asRawTensor(), value);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1573,31 +1573,31 @@ pub fn Mod(comptime ag_tensor: type) type {
             const OtherT = @TypeOf(other);
             if (comptime dtype_mod.supportsIntMath(Self.dtype)) {
                 if (comptime (OtherT == comptime_int or @typeInfo(OtherT) == .int)) {
-                    var value = try ctx.compareIntScalarTyped(Self.dtype, op, self.asRawTensor(), @intCast(other));
+                    var value = try ctx.compareScalar(Self.dtype, op, self.asRawTensor(), @intCast(other));
                     errdefer value.deinit();
                     return BoolT.fromTensor(ctx, value);
                 }
                 const Other = TensorObject(@TypeOf(other));
                 if (comptime Other.dtype != Self.dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
                 const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-                var value = try ctx.compareIntTyped(Self.dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
+                var value = try ctx.compare(Self.dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
                 errdefer value.deinit();
                 return BoolT.fromTensor(ctx, value);
             }
             comptime requireWidenedTypedFloat(Self.dtype, "compare");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
             if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
-                var value = try ctx.compareScalar(op, &wide, other);
+                var value = try ctx.compareScalar(.f32, op, &wide, other);
                 errdefer value.deinit();
                 return BoolT.fromTensor(ctx, value);
             }
             const Other = TensorObject(@TypeOf(other));
             if (comptime Other.dtype != Self.dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var wide_other = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+            var wide_other = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_other.deinit();
-            var value = try ctx.compare(op, &wide, &wide_other);
+            var value = try ctx.compare(.f32, op, &wide, &wide_other);
             errdefer value.deinit();
             return BoolT.fromTensor(ctx, value);
         }
@@ -1614,9 +1614,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (comptime Other.dtype != Self.dtype) @compileError("typed einsum requires matching dtypes; cast explicitly");
             const result_tags = comptime normalizeTags(out_tags);
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var wide_left = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide_left = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide_left.deinit();
-            var wide_right = try ctx.castTyped(Self.dtype, .f32, other_ptr.asRawTensor());
+            var wide_right = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_right.deinit();
             var wide_value = try tag_ops.taggedEinsum(Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right, result_tags);
             defer wide_value.deinit();
@@ -1627,9 +1627,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
             comptime requireWidenedTypedFloat(Self.dtype, "pad");
-            var wide = try ctx.castTyped(Self.dtype, .f32, self.asRawTensor());
+            var wide = try ctx.cast(Self.dtype, .f32, self.asRawTensor());
             defer wide.deinit();
-            var wide_value = try ctx.padAxisRank(Self.tag_count, &wide, Self.axis(tag), before, after, fill);
+            var wide_value = try ctx.pad(Self.tag_count, &wide, Self.axis(tag), before, after, fill);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
@@ -1647,7 +1647,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             const split_tags = normalizeTags(split_tags_spec);
             const result_tags = splitTags(Self.axis_tags, tag, split_tags);
-            var value = try tag_ops.splitAxisViewOf(Self.dtype, Self.axis_tags, self.asRawTensor(), tag, split_tags, split_shape);
+            var value = try tag_ops.splitAxisView(Self.dtype, Self.axis_tags, self.asRawTensor(), tag, split_tags, split_shape);
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1657,7 +1657,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             const Self = TensorObject(@TypeOf(self));
             const merge_tags = normalizeTags(merge_tags_spec);
             const result_tags = mergeTags(Self.axis_tags, out_tag, merge_tags);
-            var value = try tag_ops.mergeAxesViewOf(Self.dtype, Self.axis_tags, self.asRawTensor(), out_tag, merge_tags);
+            var value = try tag_ops.mergeAxesView(Self.dtype, Self.axis_tags, self.asRawTensor(), out_tag, merge_tags);
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -1665,7 +1665,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn typedConstantFlatten(self: anytype, ctx: *ExecContext, comptime out_tag: Tag) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{out_tag} }) {
             try typedRequireNoGrad(self);
             const Self = TensorObject(@TypeOf(self));
-            var value = try tag_ops.flattenTensorOf(Self.dtype, ctx, self.asRawTensor());
+            var value = try tag_ops.flattenTensor(Self.dtype, ctx, self.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = Self.dtype, .tags = .{out_tag} }).fromTensor(ctx, value);
         }
@@ -1787,27 +1787,27 @@ pub fn Mod(comptime ag_tensor: type) type {
             const left = tensorObjectPtrFrom(@TypeOf(self), &self);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = pointwiseResultTags(left_tags, right_tags);
-            const result_shape = try pointwiseShapeOf(tensor_dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
+            const result_shape = try pointwiseShape(tensor_dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
 
-            var left_view = try broadcastTensorToOf(tensor_dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
+            var left_view = try broadcastTensorTo(tensor_dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
             defer left_view.deinit();
-            var right_view = try broadcastTensorToOf(tensor_dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
+            var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
             defer right_view.deinit();
 
             var value = switch (op) {
-                .add => try ctx.addRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .sub => try ctx.subRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .mul => try ctx.mulRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .add => try ctx.add(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .sub => try ctx.sub(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
+                .mul => try ctx.mul(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
                 .div => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
                     @compileError("integer `div` is explicit: use divTrunc/divFloor (torch's `/` promotes to float; Fucina keeps promotion explicit)")
                 else
-                    try ctx.divRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
+                    try ctx.div(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
                 .max => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
-                    try ctx.maxRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
+                    try ctx.max(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
                 else
                     @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
                 .min => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
-                    try ctx.minRankTyped(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
+                    try ctx.min(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
                 else
                     @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
             };

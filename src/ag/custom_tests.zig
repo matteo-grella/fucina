@@ -19,9 +19,9 @@ const ScaledMul = struct {
     pub const Output = Tensor(.{.d});
 
     pub fn forward(ctx: *ExecContext, extra: Scale, inputs: []const *const RawTensor) !RawTensor {
-        var product = try ctx.mulRank(1, inputs[0], inputs[1]);
+        var product = try ctx.mul(.f32, 1, inputs[0], inputs[1]);
         defer product.deinit();
-        return ctx.scale(&product, extra.value);
+        return ctx.scale(.f32, &product, extra.value);
     }
 
     pub fn backward(
@@ -35,14 +35,14 @@ const ScaledMul = struct {
     ) !void {
         _ = output;
         if (needs_grad[0]) {
-            var scaled_rhs = try ctx.scale(inputs[1], extra.value);
+            var scaled_rhs = try ctx.scale(.f32, inputs[1], extra.value);
             defer scaled_rhs.deinit();
-            out[0] = try ctx.mulRank(1, gy, &scaled_rhs);
+            out[0] = try ctx.mul(.f32, 1, gy, &scaled_rhs);
         }
         if (needs_grad[1]) {
-            var scaled_lhs = try ctx.scale(inputs[0], extra.value);
+            var scaled_lhs = try ctx.scale(.f32, inputs[0], extra.value);
             defer scaled_lhs.deinit();
-            out[1] = try ctx.mulRank(1, gy, &scaled_lhs);
+            out[1] = try ctx.mul(.f32, 1, gy, &scaled_lhs);
         }
     }
 };
@@ -52,7 +52,7 @@ const BadShapeGradient = struct {
 
     pub fn forward(ctx: *ExecContext, extra: NoExtra, inputs: []const *const RawTensor) !RawTensor {
         _ = extra;
-        return ctx.materialize(inputs[0]);
+        return ctx.materialize(.f32, inputs[0]);
     }
 
     pub fn backward(
@@ -69,7 +69,7 @@ const BadShapeGradient = struct {
         _ = output;
         _ = gy;
         if (needs_grad[0]) {
-            out[0] = try ctx.scalar(1);
+            out[0] = try ctx.scalar(.f32, 1);
         }
     }
 };

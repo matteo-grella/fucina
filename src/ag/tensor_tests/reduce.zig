@@ -26,9 +26,9 @@ test "tagged autograd reduces broadcast pointwise gradients by tag" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try Tensor(.{ .batch, .d }).variable(&ctx, try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 }));
+    var x = try Tensor(.{ .batch, .d }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 }));
     defer x.deinit();
-    var bias = try Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(&.{3}, &.{ 10, 20, 30 }));
+    var bias = try Tensor(.{.d}).variable(&ctx, try ctx.fromSlice(.f32, &.{3}, &.{ 10, 20, 30 }));
     defer bias.deinit();
 
     var y = try x.add(&ctx, &bias);
@@ -59,6 +59,7 @@ test "tagged autograd permutes and reduces named axes" {
     var x = try Tensor(.{ .batch, .seq, .d }).variable(
         &ctx,
         try ctx.fromSlice(
+            .f32,
             &.{ 2, 3, 2 },
             &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
         ),

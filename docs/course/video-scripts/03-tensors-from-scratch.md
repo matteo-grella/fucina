@@ -89,7 +89,7 @@ output to the very same lines.
 **Visual:** Code shot of the test `"deinit recycles transient buffers through
 the pool"` from `docs/REFERENCE.md:4810-4826` (§6.2). Step-highlight in sync
 with the VO: `const first_ptr = first.dataConst().ptr;` → `first.deinit();`
-→ `var second = try ctx.add(&a, &a);` → the final
+→ `var second = try ctx.elementwise(.add, &a, &a);` → the final
 `expectEqual(first_ptr, second.dataConst().ptr)`.
 
 **Overlay:** "same size → same address — asserted, machine-verified

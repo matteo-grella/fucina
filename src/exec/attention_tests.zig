@@ -61,17 +61,17 @@ fn checkTiledAttentionParity(
     for (k_vals) |*x| x.* = if (kv_f16) @floatCast(random.floatNorm(f32)) else random.floatNorm(f32);
     for (v_vals) |*x| x.* = if (kv_f16) @floatCast(random.floatNorm(f32)) else random.floatNorm(f32);
 
-    var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_vals);
+    var q = try ctx.fromSlice(.f32, .{ q_seq, heads, d }, q_vals);
     defer q.deinit();
     var k = if (kv_f16)
-        try ctx.fromSliceRankTyped(.f16, 3, .{ kv_seq, kv_heads, d }, k_vals)
+        try ctx.fromSlice(.f16, .{ kv_seq, kv_heads, d }, k_vals)
     else
-        try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_vals);
+        try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, k_vals);
     defer k.deinit();
     var v = if (kv_f16)
-        try ctx.fromSliceRankTyped(.f16, 3, .{ kv_seq, kv_heads, d }, v_vals)
+        try ctx.fromSlice(.f16, .{ kv_seq, kv_heads, d }, v_vals)
     else
-        try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_vals);
+        try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, v_vals);
     defer v.deinit();
 
     var ref = if (kv_f16)
@@ -80,7 +80,7 @@ fn checkTiledAttentionParity(
         try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .window = window });
     defer ref.deinit();
 
-    var got = try ctx.emptyRank(2, .{ q_seq, heads * d });
+    var got = try ctx.empty(.f32, .{ q_seq, heads * d });
     defer got.deinit();
     const base = GroupedCausalAttentionTiledTask(KvElem){
         .q_data = q.dataConst(),
@@ -320,17 +320,17 @@ test "tiled attention NaN logit poisons the query row like the per-query kernels
     for (&v_vals) |*x| x.* = random.floatNorm(f32);
     for (0..D) |f| q_vals[(nan_query * H + nan_head) * D + f] = std.math.nan(f32);
 
-    var q = try ctx.fromSliceRank(3, .{ S, H, D }, &q_vals);
+    var q = try ctx.fromSlice(.f32, .{ S, H, D }, &q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ S, KVH, D }, &k_vals);
+    var k = try ctx.fromSlice(.f32, .{ S, KVH, D }, &k_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ S, KVH, D }, &v_vals);
+    var v = try ctx.fromSlice(.f32, .{ S, KVH, D }, &v_vals);
     defer v.deinit();
 
     var ref = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.5, .{});
     defer ref.deinit();
 
-    var got = try ctx.emptyRank(2, .{ S, H * D });
+    var got = try ctx.empty(.f32, .{ S, H * D });
     defer got.deinit();
     exec_attention.groupedCausalAttentionTiledRun(&ctx, f32, 2, .{
         .q_data = q.dataConst(),
@@ -398,14 +398,14 @@ test "tiled attention: huge usize SWA windows behave as full causal (dispatch cl
     for (k_vals) |*x| x.* = random.floatNorm(f32);
     for (v_vals) |*x| x.* = random.floatNorm(f32);
 
-    var q = try ctx.fromSliceRank(3, .{ S, H, D }, q_vals);
+    var q = try ctx.fromSlice(.f32, .{ S, H, D }, q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ KV, KVH, D }, k_vals);
+    var k = try ctx.fromSlice(.f32, .{ KV, KVH, D }, k_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ KV, KVH, D }, v_vals);
+    var v = try ctx.fromSlice(.f32, .{ KV, KVH, D }, v_vals);
     defer v.deinit();
 
-    var ref = try ctx.emptyRank(2, .{ S, H * D });
+    var ref = try ctx.empty(.f32, .{ S, H * D });
     defer ref.deinit();
     var scores: [KV * 2]f32 = undefined;
     groupedCausalAttentionHeadPairs(f32, .{
@@ -464,11 +464,11 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         defer allocator.free(kv_vals);
         for (q_vals) |*x| x.* = random.floatNorm(f32);
         for (kv_vals) |*x| x.* = random.floatNorm(f32);
-        var q = try ctx.fromSliceRank(3, .{ S, H, D }, q_vals);
+        var q = try ctx.fromSlice(.f32, .{ S, H, D }, q_vals);
         defer q.deinit();
-        var k = try ctx.fromSliceRank(3, .{ S, KVH, D }, kv_vals);
+        var k = try ctx.fromSlice(.f32, .{ S, KVH, D }, kv_vals);
         defer k.deinit();
-        var v = try ctx.fromSliceRank(3, .{ S, KVH, D }, kv_vals);
+        var v = try ctx.fromSlice(.f32, .{ S, KVH, D }, kv_vals);
         defer v.deinit();
         var out = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.25, .{});
         defer out.deinit();
@@ -495,14 +495,14 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         for (q_vals) |*x| x.* = random.floatNorm(f32);
         for (k_vals) |*x| x.* = random.floatNorm(f32);
         for (v_vals) |*x| x.* = random.floatNorm(f32);
-        var q = try ctx.fromSliceRank(3, .{ S, H, D }, q_vals);
+        var q = try ctx.fromSlice(.f32, .{ S, H, D }, q_vals);
         defer q.deinit();
-        var k = try ctx.fromSliceRank(3, .{ KV, KVH, D }, k_vals);
+        var k = try ctx.fromSlice(.f32, .{ KV, KVH, D }, k_vals);
         defer k.deinit();
-        var v = try ctx.fromSliceRank(3, .{ KV, KVH, D }, v_vals);
+        var v = try ctx.fromSlice(.f32, .{ KV, KVH, D }, v_vals);
         defer v.deinit();
 
-        var serial_out = try ctx.emptyRank(2, .{ S, H * D });
+        var serial_out = try ctx.empty(.f32, .{ S, H * D });
         defer serial_out.deinit();
         const q_tile = attention_tile_rows / 2;
         var task = GroupedCausalAttentionTiledTask(f32){
@@ -527,7 +527,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         const run = runGroupedCausalAttentionTiledTask(f32, 2);
         run(&task);
 
-        var pooled_out = try ctx.emptyRank(2, .{ S, H * D });
+        var pooled_out = try ctx.empty(.f32, .{ S, H * D });
         defer pooled_out.deinit();
         var base = task;
         base.out_data = pooled_out.data();
@@ -565,7 +565,7 @@ fn checkMultiKvAttentionParity(
     const q_vals = try allocator.alloc(f32, n * heads * d);
     defer allocator.free(q_vals);
     for (q_vals) |*x| x.* = random.floatNorm(f32);
-    var q = try ctx.fromSliceRank(3, .{ n, heads, d }, q_vals);
+    var q = try ctx.fromSlice(.f32, .{ n, heads, d }, q_vals);
     defer q.deinit();
 
     const KvElem = if (q8) BlockQ8_0 else f16;
@@ -589,11 +589,11 @@ fn checkMultiKvAttentionParity(
             const f32_vals = try allocator.alloc(f32, len_s * kv_heads * d);
             defer allocator.free(f32_vals);
             for (f32_vals) |*x| x.* = random.floatNorm(f32);
-            var rows = try ctx.fromSliceRank(3, .{ len_s, kv_heads, d }, f32_vals);
+            var rows = try ctx.fromSlice(.f32, .{ len_s, kv_heads, d }, f32_vals);
             defer rows.deinit();
             try ctx.quantizeF32RowsToQ8_0Into(&rows, k_owned[s]);
             for (f32_vals) |*x| x.* = random.floatNorm(f32);
-            var v_rows = try ctx.fromSliceRank(3, .{ len_s, kv_heads, d }, f32_vals);
+            var v_rows = try ctx.fromSlice(.f32, .{ len_s, kv_heads, d }, f32_vals);
             defer v_rows.deinit();
             try ctx.quantizeF32RowsToQ8_0Into(&v_rows, v_owned[s]);
         } else {
@@ -621,14 +621,14 @@ fn checkMultiKvAttentionParity(
     defer out.deinit();
 
     for (lens, 0..) |len_s, s| {
-        var q_s = try ctx.fromSliceRank(3, .{ 1, heads, d }, q_vals[s * heads * d ..][0 .. heads * d]);
+        var q_s = try ctx.fromSlice(.f32, .{ 1, heads, d }, q_vals[s * heads * d ..][0 .. heads * d]);
         defer q_s.deinit();
         var ref = if (comptime q8)
             try ctx.groupedAttention(&q_s, .{ .q8 = .{ .k = ks[s], .v = vs[s], .kv_seq = len_s, .kv_heads = kv_heads } }, kv_head_for_head, scale_value, .{})
         else blk: {
-            var k_t = try ctx.fromSliceRankTyped(.f16, 3, .{ len_s, kv_heads, d }, k_owned[s]);
+            var k_t = try ctx.fromSlice(.f16, .{ len_s, kv_heads, d }, k_owned[s]);
             defer k_t.deinit();
-            var v_t = try ctx.fromSliceRankTyped(.f16, 3, .{ len_s, kv_heads, d }, v_owned[s]);
+            var v_t = try ctx.fromSlice(.f16, .{ len_s, kv_heads, d }, v_owned[s]);
             defer v_t.deinit();
             break :blk try ctx.groupedAttention(&q_s, .{ .f16 = .{ .k = &k_t, .v = &v_t } }, kv_head_for_head, scale_value, .{});
         };
@@ -670,7 +670,7 @@ test "multi-stream attention rejects bad shapes" {
 
     const map = [_]usize{ 0, 0 };
     const q_vals = [_]f32{0} ** (2 * 2 * 16);
-    var q = try ctx.fromSliceRank(3, .{ 2, 2, 16 }, &q_vals);
+    var q = try ctx.fromSlice(.f32, .{ 2, 2, 16 }, &q_vals);
     defer q.deinit();
     const k_vals = [_]f16{0} ** (3 * 16);
     const ks = [_][]const f16{ k_vals[0..], k_vals[0..] };
@@ -769,13 +769,13 @@ fn checkBiasedBidirectionalParity(
         },
     }
 
-    var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_vals);
+    var q = try ctx.fromSlice(.f32, .{ q_seq, heads, d }, q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_vals);
+    var k = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, k_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_vals);
+    var v = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, v_vals);
     defer v.deinit();
-    var bias = try ctx.fromSliceRank(2, .{ q_seq, kv_seq }, bias_vals);
+    var bias = try ctx.fromSlice(.f32, .{ q_seq, kv_seq }, bias_vals);
     defer bias.deinit();
 
     var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .mask = .bidirectional, .bias = &bias });
@@ -876,15 +876,15 @@ test "grouped bidirectional biased attention rejects a mis-shaped bias" {
     const map = [_]usize{ 0, 0 };
     const q_vals = [_]f32{0} ** (3 * 2 * 16);
     const kv_vals = [_]f32{0} ** (3 * 1 * 16);
-    var q = try ctx.fromSliceRank(3, .{ 3, 2, 16 }, &q_vals);
+    var q = try ctx.fromSlice(.f32, .{ 3, 2, 16 }, &q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ 3, 1, 16 }, &kv_vals);
+    var k = try ctx.fromSlice(.f32, .{ 3, 1, 16 }, &kv_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ 3, 1, 16 }, &kv_vals);
+    var v = try ctx.fromSlice(.f32, .{ 3, 1, 16 }, &kv_vals);
     defer v.deinit();
 
     const bias_vals = [_]f32{0} ** (3 * 4);
-    var bias = try ctx.fromSliceRank(2, .{ 3, 4 }, &bias_vals);
+    var bias = try ctx.fromSlice(.f32, .{ 3, 4 }, &bias_vals);
     defer bias.deinit();
     try std.testing.expectError(
         error.InvalidShape,
@@ -912,11 +912,11 @@ fn checkWindowedAttention(
     for (&k_vals, 0..) |*x, i| x.* = @cos(@as(f32, @floatFromInt(i)) * 0.21) - 0.2;
     for (&v_vals, 0..) |*x, i| x.* = @sin(@as(f32, @floatFromInt(i)) * 0.17 + 0.4);
 
-    var q = try ctx.fromSliceRank(3, .{ S, H, D }, &q_vals);
+    var q = try ctx.fromSlice(.f32, .{ S, H, D }, &q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ S, KV, D }, &k_vals);
+    var k = try ctx.fromSlice(.f32, .{ S, KV, D }, &k_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ S, KV, D }, &v_vals);
+    var v = try ctx.fromSlice(.f32, .{ S, KV, D }, &v_vals);
     defer v.deinit();
 
     var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale_value, .{ .window = window });
@@ -993,11 +993,11 @@ test "grouped causal attention tiled dispatch matches a naive reference at long 
     for (&k_vals) |*x| x.* = random.floatNorm(f32);
     for (&v_vals) |*x| x.* = random.floatNorm(f32);
 
-    var q = try ctx.fromSliceRank(3, .{ S, H, D }, &q_vals);
+    var q = try ctx.fromSlice(.f32, .{ S, H, D }, &q_vals);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ KV, KVH, D }, &k_vals);
+    var k = try ctx.fromSlice(.f32, .{ KV, KVH, D }, &k_vals);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ KV, KVH, D }, &v_vals);
+    var v = try ctx.fromSlice(.f32, .{ KV, KVH, D }, &v_vals);
     defer v.deinit();
 
     for ([_]usize{ 0, 13 }) |window| {
@@ -1082,19 +1082,19 @@ test "grouped bidirectional attention matches a naive full-range reference" {
         }
         const head_map = kv_head_for_head[0..case.h];
 
-        var q = try ctx.fromSliceRank(3, .{ case.s, case.h, case.d }, q_vals);
+        var q = try ctx.fromSlice(.f32, .{ case.s, case.h, case.d }, q_vals);
         defer q.deinit();
-        var k = try ctx.fromSliceRank(3, .{ case.kv, case.kvh, case.d }, k_vals);
+        var k = try ctx.fromSlice(.f32, .{ case.kv, case.kvh, case.d }, k_vals);
         defer k.deinit();
-        var v = try ctx.fromSliceRank(3, .{ case.kv, case.kvh, case.d }, v_vals);
+        var v = try ctx.fromSlice(.f32, .{ case.kv, case.kvh, case.d }, v_vals);
         defer v.deinit();
 
         var got = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, head_map, scale_value, .{ .mask = .bidirectional });
         defer got.deinit();
 
-        var k16 = try ctx.castTyped(.f32, .f16, &k);
+        var k16 = try ctx.cast(.f32, .f16, &k);
         defer k16.deinit();
-        var v16 = try ctx.castTyped(.f32, .f16, &v);
+        var v16 = try ctx.cast(.f32, .f16, &v);
         defer v16.deinit();
         var got16 = try ctx.groupedAttention(&q, .{ .f16 = .{ .k = &k16, .v = &v16 } }, head_map, scale_value, .{ .mask = .bidirectional });
         defer got16.deinit();
@@ -1169,11 +1169,11 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
         for (k_data) |*value| value.* = random.floatNorm(f32);
         for (v_data) |*value| value.* = random.floatNorm(f32);
 
-        var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_data);
+        var q = try ctx.fromSlice(.f32, .{ q_seq, heads, d }, q_data);
         defer q.deinit();
-        var k = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_data);
+        var k = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, k_data);
         defer k.deinit();
-        var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_data);
+        var v = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, v_data);
         defer v.deinit();
 
         var out_plain = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, kv_head_for_head, scale, .{});
@@ -1238,13 +1238,13 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
     for (k_data) |*value| value.* = random.floatNorm(f32);
     for (v_data) |*value| value.* = random.floatNorm(f32);
     for (gy_data) |*value| value.* = random.floatNorm(f32);
-    var q = try ctx.fromSliceRank(3, .{ q_seq, heads, d }, q_data);
+    var q = try ctx.fromSlice(.f32, .{ q_seq, heads, d }, q_data);
     defer q.deinit();
-    var k = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, k_data);
+    var k = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, k_data);
     defer k.deinit();
-    var v = try ctx.fromSliceRank(3, .{ kv_seq, kv_heads, d }, v_data);
+    var v = try ctx.fromSlice(.f32, .{ kv_seq, kv_heads, d }, v_data);
     defer v.deinit();
-    var gy = try ctx.fromSliceRank(2, .{ q_seq, heads * d }, gy_data);
+    var gy = try ctx.fromSlice(.f32, .{ q_seq, heads * d }, gy_data);
     defer gy.deinit();
 
     for ([_][2]usize{ .{ 0, 1 }, .{ 16, 1 }, .{ 0, 0 } }) |variant| {

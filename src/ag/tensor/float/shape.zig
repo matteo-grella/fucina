@@ -60,7 +60,7 @@ pub fn Ops(comptime Self: type) type {
         const padding2dValues = plumbing.padding2dValues;
 
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
-            var value = try ctx.materialize(self.asRawTensor());
+            var value = try ctx.materialize(.f32, self.asRawTensor());
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, tags), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
@@ -149,7 +149,7 @@ pub fn Ops(comptime Self: type) type {
         ) !Tensor(splitTags(tags, tag, normalizeTags(split_tags_spec))) {
             const split_tags = normalizeTags(split_tags_spec);
             const result_tags = splitTags(tags, tag, split_tags);
-            var value = try tag_ops.splitAxisView(tags, self.asRawTensor(), tag, split_tags, split_shape);
+            var value = try tag_ops.splitAxisView(.f32, tags, self.asRawTensor(), tag, split_tags, split_shape);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
@@ -157,7 +157,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn merge(self: *const Self, ctx: *ExecContext, comptime out_tag: Tag, comptime merge_tags_spec: anytype) !Tensor(mergeTags(tags, out_tag, normalizeTags(merge_tags_spec))) {
             const merge_tags = normalizeTags(merge_tags_spec);
             const result_tags = mergeTags(tags, out_tag, merge_tags);
-            var value = try tag_ops.mergeAxesView(tags, self.asRawTensor(), out_tag, merge_tags);
+            var value = try tag_ops.mergeAxesView(.f32, tags, self.asRawTensor(), out_tag, merge_tags);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
@@ -195,13 +195,13 @@ pub fn Ops(comptime Self: type) type {
             target_shape: [normalizeTags(target_tags_spec).len]usize,
         ) !Tensor(normalizeTags(target_tags_spec)) {
             const target_tags = normalizeTags(target_tags_spec);
-            var value = try broadcastTensorTo(tags, self.asRawTensor(), target_tags, target_shape);
+            var value = try broadcastTensorTo(.f32, tags, self.asRawTensor(), target_tags, target_shape);
             errdefer value.deinit();
             return finishOp(target_tags, ctx, value, self.requiresGrad(), BroadcastBackward(tags, target_tags), .{ ctx.allocator, self.grad_state, &self.value });
         }
 
         pub fn flatten(self: *const Self, ctx: *ExecContext, comptime out_tag: Tag) !Tensor(.{out_tag}) {
-            var value = try tag_ops.flattenTensor(ctx, self.asRawTensor());
+            var value = try tag_ops.flattenTensor(.f32, ctx, self.asRawTensor());
             errdefer value.deinit();
             return finishOp(.{out_tag}, ctx, value, self.requiresGrad(), ReshapeBackward, .{ ctx.allocator, self.grad_state, &self.value });
         }
@@ -338,7 +338,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn narrow(self: *const Self, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize) !Self {
             const slice_axis = comptime axis(tag);
-            var value = try ctx.narrowAxisRank(tag_rank, self.asRawTensor(), slice_axis, start, length);
+            var value = try ctx.narrowAxis(.f32, tag_rank, self.asRawTensor(), slice_axis, start, length);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), NarrowBackward(tags, slice_axis), .{ ctx.allocator, self.grad_state, &self.value, start });
         }
@@ -626,7 +626,7 @@ pub fn Ops(comptime Self: type) type {
         /// positions are constants and drop their gradient).
         pub fn pad(self: *const Self, ctx: *ExecContext, comptime tag: Tag, before: usize, after: usize, fill: f32) !Self {
             const pad_axis = comptime axis(tag);
-            var value = try ctx.padAxisRank(tag_rank, self.asRawTensor(), pad_axis, before, after, fill);
+            var value = try ctx.pad(tag_rank, self.asRawTensor(), pad_axis, before, after, fill);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), PadBackward(tags, pad_axis), .{ ctx.allocator, self.grad_state, &self.value, before });
         }
@@ -745,7 +745,7 @@ pub fn Ops(comptime Self: type) type {
             }
 
             const concat_axis = comptime axis(tag);
-            var value = try ctx.concatAxisRank(tag_rank, raw_inputs, concat_axis);
+            var value = try ctx.concatAxis(.f32, tag_rank, raw_inputs, concat_axis);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, any_grad, ConcatBackward(tags, concat_axis), .{ ctx.allocator, parents, sizes });
         }

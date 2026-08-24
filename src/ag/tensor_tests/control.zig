@@ -196,7 +196,7 @@ test "tagged public tensor stores no-grad values inline" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const raw = try ctx.fromSliceRank(1, .{3}, &.{ 1, 2, 3 });
+    const raw = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     const buffer = raw.buffer;
     var x = try Tensor(1).fromTensor(&ctx, raw);
     defer x.deinit();

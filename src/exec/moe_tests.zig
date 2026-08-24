@@ -201,7 +201,7 @@ test "moe batched ffn: phased chain output is deterministic across identical run
     const x_vals = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
-    var x = try ctx.fromSliceRank(2, .{ seq, hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ seq, hidden }, x_vals);
     defer x.deinit();
 
     // Every expert active with uneven per-expert m; per-pair routing weights.

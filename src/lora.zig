@@ -98,7 +98,7 @@ pub fn Adapter(comptime in_tag: Tag, comptime out_tag: Tag) type {
             if (!(config.dropout_p >= 0 and config.dropout_p < 1)) return LoraError.InvalidDropout;
 
             var a = blk: {
-                var value = try ctx.emptyRank(2, .{ config.rank, in_dim });
+                var value = try ctx.empty(.f32, .{ config.rank, in_dim });
                 errdefer value.deinit();
                 rng.kaimingUniformFill(seed, value.data(), in_dim);
                 break :blk try ATensor.variable(ctx, value);
@@ -106,7 +106,7 @@ pub fn Adapter(comptime in_tag: Tag, comptime out_tag: Tag) type {
             errdefer a.deinit();
 
             const b = blk: {
-                var value = try ctx.zeros(&.{ out_dim, config.rank });
+                var value = try ctx.zeros(.f32, &.{ out_dim, config.rank });
                 errdefer value.deinit();
                 break :blk try BTensor.variable(ctx, value);
             };
@@ -254,10 +254,10 @@ pub fn Adapter(comptime in_tag: Tag, comptime out_tag: Tag) type {
             if (w.dim(out_tag) != self.b.dim(out_tag) or w.dim(in_tag) != self.a.dim(in_tag)) {
                 return TensorError.ShapeMismatch;
             }
-            var wide = try ctx.castTyped(.f16, .f32, w.asRawTensor());
+            var wide = try ctx.cast(.f16, .f32, w.asRawTensor());
             defer wide.deinit();
             try self.addScaledDeltaW(ctx, wide.data());
-            var back = try ctx.castTyped(.f32, .f16, &wide);
+            var back = try ctx.cast(.f32, .f16, &wide);
             errdefer back.deinit();
             return W.fromTensor(ctx, back);
         }
@@ -266,7 +266,7 @@ pub fn Adapter(comptime in_tag: Tag, comptime out_tag: Tag) type {
         /// always contiguous (fresh buffers, updated in place), so the raw
         /// matmul applies directly.
         fn addScaledDeltaW(self: *const Self, ctx: *ExecContext, w_data: []f32) !void {
-            var ba = try ctx.matmul2D(self.b.asRawTensor(), self.a.asRawTensor());
+            var ba = try ctx.matmul(.f32, self.b.asRawTensor(), self.a.asRawTensor());
             defer ba.deinit();
             const ba_data = ba.dataConst();
             std.debug.assert(w_data.len == ba_data.len);

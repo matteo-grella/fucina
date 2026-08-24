@@ -95,7 +95,7 @@ pub fn reduceGradientToTags(
 /// already contiguous, else a materialized copy. Shared with `elemental.zig`.
 pub fn contiguousForRead(ctx: *ExecContext, value: *const RawTensor) !RawTensor {
     if (value.isContiguous()) return value.cloneView();
-    return ctx.materialize(value);
+    return ctx.materialize(.f32, value);
 }
 
 pub fn expandGradientToTags(
@@ -107,7 +107,7 @@ pub fn expandGradientToTags(
 ) !RawTensor {
     const tagged_shape = taggedShapeArray(target_tags, target_shape);
     _ = ctx;
-    return tag_ops.broadcastTensorTo(grad_tags, grad, target_tags, tagged_shape);
+    return tag_ops.broadcastTensorTo(.f32, grad_tags, grad, target_tags, tagged_shape);
 }
 
 test "reduceGradientToTags uses direct view when tags and shape already match" {
@@ -116,7 +116,7 @@ test "reduceGradientToTags uses direct view when tags and shape already match" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var grad = try ctx.fromSliceRank(2, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var grad = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer grad.deinit();
 
     const outstanding_before = ctx.buffers.outstandingBuffers();
@@ -133,7 +133,7 @@ test "reduceGradientToTags uses direct view when tags and shape already match" {
 /// Contiguous read of a saved typed mask/cond tensor (any scalar dtype).
 pub fn contiguousForReadTyped(comptime mask_dtype: tensor_mod.DType, ctx: *ExecContext, value: *const tensor_mod.TensorOf(mask_dtype)) !tensor_mod.TensorOf(mask_dtype) {
     if (value.isContiguous()) return value.cloneView();
-    return ctx.materializeTyped(mask_dtype, value);
+    return ctx.materialize(mask_dtype, value);
 }
 
 /// Shared tail of the masked-reduction VJPs: broadcast a result-shaped
@@ -159,7 +159,7 @@ pub fn gateGradientByMask(
     var expanded = try contiguousForRead(ctx, &expanded_view);
     defer expanded.deinit();
 
-    var gx = try ctx.empty(m.shape.slice());
+    var gx = try ctx.empty(.f32, m.shape.slice());
     errdefer gx.deinit();
     for (m.dataConst(), expanded.dataConst(), gx.data()) |mv, grad, *dst| {
         dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) grad else 0;

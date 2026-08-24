@@ -81,7 +81,7 @@ test "tagged autograd gathers embedding rows and scatter-adds gradients" {
 
     var table = try Tensor(.{ .vocab, .d }).variable(
         &ctx,
-        try ctx.fromSlice(&.{ 4, 2 }, &.{ 1, 10, 2, 20, 3, 30, 4, 40 }),
+        try ctx.fromSlice(.f32, &.{ 4, 2 }, &.{ 1, 10, 2, 20, 3, 30, 4, 40 }),
     );
     defer table.deinit();
 

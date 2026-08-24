@@ -138,15 +138,15 @@ fn runRawAdd(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a = try ctx.emptyRank(1, .{n});
+    var a = try ctx.empty(.f32, .{n});
     defer a.deinit();
     fillPattern(&a, 1);
-    var b = try ctx.emptyRank(1, .{n});
+    var b = try ctx.empty(.f32, .{n});
     defer b.deinit();
     fillPattern(&b, 2);
 
     for (0..4) |_| {
-        var y = try ctx.addRank(1, &a, &b);
+        var y = try ctx.add(.f32, 1, &a, &b);
         y.deinit();
     }
 
@@ -154,7 +154,7 @@ fn runRawAdd(n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.addRank(1, &a, &b);
+        var y = try ctx.add(.f32, 1, &a, &b);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -178,12 +178,12 @@ fn runPublicAdd(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a_value = try ctx.emptyRank(1, .{n});
+    var a_value = try ctx.empty(.f32, .{n});
     fillPattern(&a_value, 1);
     var a = try fucina.Tensor(1).fromTensor(&ctx, a_value);
     defer a.deinit();
 
-    var b_value = try ctx.emptyRank(1, .{n});
+    var b_value = try ctx.empty(.f32, .{n});
     fillPattern(&b_value, 2);
     var b = try fucina.Tensor(1).fromTensor(&ctx, b_value);
     defer b.deinit();
@@ -221,15 +221,15 @@ fn runRawSwiglu(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a = try ctx.emptyRank(1, .{n});
+    var a = try ctx.empty(.f32, .{n});
     defer a.deinit();
     fillPattern(&a, 3);
-    var gate = try ctx.emptyRank(1, .{n});
+    var gate = try ctx.empty(.f32, .{n});
     defer gate.deinit();
     fillPattern(&gate, 4);
 
     for (0..4) |_| {
-        var y = try ctx.swigluRank(1, &a, &gate);
+        var y = try ctx.swiglu(1, &a, &gate);
         y.deinit();
     }
 
@@ -237,7 +237,7 @@ fn runRawSwiglu(n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.swigluRank(1, &a, &gate);
+        var y = try ctx.swiglu(1, &a, &gate);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -255,12 +255,12 @@ fn runPublicSwiglu(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a_value = try ctx.emptyRank(1, .{n});
+    var a_value = try ctx.empty(.f32, .{n});
     fillPattern(&a_value, 3);
     var a = try fucina.Tensor(1).fromTensor(&ctx, a_value);
     defer a.deinit();
 
-    var gate_value = try ctx.emptyRank(1, .{n});
+    var gate_value = try ctx.empty(.f32, .{n});
     fillPattern(&gate_value, 4);
     var gate = try fucina.Tensor(1).fromTensor(&ctx, gate_value);
     defer gate.deinit();
@@ -292,7 +292,7 @@ fn runRawClamp(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(1, .{n});
+    var x = try ctx.empty(.f32, .{n});
     defer x.deinit();
     fillPattern(&x, 11);
 
@@ -323,7 +323,7 @@ fn runPublicClamp(n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var value = try ctx.emptyRank(1, .{n});
+    var value = try ctx.empty(.f32, .{n});
     fillPattern(&value, 11);
     var x = try fucina.Tensor(1).fromTensor(&ctx, value);
     defer x.deinit();
@@ -355,12 +355,12 @@ fn runRawSumLast(rows: usize, cols: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(2, .{ rows, cols });
+    var x = try ctx.empty(.f32, .{ rows, cols });
     defer x.deinit();
     fillPattern(&x, 12);
 
     for (0..4) |_| {
-        var y = try ctx.sumAxisRank(2, &x, 1);
+        var y = try ctx.sumAxis(.f32, 2, &x, 1);
         y.deinit();
     }
 
@@ -368,7 +368,7 @@ fn runRawSumLast(rows: usize, cols: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.sumAxisRank(2, &x, 1);
+        var y = try ctx.sumAxis(.f32, 2, &x, 1);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -386,7 +386,7 @@ fn runPublicSumLast(rows: usize, cols: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var value = try ctx.emptyRank(2, .{ rows, cols });
+    var value = try ctx.empty(.f32, .{ rows, cols });
     fillPattern(&value, 12);
     var x = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, value);
     defer x.deinit();
@@ -418,12 +418,12 @@ fn runRawNarrowLast(rows: usize, cols: usize, start: usize, length: usize, itera
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(2, .{ rows, cols });
+    var x = try ctx.empty(.f32, .{ rows, cols });
     defer x.deinit();
     fillPattern(&x, 5);
 
     for (0..8) |_| {
-        var y = try ctx.narrowAxisRank(2, &x, 1, start, length);
+        var y = try ctx.narrowAxis(.f32, 2, &x, 1, start, length);
         y.deinit();
     }
 
@@ -431,7 +431,7 @@ fn runRawNarrowLast(rows: usize, cols: usize, start: usize, length: usize, itera
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.narrowAxisRank(2, &x, 1, start, length);
+        var y = try ctx.narrowAxis(.f32, 2, &x, 1, start, length);
         checksum += @as(f64, @floatCast(firstRawValue(&y)));
         y.deinit();
     }
@@ -449,7 +449,7 @@ fn runPublicNarrowLast(rows: usize, cols: usize, start: usize, length: usize, it
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var value = try ctx.emptyRank(2, .{ rows, cols });
+    var value = try ctx.empty(.f32, .{ rows, cols });
     fillPattern(&value, 5);
     var x = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, value);
     defer x.deinit();
@@ -481,16 +481,16 @@ fn runRawConcatLast(rows: usize, left_cols: usize, right_cols: usize, iterations
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a = try ctx.emptyRank(2, .{ rows, left_cols });
+    var a = try ctx.empty(.f32, .{ rows, left_cols });
     defer a.deinit();
     fillPattern(&a, 6);
-    var b = try ctx.emptyRank(2, .{ rows, right_cols });
+    var b = try ctx.empty(.f32, .{ rows, right_cols });
     defer b.deinit();
     fillPattern(&b, 7);
     var inputs = [_]*const RawTensor{ &a, &b };
 
     for (0..4) |_| {
-        var y = try ctx.concatAxisRank(2, &inputs, 1);
+        var y = try ctx.concatAxis(.f32, 2, &inputs, 1);
         y.deinit();
     }
 
@@ -498,7 +498,7 @@ fn runRawConcatLast(rows: usize, left_cols: usize, right_cols: usize, iterations
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.concatAxisRank(2, &inputs, 1);
+        var y = try ctx.concatAxis(.f32, 2, &inputs, 1);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -516,12 +516,12 @@ fn runPublicConcatLast(rows: usize, left_cols: usize, right_cols: usize, iterati
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a_value = try ctx.emptyRank(2, .{ rows, left_cols });
+    var a_value = try ctx.empty(.f32, .{ rows, left_cols });
     fillPattern(&a_value, 6);
     var a = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, a_value);
     defer a.deinit();
 
-    var b_value = try ctx.emptyRank(2, .{ rows, right_cols });
+    var b_value = try ctx.empty(.f32, .{ rows, right_cols });
     fillPattern(&b_value, 7);
     var b = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, b_value);
     defer b.deinit();
@@ -554,15 +554,15 @@ fn runRawSetRowsLast(rows: usize, cols: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var base = try ctx.emptyRank(2, .{ rows, cols });
+    var base = try ctx.empty(.f32, .{ rows, cols });
     defer base.deinit();
     fillPattern(&base, 8);
-    var update = try ctx.emptyRank(2, .{ rows, indices.len });
+    var update = try ctx.empty(.f32, .{ rows, indices.len });
     defer update.deinit();
     fillPattern(&update, 9);
 
     for (0..4) |_| {
-        var y = try ctx.setRowsAxisRank(2, &base, &update, 1, &indices);
+        var y = try ctx.setRows(.f32, 2, &base, &update, 1, &indices);
         y.deinit();
     }
 
@@ -570,7 +570,7 @@ fn runRawSetRowsLast(rows: usize, cols: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.setRowsAxisRank(2, &base, &update, 1, &indices);
+        var y = try ctx.setRows(.f32, 2, &base, &update, 1, &indices);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -589,12 +589,12 @@ fn runPublicSetRowsLast(rows: usize, cols: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var base_value = try ctx.emptyRank(2, .{ rows, cols });
+    var base_value = try ctx.empty(.f32, .{ rows, cols });
     fillPattern(&base_value, 8);
     var base = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, base_value);
     defer base.deinit();
 
-    var update_value = try ctx.emptyRank(2, .{ rows, indices.len });
+    var update_value = try ctx.empty(.f32, .{ rows, indices.len });
     fillPattern(&update_value, 9);
     var update = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, update_value);
     defer update.deinit();
@@ -626,12 +626,12 @@ fn runRawTopK(rows: usize, cols: usize, k: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(2, .{ rows, cols });
+    var x = try ctx.empty(.f32, .{ rows, cols });
     defer x.deinit();
     fillPattern(&x, 10);
 
     for (0..2) |_| {
-        var y = try ctx.topKAxisRank(2, &x, 1, k);
+        var y = try ctx.topK(2, &x, 1, k);
         y.deinit();
     }
 
@@ -639,7 +639,7 @@ fn runRawTopK(rows: usize, cols: usize, k: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.topKAxisRank(2, &x, 1, k);
+        var y = try ctx.topK(2, &x, 1, k);
         checksum += @as(f64, @floatCast(y.values.dataConst()[0]));
         y.deinit();
     }
@@ -657,7 +657,7 @@ fn runPublicTopK(rows: usize, cols: usize, k: usize, iterations: usize) !Result 
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var value = try ctx.emptyRank(2, .{ rows, cols });
+    var value = try ctx.empty(.f32, .{ rows, cols });
     fillPattern(&value, 10);
     var x = try fucina.Tensor(.{ .row, .d }).fromTensor(&ctx, value);
     defer x.deinit();
@@ -689,14 +689,14 @@ fn runRawDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Result 
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(2, .{ m, k });
+    var x = try ctx.empty(.f32, .{ m, k });
     defer x.deinit();
     fillPattern(&x, 11);
 
     const blocks = try counted.allocator().alloc(bench_raw.BlockQ8_0, n * (k / bench_raw.q8_0_block_size));
     defer counted.allocator().free(blocks);
     fillQ8_0Blocks(blocks);
-    var w = try ctx.fromStorageSliceRankTyped(.q8_0, 2, .{ n, k }, blocks);
+    var w = try ctx.fromStorageSlice(.q8_0, .{ n, k }, blocks);
     defer w.deinit();
     var packed_rhs = try ctx.packMatmulRhs(.q8_0, &w);
     defer packed_rhs.deinit();
@@ -728,7 +728,7 @@ fn runPublicDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Resu
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x_value = try ctx.emptyRank(2, .{ m, k });
+    var x_value = try ctx.empty(.f32, .{ m, k });
     fillPattern(&x_value, 11);
     var x = try fucina.Tensor(.{ .batch, .in }).fromTensor(&ctx, x_value);
     defer x.deinit();
@@ -768,13 +768,13 @@ fn runRawGroupedCausalAttention(q_seq: usize, kv_seq: usize, heads: usize, kv_he
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var q = try ctx.emptyRank(3, .{ q_seq, heads, d });
+    var q = try ctx.empty(.f32, .{ q_seq, heads, d });
     defer q.deinit();
     fillPattern(&q, 12);
-    var k = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+    var k = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
     defer k.deinit();
     fillPattern(&k, 13);
-    var v = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+    var v = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
     defer v.deinit();
     fillPattern(&v, 14);
 
@@ -810,15 +810,15 @@ fn runPublicGroupedCausalAttention(q_seq: usize, kv_seq: usize, heads: usize, kv
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var q_value = try ctx.emptyRank(3, .{ q_seq, heads, d });
+    var q_value = try ctx.empty(.f32, .{ q_seq, heads, d });
     fillPattern(&q_value, 12);
     var q = try fucina.Tensor(.{ .seq, .head, .d }).fromTensor(&ctx, q_value);
     defer q.deinit();
-    var k_value = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+    var k_value = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
     fillPattern(&k_value, 13);
     var k = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromTensor(&ctx, k_value);
     defer k.deinit();
-    var v_value = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+    var v_value = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
     fillPattern(&v_value, 14);
     var v = try fucina.Tensor(.{ .seq, .kv_head, .d }).fromTensor(&ctx, v_value);
     defer v.deinit();
@@ -855,10 +855,10 @@ fn runRawMatmulTransB(m: usize, k: usize, n: usize, iterations: usize) !Result {
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a = try ctx.emptyRank(2, .{ m, k });
+    var a = try ctx.empty(.f32, .{ m, k });
     defer a.deinit();
     fillPattern(&a, 15);
-    var b = try ctx.emptyRank(2, .{ n, k });
+    var b = try ctx.empty(.f32, .{ n, k });
     defer b.deinit();
     fillPattern(&b, 16);
 
@@ -889,11 +889,11 @@ fn runPublicMatmulTransB(m: usize, k: usize, n: usize, iterations: usize) !Resul
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var a_value = try ctx.emptyRank(2, .{ m, k });
+    var a_value = try ctx.empty(.f32, .{ m, k });
     fillPattern(&a_value, 15);
     var a = try fucina.Tensor(.{ .m, .k }).fromTensor(&ctx, a_value);
     defer a.deinit();
-    var b_value = try ctx.emptyRank(2, .{ n, k });
+    var b_value = try ctx.empty(.f32, .{ n, k });
     fillPattern(&b_value, 16);
     var b = try fucina.Tensor(.{ .n, .k }).fromTensor(&ctx, b_value);
     defer b.deinit();
@@ -931,7 +931,7 @@ fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, 
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x = try ctx.emptyRank(3, .{ seq, heads, d });
+    var x = try ctx.empty(.f32, .{ seq, heads, d });
     defer x.deinit();
     fillPattern(&x, 17);
 
@@ -941,7 +941,7 @@ fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, 
     defer table.deinit();
 
     for (0..4) |_| {
-        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, mode);
+        var y = try ctx.ropePartialWithTable(3, &x, 0, 2, &table, mode);
         y.deinit();
     }
 
@@ -949,7 +949,7 @@ fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, 
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.ropePartialAxisRankWithTable(3, &x, 0, 2, &table, mode);
+        var y = try ctx.ropePartialWithTable(3, &x, 0, 2, &table, mode);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -967,7 +967,7 @@ fn runPublicRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usiz
     ctx.init(counted.allocator());
     defer ctx.deinit();
 
-    var x_value = try ctx.emptyRank(3, .{ seq, heads, d });
+    var x_value = try ctx.empty(.f32, .{ seq, heads, d });
     fillPattern(&x_value, 17);
     var x = try fucina.Tensor(.{ .seq, .head, .d }).fromTensor(&ctx, x_value);
     defer x.deinit();

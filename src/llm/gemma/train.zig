@@ -281,7 +281,7 @@ fn rawExpertOutput(
 }
 
 fn zeroHidden(ctx: *ExecContext, seq: usize, hidden: usize) !Hidden {
-    var value = try ctx.zeros(&.{ seq, hidden });
+    var value = try ctx.zeros(.f32, &.{ seq, hidden });
     errdefer value.deinit();
     return Hidden.fromTensor(ctx, value);
 }

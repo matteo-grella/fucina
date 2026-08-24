@@ -10,6 +10,16 @@ const exec_row_ops = @import("row_ops.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
+
+/// Storage dtype of a packed-RHS container (value or pointer), for the
+/// matmul pool gate.
+fn packedRhsDType(comptime Rhs: type) DType {
+    return switch (@typeInfo(Rhs)) {
+        .pointer => |info| info.child.dtype,
+        else => Rhs.dtype,
+    };
+}
+
 const Tensor = tensor.Tensor;
 
 const FusedActQuantTask = exec_row_ops.FusedActQuantTask;
@@ -46,20 +56,20 @@ pub const QuantizedMatmulOptions = struct {
     rhs_lifetime: RhsLifetime = .transient,
 };
 
-pub fn dequantizeTensorTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
-    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("dequantizeTensorTyped requires a block-quantized dtype");
+pub fn dequantizeTensor(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
+    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("dequantizeTensor requires a block-quantized dtype");
     const view = try x.rankView(2);
-    var out = try self.emptyRankTyped(.f32, 2, .{ view.dim(0), view.dim(1) });
+    var out = try self.empty(.f32, .{ view.dim(0), view.dim(1) });
     errdefer out.deinit();
     try backend_mod.quantized_matmul.dequantizeTensorInto(dtype, &out, x);
     return out;
 }
 
-pub fn getRowsQuantizedTyped(self: *ExecContext, comptime dtype: DType, table: *const tensor.TensorOf(dtype), indices: []const usize) !Tensor {
-    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("getRowsQuantizedTyped requires a block-quantized dtype");
+pub fn getRowsQuantized(self: *ExecContext, comptime dtype: DType, table: *const tensor.TensorOf(dtype), indices: []const usize) !Tensor {
+    comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("getRowsQuantized requires a block-quantized dtype");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
     const view = try table.rankView(2);
-    var out = try self.emptyRankTyped(.f32, 2, .{ indices.len, view.dim(1) });
+    var out = try self.empty(.f32, .{ indices.len, view.dim(1) });
     errdefer out.deinit();
     try backend_mod.quantized_matmul.getRowsTensorInto(dtype, &out, table, indices);
     return out;
@@ -80,10 +90,10 @@ fn pinnedRowwise(self: *ExecContext, a: *const Tensor, ctx: anytype) !Tensor {
     const av = try a.rankView(2);
     const m = av.dim(0);
     const cols = av.dim(1);
-    var aa = try self.prepareContiguousTyped(.f32, a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
     const input = aa.tensor().dataConst();
-    var row = try self.emptyRankTyped(.f32, 2, .{ 1, cols });
+    var row = try self.empty(.f32, .{ 1, cols });
     defer row.deinit();
     var out: ?Tensor = null;
     errdefer if (out) |*o| o.deinit();
@@ -94,7 +104,7 @@ fn pinnedRowwise(self: *ExecContext, a: *const Tensor, ctx: anytype) !Tensor {
         defer row_out.deinit();
         if (out == null) {
             n = (try row_out.rankView(2)).dim(1);
-            out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+            out = try self.empty(.f32, .{ m, n });
         }
         @memcpy(out.?.data()[r * n ..][0..n], row_out.dataConst());
     }
@@ -105,15 +115,6 @@ fn pinnedRowwise(self: *ExecContext, a: *const Tensor, ctx: anytype) !Tensor {
 /// row blocks -> f32 [m, n]. This is the public Tensor-backed path; GGUF
 /// loading will populate these block-quantized tensors directly.
 pub fn matmul2DWithQuantizedTensorRhs(
-    self: *ExecContext,
-    comptime rhs_dtype: DType,
-    a: *const Tensor,
-    rhs: *const tensor.TensorOf(rhs_dtype),
-) !Tensor {
-    return matmul2DWithQuantizedTensorRhsOptions(self, rhs_dtype, a, rhs, .{});
-}
-
-pub fn matmul2DWithQuantizedTensorRhsOptions(
     self: *ExecContext,
     comptime rhs_dtype: DType,
     a: *const Tensor,
@@ -133,11 +134,11 @@ pub fn matmul2DWithQuantizedTensorRhsOptions(
         rhs: *const tensor.TensorOf(rhs_dtype),
         options: QuantizedMatmulOptions,
         fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithQuantizedTensorRhsOptions(ctx, rhs_dtype, row, c.rhs, c.options);
+            return matmul2DWithQuantizedTensorRhs(ctx, rhs_dtype, row, c.rhs, c.options);
         }
     }{ .rhs = rhs, .options = options });
 
-    var aa = try self.prepareContiguousTyped(.f32, a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
 
     const blocks = try rhs.dataConstChecked();
@@ -149,9 +150,9 @@ pub fn matmul2DWithQuantizedTensorRhsOptions(
         }
     }
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(rhs_dtype, m, n, k);
 
     switch (rhs_dtype) {
         .q1_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ1_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
@@ -192,17 +193,6 @@ pub fn matmul2DWithQuantizedBlocksRhs(
     blocks: []const dtype_mod.Storage(rhs_dtype),
     n: usize,
     k: usize,
-) !Tensor {
-    return matmul2DWithQuantizedBlocksRhsOptions(self, rhs_dtype, a, blocks, n, k, .{});
-}
-
-pub fn matmul2DWithQuantizedBlocksRhsOptions(
-    self: *ExecContext,
-    comptime rhs_dtype: DType,
-    a: *const Tensor,
-    blocks: []const dtype_mod.Storage(rhs_dtype),
-    n: usize,
-    k: usize,
     options: QuantizedMatmulOptions,
 ) !Tensor {
     comptime if (!dtype_mod.supportsQuantizedMatmulRhs(rhs_dtype)) @compileError("RHS dtype does not support quantized matmul");
@@ -218,11 +208,11 @@ pub fn matmul2DWithQuantizedBlocksRhsOptions(
         k: usize,
         options: QuantizedMatmulOptions,
         fn call(c: @This(), ctx: *ExecContext, row: *const Tensor) anyerror!Tensor {
-            return matmul2DWithQuantizedBlocksRhsOptions(ctx, rhs_dtype, row, c.blocks, c.n, c.k, c.options);
+            return matmul2DWithQuantizedBlocksRhs(ctx, rhs_dtype, row, c.blocks, c.n, c.k, c.options);
         }
     }{ .blocks = blocks, .n = n, .k = k, .options = options });
 
-    var aa = try self.prepareContiguousTyped(.f32, a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
 
     if (options.allow_gpu) {
@@ -231,9 +221,9 @@ pub fn matmul2DWithQuantizedBlocksRhsOptions(
         }
     }
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(rhs_dtype, m, n, k);
 
     switch (rhs_dtype) {
         .q8_0 => try matmul2DWithQuantizedRowsTensorRhs(self, backend_mod.QuantizedMatmulRhsQ8_0, &out, aa.tensor(), blocks, m, n, k, blocks_per_row),
@@ -299,7 +289,20 @@ fn matmul2DWithQuantizedKTensorRhs(
 /// matmul RHS container for its dtype (`backend.PackedRhsFor(dt)`); the
 /// Q4_K choice between x8 and x2Mmla stays comptime. The per-format
 /// packers live in the backend's `quant/<fmt>.zig` children.
-pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !backend_mod.PackedRhsFor(dt) {
+/// Packed-RHS container type for `packMatmulRhs`: the 16-bit streaming
+/// pack for `.f16`/`.bf16` (consumed by `matmul2DWithPackedRhs`), the
+/// quantized block pack otherwise (consumed by `matmulPacked`).
+pub fn PackedMatmulRhsContainer(comptime dt: DType) type {
+    return if (dt == .f16 or dt == .bf16) backend_mod.PackedMatmulRhsFor(dt) else backend_mod.PackedRhsFor(dt);
+}
+
+pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !PackedMatmulRhsContainer(dt) {
+    if (comptime dt == .f16 or dt == .bf16) {
+        _ = try rhs.rankView(2);
+        var rr = try self.prepareContiguous(dt, rhs);
+        defer rr.deinit();
+        return kernels.packMatmulRhsTyped(dt, self.allocator, rr.tensor());
+    }
     return packMatmulRhsAs(self, backend_mod.PackedRhsFor(dt), rhs);
 }
 
@@ -330,12 +333,12 @@ pub fn matmulPacked(self: *ExecContext, a: *const Tensor, rhs: anytype) !Tensor 
         }
     }{ .rhs = rhs });
 
-    var aa = try self.prepareContiguousTyped(.f32, a);
+    var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
+    var out = try self.empty(.f32, .{ m, rhs.n });
     errdefer out.deinit();
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, rhs.n, k);
     try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
     return out;
 }
@@ -386,7 +389,7 @@ fn splitSwiGluMatmulQ8_0x4Impl(
         }
     }{ .rhs = rhs });
 
-    var gg = try self.prepareContiguousTyped(.f32, gate_up);
+    var gg = try self.prepareContiguous(.f32, gate_up);
     defer gg.deinit();
 
     // Decode (m == 1): the lane-packed kernel pads the single row to four
@@ -395,17 +398,17 @@ fn splitSwiGluMatmulQ8_0x4Impl(
     // (bench-q8gemv). Materialize the fused SwiGLU row and take the
     // plain-lhs route instead.
     if (m == 1) {
-        var fused = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        var fused = try self.empty(.f32, .{ 1, k });
         defer fused.deinit();
         backend_mod.quantized_matmul.q8_0.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
-        var row_out = try self.emptyRankTyped(.f32, 2, .{ 1, rhs.n });
+        var row_out = try self.empty(.f32, .{ 1, rhs.n });
         errdefer row_out.deinit();
-        self.enableNativeTypedMatmulPoolForWork(1, rhs.n, k);
+        self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), 1, rhs.n, k);
         try kernels.matmulPacked(self.pc(), self.allocator, &row_out, &fused, rhs, 1, rhs.n, k);
         return row_out;
     }
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
+    var out = try self.empty(.f32, .{ m, rhs.n });
     errdefer out.deinit();
 
     const blocks_per_row = try backend_mod.quantized_matmul.q8k.q8_0BlockCount(k);
@@ -442,7 +445,7 @@ fn splitSwiGluMatmulQ8_0x4Impl(
         0,
         row_groups,
     );
-    self.enableNativeTypedMatmulPoolForWork(m, rhs.n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, rhs.n, k);
     if (m % 4 == 0) {
         try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs_blocks, rhs, m, rhs.n, k);
     } else {
@@ -487,11 +490,11 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
     const blocks_per_row = try qm.q8k.qkBlockCount(k);
     const n = rhs.n;
 
-    var gg = try self.prepareContiguousTyped(.f32, gate_up);
+    var gg = try self.prepareContiguous(.f32, gate_up);
     defer gg.deinit();
     const input = gg.tensor().dataConst();
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
     const out_data = out.data();
 
@@ -510,7 +513,7 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
     defer scratch_storage.release();
     const scratch = scratch_storage.data[0 .. parallel.vector_max_threads * 4 * k];
 
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, n, k);
 
     if (prefix_rows > 0) {
         const row_groups = if (pad_x4) (prefix_rows + 3) / 4 else prefix_rows / 4;
@@ -580,15 +583,15 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
     const blocks_per_row = try qm.q8k.qkBlockCount(k);
     const n = rhs.n;
 
-    var xx = try self.prepareContiguousTyped(.f32, x);
+    var xx = try self.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
-    var ww = try self.prepareContiguousTyped(.f32, norm_weights);
+    var ww = try self.prepareContiguous(.f32, norm_weights);
     defer ww.deinit();
     const weights = ww.tensor().dataConst();
     const inv_cols: f32 = 1.0 / @as(f32, @floatFromInt(k));
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
     const out_data = out.data();
 
@@ -606,7 +609,7 @@ fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsK
     defer scratch_storage.release();
     const scratch = scratch_storage.data[0 .. parallel.vector_max_threads * 4 * k];
 
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, n, k);
 
     if (prefix_rows > 0) {
         const row_groups = if (pad_x4) (prefix_rows + 3) / 4 else prefix_rows / 4;
@@ -683,12 +686,12 @@ fn rmsNormMulMatmulQ8_0x4Impl(self: *ExecContext, x: *const Tensor, norm_weights
     const blocks_per_row = try qm.q8k.q8_0BlockCount(k);
     const n = rhs.n;
 
-    var xx = try self.prepareContiguousTyped(.f32, x);
+    var xx = try self.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ww = try self.prepareContiguousTyped(.f32, norm_weights);
+    var ww = try self.prepareContiguous(.f32, norm_weights);
     defer ww.deinit();
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
 
     const row_groups = (m + 3) / 4;
@@ -716,7 +719,7 @@ fn rmsNormMulMatmulQ8_0x4Impl(self: *ExecContext, x: *const Tensor, norm_weights
         .q8_0x4_blocks = qlhs,
     }, row_groups, scratch);
 
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, n, k);
     if (m % 4 == 0) {
         try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     } else {
@@ -741,17 +744,17 @@ pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *cons
         // Two row-batched inputs: the shared pinnedRowwise helper carries
         // one, so loop both here — same contract, each row runs the
         // m == 1 entry.
-        var gg_pin = try self.prepareContiguousTyped(.f32, gate);
+        var gg_pin = try self.prepareContiguous(.f32, gate);
         defer gg_pin.deinit();
-        var uu_pin = try self.prepareContiguousTyped(.f32, up);
+        var uu_pin = try self.prepareContiguous(.f32, up);
         defer uu_pin.deinit();
         const g_in = gg_pin.tensor().dataConst();
         const u_in = uu_pin.tensor().dataConst();
-        var g_row = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        var g_row = try self.empty(.f32, .{ 1, k });
         defer g_row.deinit();
-        var u_row = try self.emptyRankTyped(.f32, 2, .{ 1, k });
+        var u_row = try self.empty(.f32, .{ 1, k });
         defer u_row.deinit();
-        var out = try self.emptyRankTyped(.f32, 2, .{ m, rhs.n });
+        var out = try self.empty(.f32, .{ m, rhs.n });
         errdefer out.deinit();
         for (0..m) |r| {
             @memcpy(g_row.data(), g_in[r * k ..][0..k]);
@@ -765,12 +768,12 @@ pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *cons
     const blocks_per_row = try qm.q8k.q8_0BlockCount(k);
     const n = rhs.n;
 
-    var gg = try self.prepareContiguousTyped(.f32, gate);
+    var gg = try self.prepareContiguous(.f32, gate);
     defer gg.deinit();
-    var uu = try self.prepareContiguousTyped(.f32, up);
+    var uu = try self.prepareContiguous(.f32, up);
     defer uu.deinit();
 
-    var out = try self.emptyRankTyped(.f32, 2, .{ m, n });
+    var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
 
     const row_groups = (m + 3) / 4;
@@ -795,7 +798,7 @@ pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *cons
         .q8_0x4_blocks = qlhs,
     }, row_groups, scratch);
 
-    self.enableNativeTypedMatmulPoolForWork(m, n, k);
+    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, n, k);
     if (m % 4 == 0) {
         try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), &out, qlhs, rhs, m, n, k);
     } else {
@@ -866,7 +869,7 @@ fn denseQuantMatmulGpuImpl(
         if ((prefill_arm or decode_arm) and k % fmt.kMultiple() == 0 and n % 4 == 0 and
             input.isContiguous())
         {
-            var out = try self.emptyRank(2, .{ m, n });
+            var out = try self.empty(.f32, .{ m, n });
             errdefer out.deinit();
             // Stable GGUF/model weights admit true eager-async dispatch:
             // providers bind tensor storage directly and attach completion to
@@ -941,7 +944,7 @@ pub fn foldedTernaryMatmulGpu(
         const work = quantMatmulWork(m, n, k);
         const prefill_arm = m >= 32 and gpu.shouldUseGpuDenseQuantPacked(fmt, work);
         if (prefill_arm and k % fmt.kMultiple() == 0 and n % 4 == 0 and input.isContiguous()) {
-            var out = try self.emptyRank(2, .{ m, n });
+            var out = try self.empty(.f32, .{ m, n });
             errdefer out.deinit();
             if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
                 fmt,
@@ -1021,7 +1024,7 @@ pub fn denseQuantMatmulGpuSharedInputBatch(
             input.isContiguous() and
             gpu.shouldUseGpuDenseQuant(fmt, work))
         {
-            var out = try self.emptyRank(2, .{ rows_total, n });
+            var out = try self.empty(.f32, .{ rows_total, n });
             errdefer out.deinit();
             if (rhs_lifetime.isCacheable() and gpu.gemmQuantNtAsync(
                 fmt,

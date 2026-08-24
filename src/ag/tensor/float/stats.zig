@@ -40,7 +40,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn variance(self: *const Self, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(removeTag(tags, tag)) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.varAxisRank(tag_rank, self.asRawTensor(), reduce_axis, ddof);
+            var value = try ctx.varAxis(tag_rank, self.asRawTensor(), reduce_axis, ddof);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad(), VarBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, ddof });
         }
@@ -68,11 +68,11 @@ pub fn Ops(comptime Self: type) type {
             }
             const norm_axis = comptime axis(tag);
             if (comptime @hasField(Options, "valid_len")) {
-                var value = try ctx.standardizeAxisValidPrefixRank(tag_rank, self.asRawTensor(), norm_axis, options.valid_len, exec_options);
+                var value = try ctx.standardizeValidPrefix(tag_rank, self.asRawTensor(), norm_axis, options.valid_len, exec_options);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), StandardizeBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, @as(?usize, options.valid_len), exec_options });
             }
-            var value = try ctx.standardizeAxisRank(tag_rank, self.asRawTensor(), norm_axis, exec_options);
+            var value = try ctx.standardize(tag_rank, self.asRawTensor(), norm_axis, exec_options);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad(), StandardizeBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, @as(?usize, null), exec_options });
         }
@@ -82,7 +82,7 @@ pub fn Ops(comptime Self: type) type {
         /// exec scope (the typed-constant ownership rule).
         pub fn argmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .i64, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
-            var value = try ctx.argmaxAxisRank(tag_rank, self.asRawTensor(), axis(tag));
+            var value = try ctx.argmax(tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -125,7 +125,7 @@ pub fn Ops(comptime Self: type) type {
             var prepared: ?RawTensor = null;
             defer if (prepared) |*p| p.deinit();
             const weights_flat = if (raw.isContiguous()) try raw.dataConstChecked() else blk: {
-                prepared = try ctx.materialize(raw);
+                prepared = try ctx.materialize(.f32, raw);
                 break :blk try prepared.?.dataConstChecked();
             };
 
@@ -218,8 +218,8 @@ pub fn Ops(comptime Self: type) type {
             const reduce_axis = comptime axis(tag);
             if (comptime !@hasField(@TypeOf(opts), "mask")) {
                 var raw = switch (op) {
-                    .max => try ctx.maxAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
-                    .min => try ctx.minAxisRank(tag_rank, self.asRawTensor(), reduce_axis),
+                    .max => try ctx.maxAxis(tag_rank, self.asRawTensor(), reduce_axis),
+                    .min => try ctx.minAxis(tag_rank, self.asRawTensor(), reduce_axis),
                 };
                 // The first-extremum indices go into the backward node
                 // (computed in the forward, not recomputed); the caller only
@@ -241,8 +241,8 @@ pub fn Ops(comptime Self: type) type {
             comptime validateMaskType(Mask, "max/min");
             const empty_value = maskedReduceEmpty(opts);
             var raw = switch (op) {
-                .max => try ctx.maxMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
-                .min => try ctx.minMaskedAxisRank(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
+                .max => try ctx.maxMasked(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
+                .min => try ctx.minMasked(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), reduce_axis, empty_value),
             };
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();

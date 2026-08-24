@@ -49,12 +49,12 @@ test "exec context matmul uses backend into pooled output" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSlice(&.{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
+    var b = try ctx.fromSlice(.f32, &.{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
-    var c = try ctx.matmul(&a, &b);
+    var c = try ctx.matmul(.f32, &a, &b);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 58, 64, 139, 154 }, c.dataConst());
@@ -81,14 +81,14 @@ test "the GEMM dispatch tier leaves the IEEE float environment untouched" {
     // Denormal and huge operands, so a kernel that flushes subnormals or traps
     // on overflow shows up here rather than in a distant parity failure.
     const n = 64;
-    var lhs = try ctx.zeros(&.{ n, n });
+    var lhs = try ctx.zeros(.f32, &.{ n, n });
     defer lhs.deinit();
-    var rhs = try ctx.zeros(&.{ n, n });
+    var rhs = try ctx.zeros(.f32, &.{ n, n });
     defer rhs.deinit();
     for (lhs.data(), 0..) |*v, i| v.* = if (i % 7 == 0) 1.0e-40 else @floatFromInt(i % 13);
     for (rhs.data(), 0..) |*v, i| v.* = if (i % 5 == 0) 1.0e-40 else @floatFromInt(i % 11);
 
-    var nn = try ctx.matmul(&lhs, &rhs);
+    var nn = try ctx.matmul(.f32, &lhs, &rhs);
     defer nn.deinit();
     var nt = try ctx.matmulTransB(&lhs, &rhs);
     defer nt.deinit();
@@ -125,11 +125,11 @@ test "exec context matmul transpose variants use backend outputs" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSlice(&.{ 2, 3 }, &.{ 7, 8, 9, 10, 11, 12 });
+    var b = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
-    var c = try ctx.fromSlice(&.{ 2, 2 }, &.{ 7, 8, 9, 10 });
+    var c = try ctx.fromSlice(.f32, &.{ 2, 2 }, &.{ 7, 8, 9, 10 });
     defer c.deinit();
 
     var nt = try ctx.matmulTransB(&a, &b);
@@ -140,9 +140,9 @@ test "exec context matmul transpose variants use backend outputs" {
     defer tn.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 43, 48, 59, 66, 75, 84 }, tn.dataConst());
 
-    var column = try ctx.fromSlice(&.{ 3, 1 }, &.{ 2, 3, 4 });
+    var column = try ctx.fromSlice(.f32, &.{ 3, 1 }, &.{ 2, 3, 4 });
     defer column.deinit();
-    var gemv = try ctx.matmul(&a, &column);
+    var gemv = try ctx.matmul(.f32, &a, &column);
     defer gemv.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 20, 47 }, gemv.dataConst());
 }
@@ -172,18 +172,18 @@ test "exec context matmul around the blocked-gemm work threshold stays consisten
     for (a_data) |*v| v.* = rand.float(f32) - 0.5;
     for (b_data) |*v| v.* = rand.float(f32) - 0.5;
 
-    var b = try ctx.fromSlice(&.{ k, n }, b_data);
+    var b = try ctx.fromSlice(.f32, &.{ k, n }, b_data);
     defer b.deinit();
 
-    var a_above = try ctx.fromSlice(&.{ 768, k }, a_data);
+    var a_above = try ctx.fromSlice(.f32, &.{ 768, k }, a_data);
     defer a_above.deinit();
-    var above = try ctx.matmul(&a_above, &b);
+    var above = try ctx.matmul(.f32, &a_above, &b);
     defer above.deinit();
     try expectSampledMatmulParity(above.dataConst(), a_data, b_data, 768, n, k, 2e-3);
 
-    var a_below = try ctx.fromSlice(&.{ 767, k }, a_data[0 .. 767 * k]);
+    var a_below = try ctx.fromSlice(.f32, &.{ 767, k }, a_data[0 .. 767 * k]);
     defer a_below.deinit();
-    var below = try ctx.matmul(&a_below, &b);
+    var below = try ctx.matmul(.f32, &a_below, &b);
     defer below.deinit();
 
     for (below.dataConst(), above.dataConst()[0 .. 767 * n]) |lo, hi| {
@@ -221,16 +221,16 @@ test "exec context matmul blocked path covers transposed and strided inputs" {
         for (0..n) |j| bt_data[j * k + p] = b_data[p * n + j];
     }
 
-    var a = try ctx.fromSlice(&.{ m, k }, a_data);
+    var a = try ctx.fromSlice(.f32, &.{ m, k }, a_data);
     defer a.deinit();
-    var a_t = try ctx.fromSlice(&.{ k, m }, at_data);
+    var a_t = try ctx.fromSlice(.f32, &.{ k, m }, at_data);
     defer a_t.deinit();
-    var b = try ctx.fromSlice(&.{ k, n }, b_data);
+    var b = try ctx.fromSlice(.f32, &.{ k, n }, b_data);
     defer b.deinit();
-    var b_t = try ctx.fromSlice(&.{ n, k }, bt_data);
+    var b_t = try ctx.fromSlice(.f32, &.{ n, k }, bt_data);
     defer b_t.deinit();
 
-    var want = try ctx.matmul(&a, &b);
+    var want = try ctx.matmul(.f32, &a, &b);
     defer want.deinit();
     try expectSampledMatmulParity(want.dataConst(), a_data, b_data, m, n, k, 2e-3);
 
@@ -246,7 +246,7 @@ test "exec context matmul blocked path covers transposed and strided inputs" {
     // prepareContiguous materializes it before the kernel dispatch.
     var a_view = try a_t.viewWithStrides(&.{ m, k }, &.{ 1, m });
     defer a_view.deinit();
-    var nn = try ctx.matmul(&a_view, &b);
+    var nn = try ctx.matmul(.f32, &a_view, &b);
     defer nn.deinit();
     for (want.dataConst(), nn.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
 }
@@ -257,9 +257,9 @@ test "exec context matmul transposed f16 RHS uses backend output" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRankTyped(.f16, 2, .{ 2, 3 }, &.{ 7, 8, 9, 10, 11, 12 });
+    var b = try ctx.fromSlice(.f16, .{ 2, 3 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
     var got = try ctx.matmulTransB2DWithF16Rhs(&a, &b);
@@ -274,9 +274,9 @@ test "exec context matmul transposed bf16 RHS uses backend output" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var a = try ctx.fromSlice(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    var a = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer a.deinit();
-    var b = try ctx.fromSliceRankTyped(.bf16, 2, .{ 2, 3 }, &.{
+    var b = try ctx.fromSlice(.bf16, .{ 2, 3 }, &.{
         dtype_mod.f32ToBf16(7),
         dtype_mod.f32ToBf16(8),
         dtype_mod.f32ToBf16(9),
@@ -316,11 +316,11 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
         bb.* = dtype_mod.f32ToBf16(value);
     }
 
-    var a = try ctx.fromSlice(&.{ m, k }, &a_data);
+    var a = try ctx.fromSlice(.f32, &.{ m, k }, &a_data);
     defer a.deinit();
-    var b16 = try ctx.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    var b16 = try ctx.fromSlice(.f16, .{ n, k }, &b16_data);
     defer b16.deinit();
-    var bbf = try ctx.fromSliceRankTyped(.bf16, 2, .{ n, k }, &bbf_data);
+    var bbf = try ctx.fromSlice(.bf16, .{ n, k }, &bbf_data);
     defer bbf.deinit();
 
     exec_matmul.setCpuF32Shadow(false, null);
@@ -360,16 +360,16 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     ctx_on.init(allocator);
     defer ctx_on.deinit();
     ctx_on.setTuning(.{ .cpu_f32_shadow = true, .cpu_f32_shadow_min_m = 4 });
-    var b16_ovr = try ctx_on.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    var b16_ovr = try ctx_on.fromSlice(.f16, .{ n, k }, &b16_data);
     defer b16_ovr.deinit();
-    var a_ovr = try ctx_on.fromSlice(&.{ m, k }, &a_data);
+    var a_ovr = try ctx_on.fromSlice(.f32, &.{ m, k }, &a_data);
     defer a_ovr.deinit();
     var got_ovr = try ctx_on.matmulTransB2DWithF16Rhs(&a_ovr, &b16_ovr);
     defer got_ovr.deinit();
     try std.testing.expect(b16_ovr.buffer.acceleratorResource(.cpu) != null); // shadow route ran
     for (want16.dataConst(), got_ovr.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
 
-    var b16_plain = try ctx.fromSliceRankTyped(.f16, 2, .{ n, k }, &b16_data);
+    var b16_plain = try ctx.fromSlice(.f16, .{ n, k }, &b16_data);
     defer b16_plain.deinit();
     var got_plain = try ctx.matmulTransB2DWithF16Rhs(&a, &b16_plain);
     defer got_plain.deinit();

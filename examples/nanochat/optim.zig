@@ -917,9 +917,9 @@ fn sumSq(s: []const f32) f64 {
 /// Batched matmul over the raw kernels (stride-0 batch = leading axis). `kind`:
 /// .plain a[k,M,K]·b[k,K,N]; .trans_a a[k,K,M]ᵀ·b[k,K,N]; .trans_b a[k,M,K]·b[k,N,K]ᵀ.
 fn bmm3(ctx: *ExecContext, kind: BmmKind, a: []f32, ash: [3]usize, b: []f32, bsh: [3]usize, out: []f32, osh: [3]usize) !void {
-    var at = try ctx.fromBorrowedSliceRank(3, ash, a);
+    var at = try ctx.fromBorrowedSlice(.f32, ash, a);
     defer at.deinit();
-    var bt = try ctx.fromBorrowedSliceRank(3, bsh, b);
+    var bt = try ctx.fromBorrowedSlice(.f32, bsh, b);
     defer bt.deinit();
     var rt = switch (kind) {
         .plain => try ctx.bmm(&at, &bt),

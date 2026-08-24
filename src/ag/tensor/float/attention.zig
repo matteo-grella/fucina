@@ -243,10 +243,10 @@ pub fn Ops(comptime Self: type) type {
             if (kv_seq * kv_heads == 0 or k_blocks.len % (kv_seq * kv_heads) != 0) return TensorError.InvalidShape;
             if (v_blocks.len != k_blocks.len) return TensorError.InvalidShape;
             const d = (k_blocks.len / (kv_seq * kv_heads)) * block_size;
-            var k32 = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+            var k32 = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
             defer k32.deinit();
             try ctx.dequantizeQ8_0RowsInto(k32.data(), k_blocks);
-            var v32 = try ctx.emptyRank(3, .{ kv_seq, kv_heads, d });
+            var v32 = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
             defer v32.deinit();
             try ctx.dequantizeQ8_0RowsInto(v32.data(), v_blocks);
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
@@ -286,9 +286,9 @@ pub fn Ops(comptime Self: type) type {
             window: usize,
             causal: bool,
         ) !Tensor(.{ .seq, out_tag }) {
-            var k32 = try ctx.castTyped(.f16, .f32, k.asRawTensor());
+            var k32 = try ctx.cast(.f16, .f32, k.asRawTensor());
             defer k32.deinit();
-            var v32 = try ctx.castTyped(.f16, .f32, v.asRawTensor());
+            var v32 = try ctx.cast(.f16, .f32, v.asRawTensor());
             defer v32.deinit();
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
             defer if (row_stats) |stats| ctx.allocator.free(stats);

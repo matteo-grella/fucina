@@ -151,13 +151,13 @@ const Base = struct {
     allocator: std.mem.Allocator,
 
     fn init(ctx: *ExecContext, case: Case) !Base {
-        var q = try ctx.emptyRank(3, .{ case.q_seq, case.heads, case.d });
+        var q = try ctx.empty(.f32, .{ case.q_seq, case.heads, case.d });
         errdefer q.deinit();
-        var k = try ctx.emptyRank(3, .{ case.kv_seq, case.kv_heads, case.d });
+        var k = try ctx.empty(.f32, .{ case.kv_seq, case.kv_heads, case.d });
         errdefer k.deinit();
-        var v = try ctx.emptyRank(3, .{ case.kv_seq, case.kv_heads, case.d });
+        var v = try ctx.empty(.f32, .{ case.kv_seq, case.kv_heads, case.d });
         errdefer v.deinit();
-        var gy = try ctx.emptyRank(2, .{ case.q_seq, case.heads * case.d });
+        var gy = try ctx.empty(.f32, .{ case.q_seq, case.heads * case.d });
         errdefer gy.deinit();
         const kv_head_for_head = try ctx.allocator.alloc(usize, case.heads);
         errdefer ctx.allocator.free(kv_head_for_head);

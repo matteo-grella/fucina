@@ -1,7 +1,7 @@
 //! Substrate of `ExecContext`: lifecycle, exec scopes, the worker team, and
 //! the tensor allocation primitives. Every function here takes the context
 //! as its first parameter and is aliased into the `ExecContext` struct body
-//! in `exec.zig`, so `ctx.empty(...)` and `exec_runtime.empty(ctx, ...)` are
+//! in `exec.zig`, so `ctx.empty(.f32, ...)` and `exec_runtime.empty(ctx, ...)` are
 //! the same call. The fields these functions operate on are declared on
 //! `ExecContext` itself; domain modules under `src/exec/` reach the same
 //! substrate through the same `*ExecContext`.
@@ -269,192 +269,156 @@ pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker {
 // storage dtype).
 // ------------------------------------------------------------------
 
-pub fn empty(self: *ExecContext, shape: []const usize) !Tensor {
-    const len = try tensor.elementCount(shape);
-    const buffer = try self.buffers.acquire(len);
-    errdefer buffer.release();
-    return Tensor.fromOwnedBuffer(buffer, shape);
+/// Comptime rank carried by a shape argument: `[n]usize` arrays, pointers
+/// to arrays (`&.{...}`), and integer tuples report their rank through the
+/// type; a `[]const usize` slice reports null and takes the runtime-rank
+/// path.
+pub fn shapeComptimeRank(comptime Shape: type) ?usize {
+    const invalid = "shape must be a [n]usize array, a tuple of sizes, or a []const usize slice";
+    return switch (@typeInfo(Shape)) {
+        .array => |info| info.len,
+        .pointer => |info| switch (info.size) {
+            .one => shapeComptimeRank(info.child),
+            .slice => null,
+            else => @compileError(invalid),
+        },
+        .@"struct" => |info| if (info.is_tuple) info.fields.len else @compileError(invalid),
+        else => @compileError(invalid),
+    };
 }
 
-pub fn emptyRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize) !Tensor {
-    const len = try tensor.elementCountArray(rank, shape);
-    const buffer = try self.buffers.acquire(len);
-    errdefer buffer.release();
-    return Tensor.fromOwnedBuffer(buffer, shape[0..]);
+pub fn shapeArray(comptime rank: usize, shape: anytype) [rank]usize {
+    var out: [rank]usize = undefined;
+    if (comptime @typeInfo(@TypeOf(shape)) == .pointer) {
+        inline for (shape.*, 0..) |dim, i| out[i] = dim;
+    } else {
+        inline for (shape, 0..) |dim, i| out[i] = dim;
+    }
+    return out;
 }
 
-pub fn emptyTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-    if (comptime dtype == .f32) return self.empty(shape);
+fn shapeElementCount(shape: anytype) !usize {
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        return tensor.elementCountArray(rank, shapeArray(rank, shape));
+    }
+    return tensor.elementCount(shape);
+}
 
+fn shapeStorageElementCount(comptime dtype: DType, shape: anytype) !usize {
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        return tensor.storageElementCountArray(dtype, rank, shapeArray(rank, shape));
+    }
+    return tensor.storageElementCount(dtype, shape);
+}
+
+/// Uninitialized tensor of `dtype` with `shape`: a `[n]usize` array or a
+/// tuple of sizes takes the comptime-rank arm, a `[]const usize` slice the
+/// runtime-rank arm.
+pub fn empty(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.TensorOf(dtype) {
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        const shape_array = shapeArray(rank, shape);
+        if (comptime dtype == .f32) {
+            const len = try tensor.elementCountArray(rank, shape_array);
+            const buffer = try self.buffers.acquire(len);
+            errdefer buffer.release();
+            return Tensor.fromOwnedBuffer(buffer, shape_array[0..]);
+        }
+        const len = try tensor.storageElementCountArray(dtype, rank, shape_array);
+        const buffer = try self.buffers.acquireTyped(dtype, len);
+        errdefer buffer.release();
+        return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape_array[0..]);
+    }
+    if (comptime dtype == .f32) {
+        const len = try tensor.elementCount(shape);
+        const buffer = try self.buffers.acquire(len);
+        errdefer buffer.release();
+        return Tensor.fromOwnedBuffer(buffer, shape);
+    }
     const len = try tensor.storageElementCount(dtype, shape);
     const buffer = try self.buffers.acquireTyped(dtype, len);
     errdefer buffer.release();
     return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape);
 }
 
-pub fn emptyRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-    if (comptime dtype == .f32) return self.emptyRank(rank, shape);
-
-    const len = try tensor.storageElementCountArray(dtype, rank, shape);
-    const buffer = try self.buffers.acquireTyped(dtype, len);
-    errdefer buffer.release();
-    return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape[0..]);
+/// Zero-copy broadcast view of `x` with `shape` (array/tuple or slice).
+pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: anytype) !Tensor {
+    _ = self;
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        return x.broadcastToRank(rank, shapeArray(rank, shape));
+    }
+    return x.broadcastTo(shape);
 }
 
-pub fn zeros(self: *ExecContext, shape: []const usize) !Tensor {
-    var out = try self.empty(shape);
-    @memset(out.data(), 0);
-    return out;
-}
-
-pub fn zerosRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize) !Tensor {
-    var out = try self.emptyRank(rank, shape);
-    @memset(out.data(), 0);
-    return out;
-}
-
-pub fn zerosTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-    var out = try self.emptyTyped(dtype, shape);
+pub fn zeros(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.TensorOf(dtype) {
+    var out = try self.empty(dtype, shape);
     @memset(out.data(), dtype_mod.zero(dtype));
     return out;
 }
 
-pub fn zerosRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-    var out = try self.emptyRankTyped(dtype, rank, shape);
-    @memset(out.data(), dtype_mod.zero(dtype));
-    return out;
-}
-
-pub fn ones(self: *ExecContext, shape: []const usize) !Tensor {
-    var out = try self.empty(shape);
-    @memset(out.data(), 1);
-    return out;
-}
-
-pub fn onesRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize) !Tensor {
-    var out = try self.emptyRank(rank, shape);
-    @memset(out.data(), 1);
-    return out;
-}
-
-pub fn onesTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize) !tensor.TensorOf(dtype) {
-    var out = try self.emptyTyped(dtype, shape);
+pub fn ones(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.TensorOf(dtype) {
+    var out = try self.empty(dtype, shape);
     @memset(out.data(), dtype_mod.one(dtype));
     return out;
 }
 
-pub fn onesRankTyped(self: *ExecContext, comptime dtype: DType, comptime rank: usize, shape: [rank]usize) !tensor.TensorOf(dtype) {
-    var out = try self.emptyRankTyped(dtype, rank, shape);
-    @memset(out.data(), dtype_mod.one(dtype));
-    return out;
-}
-
-pub fn full(self: *ExecContext, shape: []const usize, value: f32) !Tensor {
-    var out = try self.empty(shape);
+pub fn full(self: *ExecContext, comptime dtype: DType, shape: anytype, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+    var out = try self.empty(dtype, shape);
     @memset(out.data(), value);
     return out;
 }
 
-pub fn fullTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    var out = try self.emptyTyped(dtype, shape);
-    @memset(out.data(), value);
-    return out;
-}
-
-pub fn scalar(self: *ExecContext, value: f32) !Tensor {
-    var out = try self.empty(&.{1});
+pub fn scalar(self: *ExecContext, comptime dtype: DType, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+    var out = try self.empty(dtype, &.{1});
     out.data()[0] = value;
     return out;
 }
 
-pub fn scalarTyped(self: *ExecContext, comptime dtype: DType, value: dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    var out = try self.emptyTyped(dtype, &.{1});
-    out.data()[0] = value;
-    return out;
-}
-
-pub fn fromSlice(self: *ExecContext, shape: []const usize, values: []const f32) !Tensor {
-    const len = try tensor.elementCount(shape);
+pub fn fromSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+    const len = try shapeElementCount(shape);
     if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.empty(shape);
+    var out = try self.empty(dtype, shape);
     @memcpy(out.data(), values);
     return out;
 }
 
-pub fn fromSliceRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize, values: []const f32) !Tensor {
-    const len = try tensor.elementCountArray(rank, shape);
+pub fn fromBorrowedSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        const shape_array = shapeArray(rank, shape);
+        return tensor.TensorOf(dtype).fromBorrowedSlice(self.allocator, shape_array[0..], values);
+    }
+    return tensor.TensorOf(dtype).fromBorrowedSlice(self.allocator, shape, values);
+}
+
+pub fn fromStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
+    const len = try shapeStorageElementCount(dtype, shape);
     if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.emptyRank(rank, shape);
+    var out = try self.empty(dtype, shape);
     @memcpy(out.data(), values);
     return out;
 }
 
-pub fn fromBorrowedSliceRank(self: *ExecContext, comptime rank: usize, shape: [rank]usize, values: []f32) !Tensor {
-    return Tensor.fromBorrowedSlice(self.allocator, shape[0..], values);
+pub fn fromBorrowedStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
+    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
+    if (comptime maybe_rank != null) {
+        const rank = comptime maybe_rank.?;
+        const shape_array = shapeArray(rank, shape);
+        return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.allocator, shape_array[0..], values);
+    }
+    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.allocator, shape, values);
 }
 
-pub fn fromSliceTyped(self: *ExecContext, comptime dtype: DType, shape: []const usize, values: []const dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    const len = try tensor.elementCount(shape);
-    if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.emptyTyped(dtype, shape);
-    @memcpy(out.data(), values);
-    return out;
-}
-
-pub fn fromSliceRankTyped(
-    self: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    shape: [rank]usize,
-    values: []const dtype_mod.Scalar(dtype),
-) !tensor.TensorOf(dtype) {
-    const len = try tensor.elementCountArray(rank, shape);
-    if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.emptyRankTyped(dtype, rank, shape);
-    @memcpy(out.data(), values);
-    return out;
-}
-
-pub fn fromBorrowedSliceRankTyped(
-    self: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    shape: [rank]usize,
-    values: []dtype_mod.Scalar(dtype),
-) !tensor.TensorOf(dtype) {
-    return tensor.TensorOf(dtype).fromBorrowedSlice(self.allocator, shape[0..], values);
-}
-
-pub fn fromStorageSliceRankTyped(
-    self: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    shape: [rank]usize,
-    values: []const dtype_mod.Storage(dtype),
-) !tensor.TensorOf(dtype) {
-    const len = try tensor.storageElementCountArray(dtype, rank, shape);
-    if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.emptyRankTyped(dtype, rank, shape);
-    @memcpy(out.data(), values);
-    return out;
-}
-
-pub fn fromBorrowedStorageSliceRankTyped(
-    self: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    shape: [rank]usize,
-    values: []dtype_mod.Storage(dtype),
-) !tensor.TensorOf(dtype) {
-    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.allocator, shape[0..], values);
-}
-
-pub fn materialize(self: *ExecContext, x: *const Tensor) !Tensor {
-    return self.materializeTyped(.f32, x);
-}
-
-pub fn materializeTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    var out = try self.emptyTyped(dtype, x.shape.slice());
+pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    var out = try self.empty(dtype, x.shape.slice());
     errdefer out.deinit();
     if (comptime dtype_mod.isScalar(dtype)) {
         if (!x.isContiguous()) {
@@ -514,12 +478,8 @@ fn materializeChunked(comptime dtype: DType, x: *const tensor.TensorOf(dtype), d
     pool.parallelChunks(Task, tasks[0..count], runMaterializeTask(dtype));
 }
 
-pub fn clone(self: *ExecContext, x: *const Tensor) !Tensor {
-    return self.materialize(x);
-}
-
-pub fn cloneTyped(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    return self.materializeTyped(dtype, x);
+pub fn clone(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    return self.materialize(dtype, x);
 }
 
 // ------------------------------------------------------------------
@@ -553,17 +513,13 @@ pub fn PreparedTensorOf(comptime dtype: DType) type {
     };
 }
 
-pub fn prepareContiguous(self: *ExecContext, x: *const Tensor) !PreparedTensor {
-    return self.prepareContiguousTyped(.f32, x);
-}
-
-pub fn prepareContiguousTyped(
+pub fn prepareContiguous(
     self: *ExecContext,
     comptime dtype: DType,
     x: *const tensor.TensorOf(dtype),
 ) !PreparedTensorOf(dtype) {
     if (x.isContiguous()) return .{ .borrowed = x };
-    return .{ .owned = try self.materializeTyped(dtype, x) };
+    return .{ .owned = try self.materialize(dtype, x) };
 }
 
 // ------------------------------------------------------------------
@@ -577,14 +533,12 @@ pub fn enableNativeVectorPoolForWork(self: *ExecContext, work: usize, threshold:
     if (work >= threshold) _ = self.tryWorkPool() catch null;
 }
 
-pub fn enableNativeMatmulPoolForWork(self: *ExecContext, m: usize, n: usize, k: usize) void {
-    if (comptime backend_mod.active_kind != .native or backend_mod.native_uses_blas) return;
-    const work = parallel.saturatedMul3(m, n, k);
-    self.enableNativeVectorPoolForWork(work, parallel.vector_matmul_work_threshold);
-}
-
-pub fn enableNativeTypedMatmulPoolForWork(self: *ExecContext, m: usize, n: usize, k: usize) void {
+/// `dtype` names the storage the matmul kernel walks. The f32 dense route
+/// may be BLAS-owned (BLAS threads itself, so the pool stays down); every
+/// other storage runs our own kernels and threads through the pool.
+pub fn enableNativeMatmulPoolForWork(self: *ExecContext, comptime dtype: DType, m: usize, n: usize, k: usize) void {
     if (comptime backend_mod.active_kind != .native) return;
+    if (comptime dtype == .f32 and backend_mod.native_uses_blas) return;
     const work = parallel.saturatedMul3(m, n, k);
     self.enableNativeVectorPoolForWork(work, parallel.vector_matmul_work_threshold);
 }

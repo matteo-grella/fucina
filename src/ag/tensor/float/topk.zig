@@ -26,7 +26,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn topK(self: *const Self, ctx: *ExecContext, comptime tag: Tag, k: usize, comptime out_tag: Tag) !TopKResult(replaceTag(tags, tag, out_tag)) {
             const result_tags = replaceTag(tags, tag, out_tag);
-            const raw = try ctx.topKAxisRank(tag_rank, self.asRawTensor(), axis(tag), k);
+            const raw = try ctx.topK(tag_rank, self.asRawTensor(), axis(tag), k);
             var raw_values: ?RawTensor = raw.values;
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
@@ -46,12 +46,12 @@ pub fn Ops(comptime Self: type) type {
         /// unstable by default, but the tie ORDER may differ). NaN sorts
         /// LAST regardless of direction (documented divergence from
         /// torch.sort, which puts NaN first when descending — see
-        /// `sortAxisRank`). Values are differentiable (the gradient scatters
+        /// `sort`). Values are differentiable (the gradient scatters
         /// back through the saved indices, the topK VJP); indices are a
         /// constant i64 tensor (exact for any axis length, the repo-wide
         /// index convention).
         pub fn sort(self: *const Self, ctx: *ExecContext, comptime tag: Tag, descending: bool) !TopKResult(tags) {
-            const raw = try ctx.sortAxisRank(tag_rank, self.asRawTensor(), axis(tag), descending);
+            const raw = try ctx.sort(tag_rank, self.asRawTensor(), axis(tag), descending);
             var raw_values: ?RawTensor = raw.values;
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
@@ -70,7 +70,7 @@ pub fn Ops(comptime Self: type) type {
         /// for any axis length). Same unstable-sort and NaN-last contract
         /// as `sort`.
         pub fn argsort(self: *const Self, ctx: *ExecContext, comptime tag: Tag, descending: bool) !Tensor(.{ .dtype = .i64, .tags = tags }) {
-            var raw = try ctx.sortAxisRank(tag_rank, self.asRawTensor(), axis(tag), descending);
+            var raw = try ctx.sort(tag_rank, self.asRawTensor(), axis(tag), descending);
             raw.values.deinit();
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_indices) |*value| value.deinit();

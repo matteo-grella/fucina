@@ -127,9 +127,9 @@ test "first program" {
     defer ctx.deinit();
 
     // x: [batch=1, in=2], w: [in=2, out=1]
-    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 1, 2 }, &.{ 2, 3 }));
     defer x.deinit();
-    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 1 }, &.{ 4, 5 }));
     defer w.deinit();
 
     var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]

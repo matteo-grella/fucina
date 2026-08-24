@@ -241,7 +241,7 @@ pub fn CrossEntropyExtBackward(comptime tags: anytype, comptime axis: usize, com
         // Forward-saved per-position {max, sum_exp} (8 bytes per position):
         // the backward emits final gradients in ONE pass over the logits,
         // bitwise identical to recomputing the statistics (see
-        // `crossEntropyBackwardExStatsAxisRank`).
+        // `crossEntropyBackwardExStats`).
         row_stats: []f32,
 
         const Self = @This();
@@ -270,7 +270,7 @@ pub fn CrossEntropyExtBackward(comptime tags: anytype, comptime axis: usize, com
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // For `.mean`/`.sum` the upstream gy must be a scalar; for `.none`
             // it's the per-position gradient tensor (class axis removed).
-            out[0] = try ctx.crossEntropyBackwardExUpstreamStatsAxisRank(rawRank(tags.len), &self.logits, axis, self.labels, options, gy, self.row_stats);
+            out[0] = try ctx.crossEntropyBackwardExUpstreamStats(rawRank(tags.len), &self.logits, axis, self.labels, options, gy, self.row_stats);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {

@@ -46,7 +46,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
 
             for (needs_grad, out, 0..) |need, *slot, i| {
                 if (need) {
-                    slot.* = try ctx.scalar(@floatFromInt(i + 1));
+                    slot.* = try ctx.scalar(.f32, @floatFromInt(i + 1));
                 }
             }
         }
@@ -93,7 +93,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
         }
     }
 
-    var output_value = try ctx.scalar(0);
+    var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try core.createNode(WideBackward, .{ ctx.allocator, &parent_operands });
@@ -168,7 +168,7 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
     const b = try GradState.leaf(ctx.allocator);
     defer b.deinit();
 
-    var output_value = try ctx.scalar(0);
+    var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try core.createNode(DuplicateViewBackward, .{ ctx.allocator, a, b });
@@ -219,7 +219,7 @@ test "multi-output backward adds a seed when a prior output already touched that
         ) anyerror!void {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             if (needs_grad[0]) {
-                out[0] = try ctx.scalar(gy.item() * self.factor);
+                out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
             }
         }
 
@@ -252,9 +252,9 @@ test "multi-output backward adds a seed when a prior output already touched that
     const y = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, z, 2 });
     defer y.deinit();
 
-    var y_value = try ctx.scalar(0);
+    var y_value = try ctx.scalar(.f32, 0);
     defer y_value.deinit();
-    var z_value = try ctx.scalar(0);
+    var z_value = try ctx.scalar(.f32, 0);
     defer z_value.deinit();
 
     try backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value });
@@ -297,7 +297,7 @@ test "failed output seeding leaves the graph re-runnable" {
         ) anyerror!void {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             if (needs_grad[0]) {
-                out[0] = try ctx.scalar(gy.item() * self.factor);
+                out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
             }
         }
 
@@ -330,9 +330,9 @@ test "failed output seeding leaves the graph re-runnable" {
     const z = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 3 });
     defer z.deinit();
 
-    var y_value = try ctx.scalar(0);
+    var y_value = try ctx.scalar(.f32, 0);
     defer y_value.deinit();
-    var z_value = try ctx.fromSlice(&.{2}, &.{ 0, 0 });
+    var z_value = try ctx.fromSlice(.f32, &.{2}, &.{ 0, 0 });
     defer z_value.deinit();
 
     // z is non-scalar and unseeded: the failure must surface before any
@@ -346,7 +346,7 @@ test "failed output seeding leaves the graph re-runnable" {
     // Seeding z explicitly repairs the SAME graph: the retry must deliver
     // both contributions to x (stale counters from the failed pass would
     // silently skip z's backward).
-    z.setGrad(try ctx.scalar(1));
+    z.setGrad(try ctx.scalar(.f32, 1));
     try backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value });
 
     var gx = (try x.gradClone(ctx.allocator)).?;

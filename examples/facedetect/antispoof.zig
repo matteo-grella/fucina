@@ -51,7 +51,7 @@ fn memberProbs(ctx: *ExecContext, allocator: std.mem.Allocator, compiled: *const
         buf[p * 3 + 1] = @floatFromInt(pixels[p * 3 + 1]); // G
         buf[p * 3 + 2] = @floatFromInt(pixels[p * 3 + 0]); // R
     }
-    var input = try ctx.fromSlice(&.{ height, width, 3 }, buf);
+    var input = try ctx.fromSlice(.f32, &.{ height, width, 3 }, buf);
     defer input.deinit();
     var logits = try compiled.run(ctx, allocator, &input);
     defer logits.deinit();

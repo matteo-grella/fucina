@@ -86,9 +86,9 @@ test "first program" {
     defer ctx.deinit();
 
     // x: [batch=1, in=2], w: [in=2, out=1]
-    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(&.{ 1, 2 }, &.{ 2, 3 }));
+    var x = try fucina.Tensor(.{ .batch, .in }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 1, 2 }, &.{ 2, 3 }));
     defer x.deinit();
-    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(&.{ 2, 1 }, &.{ 4, 5 }));
+    var w = try fucina.Tensor(.{ .in, .out }).variable(&ctx, try ctx.fromSlice(.f32, &.{ 2, 1 }, &.{ 4, 5 }));
     defer w.deinit();
 
     var y = try x.dot(&ctx, &w, .in); // contract .in => [batch, out]
@@ -120,7 +120,7 @@ What it does, in Zig terms, is a checklist of this chapter:
 | `try`, the `!` hiding in every op | error unions — errors are values | 1.4 |
 | `defer ctx.deinit()`, `defer x.deinit()` | deterministic cleanup | 1.5 |
 | `&.{ 2, 3 }`, `dataConst()` returning `[]const f32` | arrays vs slices | 1.6 |
-| `ctx.fromSlice(...)`, methods on structs | structs and methods | 1.7 |
+| `ctx.fromSlice(.f32, ...)`, methods on structs | structs and methods | 1.7 |
 | `(try x.grad(&ctx)).?` | optionals — "maybe" in the type | 1.8 |
 | `.in`, `.batch` — bare dot-names | enum literals, enums, `switch` | 1.9–1.10 |
 | `fucina.Tensor(.{ .batch, .in })` | a *function call that returns a type* | 1.11 |

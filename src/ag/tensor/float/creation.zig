@@ -24,7 +24,7 @@ pub fn Ops(comptime Self: type) type {
         /// Consumes `value` on success; on error, ownership stays with the caller.
         pub fn variable(ctx: *ExecContext, value: RawTensor) !Self {
             var v = value;
-            try validateTensorRank(tags, &v);
+            try validateTensorRank(.f32, tags, &v);
 
             const state = try GradState.leaf(ctx.allocator);
             errdefer state.deinit();
@@ -33,7 +33,7 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromSliceRank(tensor_rank, raw_shape, values);
+            var value = try ctx.fromSlice(.f32, raw_shape, values);
             errdefer value.deinit();
             return Self.variable(ctx, value);
         }
@@ -42,7 +42,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn constant(ctx: *ExecContext, value: RawTensor) !Self {
             _ = ctx;
             var v = value;
-            try validateTensorRank(tags, &v);
+            try validateTensorRank(.f32, tags, &v);
             return .{ .value = v };
         }
 
@@ -51,7 +51,7 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromSliceRank(tensor_rank, raw_shape, values);
+            var value = try ctx.fromSlice(.f32, raw_shape, values);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
@@ -60,7 +60,7 @@ pub fn Ops(comptime Self: type) type {
         /// The returned tensor borrows `values`; callers must keep that slice
         /// alive and unmoved until the tensor is deinitialized.
         pub fn fromBorrowedSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []f32) !Self {
-            var value = try ctx.fromBorrowedSliceRank(tensor_rank, raw_shape, values);
+            var value = try ctx.fromBorrowedSlice(.f32, raw_shape, values);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
@@ -73,42 +73,42 @@ pub fn Ops(comptime Self: type) type {
         /// is sound only under that read-only contract — use `fromSlice` (which
         /// copies into owned storage) if you need a writable buffer.
         pub fn fromBorrowedConstSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromBorrowedSliceRank(tensor_rank, raw_shape, @constCast(values));
+            var value = try ctx.fromBorrowedSlice(.f32, raw_shape, @constCast(values));
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
 
         /// Allocate an uninitialized no-grad tensor of the tag-implied rank.
         pub fn empty(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.empty(&raw_shape);
+            var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
 
         /// Allocate a zero-filled no-grad tensor.
         pub fn zeros(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.zeros(&raw_shape);
+            var value = try ctx.zeros(.f32, &raw_shape);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
 
         /// Allocate a one-filled no-grad tensor.
         pub fn ones(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.ones(&raw_shape);
+            var value = try ctx.ones(.f32, &raw_shape);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
 
         /// Allocate a no-grad tensor filled with `fill_value`.
         pub fn full(ctx: *ExecContext, raw_shape: [tensor_rank]usize, fill_value: f32) !Self {
-            var value = try ctx.full(&raw_shape, fill_value);
+            var value = try ctx.full(.f32, &raw_shape, fill_value);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
 
         /// Build a single-element no-grad tensor holding `scalar_value`.
         pub fn scalar(ctx: *ExecContext, scalar_value: f32) !Self {
-            var value = try ctx.scalar(scalar_value);
+            var value = try ctx.scalar(.f32, scalar_value);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
@@ -124,7 +124,7 @@ pub fn Ops(comptime Self: type) type {
             const span = (end - start) / step;
             if (!(span > 0)) return TensorError.InvalidShape;
             const count: usize = @intFromFloat(@ceil(span));
-            var value = try ctx.empty(&.{count});
+            var value = try ctx.empty(.f32, &.{count});
             errdefer value.deinit();
             for (value.data(), 0..) |*out, i| out.* = start + @as(f32, @floatFromInt(i)) * step;
             return try Self.constant(ctx, value);
@@ -138,7 +138,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn linspace(ctx: *ExecContext, start: f32, end: f32, steps: usize) !Self {
             comptime if (tag_count != 1) @compileError("linspace builds a rank-1 tensor; use a single-tag Tensor type");
             if (steps == 0) return TensorError.InvalidShape;
-            var value = try ctx.empty(&.{steps});
+            var value = try ctx.empty(.f32, &.{steps});
             errdefer value.deinit();
             const out = value.data();
             if (steps == 1) {
@@ -161,7 +161,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn oneHot(ctx: *ExecContext, indices: []const usize, depth: usize) !Self {
             comptime if (tag_count != 2) @compileError("oneHot builds a rank-2 [rows, classes] tensor; use a two-tag Tensor type");
             if (indices.len == 0 or depth == 0) return TensorError.InvalidShape;
-            var value = try ctx.zeros(&.{ indices.len, depth });
+            var value = try ctx.zeros(.f32, &.{ indices.len, depth });
             errdefer value.deinit();
             const out = value.data();
             for (indices, 0..) |class_index, row| {
@@ -184,7 +184,7 @@ pub fn Ops(comptime Self: type) type {
 
         /// `rand` over `[lo, hi)` (the `fucina.rng.uniformFill` mapping).
         pub fn uniform(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, lo: f32, hi: f32) !Self {
-            var value = try ctx.empty(&raw_shape);
+            var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             rng.uniformFill(seed, value.data(), lo, hi);
             return try Self.constant(ctx, value);
@@ -199,7 +199,7 @@ pub fn Ops(comptime Self: type) type {
 
         /// `randn` with explicit moments (`fucina.rng.normalFill`).
         pub fn normal(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, mean_value: f32, std_dev: f32) !Self {
-            var value = try ctx.empty(&raw_shape);
+            var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             rng.normalFill(seed, value.data(), mean_value, std_dev);
             return try Self.constant(ctx, value);
@@ -211,7 +211,7 @@ pub fn Ops(comptime Self: type) type {
         /// `[0, 1]` is `InvalidShape`.
         pub fn bernoulli(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, p: f32) !Self {
             if (!(p >= 0 and p <= 1)) return TensorError.InvalidShape;
-            var value = try ctx.empty(&raw_shape);
+            var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             const out = value.data();
             rng.uniformFill(seed, out, 0, 1);
@@ -226,7 +226,7 @@ pub fn Ops(comptime Self: type) type {
         /// argmax for a categorical sample, or softmax at a temperature
         /// for its differentiable relaxation.
         pub fn gumbel(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64) !Self {
-            var value = try ctx.empty(&raw_shape);
+            var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             rng.gumbelFill(seed, value.data());
             return try Self.constant(ctx, value);
@@ -239,7 +239,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn eye(ctx: *ExecContext, n: usize) !Self {
             comptime if (tag_count != 2) @compileError("eye builds a rank-2 [n, n] tensor; use a two-tag Tensor type");
             if (n == 0) return TensorError.InvalidShape;
-            var value = try ctx.zeros(&.{ n, n });
+            var value = try ctx.zeros(.f32, &.{ n, n });
             errdefer value.deinit();
             const out = value.data();
             for (0..n) |i| out[i * (n + 1)] = 1;

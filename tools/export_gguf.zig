@@ -906,9 +906,9 @@ fn quantizeExpertStackStreamNative(
     try streamer.writeTensorData(pack_bytes);
 
     try stdout.print("ptqtp {s} [{d} x {d} x {d}] {s} -> tq2_0_fx4  rel_err mean {d:.4} max {d:.4}  unconverged {d}/{d}  ({d:.1} -> {d:.1} MiB)\n", .{
-        info.name, n_expert, out_dim, in_dim, @tagName(info.ggml_type),
-        rel_sum / @as(f64, @floatFromInt(n_expert)), rel_max, unconverged, groups,
-        mib(info.data.len), mib(pack_bytes.len),
+        info.name,                                   n_expert, out_dim,     in_dim, @tagName(info.ggml_type),
+        rel_sum / @as(f64, @floatFromInt(n_expert)), rel_max,  unconverged, groups, mib(info.data.len),
+        mib(pack_bytes.len),
     });
     try stdout.flush();
     const expert_plane_bytes = out_dim * bpc * @sizeOf(fucina.ptqtp.BlockTQ2_0);
@@ -1113,7 +1113,7 @@ fn mergeOne(
             defer allocator.free(values);
             widenRow(.f32, info.data, values);
             var weight = inner: {
-                var raw = try ctx.fromSliceRank(2, .{ out_dim, in_dim }, values);
+                var raw = try ctx.fromSlice(.f32, .{ out_dim, in_dim }, values);
                 errdefer raw.deinit();
                 break :inner try WeightF32For(t).constant(ctx, raw);
             };
@@ -1128,7 +1128,7 @@ fn mergeOne(
             defer allocator.free(values);
             widenRow(.bf16, info.data, values);
             var weight = inner: {
-                var raw = try ctx.fromSliceRank(2, .{ out_dim, in_dim }, values);
+                var raw = try ctx.fromSlice(.f32, .{ out_dim, in_dim }, values);
                 errdefer raw.deinit();
                 break :inner try WeightF32For(t).constant(ctx, raw);
             };
@@ -1147,7 +1147,7 @@ fn mergeOne(
                 half.* = @bitCast(std.mem.readInt(u16, info.data[i * 2 ..][0..2], .little));
             }
             var weight = inner: {
-                var raw = try ctx.fromSliceRankTyped(.f16, 2, .{ out_dim, in_dim }, halves);
+                var raw = try ctx.fromSlice(.f16, .{ out_dim, in_dim }, halves);
                 errdefer raw.deinit();
                 break :inner try WeightF16For(t).constant(ctx, raw);
             };

@@ -165,13 +165,13 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case, co
 }
 
 fn mlpInference(ctx: *ExecContext, base: *const Base, comptime bias_mode: BiasMode) !Tensor {
-    var h = try ctx.matmul2D(&base.x, &base.w1);
+    var h = try ctx.matmul(.f32, &base.x, &base.w1);
     errdefer h.deinit();
 
     switch (bias_mode) {
         .full_bias => try ctx.addInPlace(&h, &base.b1_full),
         .broadcast_bias => {
-            var b1 = try ctx.broadcastToRank(2, &base.b1_vec, .{ base.case.batch, base.case.hidden });
+            var b1 = try ctx.broadcastTo(&base.b1_vec, .{ base.case.batch, base.case.hidden });
             defer b1.deinit();
             try ctx.addInPlace(&h, &b1);
         },
@@ -180,12 +180,12 @@ fn mlpInference(ctx: *ExecContext, base: *const Base, comptime bias_mode: BiasMo
     try ctx.mulInPlace(&h, &base.gate);
     defer h.deinit();
 
-    var y = try ctx.matmul2D(&h, &base.w2);
+    var y = try ctx.matmul(.f32, &h, &base.w2);
     errdefer y.deinit();
     switch (bias_mode) {
         .full_bias => try ctx.addInPlace(&y, &base.b2_full),
         .broadcast_bias => {
-            var b2 = try ctx.broadcastToRank(2, &base.b2_vec, .{ base.case.batch, base.case.out });
+            var b2 = try ctx.broadcastTo(&base.b2_vec, .{ base.case.batch, base.case.out });
             defer b2.deinit();
             try ctx.addInPlace(&y, &b2);
         },
@@ -270,34 +270,34 @@ const Base = struct {
     b2_vec: Tensor,
 
     fn init(ctx: *ExecContext, case: Case) !Base {
-        var x = try ctx.emptyRank(2, .{ case.batch, case.d });
+        var x = try ctx.empty(.f32, .{ case.batch, case.d });
         errdefer x.deinit();
         fillPattern(&x, 1);
 
-        var w1 = try ctx.emptyRank(2, .{ case.d, case.hidden });
+        var w1 = try ctx.empty(.f32, .{ case.d, case.hidden });
         errdefer w1.deinit();
         fillPattern(&w1, 2);
 
-        var b1_full = try ctx.emptyRank(2, .{ case.batch, case.hidden });
+        var b1_full = try ctx.empty(.f32, .{ case.batch, case.hidden });
         errdefer b1_full.deinit();
 
-        var b1_vec = try ctx.emptyRank(1, .{case.hidden});
+        var b1_vec = try ctx.empty(.f32, .{case.hidden});
         errdefer b1_vec.deinit();
         fillPattern(&b1_vec, 3);
         fillRepeatedRows(&b1_full, &b1_vec);
 
-        var gate = try ctx.emptyRank(2, .{ case.batch, case.hidden });
+        var gate = try ctx.empty(.f32, .{ case.batch, case.hidden });
         errdefer gate.deinit();
         fillRepeatedRowsPattern(&gate, 6);
 
-        var w2 = try ctx.emptyRank(2, .{ case.hidden, case.out });
+        var w2 = try ctx.empty(.f32, .{ case.hidden, case.out });
         errdefer w2.deinit();
         fillPattern(&w2, 4);
 
-        var b2_full = try ctx.emptyRank(2, .{ case.batch, case.out });
+        var b2_full = try ctx.empty(.f32, .{ case.batch, case.out });
         errdefer b2_full.deinit();
 
-        var b2_vec = try ctx.emptyRank(1, .{case.out});
+        var b2_vec = try ctx.empty(.f32, .{case.out});
         errdefer b2_vec.deinit();
         fillPattern(&b2_vec, 5);
         fillRepeatedRows(&b2_full, &b2_vec);

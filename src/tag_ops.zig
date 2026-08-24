@@ -60,23 +60,23 @@ pub fn pointwise(
     comptime right_tags: anytype,
     right: *const RawTensor,
 ) !RawTensor {
-    try validateTensorRank(left_tags, left);
-    try validateTensorRank(right_tags, right);
+    try validateTensorRank(.f32, left_tags, left);
+    try validateTensorRank(.f32, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
     const result_shape = try broadcastResultShape(result_tags, left_tags, left, right_tags, right);
 
-    var left_view = try broadcastTensorTo(left_tags, left, result_tags, result_shape);
+    var left_view = try broadcastTensorTo(.f32, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
-    var right_view = try broadcastTensorTo(right_tags, right, result_tags, result_shape);
+    var right_view = try broadcastTensorTo(.f32, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
     return switch (op) {
-        .add => ctx.addRank(rawRank(result_tags.len), &left_view, &right_view),
-        .sub => ctx.subRank(rawRank(result_tags.len), &left_view, &right_view),
-        .mul => ctx.mulRank(rawRank(result_tags.len), &left_view, &right_view),
-        .div => ctx.divRank(rawRank(result_tags.len), &left_view, &right_view),
-        .max => ctx.maxRank(rawRank(result_tags.len), &left_view, &right_view),
-        .min => ctx.minRank(rawRank(result_tags.len), &left_view, &right_view),
+        .add => ctx.add(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .sub => ctx.sub(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .mul => ctx.mul(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .div => ctx.div(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .max => ctx.max(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .min => ctx.min(.f32, rawRank(result_tags.len), &left_view, &right_view),
     };
 }
 
@@ -89,17 +89,17 @@ pub fn gatedPointwise(
     comptime right_tags: anytype,
     right: *const RawTensor,
 ) !RawTensor {
-    try validateTensorRank(left_tags, left);
-    try validateTensorRank(right_tags, right);
+    try validateTensorRank(.f32, left_tags, left);
+    try validateTensorRank(.f32, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
     const result_shape = try broadcastResultShape(result_tags, left_tags, left, right_tags, right);
 
-    var left_view = try broadcastTensorTo(left_tags, left, result_tags, result_shape);
+    var left_view = try broadcastTensorTo(.f32, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
-    var right_view = try broadcastTensorTo(right_tags, right, result_tags, result_shape);
+    var right_view = try broadcastTensorTo(.f32, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
-    return ctx.gatedRank(rawRank(result_tags.len), op, &left_view, &right_view);
+    return ctx.gated(rawRank(result_tags.len), op, &left_view, &right_view);
 }
 
 /// Tag-directed contraction over one named tag: the single-contract-tag
@@ -142,9 +142,9 @@ pub fn taggedEinsum(
     comptime out_tags: anytype,
 ) !RawTensor {
     comptime einsumValidate(left_tags, right_tags, out_tags);
-    try validateTensorRank(left_tags, left);
-    try validateTensorRank(right_tags, right);
-    const result_shape = try einsumResultShapeOf(.f32, .f32, left_tags, left, right_tags, right, out_tags);
+    try validateTensorRank(.f32, left_tags, left);
+    try validateTensorRank(.f32, right_tags, right);
+    const result_shape = try einsumResultShape(.f32, .f32, left_tags, left, right_tags, right, out_tags);
 
     // Operand-private dropped tags are summed away first: cheaper than
     // carrying them through the contraction, and it leaves every remaining
@@ -181,10 +181,10 @@ pub fn sumManyTensor(
         validateUniqueTags(reduce_tags);
         for (reduce_tags) |tag| _ = tagIndexOrCompileError(tags, tag);
     }
-    try validateTensorRank(tags, source);
+    try validateTensorRank(.f32, tags, source);
 
     if (reduce_tags.len == 0) return source.cloneView();
-    if (reduce_tags.len == tags.len) return ctx.sum(source);
+    if (reduce_tags.len == tags.len) return ctx.sum(.f32, source);
 
     var current = try source.cloneView();
     errdefer current.deinit();
@@ -193,25 +193,15 @@ pub fn sumManyTensor(
     inline for (axes, 0..) |axis, step| {
         const rank_now = comptime tags.len - step;
         const axis_now = comptime axis;
-        const next = try ctx.sumAxisRank(rank_now, &current, axis_now);
+        const next = try ctx.sumAxis(.f32, rank_now, &current, axis_now);
         current.deinit();
         current = next;
     }
     return current;
 }
 
-pub fn splitAxisView(
-    comptime source_tags: anytype,
-    source: *const RawTensor,
-    comptime tag: Tag,
-    comptime split_tags: anytype,
-    split_shape: [split_tags.len]usize,
-) !RawTensor {
-    return splitAxisViewOf(.f32, source_tags, source, tag, split_tags, split_shape);
-}
-
 /// Zero-copy view splitting the `tag` axis into `split_tags` factor axes.
-pub fn splitAxisViewOf(
+pub fn splitAxisView(
     comptime tensor_dtype: DType,
     comptime source_tags: anytype,
     source: *const tensor_mod.TensorOf(tensor_dtype),
@@ -221,7 +211,7 @@ pub fn splitAxisViewOf(
 ) !tensor_mod.TensorOf(tensor_dtype) {
     const axis_index = tagIndexOrCompileError(source_tags, tag);
     _ = splitTags(source_tags, tag, split_tags);
-    try validateTensorRankOf(tensor_dtype, source_tags, source);
+    try validateTensorRank(tensor_dtype, source_tags, source);
     const split_count = try elementCountArray(split_tags.len, split_shape);
     if (split_count != source.shape.at(axis_index)) return TensorError.InvalidShape;
 
@@ -244,18 +234,9 @@ pub fn splitAxisViewOf(
     return source.viewWithStrides(shape[0..], strides[0..]);
 }
 
-pub fn mergeAxesView(
-    comptime source_tags: anytype,
-    source: *const RawTensor,
-    comptime out_tag: Tag,
-    comptime merge_tags: anytype,
-) !RawTensor {
-    return mergeAxesViewOf(.f32, source_tags, source, out_tag, merge_tags);
-}
-
 /// Zero-copy view merging adjacent `merge_tags` axes into one axis; requires
 /// the merged axes to be stride-compatible (an unsplit layout).
-pub fn mergeAxesViewOf(
+pub fn mergeAxesView(
     comptime tensor_dtype: DType,
     comptime source_tags: anytype,
     source: *const tensor_mod.TensorOf(tensor_dtype),
@@ -264,7 +245,7 @@ pub fn mergeAxesViewOf(
 ) !tensor_mod.TensorOf(tensor_dtype) {
     const start = comptime mergeStartAxis(source_tags, merge_tags);
     _ = mergeTags(source_tags, out_tag, merge_tags);
-    try validateTensorRankOf(tensor_dtype, source_tags, source);
+    try validateTensorRank(tensor_dtype, source_tags, source);
 
     var merged_dim: usize = 1;
     inline for (0..merge_tags.len) |i| {
@@ -295,17 +276,12 @@ pub fn mergeAxesViewOf(
     return source.viewWithStrides(shape[0..], strides[0..]);
 }
 
-/// Flattens to rank 1, materializing first if the source is non-contiguous.
-pub fn flattenTensor(ctx: *ExecContext, source: *const RawTensor) !RawTensor {
-    return flattenTensorOf(.f32, ctx, source);
-}
-
-pub fn flattenTensorOf(
+pub fn flattenTensor(
     comptime tensor_dtype: DType,
     ctx: *ExecContext,
     source: *const tensor_mod.TensorOf(tensor_dtype),
 ) !tensor_mod.TensorOf(tensor_dtype) {
-    var ready = try contiguousForReshapeOf(tensor_dtype, ctx, source);
+    var ready = try contiguousForReshape(tensor_dtype, ctx, source);
     defer ready.deinit();
     return ready.reshape(&.{source.len()});
 }
@@ -318,16 +294,12 @@ pub fn permuteTensorTo(
     comptime target_tags: anytype,
 ) !RawTensor {
     comptime validateSameTagSet(source_tags, target_tags);
-    return alignTensorTo(source_tags, source, target_tags);
-}
-
-pub fn alignTensorTo(comptime source_tags: anytype, source: *const RawTensor, comptime target_tags: anytype) !RawTensor {
-    return alignTensorToOf(.f32, source_tags, source, target_tags);
+    return alignTensorTo(.f32, source_tags, source, target_tags);
 }
 
 /// Reorders axes to `target_tags` order and injects zero-stride singleton axes
 /// for target tags absent from the source. Zero-copy.
-pub fn alignTensorToOf(
+pub fn alignTensorTo(
     comptime tensor_dtype: DType,
     comptime source_tags: anytype,
     source: *const tensor_mod.TensorOf(tensor_dtype),
@@ -340,7 +312,7 @@ pub fn alignTensorToOf(
             if (tagIndex(target_tags, tag) == null) @compileError("target tags must include all source tags");
         }
     }
-    try validateTensorRankOf(tensor_dtype, source_tags, source);
+    try validateTensorRank(tensor_dtype, source_tags, source);
 
     if (target_tags.len == 0) {
         return source.cloneView();
@@ -361,18 +333,9 @@ pub fn alignTensorToOf(
     return source.viewWithStrides(shape[0..], strides[0..]);
 }
 
-pub fn broadcastTensorTo(
-    comptime source_tags: anytype,
-    source: *const RawTensor,
-    comptime target_tags: anytype,
-    target_shape: [target_tags.len]usize,
-) !RawTensor {
-    return broadcastTensorToOf(.f32, source_tags, source, target_tags, target_shape);
-}
-
 /// Aligns to `target_tags` order, then broadcasts to `target_shape` with
 /// zero-stride expansion. Zero-copy.
-pub fn broadcastTensorToOf(
+pub fn broadcastTensorTo(
     comptime tensor_dtype: DType,
     comptime source_tags: anytype,
     source: *const tensor_mod.TensorOf(tensor_dtype),
@@ -384,24 +347,14 @@ pub fn broadcastTensorToOf(
         return source.cloneView();
     }
 
-    var aligned = try alignTensorToOf(tensor_dtype, source_tags, source, target_tags);
+    var aligned = try alignTensorTo(tensor_dtype, source_tags, source, target_tags);
     defer aligned.deinit();
     return aligned.broadcastToRank(target_tags.len, target_shape);
 }
 
-pub fn pointwiseShape(
-    comptime result_tags: anytype,
-    comptime left_tags: anytype,
-    left: *const RawTensor,
-    comptime right_tags: anytype,
-    right: *const RawTensor,
-) ![rawRank(result_tags.len)]usize {
-    return pointwiseShapeOf(.f32, result_tags, left_tags, left, right_tags, right);
-}
-
 /// Raw-rank pointwise result shape (scalar results report `{1}`); validates
 /// dim-by-dim broadcast compatibility.
-pub fn pointwiseShapeOf(
+pub fn pointwiseShape(
     comptime tensor_dtype: DType,
     comptime result_tags: anytype,
     comptime left_tags: anytype,
@@ -416,8 +369,8 @@ pub fn pointwiseShapeOf(
     }
 
     inline for (result_tags, 0..) |tag, i| {
-        const left_dim = dimForTagOf(tensor_dtype, left_tags, left, tag);
-        const right_dim = dimForTagOf(tensor_dtype, right_tags, right, tag);
+        const left_dim = dimForTag(tensor_dtype, left_tags, left, tag);
+        const right_dim = dimForTag(tensor_dtype, right_tags, right, tag);
         if (left_dim == right_dim) {
             shape[i] = left_dim;
         } else if (left_dim == 1) {
@@ -433,7 +386,7 @@ pub fn pointwiseShapeOf(
 
 /// Raw-rank dot result shape (scalar results report `{1}`); validates the
 /// contract dim and any shared batch dims.
-pub fn dotResultShapeOf(
+pub fn dotResultShape(
     comptime left_dtype: DType,
     comptime right_dtype: DType,
     comptime left_tags: anytype,
@@ -470,7 +423,7 @@ pub fn dotResultShapeOf(
 
 /// Raw-rank einsum result shape (scalar results report `{1}`); validates every
 /// shared dim (batch and contract) for equality.
-pub fn einsumResultShapeOf(
+pub fn einsumResultShape(
     comptime left_dtype: DType,
     comptime right_dtype: DType,
     comptime left_tags: anytype,
@@ -500,26 +453,22 @@ pub fn einsumResultShapeOf(
     return shape;
 }
 
-pub fn contiguousForReshapeOf(
+pub fn contiguousForReshape(
     comptime tensor_dtype: DType,
     ctx: *ExecContext,
     value: *const tensor_mod.TensorOf(tensor_dtype),
 ) !tensor_mod.TensorOf(tensor_dtype) {
     if (value.isContiguous()) return value.cloneView();
-    return ctx.materializeTyped(tensor_dtype, value);
+    return ctx.materialize(tensor_dtype, value);
 }
 
-pub fn productRangeOf(comptime tensor_dtype: DType, value: *const tensor_mod.TensorOf(tensor_dtype), comptime start: usize, comptime count: usize) usize {
+pub fn productRange(comptime tensor_dtype: DType, value: *const tensor_mod.TensorOf(tensor_dtype), comptime start: usize, comptime count: usize) usize {
     var out: usize = 1;
     inline for (start..start + count) |i| out *= value.shape.at(i);
     return out;
 }
 
-pub fn validateTensorRank(comptime tags: anytype, value: *const RawTensor) !void {
-    return validateTensorRankOf(.f32, tags, value);
-}
-
-pub fn validateTensorRankOf(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype)) !void {
+pub fn validateTensorRank(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype)) !void {
     if (tags.len == 0) {
         if (!value.isScalar()) return TensorError.InvalidShape;
         return;
@@ -549,19 +498,19 @@ fn einsumFullDot(
     comptime r_tags: anytype,
     r: *const RawTensor,
 ) !RawTensor {
-    var l_ready = try contiguousForReshape(ctx, l);
+    var l_ready = try contiguousForReshape(.f32, ctx, l);
     defer l_ready.deinit();
     var l_vec = try l_ready.reshape(&.{l_ready.len()});
     defer l_vec.deinit();
 
-    var r_aligned = try alignTensorTo(r_tags, r, l_tags);
+    var r_aligned = try alignTensorTo(.f32, r_tags, r, l_tags);
     defer r_aligned.deinit();
-    var r_ready = try contiguousForReshape(ctx, &r_aligned);
+    var r_ready = try contiguousForReshape(.f32, ctx, &r_aligned);
     defer r_ready.deinit();
     var r_vec = try r_ready.reshape(&.{r_ready.len()});
     defer r_vec.deinit();
 
-    return ctx.dot(&l_vec, &r_vec);
+    return ctx.dot(.f32, &l_vec, &r_vec);
 }
 
 /// Generic einsum lowering: align both operands to a group-nested order
@@ -599,7 +548,7 @@ fn einsumGeneric(
     defer value.deinit();
     var perm = try permuteTensorTo(canon, &value, out_tags);
     defer perm.deinit();
-    return ctx.materializeTyped(.f32, &perm);
+    return ctx.materialize(.f32, &perm);
 }
 
 /// One aligned GEMM/BMM pass: `x` as kernel-left with free axes `m_ord`, `y`
@@ -629,16 +578,16 @@ fn einsumGenericGemm(
     var trans_a = false;
     var trans_b = false;
     {
-        var x_probe = try alignTensorTo(x_tags, x, x_plain_target);
+        var x_probe = try alignTensorTo(.f32, x_tags, x, x_plain_target);
         defer x_probe.deinit();
-        var y_probe = try alignTensorTo(y_tags, y, y_plain_target);
+        var y_probe = try alignTensorTo(.f32, y_tags, y, y_plain_target);
         defer y_probe.deinit();
         const x_plain_ok = x_probe.isContiguous();
         const y_plain_ok = y_probe.isContiguous();
         if (!x_plain_ok or !y_plain_ok) {
-            var x_trans_probe = try alignTensorTo(x_tags, x, x_trans_target);
+            var x_trans_probe = try alignTensorTo(.f32, x_tags, x, x_trans_target);
             defer x_trans_probe.deinit();
-            var y_trans_probe = try alignTensorTo(y_tags, y, y_trans_target);
+            var y_trans_probe = try alignTensorTo(.f32, y_tags, y, y_trans_target);
             defer y_trans_probe.deinit();
             const x_wants = !x_plain_ok and x_trans_probe.isContiguous();
             const y_wants = !y_plain_ok and y_trans_probe.isContiguous();
@@ -651,29 +600,29 @@ fn einsumGenericGemm(
         }
     }
 
-    var x_aligned = if (trans_a) try alignTensorTo(x_tags, x, x_trans_target) else try alignTensorTo(x_tags, x, x_plain_target);
+    var x_aligned = if (trans_a) try alignTensorTo(.f32, x_tags, x, x_trans_target) else try alignTensorTo(.f32, x_tags, x, x_plain_target);
     defer x_aligned.deinit();
-    var y_aligned = if (trans_b) try alignTensorTo(y_tags, y, y_trans_target) else try alignTensorTo(y_tags, y, y_plain_target);
+    var y_aligned = if (trans_b) try alignTensorTo(.f32, y_tags, y, y_trans_target) else try alignTensorTo(.f32, y_tags, y, y_plain_target);
     defer y_aligned.deinit();
-    var x_ready = try contiguousForReshape(ctx, &x_aligned);
+    var x_ready = try contiguousForReshape(.f32, ctx, &x_aligned);
     defer x_ready.deinit();
-    var y_ready = try contiguousForReshape(ctx, &y_aligned);
+    var y_ready = try contiguousForReshape(.f32, ctx, &y_aligned);
     defer y_ready.deinit();
 
     const x_m_off: usize = if (trans_a) batch_ord.len + k_ord.len else batch_ord.len;
     const y_n_off: usize = if (trans_b) batch_ord.len else batch_ord.len + k_ord.len;
     const m = if (trans_a)
-        productRangeOf(.f32, &x_ready, batch_ord.len + k_ord.len, m_ord.len)
+        productRange(.f32, &x_ready, batch_ord.len + k_ord.len, m_ord.len)
     else
-        productRangeOf(.f32, &x_ready, batch_ord.len, m_ord.len);
+        productRange(.f32, &x_ready, batch_ord.len, m_ord.len);
     const k = if (trans_a)
-        productRangeOf(.f32, &x_ready, batch_ord.len, k_ord.len)
+        productRange(.f32, &x_ready, batch_ord.len, k_ord.len)
     else
-        productRangeOf(.f32, &x_ready, batch_ord.len + m_ord.len, k_ord.len);
+        productRange(.f32, &x_ready, batch_ord.len + m_ord.len, k_ord.len);
     const n = if (trans_b)
-        productRangeOf(.f32, &y_ready, batch_ord.len, n_ord.len)
+        productRange(.f32, &y_ready, batch_ord.len, n_ord.len)
     else
-        productRangeOf(.f32, &y_ready, batch_ord.len + k_ord.len, n_ord.len);
+        productRange(.f32, &y_ready, batch_ord.len + k_ord.len, n_ord.len);
 
     var value = blk: {
         if (comptime batch_ord.len == 0) {
@@ -683,7 +632,7 @@ fn einsumGenericGemm(
             defer ym.deinit();
             if (trans_a) break :blk try ctx.matmulTransA(&xm, &ym);
             if (trans_b) break :blk try ctx.matmulTransB(&xm, &ym);
-            break :blk try ctx.matmul2D(&xm, &ym);
+            break :blk try ctx.matmul(.f32, &xm, &ym);
         }
         // The batch group collapses into ONE bmm axis, so any batch count
         // the operands can represent is lowerable (no rank-cap on batch).
@@ -726,8 +675,8 @@ fn broadcastResultShape(
 ) ![result_tags.len]usize {
     var shape: [result_tags.len]usize = undefined;
     inline for (result_tags, 0..) |tag, i| {
-        const left_dim = dimForTagOf(.f32, left_tags, left, tag);
-        const right_dim = dimForTagOf(.f32, right_tags, right, tag);
+        const left_dim = dimForTag(.f32, left_tags, left, tag);
+        const right_dim = dimForTag(.f32, right_tags, right, tag);
         if (left_dim == right_dim) {
             shape[i] = left_dim;
         } else if (left_dim == 1) {
@@ -741,13 +690,9 @@ fn broadcastResultShape(
     return shape;
 }
 
-fn dimForTagOf(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype), comptime tag: Tag) usize {
+fn dimForTag(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype), comptime tag: Tag) usize {
     if (comptime tagIndex(tags, tag)) |i| return value.shape.at(i);
     return 1;
-}
-
-fn contiguousForReshape(ctx: *ExecContext, value: *const RawTensor) !RawTensor {
-    return contiguousForReshapeOf(.f32, ctx, value);
 }
 
 fn elementCountArray(comptime rank: usize, shape: [rank]usize) !usize {

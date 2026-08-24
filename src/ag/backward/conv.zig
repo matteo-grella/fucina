@@ -63,7 +63,7 @@ pub fn CausalDepthwiseConv1dBackward(
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.causalDepthwiseConv1dBackwardInputAxisRank(
+                out[0] = try ctx.causalDepthwiseConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
                     &self.kernel_value,
@@ -73,7 +73,7 @@ pub fn CausalDepthwiseConv1dBackward(
                 );
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.causalDepthwiseConv1dBackwardKernelAxisRank(
+                out[1] = try ctx.causalDepthwiseConv1dBackwardKernel(
                     rawRank(input_tags.len),
                     &self.input_value,
                     gy,
@@ -155,7 +155,7 @@ pub fn CausalConv1dBackward(
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.causalConv1dBackwardInputAxisRank(
+                out[0] = try ctx.causalConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
                     &self.weight_value,
@@ -165,7 +165,7 @@ pub fn CausalConv1dBackward(
                 );
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.causalConv1dBackwardWeightAxisRank(
+                out[1] = try ctx.causalConv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
                     gy,
@@ -251,7 +251,7 @@ pub fn GroupedCausalConv1dBackward(
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.groupedCausalConv1dBackwardInputAxisRank(
+                out[0] = try ctx.groupedCausalConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
                     &self.weight_value,
@@ -262,7 +262,7 @@ pub fn GroupedCausalConv1dBackward(
                 );
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.groupedCausalConv1dBackwardWeightAxisRank(
+                out[1] = try ctx.groupedCausalConv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
                     gy,
@@ -358,9 +358,9 @@ pub const Conv2dBackward = struct {
             out[1] = try ctx.conv2dBackwardWeight(&self.input_value, gy, self.weight_shape[1], self.weight_shape[2], self.stride, self.pad, self.groups);
         }
         if (needs_grad.len > 2 and needs_grad[2]) {
-            var s0 = try ctx.sumAxisRank(3, gy, 0); // Σ over oh -> [ow, cout]
+            var s0 = try ctx.sumAxis(.f32, 3, gy, 0); // Σ over oh -> [ow, cout]
             defer s0.deinit();
-            out[2] = try ctx.sumAxisRank(2, &s0, 0); // Σ over ow -> [cout]
+            out[2] = try ctx.sumAxis(.f32, 2, &s0, 0); // Σ over ow -> [cout]
         }
     }
 
@@ -499,7 +499,7 @@ pub fn Conv1dBackward(
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.conv1dBackwardInputAxisRank(
+                out[0] = try ctx.conv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
                     &self.weight_value,
@@ -513,7 +513,7 @@ pub fn Conv1dBackward(
                 );
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.conv1dBackwardWeightAxisRank(
+                out[1] = try ctx.conv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
                     gy,
@@ -606,7 +606,7 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
             const need_bias = needs_grad.len > 2 and needs_grad[2];
 
             if (need_input or need_weight) {
-                var gcol = try ctx.col2im1dBackwardAxisRank(
+                var gcol = try ctx.col2im1dBackward(
                     gy,
                     self.input_shape[0],
                     self.out_channels,
@@ -615,10 +615,10 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
                     self.pad,
                 );
                 defer gcol.deinit();
-                if (need_input) out[0] = try ctx.matmul2D(&gcol, &self.weight_value);
+                if (need_input) out[0] = try ctx.matmul(.f32, &gcol, &self.weight_value);
                 if (need_weight) out[1] = try ctx.matmulTransA(&gcol, &self.input_value);
             }
-            if (need_bias) out[2] = try ctx.sumAxisRank(2, gy, 0);
+            if (need_bias) out[2] = try ctx.sumAxis(.f32, 2, gy, 0);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {

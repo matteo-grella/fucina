@@ -53,7 +53,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
         cols: usize,
         blocks_per_row: usize,
         // rms_norm_mul only. `rows_kernel` mirrors the unfused
-        // rmsNormMulAxisRank dispatch (rows kernel at/above the elementwise
+        // rmsNormMul dispatch (rows kernel at/above the elementwise
         // work threshold, the scalar loop below it) so the fused route stays
         // BITWISE identical to rmsNormMul + quantize at every shape.
         eps: f32 = 0,

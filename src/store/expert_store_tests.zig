@@ -94,7 +94,7 @@ const Fixture = struct {
         const x_vals = try self.allocator.alloc(f32, hidden);
         defer self.allocator.free(x_vals);
         for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 13) % 199)) - 99);
-        var x = try ctx.fromSliceRank(2, .{ 1, hidden }, x_vals);
+        var x = try ctx.fromSlice(.f32, .{ 1, hidden }, x_vals);
         defer x.deinit();
 
         var want = try ctx.moeExpertFfn(&x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .swiglu, null, null);
@@ -166,7 +166,7 @@ const Fixture = struct {
         const x_vals = try self.allocator.alloc(f32, hidden);
         defer self.allocator.free(x_vals);
         for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 13) % 199)) - 99);
-        var x = try ctx.fromSliceRank(2, .{ 1, hidden }, x_vals);
+        var x = try ctx.fromSlice(.f32, .{ 1, hidden }, x_vals);
         defer x.deinit();
 
         var want = try ctx.moeExpertFfn(&x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .swiglu, null, null);
@@ -223,7 +223,7 @@ test "streamed MoE batched prefill is bit-exact when the active set overflows th
     const x_vals = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
-    var x = try ctx.fromSliceRank(2, .{ seq, hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ seq, hidden }, x_vals);
     defer x.deinit();
 
     var selected: [seq * top_k]usize = undefined;
@@ -476,7 +476,7 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
     const x_vals = try allocator.alloc(f32, ds_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 151)) - 75)) / 75.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, ds_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, ds_hidden }, x_vals);
     defer x.deinit();
 
     // Cold, warm, and evicting decodes must all match the resident path
@@ -587,7 +587,7 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
         var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .swiglu, null, null);
@@ -603,7 +603,7 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 5) % 199)) - 99)) / 99.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 3, 1, 2, 2, 0, 3, 1, 0, 1 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
@@ -817,7 +817,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.6, 0.4 };
@@ -849,7 +849,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 199)) - 99)) / 99.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
@@ -1086,7 +1086,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13) % 167)) - 83)) / 83.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.6, 0.4 };
@@ -1116,7 +1116,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 17) % 191)) - 95)) / 95.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
@@ -1241,7 +1241,7 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 17) % 191)) - 95)) / 95.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
         var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .swiglu, null, null);
@@ -1256,7 +1256,7 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 3) % 157)) - 78)) / 78.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 3, 1, 2, 2, 0, 3, 1, 0, 1 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
@@ -1513,7 +1513,7 @@ test "parallel demand reads: fan-out stays bit-exact, drives a mirror concurrent
     const x_vals = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
-    var x = try ctx.fromSliceRank(2, .{ seq, hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ seq, hidden }, x_vals);
     defer x.deinit();
     var selected: [seq * top_k]usize = undefined;
     var routing: [seq * top_k]f32 = undefined;
@@ -1969,7 +1969,7 @@ test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs;
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 13) % 167)) - 83)) / 83.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     const pair = [2]usize{ 0, 1 };
     const routing = [_]f32{ 0.6, 0.4 };
@@ -2146,7 +2146,7 @@ test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kerne
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.55, 0.45 };
@@ -2167,7 +2167,7 @@ test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kerne
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 19) % 181)) - 90)) / 90.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
@@ -2302,7 +2302,7 @@ test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismat
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 7) % 157)) - 78)) / 78.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.65, 0.35 };
@@ -2320,7 +2320,7 @@ test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismat
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 23) % 199)) - 99)) / 99.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8 };
@@ -2459,7 +2459,7 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
         const x0_vals = try allocator.alloc(f32, t_hidden);
         defer allocator.free(x0_vals);
         for (x0_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
-        var x0 = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x0_vals);
+        var x0 = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x0_vals);
         defer x0.deinit();
         const pair0 = [2]usize{ 0, 1 };
         const routing0 = [_]f32{ 0.55, 0.45 };
@@ -2494,7 +2494,7 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
     const x_vals = try allocator.alloc(f32, t_hidden);
     defer allocator.free(x_vals);
     for (x_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 173)) - 86)) / 86.0;
-    var x = try ctx.fromSliceRank(2, .{ 1, t_hidden }, x_vals);
+    var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
 
     var first_pass: ?[]f32 = null;
@@ -2524,7 +2524,7 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
     const xb_vals = try allocator.alloc(f32, m * t_hidden);
     defer allocator.free(xb_vals);
     for (xb_vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 19) % 181)) - 90)) / 90.0;
-    var xb = try ctx.fromSliceRank(2, .{ m, t_hidden }, xb_vals);
+    var xb = try ctx.fromSlice(.f32, .{ m, t_hidden }, xb_vals);
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };

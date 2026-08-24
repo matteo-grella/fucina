@@ -50,7 +50,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
     const norm_vals = try allocator.alloc(f32, k);
     defer allocator.free(norm_vals);
     for (norm_vals, 0..) |*v, i| v.* = 0.5 + 0.01 * @as(f32, @floatFromInt(i % 37));
-    var norm_w = try ctx.fromSliceRank(1, .{k}, norm_vals);
+    var norm_w = try ctx.fromSlice(.f32, .{k}, norm_vals);
     defer norm_w.deinit();
 
     ctx.pinRowwiseKernels(true);
@@ -58,12 +58,12 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
 
     const expectRowwise = struct {
         fn go(c: *ExecContext, entry: anytype, input: []const f32, cols: usize, m: usize, out_n: usize) !void {
-            var batch_in = try c.fromSliceRank(2, .{ m, cols }, input[0 .. m * cols]);
+            var batch_in = try c.fromSlice(.f32, .{ m, cols }, input[0 .. m * cols]);
             defer batch_in.deinit();
             var batch_out = try entry.run(c, &batch_in);
             defer batch_out.deinit();
             for (0..m) |r| {
-                var row_in = try c.fromSliceRank(2, .{ 1, cols }, input[r * cols ..][0..cols]);
+                var row_in = try c.fromSlice(.f32, .{ 1, cols }, input[r * cols ..][0..cols]);
                 defer row_in.deinit();
                 var row_out = try entry.run(c, &row_in);
                 defer row_out.deinit();
@@ -189,7 +189,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         const mx_vals = try allocator.alloc(f32, seq * hidden);
         defer allocator.free(mx_vals);
         for (mx_vals, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast((i * 17) % 251)) - 125);
-        var mx = try ctx.fromSliceRank(2, .{ seq, hidden }, mx_vals);
+        var mx = try ctx.fromSlice(.f32, .{ seq, hidden }, mx_vals);
         defer mx.deinit();
         var selected: [seq * top_k]usize = undefined;
         var weights: [seq * top_k]f32 = undefined;
@@ -200,7 +200,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         var batch_out = try ctx.moeExpertFfnBatch(&mx, &gate, &up, &down, &selected, &weights, top_k, out_pe, .swiglu, null, null);
         defer batch_out.deinit();
         for (0..seq) |t| {
-            var row = try ctx.fromSliceRank(2, .{ 1, hidden }, mx_vals[t * hidden ..][0..hidden]);
+            var row = try ctx.fromSlice(.f32, .{ 1, hidden }, mx_vals[t * hidden ..][0..hidden]);
             defer row.deinit();
             var row_out = try ctx.moeExpertFfn(&row, &gate, &up, &down, selected[t * top_k ..][0..top_k], weights[t * top_k ..][0..top_k], out_pe, .swiglu, null, null);
             defer row_out.deinit();
@@ -210,7 +210,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
 }
 
 test "fused rms-norm+rope: batch rows are bitwise equal to single-position calls at every m" {
-    // rmsNormMulRopeAxisRankWithTable's kernel choice is layout-only by
+    // rmsNormMulRopeWithTable's kernel choice is layout-only by
     // contract: a row's bytes must not depend on how many rows share the
     // call, because k rows land in the KV cache and feed every subsequent
     // token (the lossless-speculation contract, speculative/core.zig).
@@ -234,7 +234,7 @@ test "fused rms-norm+rope: batch rows are bitwise equal to single-position calls
     const w_vals = try allocator.alloc(f32, d);
     defer allocator.free(w_vals);
     for (w_vals, 0..) |*v, i| v.* = 0.6 + 0.02 * @as(f32, @floatFromInt(i % 23));
-    var w = try ctx.fromSliceRank(1, .{d}, w_vals);
+    var w = try ctx.fromSlice(.f32, .{d}, w_vals);
     defer w.deinit();
 
     for ([_]usize{ 1, 2, 15, 16, 17, 31, 32, 33, 40 }) |m| {
@@ -242,18 +242,18 @@ test "fused rms-norm+rope: batch rows are bitwise equal to single-position calls
         for (positions[0..m], 0..) |*p, i| p.* = @intCast(i);
         var table = try ctx.prepareRopeTable(positions[0..m], d, 10000.0, false);
         defer table.deinit();
-        var x = try ctx.fromSliceRank(3, .{ m, heads, d }, x_vals[0 .. m * heads * d]);
+        var x = try ctx.fromSlice(.f32, .{ m, heads, d }, x_vals[0 .. m * heads * d]);
         defer x.deinit();
-        var batch = try ctx.rmsNormMulRopeAxisRankWithTable(3, &x, &w, 0, 2, eps, &table, .half);
+        var batch = try ctx.rmsNormMulRopeWithTable(3, &x, &w, 0, 2, eps, &table, .half);
         defer batch.deinit();
 
         for (0..m) |i| {
             var row_pos = [_]i32{@intCast(i)};
             var row_table = try ctx.prepareRopeTable(&row_pos, d, 10000.0, false);
             defer row_table.deinit();
-            var row = try ctx.fromSliceRank(3, .{ 1, heads, d }, x_vals[i * heads * d ..][0 .. heads * d]);
+            var row = try ctx.fromSlice(.f32, .{ 1, heads, d }, x_vals[i * heads * d ..][0 .. heads * d]);
             defer row.deinit();
-            var single = try ctx.rmsNormMulRopeAxisRankWithTable(3, &row, &w, 0, 2, eps, &row_table, .half);
+            var single = try ctx.rmsNormMulRopeWithTable(3, &row, &w, 0, 2, eps, &row_table, .half);
             defer single.deinit();
             try std.testing.expectEqualSlices(
                 f32,

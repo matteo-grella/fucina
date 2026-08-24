@@ -1917,7 +1917,7 @@ pub fn linearSeqBorrowedQuantized(
     if (input.dim(in_tag) != shape[1]) return Error.InvalidWeightShape;
 
     const blocks = try blockSlice(BlockStorage(dtype), bytes);
-    var value = try ctx.matmul2DWithQuantizedBlocksRhsOptions(dtype, input.asRawTensor(), blocks, shape[0], shape[1], .{
+    var value = try ctx.matmul2DWithQuantizedBlocksRhs(dtype, input.asRawTensor(), blocks, shape[0], shape[1], .{
         .allow_gpu = options.allow_gpu,
         .rhs_lifetime = options.rhs_lifetime,
     });
