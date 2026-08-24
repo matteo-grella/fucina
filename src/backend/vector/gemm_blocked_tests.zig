@@ -34,12 +34,12 @@ fn naiveGemm(
             var acc: f64 = 0;
             for (0..k) |p| {
                 const a_val: f64 = switch (orient) {
-                    .nn, .nt => ad[i * k + p],
-                    .tn => ad[p * m + i],
+                    .plain, .trans_b => ad[i * k + p],
+                    .trans_a => ad[p * m + i],
                 };
                 const b_val: f64 = switch (orient) {
-                    .nn, .tn => bd[p * n + j],
-                    .nt => bd[j * k + p],
+                    .plain, .trans_a => bd[p * n + j],
+                    .trans_b => bd[j * k + p],
                 };
                 acc += a_val * b_val;
             }
@@ -92,7 +92,7 @@ test "blocked gemm matches naive reference across every tail combination" {
     // run even at test sizes (k=65 -> three pc blocks, n=37 -> two jc blocks).
     const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
 
-    inline for (.{ gemm_blocked.Orientation.nn, gemm_blocked.Orientation.tn, gemm_blocked.Orientation.nt }) |orient| {
+    inline for (.{ gemm_blocked.Orientation.plain, gemm_blocked.Orientation.trans_a, gemm_blocked.Orientation.trans_b }) |orient| {
         for (ms) |m| {
             for (ns) |n| {
                 for (ks) |k| {
@@ -107,7 +107,7 @@ test "blocked gemm matches naive reference at kc boundaries with default params"
     const allocator = testing.allocator;
     const ks = [_]usize{ 255, 256, 257, 511, 512, 513 };
     for (ks) |k| {
-        try expectBlockedMatchesNaive(.{}, .nn, allocator, 9, 13, k, .{}, 1e-3);
+        try expectBlockedMatchesNaive(.{}, .plain, allocator, 9, 13, k, .{}, 1e-3);
     }
 }
 
@@ -129,12 +129,12 @@ test "blocked gemm parallel result matches serial result exactly" {
     fillPattern(bd, 2);
 
     const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
-    gemm_blocked.gemmBlockedWithParams(.{}, .nn, serial, ad, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .plain, serial, ad, bd, m, n, k, tiny);
 
     var pool: thread.Pool = undefined;
     try pool.init(.{ .allocator = allocator, .max_workers = 3 });
     defer pool.deinit();
-    gemm_blocked.gemmBlockedWithParams(.{ .pool = &pool }, .nn, pooled, ad, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{ .pool = &pool }, .plain, pooled, ad, bd, m, n, k, tiny);
 
     // Disjoint ic ownership means the split cannot change the arithmetic.
     try testing.expectEqualSlices(f32, serial, pooled);
@@ -160,8 +160,8 @@ test "blocked gemm large random shape stays within f64-reference tolerance" {
     for (ad) |*v| v.* = rng.float(f32) * 2 - 1;
     for (bd) |*v| v.* = rng.float(f32) * 2 - 1;
 
-    gemm_blocked.gemmBlockedWithParams(.{}, .nn, got, ad, bd, m, n, k, .{ .kc = 128, .mc = 64, .nc = 96 });
-    naiveGemm(.nn, want, ad, bd, m, n, k);
+    gemm_blocked.gemmBlockedWithParams(.{}, .plain, got, ad, bd, m, n, k, .{ .kc = 128, .mc = 64, .nc = 96 });
+    naiveGemm(.plain, want, ad, bd, m, n, k);
 
     // k = 300 values in [-1, 1): partial sums stay O(sqrt(k)); sequential
     // f32 FMA accumulation vs the f64 reference stays well under 1e-3.
@@ -201,9 +201,9 @@ test "blocked gemm transposed orientations match the plain orientation bitwise" 
     defer allocator.free(nt);
 
     const tiny: gemm_blocked.BlockParams = .{ .kc = 32, .mc = 16, .nc = 24 };
-    gemm_blocked.gemmBlockedWithParams(.{}, .nn, nn, ad, bd, m, n, k, tiny);
-    gemm_blocked.gemmBlockedWithParams(.{}, .tn, tn, at, bd, m, n, k, tiny);
-    gemm_blocked.gemmBlockedWithParams(.{}, .nt, nt, ad, bt, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .plain, nn, ad, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .trans_a, tn, at, bd, m, n, k, tiny);
+    gemm_blocked.gemmBlockedWithParams(.{}, .trans_b, nt, ad, bt, m, n, k, tiny);
 
     // Packing absorbs the transposes without changing the arithmetic order.
     try testing.expectEqualSlices(f32, nn, tn);
@@ -212,7 +212,7 @@ test "blocked gemm transposed orientations match the plain orientation bitwise" 
 
 test "blocked gemm handles k == 0 by zeroing the output" {
     var cd = [_]f32{ 1, 2, 3, 4, 5, 6 };
-    gemm_blocked.gemmBlockedWithParams(.{}, .nn, &cd, &.{}, &.{}, 2, 3, 0, .{});
+    gemm_blocked.gemmBlockedWithParams(.{}, .plain, &cd, &.{}, &.{}, 2, 3, 0, .{});
     try testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0 }, &cd);
 }
 

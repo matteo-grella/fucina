@@ -109,7 +109,7 @@ test "backend matmul" {
 
     var c = try Tensor.zeros(allocator, &.{ 2, 2 });
     defer c.deinit();
-    try kernels.matmulInto(&c, &a, &b);
+    kernels.gemm(.{}, .{}, &c, &a, &b, 2, 2, 3);
 
     try std.testing.expectEqualSlices(f32, &.{ 58, 64, 139, 154 }, c.dataConst());
 }

@@ -709,7 +709,7 @@ fn ffnFusedDown(
 /// (biasedAttentionPerHead below). q is viewed [kv_head, g, seq, d] with
 /// head = kv_head*heads_per_kv + g; k/v are viewed [kv_head, 1, seq, d], so
 /// bmm's BROADCAST batch mode dispatches the very same backend 2-D entries
-/// (matmulTransB2DIntoUnchecked / matmul2DIntoUnchecked) per head at the same
+/// (`gemm` with `.trans_b` / `.plain`) per head at the same
 /// (m, n, k). Kernel choice depends only on shape + comptime flags and the
 /// row kernels never split the k reduction, so every head's output is
 /// BIT-IDENTICAL to the per-head loop; the rank-4 softmaxExt broadcasts the

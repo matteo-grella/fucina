@@ -100,8 +100,8 @@ One field. The backend owns numeric kernels and *nothing else*: no allocator, no
 
 Below this struct sit roughly ninety kernel entry points. Their **naming encodes the checking tier**, with one caveat you must internalize:
 
-- `...Into(out, ...) !void` — validates shapes itself and returns `TensorError.ShapeMismatch` on disagreement. This holds for the elementwise, reduction, dot, and matmul families (`addInto`, `sumInto`, `dotInto`, `matmulInto`, …).
-- **Caveat:** the conv/pool/norm families (`conv2dInto`, `pool2dInto`, `groupNormInto`, `im2colInto`, `snakeInto`, …) are `...Into`-*named* but plain `void` and **unchecked** — the exec layer validates their geometry before calling them. The naming convention is a strong hint, not a guarantee; `docs/REFERENCE.md` §9.2 lists exactly which families check.
+- `...Into(out, ...) !void` — validates shapes itself and returns `TensorError.ShapeMismatch` on disagreement. This holds for the elementwise and reduction families (`addInto`, `sumInto`, …) and for `dot`; the dense `gemm` is unchecked by contract (exec validates the shapes before calling it).
+- **Caveat:** the conv/pool/norm families (`conv2dInto`, `pool2dInto`, `groupNormInto`, `im2colInto`, `snakeInto`, …) are `...Into`-*named* but plain `void` and **unchecked** — the exec layer validates their geometry before calling them. The naming convention is a strong hint, not a guarantee; `docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md` lists exactly which families check.
 - `...IntoUnchecked` / `...SliceUnchecked` — `void`; the caller has already validated shape and contiguity. Passing wrong geometry is illegal: an out-of-bounds slice panic in safe builds, **undefined behavior in ReleaseFast**.
 
 That last clause is the deal the whole architecture rests on. Kernels get to be small, branch-free, and fast *because* they check nothing — and they get to check nothing because exactly one layer above them (`ExecContext`, Chapter 5) checks everything, once. Validation is not sprinkled defensively through the stack; it has an address.
@@ -117,36 +117,46 @@ If you have read [Chapter 10](10-the-guitar-amp.md)'s preview in the course inde
 
 ## 6.4 The scalar backend is the specification
 
-Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee — the scalar backend's entire 2-D matmul, from `src/backend/cpu.zig:1301–1324`:
+Before admiring any SIMD, meet the code that keeps it honest. This is the native backend's matmul referee — the scalar backend's entire dense GEMM (`src/backend/cpu.zig`, `gemm`), one triple loop for every orientation and operand dtype the request can name:
 
 ```zig
-pub fn matmul2DIntoUncheckedWithConfig(
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
+pub fn gemm(
+    pc: ParallelConfig,
+    comptime g: ops.Gemm,
+    out: *tensor.TensorOf(g.out),
+    a: *const tensor.TensorOf(g.a),
+    b: *const tensor.TensorOf(g.b),
     m: usize,
     n: usize,
     k: usize,
-    config: ParallelConfig,
 ) void {
-    _ = config;
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
-
+    _ = pc;
+    const cd = contiguousDataOf(g.out, out, m * n);
+    const ad = contiguousDataConstOf(g.a, a, m * k);
+    const bd = contiguousDataConstOf(g.b, b, k * n);
+    const compute = comptime if (g.a == g.b) dtype_mod.computeDType(.matmul, g.a) else .f32;
     for (0..m) |i| {
         for (0..n) |j| {
-            var acc: f32 = 0;
+            var acc: dtype_mod.Scalar(compute) = 0;
             for (0..k) |p| {
-                acc += ad[i * k + p] * bd[p * n + j];
+                const av = switch (g.kind) {
+                    .plain, .trans_b => ad[i * k + p],
+                    .trans_a => ad[p * m + i],
+                };
+                const bv = switch (g.kind) {
+                    .plain, .trans_a => bd[p * n + j],
+                    .trans_b => bd[j * k + p],
+                };
+                acc += dtype_mod.castFloat(g.a, compute, av) * dtype_mod.castFloat(g.b, compute, bv);
             }
-            cd[i * n + j] = acc;
+            const value = dtype_mod.castFloat(compute, g.out, acc);
+            if (g.accumulate) cd[i * n + j] += value else cd[i * n + j] = value;
         }
     }
 }
 ```
 
-Three loops, in the order the mathematical definition suggests. Note the signature: it is *identical* to the native backend's — it even accepts the `ParallelConfig`, then ignores it (`_ = config;`), because every scalar kernel is serial. Interchangeable signatures are the point: the two backends are drop-in replacements for each other, differing only in how fast they get the same answer.
+Three loops, in the order the mathematical definition suggests; the orientation only changes which index each operand reads, and the request's dtypes only change the casts. Note the signature: it is *identical* to the native backend's — it even accepts the `ParallelConfig`, then ignores it (`_ = pc;`), because every scalar kernel is serial. Interchangeable signatures are the point: the two backends are drop-in replacements for each other, differing only in how fast they get the same answer.
 
 The judgment happens in `src/backend/parity_test.zig`, and its design carries three lessons.
 
@@ -168,7 +178,7 @@ Look at those numbers with SIMD eyes: they straddle every plausible vector width
 const tol = tolerance * @as(f32, @floatFromInt(n));
 ```
 
-`sumInto`/`dotInto` agree within `1e-6·n`; the matmul family within `1e-5·k`. Why? Floating-point addition is not associative. A serial sum computes `(((x₀+x₁)+x₂)+x₃)…`; a SIMD sum with four accumulator registers computes four interleaved partial sums and combines them at the end. Both are valid f32 computations; they round differently. The tolerance scaling *is* the numerical model: error grows with the number of accumulated terms.
+`sumInto`/`dot` agree within `1e-6·n`; `gemm` within `1e-5·k`. Why? Floating-point addition is not associative. A serial sum computes `(((x₀+x₁)+x₂)+x₃)…`; a SIMD sum with four accumulator registers computes four interleaved partial sums and combines them at the end. Both are valid f32 computations; they round differently. The tolerance scaling *is* the numerical model: error grows with the number of accumulated terms.
 
 > **ML note** — This split — *bit-identical* where the operation count and order are preserved, *tolerance-equivalent* where the fast path reassociates — recurs all through numerical computing, and Fucina states it explicitly per kernel family rather than hand-waving "floating point is approximate". Keep the two categories separate in your head; §6.7 returns to them for threading.
 

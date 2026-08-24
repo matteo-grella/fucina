@@ -93,16 +93,11 @@ pub const kernels = struct {
     pub const prodInto = cpu.prodInto;
     pub const prodSlice = cpu.prodSlice;
     pub const sumSliceTyped = cpu.sumSliceTyped;
-    pub const dotInto = cpu.dotInto;
-    pub const dotIntoTyped = cpu.dotIntoTyped;
-    pub const matmulInto = cpu.matmulInto;
-    pub const matmul2DIntoUnchecked = cpu.matmul2DIntoUnchecked;
-    pub const matmul2DAccIntoUnchecked = cpu.matmul2DAccIntoUnchecked;
-    pub const matmul2DIntoUncheckedTyped = cpu.matmul2DIntoUncheckedTyped;
-    pub const packMatmulRhsTyped = cpu.packMatmulRhsTyped;
-    pub const packDenseMatmulRhsTyped = cpu.packDenseMatmulRhsTyped;
-    pub const matmul2DIntoUncheckedPackedDenseRhs = cpu.matmul2DIntoUncheckedPackedDenseRhs;
-    pub const matmul2DIntoUncheckedPackedRhsTyped = cpu.matmul2DIntoUncheckedPackedRhsTyped;
+    pub const dot = cpu.dot;
+    pub const gemm = cpu.gemm;
+    pub const gemmBatched = cpu.gemmBatched;
+    pub const packDenseRhs = cpu.packDenseRhs;
+    pub const packHalfRhs = cpu.packHalfRhs;
     pub const quantizeMatmulRhsBlockwiseI8 = cpu.quantizeMatmulRhsBlockwiseI8;
     pub const quantizeMatmulRhsQ4_0 = cpu.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = cpu.quantizeMatmulRhsQ8_0;
@@ -114,15 +109,6 @@ pub const kernels = struct {
     pub const unaryRowSlice = cpu.unaryRowSlice;
     pub const mulRowSlice = cpu.mulRowSlice;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = cpu.matmul2DPackedPaddedQ8_0x4LhsRhs;
-    pub const matmulTransAInto = cpu.matmulTransAInto;
-    pub const matmulTransA2DIntoUnchecked = cpu.matmulTransA2DIntoUnchecked;
-    pub const matmulTransBInto = cpu.matmulTransBInto;
-    pub const matmulTransB2DIntoUnchecked = cpu.matmulTransB2DIntoUnchecked;
-    pub const matmulTransB2DIntoUncheckedF16Operands = cpu.matmulTransB2DIntoUncheckedF16Operands;
-    pub const matmulTransB2DIntoUncheckedBf16Rhs = cpu.matmulTransB2DIntoUncheckedBf16Rhs;
-    pub const matmulBatched2DIntoUnchecked = cpu.matmulBatched2DIntoUnchecked;
-    pub const matmulBatchedTransA2DIntoUnchecked = cpu.matmulBatchedTransA2DIntoUnchecked;
-    pub const matmulBatchedTransB2DIntoUnchecked = cpu.matmulBatchedTransB2DIntoUnchecked;
 };
 
 // The conv2d backward gather cores are scalar loops (no SIMD divergence), so
@@ -1097,16 +1083,9 @@ pub fn sumSliceTyped(
     return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
 }
 
-pub fn dotInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    _ = pc;
-    try tensor.requireSameShape(a, b);
-    if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    var s: f32 = 0;
-    for (a.dataConst(), b.dataConst()) |x, y| s += x * y;
-    out.data()[0] = s;
-}
-
-pub fn dotIntoTyped(
+/// Full dot product into the scalar `out`, accumulated in the dtype's
+/// matmul compute dtype.
+pub fn dot(
     pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
@@ -1327,101 +1306,51 @@ fn causalDepthwiseInputValue(
     return s[u * channels + c];
 }
 
-pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-
-    matmul2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmul2DIntoUnchecked(
+/// The dense GEMM (`ops.Gemm`) as one scalar triple loop: the orientation
+/// selects the index formulas, the operands widen to the matmul compute
+/// dtype (f32 for any mixed pair), and the accumulator narrows once on
+/// store.
+pub fn gemm(
     pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
+    comptime g: ops.Gemm,
+    out: *tensor.TensorOf(g.out),
+    a: *const tensor.TensorOf(g.a),
+    b: *const tensor.TensorOf(g.b),
     m: usize,
     n: usize,
     k: usize,
 ) void {
     _ = pc;
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
-
+    const cd = contiguousDataOf(g.out, out, m * n);
+    const ad = contiguousDataConstOf(g.a, a, m * k);
+    const bd = contiguousDataConstOf(g.b, b, k * n);
+    const compute = comptime if (g.a == g.b) dtype_mod.computeDType(.matmul, g.a) else .f32;
     for (0..m) |i| {
         for (0..n) |j| {
-            var acc: f32 = 0;
+            var acc: dtype_mod.Scalar(compute) = 0;
             for (0..k) |p| {
-                acc += ad[i * k + p] * bd[p * n + j];
+                const av = switch (g.kind) {
+                    .plain, .trans_b => ad[i * k + p],
+                    .trans_a => ad[p * m + i],
+                };
+                const bv = switch (g.kind) {
+                    .plain, .trans_a => bd[p * n + j],
+                    .trans_b => bd[j * k + p],
+                };
+                acc += dtype_mod.castFloat(g.a, compute, av) * dtype_mod.castFloat(g.b, compute, bv);
             }
-            cd[i * n + j] = acc;
+            const value = dtype_mod.castFloat(compute, g.out, acc);
+            if (g.accumulate) cd[i * n + j] += value else cd[i * n + j] = value;
         }
     }
 }
 
-/// C += A·B, the accumulate twin of the plain matmul above.
-pub fn matmul2DAccIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
-
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f32 = 0;
-            for (0..k) |p| {
-                acc += ad[i * k + p] * bd[p * n + j];
-            }
-            cd[i * n + j] += acc;
-        }
-    }
+/// The plain f32 GEMM as the half-panel matmul's inner call.
+fn gemmF32Panel(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
+    gemm(pc, .{}, out, a, b, m, n, k);
 }
 
-pub fn matmul2DIntoUncheckedTyped(
-    pc: ParallelConfig,
-    comptime dtype: DType,
-    out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    matmul2DIntoTyped(
-        dtype,
-        contiguousDataOf(dtype_mod.outputDType(.matmul, dtype), out, m * n),
-        contiguousDataConstOf(dtype, a, m * k),
-        contiguousDataConstOf(dtype, b, k * n),
-        m,
-        n,
-        k,
-    );
-}
-
-pub fn packMatmulRhsTyped(
-    comptime dtype: DType,
-    allocator: std.mem.Allocator,
-    rhs: *const tensor.TensorOf(dtype),
-) !packed_matmul.PackedMatmulRhsFor(dtype) {
-    return packed_matmul.packRhs(allocator, dtype, rhs);
-}
-
-pub fn packDenseMatmulRhsTyped(
+pub fn packDenseRhs(
     comptime dtype: DType,
     allocator: std.mem.Allocator,
     rhs: *const tensor.TensorOf(dtype),
@@ -1429,48 +1358,12 @@ pub fn packDenseMatmulRhsTyped(
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
 }
 
-pub fn matmul2DIntoUncheckedPackedDenseRhs(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const packed_matmul.PackedDenseRhs,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    _ = pc;
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    packed_matmul.matmulDenseScalar(
-        contiguousData(out, m * n),
-        contiguousDataConst(a, m * k),
-        rhs,
-        m,
-    );
-}
-
-pub fn matmul2DIntoUncheckedPackedRhsTyped(
-    pc: ParallelConfig,
+pub fn packHalfRhs(
     comptime dtype: DType,
     allocator: std.mem.Allocator,
-    out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
-    a: *const tensor.TensorOf(dtype),
-    rhs: *const packed_matmul.PackedMatmulRhsFor(dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return packed_matmul.matmul2DIntoUncheckedPackedRhsTypedWithConfig(
-        allocator,
-        dtype,
-        out,
-        a,
-        rhs,
-        m,
-        n,
-        k,
-        pc,
-        matmul2DIntoUnchecked,
-    );
+    rhs: *const tensor.TensorOf(dtype),
+) !packed_matmul.PackedMatmulRhsFor(dtype) {
+    return packed_matmul.packRhs(allocator, dtype, rhs);
 }
 
 pub fn quantizeMatmulRhsBlockwiseI8(
@@ -1722,14 +1615,20 @@ pub fn matmul2DQuantizedRhsQ8_0(
 pub fn matmulPacked(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
+    out: anytype,
+    a: anytype,
     rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
     const Rhs = @TypeOf(rhs.*);
+    if (comptime Rhs == packed_matmul.PackedDenseRhs) {
+        if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+        return packed_matmul.matmulDenseScalar(contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m);
+    }
+    if (comptime !dtype_mod.isBlockQuantized(Rhs.dtype))
+        return packed_matmul.matmulHalfPanel(allocator, Rhs.dtype, out, a, rhs, m, n, k, pc, gemmF32Panel);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
         return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)
@@ -1877,138 +1776,11 @@ fn matmul2DQuantizedRhsTableQ8_K(
     quantized_matmul.cold.matmulTableQ8_KRhsRange(rhs_dtype, cd, qlhs, rhs, m, n, 0, m);
 }
 
-pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const k = av.dim(0);
-    const m = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-
-    matmulTransA2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmulTransA2DIntoUnchecked(
+/// Batched dense f32 GEMM over `kind`; strides in elements (0 = shared
+/// across batches). The scalar reference always loops.
+pub fn gemmBatched(
     pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    const ad = contiguousDataConst(a, k * m);
-    const bd = contiguousDataConst(b, k * n);
-    const cd = contiguousData(out, m * n);
-
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f32 = 0;
-            for (0..k) |p| {
-                acc += ad[p * m + i] * bd[p * n + j];
-            }
-            cd[i * n + j] = acc;
-        }
-    }
-}
-
-pub fn matmulTransBInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(0);
-    if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-
-    matmulTransB2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmulTransB2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConst(b, n * k);
-    const cd = contiguousData(out, m * n);
-
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f32 = 0;
-            for (0..k) |p| {
-                acc += ad[i * k + p] * bd[j * k + p];
-            }
-            cd[i * n + j] = acc;
-        }
-    }
-}
-
-pub fn matmulTransB2DIntoUncheckedF16Operands(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const tensor.TensorOf(.f16),
-    b: *const tensor.TensorOf(.f16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    const ad = contiguousDataConstOf(.f16, a, m * k);
-    const bd = contiguousDataConstOf(.f16, b, n * k);
-    const cd = contiguousData(out, m * n);
-
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f32 = 0;
-            for (0..k) |p| {
-                acc += @as(f32, @floatCast(ad[i * k + p])) * @as(f32, @floatCast(bd[j * k + p]));
-            }
-            cd[i * n + j] = acc;
-        }
-    }
-}
-
-pub fn matmulTransB2DIntoUncheckedBf16Rhs(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const tensor.TensorOf(.bf16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    _ = pc;
-    const ad = contiguousDataConst(a, m * k);
-    const bd = contiguousDataConstOf(.bf16, b, n * k);
-    const cd = contiguousData(out, m * n);
-
-    for (0..m) |i| {
-        for (0..n) |j| {
-            var acc: f32 = 0;
-            for (0..k) |p| {
-                acc += ad[i * k + p] * dtype_mod.bf16ToF32(bd[j * k + p]);
-            }
-            cd[i * n + j] = acc;
-        }
-    }
-}
-
-// Batched GEMM. Strides are in elements (a value of 0 means "shared across
-// all batches", which makes broadcast-RHS just another stride value).
-// CPU backend always loops; the SIMD backend may dispatch to a single
-// Accelerate call when available.
-pub fn matmulBatched2DIntoUnchecked(
-    pc: ParallelConfig,
+    comptime kind: ops.MatmulKind,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -2030,82 +1802,22 @@ pub fn matmulBatched2DIntoUnchecked(
 
     for (0..batch_count) |bi| {
         const ai = ap[bi * stride_a .. bi * stride_a + m * k];
-        const bi_slice = bp[bi * stride_b .. bi * stride_b + k * n];
+        const bs = bp[bi * stride_b .. bi * stride_b + k * n];
         const ci = cp[bi * stride_c .. bi * stride_c + m * n];
         for (0..m) |i| {
             for (0..n) |j| {
                 var acc: f32 = 0;
-                for (0..k) |p| acc += ai[i * k + p] * bi_slice[p * n + j];
-                ci[i * n + j] = acc;
-            }
-        }
-    }
-}
-
-pub fn matmulBatchedTransA2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) void {
-    _ = pc;
-    @constCast(a.buffer).waitReady();
-    @constCast(b.buffer).waitReady();
-    out.buffer.waitMutable();
-    const ap = a.buffer.data[a.offset..].ptr;
-    const bp = b.buffer.data[b.offset..].ptr;
-    const cp = out.buffer.data[out.offset..].ptr;
-
-    for (0..batch_count) |bi| {
-        const ai = ap[bi * stride_a .. bi * stride_a + k * m];
-        const bi_slice = bp[bi * stride_b .. bi * stride_b + k * n];
-        const ci = cp[bi * stride_c .. bi * stride_c + m * n];
-        for (0..m) |i| {
-            for (0..n) |j| {
-                var acc: f32 = 0;
-                for (0..k) |p| acc += ai[p * m + i] * bi_slice[p * n + j];
-                ci[i * n + j] = acc;
-            }
-        }
-    }
-}
-
-pub fn matmulBatchedTransB2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) void {
-    _ = pc;
-    @constCast(a.buffer).waitReady();
-    @constCast(b.buffer).waitReady();
-    out.buffer.waitMutable();
-    const ap = a.buffer.data[a.offset..].ptr;
-    const bp = b.buffer.data[b.offset..].ptr;
-    const cp = out.buffer.data[out.offset..].ptr;
-
-    for (0..batch_count) |bi| {
-        const ai = ap[bi * stride_a .. bi * stride_a + m * k];
-        const bi_slice = bp[bi * stride_b .. bi * stride_b + n * k];
-        const ci = cp[bi * stride_c .. bi * stride_c + m * n];
-        for (0..m) |i| {
-            for (0..n) |j| {
-                var acc: f32 = 0;
-                for (0..k) |p| acc += ai[i * k + p] * bi_slice[j * k + p];
+                for (0..k) |p| {
+                    const av = switch (kind) {
+                        .plain, .trans_b => ai[i * k + p],
+                        .trans_a => ai[p * m + i],
+                    };
+                    const bv = switch (kind) {
+                        .plain, .trans_a => bs[p * n + j],
+                        .trans_b => bs[j * k + p],
+                    };
+                    acc += av * bv;
+                }
                 ci[i * n + j] = acc;
             }
         }
@@ -2179,34 +1891,3 @@ fn dotSliceTyped(
     return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
 }
 
-fn matmul2DIntoTyped(
-    comptime dtype: DType,
-    out: []dtype_mod.Scalar(dtype_mod.outputDType(.matmul, dtype)),
-    a: []const dtype_mod.Scalar(dtype),
-    b: []const dtype_mod.Scalar(dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    for (0..m) |i| {
-        for (0..n) |j| {
-            out[i * n + j] = dotColumnTyped(dtype, a[i * k ..][0..k], b, j, n);
-        }
-    }
-}
-
-fn dotColumnTyped(
-    comptime dtype: DType,
-    a_row: []const dtype_mod.Scalar(dtype),
-    b: []const dtype_mod.Scalar(dtype),
-    col: usize,
-    n: usize,
-) dtype_mod.Scalar(dtype_mod.outputDType(.matmul, dtype)) {
-    const compute_dtype = comptime dtype_mod.computeDType(.matmul, dtype);
-    const output_dtype = comptime dtype_mod.outputDType(.matmul, dtype);
-    var acc: dtype_mod.Scalar(compute_dtype) = 0;
-    for (0..a_row.len) |p| {
-        acc += dtype_mod.castFloat(dtype, compute_dtype, a_row[p]) * dtype_mod.castFloat(dtype, compute_dtype, b[p * n + col]);
-    }
-    return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
-}

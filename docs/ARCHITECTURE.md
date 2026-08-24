@@ -188,7 +188,7 @@ Backends:
   `pub const kernels`; `src/backend/parity_test.zig` keeps them in
   agreement numerically.
 - `src/backend/vector.zig` + `src/backend/vector/`: portable SIMD kernels,
-  addressed by child module (`vector.gemm.matmul2DIntoUnchecked`):
+  addressed by child module (`vector.gemm.gemm`):
   `primitives.zig`, `gemm.zig`, `gemm_blocked.zig` — the BLIS-style blocked
   packed f32 GEMM for the no-BLAS path, `gemm_packed.zig`, `matmul_quant.zig`,
   `elementwise.zig`, `conv.zig`, `pool.zig` — channel-last pool2d/upsample2x,

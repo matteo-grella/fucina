@@ -332,3 +332,41 @@ pub fn erff(x: f32) f32 {
     const y: f32 = if (ix < 0x40c00000) 1 - erfc2(ix, x) else 1 - 0x1p-120;
     return if (sign) -y else y;
 }
+
+const dtype_mod = @import("../dtype.zig");
+
+/// Which GEMM operand is stored transposed: `.plain` is `A[m,k]·B[k,n]`,
+/// `.trans_a` reads A stored `[k,m]`, `.trans_b` reads B stored `[n,k]`.
+/// One enum for the whole stack, from the facade's `matmul(..., kind, ...)`
+/// down to the GPU providers (the integer values cross the provider ABI
+/// verbatim).
+pub const MatmulKind = enum(c_int) { plain = 0, trans_a = 1, trans_b = 2 };
+
+/// A dense GEMM request at the kernel seam: `out[m,n] = op(a)·op(b)`, or
+/// `out += op(a)·op(b)` when `accumulate`. The operand and output dtypes are
+/// stated, not encoded in a kernel name; each provider implements the
+/// combinations it has kernels for and rejects the rest at comptime:
+///
+/// - `.plain` over f32 (store or accumulate) and over one typed dtype
+///   (f16/bf16/f64 with `out = outputDType(.matmul, dtype)`);
+/// - `.trans_a` over f32;
+/// - `.trans_b` over f32, and the mixed-precision streams f16·f16 -> f32
+///   and f32·bf16 -> f32.
+pub const Gemm = struct {
+    kind: MatmulKind = .plain,
+    a: dtype_mod.DType = .f32,
+    b: dtype_mod.DType = .f32,
+    out: dtype_mod.DType = .f32,
+    accumulate: bool = false,
+
+    /// The typed NN request for one dtype (f16/bf16/f64): both operands and
+    /// the matmul output policy of that dtype.
+    pub fn typed(comptime dtype: dtype_mod.DType) Gemm {
+        return .{ .a = dtype, .b = dtype, .out = dtype_mod.outputDType(.matmul, dtype) };
+    }
+
+    /// True for the plain f32 request family (the BLAS/GPU-routed one).
+    pub fn isF32(comptime g: Gemm) bool {
+        return g.a == .f32 and g.b == .f32 and g.out == .f32;
+    }
+};

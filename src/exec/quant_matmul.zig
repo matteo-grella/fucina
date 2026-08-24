@@ -306,7 +306,7 @@ pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.
         _ = try rhs.rankView(2);
         var rr = try self.prepareContiguous(dt, rhs);
         defer rr.deinit();
-        return kernels.packMatmulRhsTyped(dt, self.allocator, rr.tensor());
+        return kernels.packHalfRhs(dt, self.allocator, rr.tensor());
     }
     return packMatmulRhsAs(self, backend_mod.PackedRhsFor(dt), rhs);
 }
@@ -373,7 +373,7 @@ pub fn matmulPacked(self: *ExecContext, a: anytype, rhs: anytype) !MatmulPackedO
             var out = try self.empty(.f32, .{ m, rhs.n });
             errdefer out.deinit();
             self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
-            try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), &out, aa.tensor(), rhs, m, rhs.n, k);
+            try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
             return out;
         },
         .half => {
@@ -383,7 +383,7 @@ pub fn matmulPacked(self: *ExecContext, a: anytype, rhs: anytype) !MatmulPackedO
             var out = try self.empty(comptime dtype_mod.outputDType(.matmul, dt), .{ m, rhs.n });
             errdefer out.deinit();
             self.enableNativeMatmulPoolForWork(dt, m, rhs.n, k);
-            try kernels.matmul2DIntoUncheckedPackedRhsTyped(self.pc(), dt, self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
+            try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
             return out;
         },
         .quant => {
@@ -420,7 +420,7 @@ pub fn matmulPackedInto(self: *ExecContext, out: *Tensor, a: *const Tensor, rhs:
     var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
     self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
-    try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), out, aa.tensor(), rhs, m, rhs.n, k);
+    try kernels.matmulPacked(self.pc(), self.allocator, out, aa.tensor(), rhs, m, rhs.n, k);
     _ = try out.dataConstChecked();
 }
 

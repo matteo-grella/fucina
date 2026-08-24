@@ -12,6 +12,7 @@ const Impl = struct {
     const cpu = cpu_impl.kernels;
     const native = native_impl.kernels;
     const ParallelConfig = native_impl.ParallelConfig;
+    const ops = @import("ops.zig");
     const pool = @import("vector/pool.zig");
 
     const elementwise_tolerance: f32 = 1e-6;
@@ -116,14 +117,10 @@ const Impl = struct {
         }
     }
 
-    const MatMulFn = fn (out: *Tensor, a: *const Tensor, b: *const Tensor) anyerror!void;
-
     fn checkMatMul(
         allocator: Allocator,
         rng: std.Random,
-        cpu_fn: MatMulFn,
-        native_fn: MatMulFn,
-        comptime variant: enum { nn, tn, nt },
+        comptime variant: ops.MatmulKind,
     ) !void {
         for (matmul_sizes) |dims| {
             const m = dims[0];
@@ -131,12 +128,12 @@ const Impl = struct {
             const n = dims[2];
 
             const a_shape: [2]usize = switch (variant) {
-                .nn, .nt => .{ m, k },
-                .tn => .{ k, m },
+                .plain, .trans_b => .{ m, k },
+                .trans_a => .{ k, m },
             };
             const b_shape: [2]usize = switch (variant) {
-                .nn, .tn => .{ k, n },
-                .nt => .{ n, k },
+                .plain, .trans_a => .{ k, n },
+                .trans_b => .{ n, k },
             };
 
             const a_data = try allocator.alloc(f32, a_shape[0] * a_shape[1]);
@@ -153,11 +150,11 @@ const Impl = struct {
 
             var cpu_out = try Tensor.zeros(allocator, &.{ m, n });
             defer cpu_out.deinit();
-            try cpu_fn(&cpu_out, &a, &b);
+            cpu.gemm(.{}, .{ .kind = variant }, &cpu_out, &a, &b, m, n, k);
 
             var native_out = try Tensor.zeros(allocator, &.{ m, n });
             defer native_out.deinit();
-            try native_fn(&native_out, &a, &b);
+            native.gemm(.{}, .{ .kind = variant }, &native_out, &a, &b, m, n, k);
 
             // Each output element accumulates k products; the SIMD GEMM uses a
             // different reduction tree, so tolerance scales with k.
@@ -201,7 +198,7 @@ const Impl = struct {
         try checkReduce(std.testing.allocator, prng.random(), cpu.sumInto, native.sumInto, 1e-6);
     }
 
-    test "parity: dotInto" {
+    test "parity: dot" {
         var prng = std.Random.DefaultPrng.init(0xdab);
         for (elementwise_sizes) |n| {
             const shape = [_]usize{n};
@@ -219,11 +216,11 @@ const Impl = struct {
 
             var cpu_out = try Tensor.zeros(std.testing.allocator, &.{1});
             defer cpu_out.deinit();
-            try cpu.dotInto(.{}, &cpu_out, &a, &b);
+            try cpu.dot(.{}, .f32, &cpu_out, &a, &b);
 
             var native_out = try Tensor.zeros(std.testing.allocator, &.{1});
             defer native_out.deinit();
-            try native.dotInto(.{}, &native_out, &a, &b);
+            try native.dot(.{}, .f32, &native_out, &a, &b);
 
             const tol = 1e-6 * @as(f32, @floatFromInt(n));
             try expectClose(cpu_out.dataConst(), native_out.dataConst(), tol);
@@ -273,54 +270,38 @@ const Impl = struct {
         try native.sumInto(.{}, &native_scalar, &a);
         try expectClose(cpu_scalar.dataConst(), native_scalar.dataConst(), 1e-6 * @as(f32, @floatFromInt(n)));
 
-        try cpu.dotInto(.{}, &cpu_scalar, &a, &b);
-        try native.dotInto(.{}, &native_scalar, &a, &b);
+        try cpu.dot(.{}, .f32, &cpu_scalar, &a, &b);
+        try native.dot(.{}, .f32, &native_scalar, &a, &b);
         try expectClose(cpu_scalar.dataConst(), native_scalar.dataConst(), 1e-6 * @as(f32, @floatFromInt(n)));
     }
 
-    test "parity: matmulInto" {
+    test "parity: gemm plain" {
         var prng = std.Random.DefaultPrng.init(0xdeed);
-        try checkMatMul(std.testing.allocator, prng.random(), cpu.matmulInto, native.matmulInto, .nn);
+        try checkMatMul(std.testing.allocator, prng.random(), .plain);
     }
 
-    test "parity: matmulTransAInto" {
+    test "parity: gemm trans_a" {
         var prng = std.Random.DefaultPrng.init(0xfade);
-        try checkMatMul(std.testing.allocator, prng.random(), cpu.matmulTransAInto, native.matmulTransAInto, .tn);
+        try checkMatMul(std.testing.allocator, prng.random(), .trans_a);
     }
 
-    test "parity: matmulTransBInto" {
+    test "parity: gemm trans_b" {
         var prng = std.Random.DefaultPrng.init(0xface);
-        try checkMatMul(std.testing.allocator, prng.random(), cpu.matmulTransBInto, native.matmulTransBInto, .nt);
+        try checkMatMul(std.testing.allocator, prng.random(), .trans_b);
     }
 
     test "parity: large native matmul variants" {
         var prng = std.Random.DefaultPrng.init(0x514e2d);
         const dims = .{ 48, 192, 128 };
-        try checkOneMatMul(std.testing.allocator, prng.random(), dims, cpu.matmulInto, native.matmulInto, .nn);
-        try checkOneMatMul(std.testing.allocator, prng.random(), dims, cpu.matmulTransAInto, native.matmulTransAInto, .tn);
-        try checkOneMatMul(std.testing.allocator, prng.random(), dims, cpu.matmulTransBInto, native.matmulTransBInto, .nt);
+        try checkOneMatMul(std.testing.allocator, prng.random(), dims, .plain);
+        try checkOneMatMul(std.testing.allocator, prng.random(), dims, .trans_a);
+        try checkOneMatMul(std.testing.allocator, prng.random(), dims, .trans_b);
     }
-
-    const BatchedFn = fn (
-        pc: ParallelConfig,
-        out: *Tensor,
-        a: *const Tensor,
-        b: *const Tensor,
-        m: usize,
-        n: usize,
-        k: usize,
-        batch_count: usize,
-        stride_a: usize,
-        stride_b: usize,
-        stride_c: usize,
-    ) void;
 
     fn checkBatched(
         allocator: Allocator,
         rng: std.Random,
-        cpu_fn: BatchedFn,
-        native_fn: BatchedFn,
-        comptime variant: enum { nn, tn, nt },
+        comptime variant: ops.MatmulKind,
     ) !void {
         const batch_counts = [_]usize{ 1, 2, 5, 8 };
         for (matmul_sizes) |dims| {
@@ -331,18 +312,18 @@ const Impl = struct {
             for (batch_counts) |batch| {
                 // Test both fully-batched and broadcast-RHS (stride_b=0).
                 const stride_b_options = [_]usize{ switch (variant) {
-                    .nn, .tn => k * n,
-                    .nt => n * k,
+                    .plain, .trans_a => k * n,
+                    .trans_b => n * k,
                 }, 0 };
                 for (stride_b_options) |stride_b| {
                     const a_per_batch: usize = switch (variant) {
-                        .nn, .nt => m * k,
-                        .tn => k * m,
+                        .plain, .trans_b => m * k,
+                        .trans_a => k * m,
                     };
                     const b_buf_len = if (stride_b == 0)
                         switch (variant) {
-                            .nn, .tn => k * n,
-                            .nt => n * k,
+                            .plain, .trans_a => k * n,
+                            .trans_b => n * k,
                         }
                     else
                         stride_b * batch;
@@ -357,16 +338,16 @@ const Impl = struct {
                     fillRandom(rng, b_data);
 
                     const a_shape: [3]usize = switch (variant) {
-                        .nn, .nt => .{ batch, m, k },
-                        .tn => .{ batch, k, m },
+                        .plain, .trans_b => .{ batch, m, k },
+                        .trans_a => .{ batch, k, m },
                     };
                     const b_shape_full: [3]usize = switch (variant) {
-                        .nn, .tn => .{ batch, k, n },
-                        .nt => .{ batch, n, k },
+                        .plain, .trans_a => .{ batch, k, n },
+                        .trans_b => .{ batch, n, k },
                     };
                     const b_shape_shared: [2]usize = switch (variant) {
-                        .nn, .tn => .{ k, n },
-                        .nt => .{ n, k },
+                        .plain, .trans_a => .{ k, n },
+                        .trans_b => .{ n, k },
                     };
 
                     var a = try Tensor.fromSlice(allocator, &a_shape, a_data);
@@ -379,11 +360,11 @@ const Impl = struct {
 
                     var cpu_out = try Tensor.zeros(allocator, &.{ batch, m, n });
                     defer cpu_out.deinit();
-                    cpu_fn(.{}, &cpu_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
+                    cpu.gemmBatched(.{}, variant, &cpu_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
 
                     var native_out = try Tensor.zeros(allocator, &.{ batch, m, n });
                     defer native_out.deinit();
-                    native_fn(.{}, &native_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
+                    native.gemmBatched(.{}, variant, &native_out, &a, &b, m, n, k, batch, a_per_batch, stride_b, m * n);
 
                     const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
                     try std.testing.expectEqual(cpu_out.dataConst().len, out_buf_len);
@@ -397,21 +378,19 @@ const Impl = struct {
         allocator: Allocator,
         rng: std.Random,
         dims: [3]usize,
-        cpu_fn: MatMulFn,
-        native_fn: MatMulFn,
-        comptime variant: enum { nn, tn, nt },
+        comptime variant: ops.MatmulKind,
     ) !void {
         const m = dims[0];
         const k = dims[1];
         const n = dims[2];
 
         const a_shape: [2]usize = switch (variant) {
-            .nn, .nt => .{ m, k },
-            .tn => .{ k, m },
+            .plain, .trans_b => .{ m, k },
+            .trans_a => .{ k, m },
         };
         const b_shape: [2]usize = switch (variant) {
-            .nn, .tn => .{ k, n },
-            .nt => .{ n, k },
+            .plain, .trans_a => .{ k, n },
+            .trans_b => .{ n, k },
         };
 
         const a_data = try allocator.alloc(f32, a_shape[0] * a_shape[1]);
@@ -428,11 +407,11 @@ const Impl = struct {
 
         var cpu_out = try Tensor.zeros(allocator, &.{ m, n });
         defer cpu_out.deinit();
-        try cpu_fn(&cpu_out, &a, &b);
+        cpu.gemm(.{}, .{ .kind = variant }, &cpu_out, &a, &b, m, n, k);
 
         var native_out = try Tensor.zeros(allocator, &.{ m, n });
         defer native_out.deinit();
-        try native_fn(&native_out, &a, &b);
+        native.gemm(.{}, .{ .kind = variant }, &native_out, &a, &b, m, n, k);
 
         const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
         try expectClose(cpu_out.dataConst(), native_out.dataConst(), tol);
@@ -441,9 +420,7 @@ const Impl = struct {
     fn checkBatchedSharedA(
         allocator: Allocator,
         rng: std.Random,
-        cpu_fn: BatchedFn,
-        native_fn: BatchedFn,
-        comptime variant: enum { nn, tn, nt },
+        comptime variant: ops.MatmulKind,
     ) !void {
         const batch: usize = 5;
         const m: usize = 5;
@@ -451,12 +428,12 @@ const Impl = struct {
         const n: usize = 7;
 
         const a_shape: [2]usize = switch (variant) {
-            .nn, .nt => .{ m, k },
-            .tn => .{ k, m },
+            .plain, .trans_b => .{ m, k },
+            .trans_a => .{ k, m },
         };
         const b_shape: [3]usize = switch (variant) {
-            .nn, .tn => .{ batch, k, n },
-            .nt => .{ batch, n, k },
+            .plain, .trans_a => .{ batch, k, n },
+            .trans_b => .{ batch, n, k },
         };
         const a_len = a_shape[0] * a_shape[1];
         const b_stride = b_shape[1] * b_shape[2];
@@ -475,36 +452,36 @@ const Impl = struct {
 
         var cpu_out = try Tensor.zeros(allocator, &.{ batch, m, n });
         defer cpu_out.deinit();
-        cpu_fn(.{}, &cpu_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
+        cpu.gemmBatched(.{}, variant, &cpu_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
 
         var native_out = try Tensor.zeros(allocator, &.{ batch, m, n });
         defer native_out.deinit();
-        native_fn(.{}, &native_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
+        native.gemmBatched(.{}, variant, &native_out, &a, &b, m, n, k, batch, 0, b_stride, m * n);
 
         const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
         try expectClose(cpu_out.dataConst(), native_out.dataConst(), tol);
     }
 
-    test "parity: matmulBatched2DIntoUnchecked" {
+    test "parity: gemmBatched plain" {
         var prng = std.Random.DefaultPrng.init(0xb47ce0);
-        try checkBatched(std.testing.allocator, prng.random(), cpu.matmulBatched2DIntoUnchecked, native.matmulBatched2DIntoUnchecked, .nn);
+        try checkBatched(std.testing.allocator, prng.random(), .plain);
     }
 
-    test "parity: matmulBatchedTransA2DIntoUnchecked" {
+    test "parity: gemmBatched trans_a" {
         var prng = std.Random.DefaultPrng.init(0xb47c71);
-        try checkBatched(std.testing.allocator, prng.random(), cpu.matmulBatchedTransA2DIntoUnchecked, native.matmulBatchedTransA2DIntoUnchecked, .tn);
+        try checkBatched(std.testing.allocator, prng.random(), .trans_a);
     }
 
-    test "parity: matmulBatchedTransB2DIntoUnchecked" {
+    test "parity: gemmBatched trans_b" {
         var prng = std.Random.DefaultPrng.init(0xb47c72);
-        try checkBatched(std.testing.allocator, prng.random(), cpu.matmulBatchedTransB2DIntoUnchecked, native.matmulBatchedTransB2DIntoUnchecked, .nt);
+        try checkBatched(std.testing.allocator, prng.random(), .trans_b);
     }
 
     test "parity: native batched matmul accepts shared lhs stride" {
         var prng = std.Random.DefaultPrng.init(0xa571de);
-        try checkBatchedSharedA(std.testing.allocator, prng.random(), cpu.matmulBatched2DIntoUnchecked, native.matmulBatched2DIntoUnchecked, .nn);
-        try checkBatchedSharedA(std.testing.allocator, prng.random(), cpu.matmulBatchedTransA2DIntoUnchecked, native.matmulBatchedTransA2DIntoUnchecked, .tn);
-        try checkBatchedSharedA(std.testing.allocator, prng.random(), cpu.matmulBatchedTransB2DIntoUnchecked, native.matmulBatchedTransB2DIntoUnchecked, .nt);
+        try checkBatchedSharedA(std.testing.allocator, prng.random(), .plain);
+        try checkBatchedSharedA(std.testing.allocator, prng.random(), .trans_a);
+        try checkBatchedSharedA(std.testing.allocator, prng.random(), .trans_b);
     }
 
     fn checkPool2dParity(comptime kind: pool.PoolKind, allocator: Allocator, rng: std.Random) !void {

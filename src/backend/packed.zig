@@ -109,7 +109,7 @@ pub fn packRhs(
     };
 }
 
-pub fn matmul2DIntoUncheckedPackedRhsTypedWithConfig(
+pub fn matmulHalfPanel(
     allocator: Allocator,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),

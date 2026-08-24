@@ -735,7 +735,7 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
         break :blk dev_b16.ptr;
     };
 
-    // Same column-major mapping as gemmBatchedF32's .nt arm (Cᵀ = B·Aᵀ):
+    // Same column-major mapping as gemmBatchedF32's .trans_b arm (Cᵀ = B·Aᵀ):
     // first operand = B stored [n,k] with OP_T, ld=k; second = A, OP_N, ld=k.
     const one: f32 = 1.0;
     const zero: f32 = 0.0;
@@ -854,8 +854,8 @@ pub fn gemmBatchedF32(
     if (ctx.blas_handle == null) return false;
     const blas = &(ctx.blas.?);
 
-    const block_a = std.math.mul(usize, m, k) catch return false; // == k*m for .tn
-    const block_b = std.math.mul(usize, k, n) catch return false; // == n*k for .nt
+    const block_a = std.math.mul(usize, m, k) catch return false; // == k*m for .trans_a
+    const block_b = std.math.mul(usize, k, n) catch return false; // == n*k for .trans_b
     const block_c = std.math.mul(usize, m, n) catch return false;
     const total_a = std.math.add(usize, std.math.mul(usize, stride_a, batch_count - 1) catch return false, block_a) catch return false;
     const total_b = std.math.add(usize, std.math.mul(usize, stride_b, batch_count - 1) catch return false, block_b) catch return false;
@@ -907,10 +907,10 @@ pub fn gemmBatchedF32(
     const cm: c_int = @intCast(n);
     const cn: c_int = @intCast(m);
     const ck: c_int = @intCast(k);
-    const op_b: c_int = if (orient == .nt) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
-    const op_a: c_int = if (orient == .tn) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
-    const ld_b: c_int = if (orient == .nt) @intCast(k) else @intCast(n);
-    const ld_a: c_int = if (orient == .tn) @intCast(m) else @intCast(k);
+    const op_b: c_int = if (orient == .trans_b) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const op_a: c_int = if (orient == .trans_a) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const ld_b: c_int = if (orient == .trans_b) @intCast(k) else @intCast(n);
+    const ld_a: c_int = if (orient == .trans_a) @intCast(m) else @intCast(k);
     const ld_c: c_int = @intCast(n);
 
     const rc = if (batch_count == 1)
@@ -1263,10 +1263,10 @@ pub fn gemmBatchedF32Async(
 
     const one: f32 = 1.0;
     const zero: f32 = 0.0;
-    const op_b: c_int = if (orient == .nt) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
-    const op_a: c_int = if (orient == .tn) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
-    const ld_b: c_int = if (orient == .nt) @intCast(k) else @intCast(n);
-    const ld_a: c_int = if (orient == .tn) @intCast(m) else @intCast(k);
+    const op_b: c_int = if (orient == .trans_b) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const op_a: c_int = if (orient == .trans_a) api.CUBLAS_OP_T else api.CUBLAS_OP_N;
+    const ld_b: c_int = if (orient == .trans_b) @intCast(k) else @intCast(n);
+    const ld_a: c_int = if (orient == .trans_a) @intCast(m) else @intCast(k);
     const blas = &(ctx.blas.?);
     const rc = if (batch_count == 1)
         blas.cublasSgemm(ctx.blas_handle, op_b, op_a, @intCast(n), @intCast(m), @intCast(k), &one, b_dev, ld_b, a_dev, ld_a, &zero, slot.c_dev.ptr, @intCast(n))
@@ -2780,8 +2780,8 @@ test "cuda resident bytes: CPU-readable roundtrip + zero-copy RHS dispatch" {
     const expected = try allocator.alloc(f32, m * n);
     defer allocator.free(expected);
 
-    try std.testing.expect(gemmF32(.nt, a, w, c, m, n, k));
-    cpuReference(.nt, a, w, expected, m, n, k);
+    try std.testing.expect(gemmF32(.trans_b, a, w, c, m, n, k));
+    cpuReference(.trans_b, a, w, expected, m, n, k);
     for (c, expected) |got, want| {
         const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
         try std.testing.expect(@abs(got - want) <= tol);
@@ -3042,10 +3042,10 @@ test "cuda eager async gemm chains device results and synchronizes on host read"
     var second = try Tensor.zeros(allocator, &.{ m, k });
     defer second.deinit();
 
-    try std.testing.expect(gemmF32Async(.nt, &a, &b, &first, m, n, k));
+    try std.testing.expect(gemmF32Async(.trans_b, &a, &b, &first, m, n, k));
     const producer = first.buffer.pending() orelse return error.TestUnexpectedResult;
     try std.testing.expect(producer.devicePtr(.cuda) != null);
-    try std.testing.expect(gemmF32Async(.nn, &first, &b, &second, m, k, n));
+    try std.testing.expect(gemmF32Async(.plain, &first, &b, &second, m, k, n));
     try std.testing.expect(second.buffer.pending() != null);
     const got = second.dataConst();
     try std.testing.expect(second.buffer.pending() == null);

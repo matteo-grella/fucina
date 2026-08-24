@@ -1,5 +1,6 @@
-//! Dense f32/f16/f64/bf16 GEMM: the NN/TN/NT and f16-RHS entry points, their
-//! Task structs and parallel dispatch, and the inner range/cols/row kernels.
+//! Dense f32/f16/f64/bf16 GEMM: the one `gemm` entry over `ops.Gemm`
+//! (orientation, operand dtypes, store/accumulate), its Task structs and
+//! parallel dispatch, and the inner range/cols/row kernels.
 //! Shared-core symbols (ParallelConfig, contiguous-data helpers, thread-count
 //! gates, the V* width aliases) come from `common.zig`; the @Vector
 //! primitives from `primitives.zig`; blocked-tile cores from
@@ -14,6 +15,7 @@ const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 const primitives = @import("primitives.zig");
 
 const DType = dtype_mod.DType;
@@ -61,211 +63,100 @@ inline fn storeScalar(comptime mode: StoreMode, dst: *f32, s: f32) void {
     };
 }
 
-pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmul2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-// C[i, j] = sum_p A[i, p] * B[p, j]. The natural inner order (i, j, p) reads
-// B strided in p, which kills vectorization. Reorder to (i, p, j): broadcast
-// A[i, p] as a scalar, multiply by a contiguous slice of B's row p starting at
-// j, and accumulate into C's row i starting at j. Now the inner loop is two
-// contiguous reads and one contiguous write — vectorizes cleanly.
-pub fn matmul2DIntoUnchecked(
+/// The dense GEMM over contiguous slices: one entry for every orientation
+/// and operand-dtype combination the vector kernels implement (the set is
+/// stated on `ops.Gemm`). `cd` is `[m, n]`; `ad` is `[m, k]` (`[k, m]` for
+/// `.trans_a`); `bd` is `[k, n]` (`[n, k]` for `.trans_b`).
+///
+/// f32 NN: C[i, j] = sum_p A[i, p] * B[p, j]. The natural inner order
+/// (i, j, p) reads B strided in p, which kills vectorization; the row
+/// kernels reorder to (i, p, j), broadcasting A[i, p] against a contiguous
+/// slice of B's row p. TN reorders to (p, i, j) the same way; NT is a
+/// textbook dot product per output element over two contiguous streams.
+/// Large shapes take the cache-blocked packed kernel (`gemm_blocked.zig`).
+pub fn gemm(
     pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
+    comptime g: ops.Gemm,
+    cd: []dtype_mod.Scalar(g.out),
+    ad: []const dtype_mod.Scalar(g.a),
+    bd: []const dtype_mod.Scalar(g.b),
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    const ad = common.contiguousDataConst(a, m * k);
-    const bd = common.contiguousDataConst(b, k * n);
-    const cd = common.contiguousData(out, m * n);
-    if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(pc, .nn, cd, ad, bd, m, n, k);
+    if (comptime g.isF32()) {
+        switch (comptime g.kind) {
+            .plain => {
+                if (gemm_blocked.shouldUseBlocked(m, n, k)) {
+                    if (comptime g.accumulate) return gemm_blocked.gemmBlockedAcc(pc, .plain, cd, ad, bd, m, n, k);
+                    return gemm_blocked.gemmBlocked(pc, .plain, cd, ad, bd, m, n, k);
+                }
+                const mode: StoreMode = if (g.accumulate) .accumulate else .store;
+                if (maybeParallelNN(pc, mode, cd, ad, bd, m, n, k)) return;
+                gemmNNRangeMode(mode, cd, ad, bd, m, n, k, 0, m);
+            },
+            .trans_a => {
+                comptime if (g.accumulate) @compileError("gemm: accumulate is the f32 `.plain` epilogue only");
+                if (gemm_blocked.shouldUseBlocked(m, n, k)) {
+                    return gemm_blocked.gemmBlocked(pc, .trans_a, cd, ad, bd, m, n, k);
+                }
+                gemmTNRowPath(pc, cd, ad, bd, m, n, k);
+            },
+            .trans_b => {
+                comptime if (g.accumulate) @compileError("gemm: accumulate is the f32 `.plain` epilogue only");
+                if (gemm_blocked.shouldUseBlocked(m, n, k)) {
+                    return gemm_blocked.gemmBlocked(pc, .trans_b, cd, ad, bd, m, n, k);
+                }
+                gemmNTRowPath(pc, cd, ad, bd, m, n, k);
+            },
+        }
+        return;
     }
-    gemmNNRowPath(pc, cd, ad, bd, m, n, k);
+    comptime if (g.accumulate) @compileError("gemm: accumulate is the f32 `.plain` epilogue only");
+    if (comptime g.kind == .plain and g.a == g.b and g.out == dtype_mod.outputDType(.matmul, g.a)) {
+        // The typed NN family: f64 stays f64; f16/bf16 take their own row
+        // kernels (f32 accumulation, one final round).
+        if (comptime g.a == .f64) {
+            if (maybeParallelNNF64(pc, cd, ad, bd, m, n, k)) return;
+            return gemmNNRangeF64(cd, ad, bd, m, n, k, 0, m);
+        } else if (comptime g.a == .f16) {
+            if (maybeParallelNNF16(pc, cd, ad, bd, m, n, k)) return;
+            return gemmNNRangeF16(cd, ad, bd, m, n, k, 0, m);
+        } else if (comptime g.a == .bf16) {
+            if (maybeParallelNNBf16(pc, cd, ad, bd, m, n, k)) return;
+            return gemmNNRangeBf16(cd, ad, bd, m, n, k, 0, m);
+        }
+        return matmul2DIntoTypedScalar(g.a, cd, ad, bd, m, n, k);
+    }
+    if (comptime g.kind == .trans_b and g.a == .f16 and g.b == .f16 and g.out == .f32) {
+        if (maybeParallelNTF16Rhs(pc, cd, ad, bd, m, n, k)) return;
+        return gemmNTF16RhsRange(cd, ad, bd, m, n, k, 0, m);
+    }
+    if (comptime g.kind == .trans_b and g.a == .f32 and g.b == .bf16 and g.out == .f32) {
+        // Mixed-precision NT: f32 LHS activations against a frozen bf16 RHS
+        // stored [n, k]; the bf16 weights widen to f32 in-register (u16 << 16,
+        // exact) and everything accumulates in f32.
+        if (maybeParallelNTBf16Rhs(pc, cd, ad, bd, m, n, k)) return;
+        return gemmNTBf16RhsRange(cd, ad, bd, m, n, k, 0, m);
+    }
+    @compileError("gemm: no vector kernel for kind ." ++ @tagName(g.kind) ++ " over ." ++ @tagName(g.a) ++ " x ." ++ @tagName(g.b) ++ " -> ." ++ @tagName(g.out));
 }
 
-// The pre-blocking register-tiled row-kernel path, bypassing the blocked
-// dispatch above. Public so the GEMM bench can baseline it directly.
+// The pre-blocking register-tiled row-kernel paths, bypassing the blocked
+// dispatch above. Public so the GEMM bench can baseline them directly.
 pub fn gemmNNRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
     if (maybeParallelNN(pc, .store, cd, ad, bd, m, n, k)) return;
     gemmNNRangeMode(.store, cd, ad, bd, m, n, k, 0, m);
 }
 
-/// C += A·B. The accumulate twin of `matmul2DIntoUnchecked`: the
-/// row/column parallel splits keep every output element owned by one task, so
-/// the read-modify-write store needs no synchronization; the blocked path
-/// seeds its first k-panel in accumulate mode instead of store mode.
-pub fn matmul2DAccIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConst(a, m * k);
-    const bd = common.contiguousDataConst(b, k * n);
-    const cd = common.contiguousData(out, m * n);
-    if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlockedAcc(pc, .nn, cd, ad, bd, m, n, k);
-    }
-    if (maybeParallelNN(pc, .accumulate, cd, ad, bd, m, n, k)) return;
-    gemmNNRangeMode(.accumulate, cd, ad, bd, m, n, k, 0, m);
-}
-
-pub fn matmul2DIntoUncheckedTyped(
-    pc: ParallelConfig,
-    comptime dtype: DType,
-    out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConstOf(dtype, a, m * k);
-    const bd = common.contiguousDataConstOf(dtype, b, k * n);
-    const cd = common.contiguousDataOf(dtype_mod.outputDType(.matmul, dtype), out, m * n);
-    if (comptime dtype == .f64) {
-        if (maybeParallelNNF64(pc, cd, ad, bd, m, n, k)) return;
-        return gemmNNRangeF64(cd, ad, bd, m, n, k, 0, m);
-    } else if (comptime dtype == .f16) {
-        if (maybeParallelNNF16(pc, cd, ad, bd, m, n, k)) return;
-        return gemmNNRangeF16(cd, ad, bd, m, n, k, 0, m);
-    } else if (comptime dtype == .bf16) {
-        if (maybeParallelNNBf16(pc, cd, ad, bd, m, n, k)) return;
-        return gemmNNRangeBf16(cd, ad, bd, m, n, k, 0, m);
-    }
-    matmul2DIntoTypedScalar(dtype, cd, ad, bd, m, n, k);
-}
-
-pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const k = av.dim(0);
-    const m = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransA2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-// C[i, j] = sum_p A[p, i] * B[p, j], with A logically [k, m]. Reorder to
-// (p, i, j): for each p and i, broadcast A[p, i] and FMA into C's row i with
-// B's row p. Same contiguous-stream pattern as matmul2D, vectorizes in j.
-pub fn matmulTransA2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConst(a, k * m);
-    const bd = common.contiguousDataConst(b, k * n);
-    const cd = common.contiguousData(out, m * n);
-    if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(pc, .tn, cd, ad, bd, m, n, k);
-    }
-    gemmTNRowPath(pc, cd, ad, bd, m, n, k);
-}
-
-// See gemmNNRowPath.
 pub fn gemmTNRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
     if (maybeParallelTN(pc, cd, ad, bd, m, n, k)) return;
     gemmTNRange(cd, ad, bd, m, n, k, 0, m);
 }
 
-pub fn matmulTransBInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(0);
-    if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransB2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-// C[i, j] = sum_p A[i, p] * B[j, p], with B logically [n, k]. Both A's row i
-// and B's row j are contiguous in p — this is a textbook dot-product per
-// output element. The straightforward (i, j, p) ordering is already optimal
-// since each inner reduction can SIMD-accumulate two contiguous streams.
-pub fn matmulTransB2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConst(a, m * k);
-    const bd = common.contiguousDataConst(b, n * k);
-    const cd = common.contiguousData(out, m * n);
-    if (gemm_blocked.shouldUseBlocked(m, n, k)) {
-        return gemm_blocked.gemmBlocked(pc, .nt, cd, ad, bd, m, n, k);
-    }
-    gemmNTRowPath(pc, cd, ad, bd, m, n, k);
-}
-
-// See gemmNNRowPath.
 pub fn gemmNTRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) void {
     if (maybeParallelNT(pc, cd, ad, bd, m, n, k)) return;
     gemmNTRange(cd, ad, bd, m, n, k, 0, m);
-}
-
-pub fn matmulTransB2DIntoUncheckedF16Operands(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const tensor.TensorOf(.f16),
-    b: *const tensor.TensorOf(.f16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConstOf(.f16, a, m * k);
-    const bd = common.contiguousDataConstOf(.f16, b, n * k);
-    const cd = common.contiguousData(out, m * n);
-    if (maybeParallelNTF16Rhs(pc, cd, ad, bd, m, n, k)) return;
-    gemmNTF16RhsRange(cd, ad, bd, m, n, k, 0, m);
-}
-
-// Mixed-precision NT GEMM: f32 LHS activations against a frozen bf16 RHS
-// stored [n, k]. Unlike the f16 twin (which casts the LHS to f16 and
-// accumulates in half precision), the bf16 weights are widened to f32
-// in-register (u16 << 16 bit shift, exact) and everything accumulates in f32 —
-// no f32 materialization of the weight matrix, no LHS precision loss.
-pub fn matmulTransB2DIntoUncheckedBf16Rhs(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const tensor.TensorOf(.bf16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    const ad = common.contiguousDataConst(a, m * k);
-    const bd = common.contiguousDataConstOf(.bf16, b, n * k);
-    const cd = common.contiguousData(out, m * n);
-    if (maybeParallelNTBf16Rhs(pc, cd, ad, bd, m, n, k)) return;
-    gemmNTBf16RhsRange(cd, ad, bd, m, n, k, 0, m);
 }
 
 // ---------------- Inner kernels ----------------

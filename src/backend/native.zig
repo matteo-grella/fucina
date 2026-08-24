@@ -16,6 +16,7 @@ const ops = @import("ops.zig");
 const quantized_matmul = @import("quant.zig");
 const thread = @import("../thread.zig");
 const vector = @import("vector.zig");
+const vector_common = @import("vector/common.zig");
 const gpu = @import("gpu.zig").impl;
 
 const native = @This();
@@ -140,16 +141,11 @@ pub const kernels = struct {
     pub const prodInto = vector.elementwise.prodInto;
     pub const prodSlice = vector.elementwise.prodSlice;
     pub const sumSliceTyped = vector.elementwise.sumSliceTyped;
-    pub const dotInto = vector.elementwise.dotInto;
-    pub const dotIntoTyped = vector.elementwise.dotIntoTyped;
-    pub const matmulInto = native.matmulInto;
-    pub const matmul2DIntoUnchecked = native.matmul2DIntoUnchecked;
-    pub const matmul2DAccIntoUnchecked = native.matmul2DAccIntoUnchecked;
-    pub const matmul2DIntoUncheckedTyped = native.matmul2DIntoUncheckedTyped;
-    pub const packMatmulRhsTyped = native.packMatmulRhsTyped;
-    pub const packDenseMatmulRhsTyped = native.packDenseMatmulRhsTyped;
-    pub const matmul2DIntoUncheckedPackedDenseRhs = native.matmul2DIntoUncheckedPackedDenseRhs;
-    pub const matmul2DIntoUncheckedPackedRhsTyped = native.matmul2DIntoUncheckedPackedRhsTyped;
+    pub const dot = native.dot;
+    pub const gemm = native.gemm;
+    pub const gemmBatched = native.gemmBatched;
+    pub const packDenseRhs = native.packDenseRhs;
+    pub const packHalfRhs = native.packHalfRhs;
     pub const quantizeMatmulRhsBlockwiseI8 = native.quantizeMatmulRhsBlockwiseI8;
     pub const quantizeMatmulRhsQ4_0 = native.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = native.quantizeMatmulRhsQ8_0;
@@ -161,120 +157,106 @@ pub const kernels = struct {
     pub const unaryRowSlice = native.unaryRowSlice;
     pub const mulRowSlice = native.mulRowSlice;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
-    pub const matmulTransAInto = native.matmulTransAInto;
-    pub const matmulTransA2DIntoUnchecked = native.matmulTransA2DIntoUnchecked;
-    pub const matmulTransBInto = native.matmulTransBInto;
-    pub const matmulTransB2DIntoUnchecked = native.matmulTransB2DIntoUnchecked;
-    pub const matmulTransB2DIntoUncheckedF16Operands = native.matmulTransB2DIntoUncheckedF16Operands;
-    pub const matmulTransB2DIntoUncheckedBf16Rhs = native.matmulTransB2DIntoUncheckedBf16Rhs;
-    pub const matmulBatched2DIntoUnchecked = native.matmulBatched2DIntoUnchecked;
-    pub const matmulBatchedTransA2DIntoUnchecked = native.matmulBatchedTransA2DIntoUnchecked;
-    pub const matmulBatchedTransB2DIntoUnchecked = native.matmulBatchedTransB2DIntoUnchecked;
 };
 
-pub fn matmulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmul2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmul2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
-            if (gpu.gemmF32Async(.nn, a, b, out, m, n, k)) return;
-        }
-    }
-    if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k)) {
-            blasGemm(
-                cblas_no_trans,
-                cblas_no_trans,
-                m,
-                n,
-                k,
-                contiguousDataConst(a, m * k),
-                k,
-                contiguousDataConst(b, k * n),
-                n,
-                0.0,
-                contiguousData(out, m * n),
-            );
-            return;
-        }
-    }
-    vector.gemm.matmul2DIntoUnchecked(pc, out, a, b, m, n, k);
-}
-
-/// C += A·B (the beta=1 GEMM). BLAS route when the shape qualifies; the
-/// vector accumulate kernels otherwise. GPU builds fall through to the same
-/// CPU routes: the async GPU GEMM overwrites its destination and has no
-/// accumulate seam.
-pub fn matmul2DAccIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k)) {
-            blasGemm(
-                cblas_no_trans,
-                cblas_no_trans,
-                m,
-                n,
-                k,
-                contiguousDataConst(a, m * k),
-                k,
-                contiguousDataConst(b, k * n),
-                n,
-                1.0,
-                contiguousData(out, m * n),
-            );
-            return;
-        }
-    }
-    vector.gemm.matmul2DAccIntoUnchecked(pc, out, a, b, m, n, k);
-}
-
-pub fn matmul2DIntoUncheckedTyped(
+/// Full dot product into the scalar `out`: f32 takes the dedicated f32
+/// reduction, every other float dtype the typed one.
+pub fn dot(
     pc: ParallelConfig,
     comptime dtype: DType,
     out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
+) !void {
+    if (comptime dtype == .f32) return vector.elementwise.dotInto(pc, out, a, b);
+    return vector.elementwise.dotIntoTyped(pc, dtype, out, a, b);
+}
+
+fn cblasTrans(transposed: bool) c_int {
+    return if (transposed) cblas_trans else cblas_no_trans;
+}
+
+/// Leading dimensions of the row-major operands for one orientation.
+fn ldA(kind: ops.MatmulKind, m: usize, k: usize) usize {
+    return if (kind == .trans_a) m else k;
+}
+
+fn ldB(kind: ops.MatmulKind, n: usize, k: usize) usize {
+    return if (kind == .trans_b) k else n;
+}
+
+/// The dense GEMM (`ops.Gemm`). The f32 family routes GPU (store only: the
+/// async GPU GEMM overwrites its destination and has no accumulate seam)
+/// -> BLAS (beta = 1 for accumulate) -> the vector kernels; the
+/// mixed-precision `.trans_b` streams route GPU -> vector; the typed NN
+/// family is vector-only.
+pub fn gemm(
+    pc: ParallelConfig,
+    comptime g: ops.Gemm,
+    out: *tensor.TensorOf(g.out),
+    a: *const tensor.TensorOf(g.a),
+    b: *const tensor.TensorOf(g.b),
     m: usize,
     n: usize,
     k: usize,
 ) void {
-    vector.gemm.matmul2DIntoUncheckedTyped(pc, dtype, out, a, b, m, n, k);
+    if (comptime g.isF32()) {
+        if (comptime build_options.use_gpu and !g.accumulate) {
+            if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
+                if (gpu.gemmF32Async(g.kind, a, b, out, m, n, k)) return;
+            }
+        }
+        if (comptime build_options.use_blas) {
+            if (shouldUseBlas(m, n, k)) {
+                blasGemm(
+                    cblasTrans(g.kind == .trans_a),
+                    cblasTrans(g.kind == .trans_b),
+                    m,
+                    n,
+                    k,
+                    contiguousDataConst(a, m * k),
+                    ldA(g.kind, m, k),
+                    contiguousDataConst(b, k * n),
+                    ldB(g.kind, n, k),
+                    if (g.accumulate) 1.0 else 0.0,
+                    contiguousData(out, m * n),
+                );
+                return;
+            }
+        }
+    } else if (comptime g.kind == .trans_b and g.a == .f16 and g.b == .f16 and g.out == .f32) {
+        if (comptime build_options.use_gpu) {
+            if (gpu.shouldUseGpuF16ForRhs(b, m, n, k)) {
+                if (gpu.gemmF16NtAsync(a, b, out, m, n, k)) return;
+            }
+        }
+    } else if (comptime g.kind == .trans_b and g.a == .f32 and g.b == .bf16 and g.out == .f32) {
+        if (comptime build_options.use_gpu) {
+            if (gpu.shouldUseGpuBf16ForRhs(b, m, n, k)) {
+                if (gpu.gemmBf16NtAsync(a, b, out, m, n, k)) return;
+            }
+        }
+    }
+    vector.gemm.gemm(
+        pc,
+        g,
+        vector_common.contiguousDataOf(g.out, out, m * n),
+        vector_common.contiguousDataConstOf(g.a, a, m * k),
+        vector_common.contiguousDataConstOf(g.b, b, k * n),
+        m,
+        n,
+        k,
+    );
 }
 
-pub fn packMatmulRhsTyped(
-    comptime dtype: DType,
-    allocator: std.mem.Allocator,
-    rhs: *const tensor.TensorOf(dtype),
-) !packed_matmul.PackedMatmulRhsFor(dtype) {
-    return packed_matmul.packRhs(allocator, dtype, rhs);
+/// The plain f32 GEMM as the half-panel matmul's inner call.
+fn gemmF32Panel(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
+    gemm(pc, .{}, out, a, b, m, n, k);
 }
 
-pub fn packDenseMatmulRhsTyped(
+/// Build the f32 output-row panels (`PackedDenseRhs`) from an f32, f16, or
+/// bf16 `[n, k]` weight.
+pub fn packDenseRhs(
     comptime dtype: DType,
     allocator: std.mem.Allocator,
     rhs: *const tensor.TensorOf(dtype),
@@ -282,7 +264,22 @@ pub fn packDenseMatmulRhsTyped(
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
 }
 
-pub fn matmul2DIntoUncheckedPackedDenseRhs(
+/// Build the 16-bit panel (`PackedMatmulRhsFor(dtype)`) from an f16 or bf16
+/// `[k, n]` weight.
+pub fn packHalfRhs(
+    comptime dtype: DType,
+    allocator: std.mem.Allocator,
+    rhs: *const tensor.TensorOf(dtype),
+) !packed_matmul.PackedMatmulRhsFor(dtype) {
+    return packed_matmul.packRhs(allocator, dtype, rhs);
+}
+
+/// f32 [m, k] x the f32 output-row panels -> f32 [m, n]. Explicit
+/// packed-op decision table: GPU always wins; BLAS keeps its established
+/// all-dimensions>=16 cells EXCEPT the skinny-m tall-k band, where the
+/// already-packed microkernel is faster than Accelerate; the packed
+/// microkernel also owns the m<16 cliff and every no-BLAS cell.
+fn matmulPackedDense(
     pc: ParallelConfig,
     out: *Tensor,
     a: *const Tensor,
@@ -294,13 +291,9 @@ pub fn matmul2DIntoUncheckedPackedDenseRhs(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     if (comptime build_options.use_gpu) {
         if (gpu.shouldUseGpuForRhs(&rhs.rhs, m, n, k)) {
-            if (gpu.gemmF32Async(.nt, a, &rhs.rhs, out, m, n, k)) return;
+            if (gpu.gemmF32Async(.trans_b, a, &rhs.rhs, out, m, n, k)) return;
         }
     }
-    // Explicit packed-op decision table: GPU always wins; BLAS keeps its
-    // established all-dimensions>=16 cells EXCEPT the skinny-m tall-k band
-    // below, where the already-packed microkernel is faster than Accelerate;
-    // the packed microkernel also owns the m<16 cliff and every no-BLAS cell.
     if (comptime build_options.use_blas) {
         if (shouldUseBlas(m, n, k) and !packedDenseKernelPreferred(m, k)) {
             blasGemm(
@@ -327,31 +320,6 @@ pub fn matmul2DIntoUncheckedPackedDenseRhs(
         m,
         n,
         k,
-    );
-}
-
-pub fn matmul2DIntoUncheckedPackedRhsTyped(
-    pc: ParallelConfig,
-    comptime dtype: DType,
-    allocator: std.mem.Allocator,
-    out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
-    a: *const tensor.TensorOf(dtype),
-    rhs: *const packed_matmul.PackedMatmulRhsFor(dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return packed_matmul.matmul2DIntoUncheckedPackedRhsTypedWithConfig(
-        allocator,
-        dtype,
-        out,
-        a,
-        rhs,
-        m,
-        n,
-        k,
-        pc,
-        matmul2DIntoUnchecked,
     );
 }
 
@@ -886,22 +854,27 @@ pub fn matmulQuantizedRhs(
     }, allocator, out, a, rhs, m, n, k);
 }
 
-/// f32 [m, k] x lane-packed quantized RHS -> f32 [m, n]: the packed RHS
-/// container type selects the kernel family at comptime. One entry
-/// replaces the per-container forwards; each arm keeps its exact dispatch
-/// (the Q8_0x4 bulk/tail split, the Q4_Kx8/Q5_Kx8 x4-prefix split, the
-/// smmla pair path).
+/// Activations x a pre-packed RHS -> [m, n]; the container type selects the
+/// arm at comptime: the f32 output-row panel (`packDenseRhs`; f32 LHS), the
+/// 16-bit panel (`packHalfRhs`; LHS and output in that dtype), or a
+/// lane-packed quantized container (f32 LHS; each arm keeps its exact
+/// dispatch: the Q8_0x4 bulk/tail split, the Q4_Kx8/Q5_Kx8 x4-prefix split,
+/// the smmla pair path).
 pub fn matmulPacked(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
+    out: anytype,
+    a: anytype,
     rhs: anytype,
     m: usize,
     n: usize,
     k: usize,
 ) !void {
     const Rhs = @TypeOf(rhs.*);
+    if (comptime Rhs == packed_matmul.PackedDenseRhs)
+        return matmulPackedDense(pc, out, a, rhs, m, n, k);
+    if (comptime !dtype_mod.isBlockQuantized(Rhs.dtype))
+        return packed_matmul.matmulHalfPanel(allocator, Rhs.dtype, out, a, rhs, m, n, k, pc, gemmF32Panel);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
         return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)
@@ -1273,136 +1246,11 @@ fn matmul2DQuantizedRhsTQ2_0(
     vector.matmul_quant.matmul2DTQ2_0RhsInto(pc, cd, qlhs, rhs, m, n, k);
 }
 
-pub fn matmulTransAInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const k = av.dim(0);
-    const m = av.dim(1);
-    const n = bv.dim(1);
-    if (k != bv.dim(0)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransA2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmulTransA2DIntoUnchecked(
+/// Batched dense f32 GEMM over `kind` (`ops.MatmulKind`), strides in
+/// elements (0 = shared across batches): GPU -> BLAS -> the vector kernels.
+pub fn gemmBatched(
     pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
-            if (gpu.gemmF32Async(.tn, a, b, out, m, n, k)) return;
-        }
-    }
-    if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k)) {
-            blasGemm(
-                cblas_trans,
-                cblas_no_trans,
-                m,
-                n,
-                k,
-                contiguousDataConst(a, k * m),
-                m,
-                contiguousDataConst(b, k * n),
-                n,
-                0.0,
-                contiguousData(out, m * n),
-            );
-            return;
-        }
-    }
-    vector.gemm.matmulTransA2DIntoUnchecked(pc, out, a, b, m, n, k);
-}
-
-pub fn matmulTransBInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(0);
-    if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
-    if (ov.dim(0) != m or ov.dim(1) != n) return tensor.TensorError.ShapeMismatch;
-    matmulTransB2DIntoUnchecked(.{}, out, a, b, m, n, k);
-}
-
-pub fn matmulTransB2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
-            if (gpu.gemmF32Async(.nt, a, b, out, m, n, k)) return;
-        }
-    }
-    if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k)) {
-            blasGemm(
-                cblas_no_trans,
-                cblas_trans,
-                m,
-                n,
-                k,
-                contiguousDataConst(a, m * k),
-                k,
-                contiguousDataConst(b, n * k),
-                k,
-                0.0,
-                contiguousData(out, m * n),
-            );
-            return;
-        }
-    }
-    vector.gemm.matmulTransB2DIntoUnchecked(pc, out, a, b, m, n, k);
-}
-
-pub fn matmulTransB2DIntoUncheckedF16Operands(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const tensor.TensorOf(.f16),
-    b: *const tensor.TensorOf(.f16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuF16ForRhs(b, m, n, k)) {
-            if (gpu.gemmF16NtAsync(a, b, out, m, n, k)) return;
-        }
-    }
-    vector.gemm.matmulTransB2DIntoUncheckedF16Operands(pc, out, a, b, m, n, k);
-}
-
-pub fn matmulTransB2DIntoUncheckedBf16Rhs(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const tensor.TensorOf(.bf16),
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBf16ForRhs(b, m, n, k)) {
-            if (gpu.gemmBf16NtAsync(a, b, out, m, n, k)) return;
-        }
-    }
-    vector.gemm.matmulTransB2DIntoUncheckedBf16Rhs(pc, out, a, b, m, n, k);
-}
-
-pub fn matmulBatched2DIntoUnchecked(
-    pc: ParallelConfig,
+    comptime kind: ops.MatmulKind,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -1417,72 +1265,29 @@ pub fn matmulBatched2DIntoUnchecked(
     if (batch_count == 0) return;
     if (comptime build_options.use_gpu) {
         if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
-            if (gpuBatched(.nn, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
+            if (gpuBatched(kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
     if (comptime build_options.use_blas) {
         if (shouldUseBatchedBlas(m, n, k, batch_count)) {
-            blasBatched(cblas_no_trans, cblas_no_trans, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, k, n);
+            blasBatched(cblasTrans(kind == .trans_a), cblasTrans(kind == .trans_b), out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, ldA(kind, m, k), ldB(kind, n, k));
             return;
         }
     }
-    vector.batched.matmulBatched2DIntoUnchecked(pc, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
-}
-
-pub fn matmulBatchedTransA2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) void {
-    if (batch_count == 0) return;
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
-            if (gpuBatched(.tn, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
-        }
-    }
-    if (comptime build_options.use_blas) {
-        if (shouldUseBatchedBlas(m, n, k, batch_count)) {
-            blasBatched(cblas_trans, cblas_no_trans, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, m, n);
-            return;
-        }
-    }
-    vector.batched.matmulBatchedTransA2DIntoUnchecked(pc, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
-}
-
-pub fn matmulBatchedTransB2DIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) void {
-    if (batch_count == 0) return;
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
-            if (gpuBatched(.nt, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
-        }
-    }
-    if (comptime build_options.use_blas) {
-        if (shouldUseBatchedBlas(m, n, k, batch_count)) {
-            blasBatched(cblas_no_trans, cblas_trans, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, k, k);
-            return;
-        }
-    }
-    vector.batched.matmulBatchedTransB2DIntoUnchecked(pc, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
+    vector.batched.gemmBatched(
+        pc,
+        kind,
+        contiguousData(out, out.buffer.data.len - out.offset),
+        contiguousDataConst(a, a.buffer.data.len - a.offset),
+        contiguousDataConst(b, b.buffer.data.len - b.offset),
+        m,
+        n,
+        k,
+        batch_count,
+        stride_a,
+        stride_b,
+        stride_c,
+    );
 }
 
 /// One GPU dispatch covering all `batch_count` matrices (grid depth = batch);

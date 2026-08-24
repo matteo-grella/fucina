@@ -5,6 +5,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gemm = @import("gemm.zig");
+const ops = @import("../ops.zig");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
 
@@ -33,8 +34,8 @@ test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=
     var product = try Tensor.zeros(allocator, &.{ m, n });
     defer product.deinit();
 
-    gemm.matmul2DAccIntoUnchecked(.{}, &acc_out, &a, &b, m, n, k);
-    gemm.matmul2DIntoUnchecked(.{}, &product, &a, &b, m, n, k);
+    gemm.gemm(.{}, .{ .accumulate = true }, acc_out.data(), a.dataConst(), b.dataConst(), m, n, k);
+    gemm.gemm(.{}, .{}, product.data(), a.dataConst(), b.dataConst(), m, n, k);
 
     for (0..m * n) |idx| {
         try std.testing.expectEqual(seed_data[idx] + product.dataConst()[idx], acc_out.dataConst()[idx]);
@@ -44,7 +45,7 @@ test "f32 accumulate GEMM equals store GEMM plus addend, bit-exact, including k=
     // zeroes it).
     var untouched = try Tensor.fromSlice(allocator, &.{ m, n }, &seed_data);
     defer untouched.deinit();
-    gemm.matmul2DAccIntoUnchecked(.{}, &untouched, &a, &b, m, n, 0);
+    gemm.gemm(.{}, .{ .accumulate = true }, untouched.data(), a.dataConst(), b.dataConst(), m, n, 0);
     for (0..m * n) |idx| {
         try std.testing.expectEqual(seed_data[idx], untouched.dataConst()[idx]);
     }
@@ -74,7 +75,7 @@ test "f16 matmul vector kernel covers row tiles and tails" {
     var out = try tensor.TensorOf(.f16).zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    gemm.matmul2DIntoUncheckedTyped(.{}, .f16, &out, &a, &b, m, n, k);
+    gemm.gemm(.{}, ops.Gemm.typed(.f16), out.data(), a.dataConst(), b.dataConst(), m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -111,7 +112,7 @@ test "bf16 matmul vector kernel covers row tiles and tails" {
     var out = try tensor.TensorOf(.bf16).zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    gemm.matmul2DIntoUncheckedTyped(.{}, .bf16, &out, &a, &b, m, n, k);
+    gemm.gemm(.{}, ops.Gemm.typed(.bf16), out.data(), a.dataConst(), b.dataConst(), m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {
@@ -152,7 +153,7 @@ test "f16 x f16 RHS TransB kernel covers row tiles, column tails, and odd k" {
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    gemm.matmulTransB2DIntoUncheckedF16Operands(.{}, &out, &a, &b, m, n, k);
+    gemm.gemm(.{}, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, out.data(), a.dataConst(), b.dataConst(), m, n, k);
 
     // aarch64 accumulates in f16 (native fmla) — per-step rounding error up
     // to ~1e-1 abs at these magnitudes; the widened arms accumulate in f32
@@ -195,7 +196,7 @@ test "f32 x bf16 RHS TransB kernel covers row tiles, column tails, and odd k" {
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    gemm.matmulTransB2DIntoUncheckedBf16Rhs(.{}, &out, &a, &b, m, n, k);
+    gemm.gemm(.{}, .{ .kind = .trans_b, .b = .bf16 }, out.data(), a.dataConst(), b.dataConst(), m, n, k);
 
     for (0..m) |i| {
         for (0..n) |j| {

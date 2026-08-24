@@ -269,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
             const DenseCtx = struct { c: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize };
             const f32ref = try measure(dense_iters, 1, DenseCtx{ .c = &c_dense, .a = &dense, .b = &b_dense, .m = m, .n = n, .k = k }, struct {
                 fn run(c: DenseCtx) void {
-                    native.kernels.matmul2DIntoUnchecked(.{}, c.c, c.a, c.b, c.m, c.n, c.k);
+                    native.kernels.gemm(.{}, .{}, c.c, c.a, c.b, c.m, c.n, c.k);
                 }
             }.run);
 

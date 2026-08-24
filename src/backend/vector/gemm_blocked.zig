@@ -43,6 +43,7 @@ const builtin = @import("builtin");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 // ---------------- Microkernel shape ----------------
 //
@@ -55,7 +56,7 @@ pub const mr: usize = if (builtin.cpu.arch.isAARCH64()) 8 else 6;
 pub const nr_vecs: usize = if (builtin.cpu.arch.isAARCH64()) 3 else 2;
 pub const nr: usize = nr_vecs * common.vector_len;
 
-pub const Orientation = enum { nn, tn, nt };
+pub const Orientation = ops.MatmulKind;
 
 // Cache-blocking factors. aarch64 defaults tuned on M1 Max (L1d 128 KiB per
 // P-core, shared L2 ~12 MiB) with `zig build bench-gemm -Dblas=none -- --sweep`
@@ -484,7 +485,7 @@ fn packB(
         const dst = dst_storage[(j / nr) * kc_eff * nr ..][0 .. kc_eff * nr];
         switch (orient) {
             // B is [k, n] row-major: panel slice p <- B[pc+p, jc+j .. +cols].
-            .nn, .tn => {
+            .plain, .trans_a => {
                 for (0..kc_eff) |p| {
                     const src = bd[(pc + p) * n + jc + j ..][0..cols];
                     const drow = dst[p * nr ..][0..nr];
@@ -494,7 +495,7 @@ fn packB(
             },
             // TransB: B is [n, k] row-major; the pack absorbs the transpose
             // (contiguous reads along k, strided writes into the panel).
-            .nt => {
+            .trans_b => {
                 for (0..cols) |c| {
                     const src = bd[(jc + j + c) * k + pc ..][0..kc_eff];
                     for (0..kc_eff) |p| dst[p * nr + c] = src[p];
@@ -527,7 +528,7 @@ fn packA(
         switch (orient) {
             // A is [m, k] row-major: contiguous reads along k per row,
             // strided writes into the panel.
-            .nn, .nt => {
+            .plain, .trans_b => {
                 for (0..rows) |r| {
                     const src = ad[(ic + i + r) * k + pc ..][0..kc_eff];
                     for (0..kc_eff) |p| dst[p * mr + r] = src[p];
@@ -539,7 +540,7 @@ fn packA(
             // TransA: A is [k, m] row-major; panel slice p <- A[pc+p,
             // ic+i .. +rows] — the transposed layout matches the panel layout
             // directly (contiguous copy per k-step).
-            .tn => {
+            .trans_a => {
                 for (0..kc_eff) |p| {
                     const src = ad[(pc + p) * m + ic + i ..][0..rows];
                     const drow = dst[p * mr ..][0..mr];

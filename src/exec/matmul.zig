@@ -20,7 +20,11 @@ const ExecContext = @import("../exec.zig").ExecContext;
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
-pub const MatmulKind = enum { plain, trans_a, trans_b };
+const ops = backend_mod.ops;
+
+/// Which operand is stored transposed (the one enum from the facade down to
+/// the GPU providers; `backend/ops.zig`).
+pub const MatmulKind = ops.MatmulKind;
 
 pub const Matmul2DShape = struct {
     m: usize,
@@ -28,7 +32,7 @@ pub const Matmul2DShape = struct {
     n: usize,
 };
 
-pub fn analyzeMatmul2D(kind: MatmulKind, a: anytype, b: anytype) !Matmul2DShape {
+pub fn analyzeMatmul2D(comptime kind: MatmulKind, a: anytype, b: anytype) !Matmul2DShape {
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
 
@@ -94,7 +98,7 @@ pub const BmmShape = struct {
     }
 };
 
-pub fn analyzeBmm(kind: BmmKind, a: *const Tensor, b: *const Tensor) !BmmShape {
+pub fn analyzeBmm(comptime kind: BmmKind, a: *const Tensor, b: *const Tensor) !BmmShape {
     const a_rank = a.shape.len;
     const b_rank = b.shape.len;
     if (a_rank < 2 or b_rank < 2) return tensor.TensorError.InvalidShape;
@@ -249,23 +253,6 @@ pub fn batchTensorView(t: *const Tensor, offset_in_elems: usize) BatchTensorView
     };
 }
 
-fn dotF32(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    var aa = try self.prepareContiguous(.f32, a);
-    defer aa.deinit();
-    var bb = try self.prepareContiguous(.f32, b);
-    defer bb.deinit();
-
-    const ap = aa.tensor();
-    const bp = bb.tensor();
-    try tensor.requireSameShape(ap, bp);
-
-    var out = try self.scalar(.f32, 0);
-    errdefer out.deinit();
-    self.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
-    try kernels.dotInto(self.pc(), &out, ap, bp);
-    return out;
-}
-
 /// Full dot product of two same-shape tensors, a scalar tensor result.
 pub fn dot(
     self: *ExecContext,
@@ -273,9 +260,7 @@ pub fn dot(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-    if (comptime dtype == .f32) return dotF32(self, a, b);
     comptime ensureForwardFloatMath(dtype);
-    const compute_dtype = comptime dtype_mod.computeDType(.matmul, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.matmul, dtype);
 
     var aa = try self.prepareContiguous(dtype, a);
@@ -287,11 +272,10 @@ pub fn dot(
     const bp = bb.tensor();
     try tensor.requireSameShapeOf(dtype, ap, bp);
 
-    _ = compute_dtype;
     var out = try self.scalar(output_dtype, dtype_mod.zero(output_dtype));
     errdefer out.deinit();
     self.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
-    try kernels.dotIntoTyped(self.pc(), dtype, &out, ap, bp);
+    try kernels.dot(self.pc(), dtype, &out, ap, bp);
     return out;
 }
 
@@ -305,7 +289,7 @@ pub fn matmulTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Ten
     return matmul2DDispatch(self, .trans_b, a, b);
 }
 
-pub fn matmul2DDispatch(self: *ExecContext, kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
+pub fn matmul2DDispatch(self: *ExecContext, comptime kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(kind, a, b);
 
     var aa = try self.prepareContiguous(.f32, a);
@@ -319,11 +303,7 @@ pub fn matmul2DDispatch(self: *ExecContext, kind: MatmulKind, a: *const Tensor, 
     var out = try self.empty(.f32, .{ info.m, info.n });
     errdefer out.deinit();
     self.enableNativeMatmulPoolForWork(.f32, info.m, info.n, info.k);
-    switch (kind) {
-        .plain => kernels.matmul2DIntoUnchecked(self.pc(), &out, ap, bp, info.m, info.n, info.k),
-        .trans_a => kernels.matmulTransA2DIntoUnchecked(self.pc(), &out, ap, bp, info.m, info.n, info.k),
-        .trans_b => kernels.matmulTransB2DIntoUnchecked(self.pc(), &out, ap, bp, info.m, info.n, info.k),
-    }
+    kernels.gemm(self.pc(), .{ .kind = kind }, &out, ap, bp, info.m, info.n, info.k);
     return out;
 }
 
@@ -344,7 +324,7 @@ pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base:
     var out = try self.materialize(.f32, base);
     errdefer out.deinit();
     self.enableNativeMatmulPoolForWork(.f32, info.m, info.n, info.k);
-    kernels.matmul2DAccIntoUnchecked(self.pc(), &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
+    kernels.gemm(self.pc(), .{ .accumulate = true }, &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
     return out;
 }
 
@@ -369,7 +349,7 @@ pub fn matmul(
     var out = try self.empty(output_dtype, .{ info.m, info.n });
     errdefer out.deinit();
     self.enableNativeMatmulPoolForWork(dtype, info.m, info.n, info.k);
-    kernels.matmul2DIntoUncheckedTyped(self.pc(), dtype, &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
+    kernels.gemm(self.pc(), ops.Gemm.typed(dtype), &out, aa.tensor(), bb.tensor(), info.m, info.n, info.k);
     return out;
 }
 
@@ -377,7 +357,7 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
     _ = try rhs.rankView(2);
     var rr = try self.prepareContiguous(dtype, rhs);
     defer rr.deinit();
-    return kernels.packDenseMatmulRhsTyped(dtype, self.allocator, rr.tensor());
+    return kernels.packDenseRhs(dtype, self.allocator, rr.tensor());
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +467,7 @@ fn matmulTransB2DViaShadow(
     defer b32.deinit();
     var out = self.empty(.f32, .{ m, n }) catch return null;
     self.enableNativeMatmulPoolForWork(.f32, m, n, k);
-    kernels.matmulTransB2DIntoUnchecked(self.pc(), &out, a_contig, &b32, m, n, k);
+    kernels.gemm(self.pc(), .{ .kind = .trans_b }, &out, a_contig, &b32, m, n, k);
     return out;
 }
 
@@ -534,9 +514,9 @@ pub fn matmulTransB2DWithHalfRhs(self: *ExecContext, comptime dtype: DType, a: *
         .f16 => {
             var a16 = try exec_convert.cast(self, .f32, .f16, aa.tensor());
             defer a16.deinit();
-            kernels.matmulTransB2DIntoUncheckedF16Operands(self.pc(), &out, &a16, bb.tensor(), m, n, k);
+            kernels.gemm(self.pc(), .{ .kind = .trans_b, .a = .f16, .b = .f16 }, &out, &a16, bb.tensor(), m, n, k);
         },
-        .bf16 => kernels.matmulTransB2DIntoUncheckedBf16Rhs(self.pc(), &out, aa.tensor(), bb.tensor(), m, n, k),
+        .bf16 => kernels.gemm(self.pc(), .{ .kind = .trans_b, .b = .bf16 }, &out, aa.tensor(), bb.tensor(), m, n, k),
         else => unreachable,
     }
     return out;
@@ -571,7 +551,7 @@ pub fn bmmTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor
     return bmmDispatch(self, .trans_b, a, b);
 }
 
-pub fn bmmDispatch(self: *ExecContext, kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
+pub fn bmmDispatch(self: *ExecContext, comptime kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeBmm(kind, a, b);
 
     var out_buf: [tensor.max_rank]usize = undefined;
@@ -591,7 +571,7 @@ pub fn bmmDispatch(self: *ExecContext, kind: BmmKind, a: *const Tensor, b: *cons
 
 fn bmmFastPathSharedB(
     self: *ExecContext,
-    kind: BmmKind,
+    comptime kind: BmmKind,
     a: *const Tensor,
     b: *const Tensor,
     info: BmmShape,
@@ -606,11 +586,7 @@ fn bmmFastPathSharedB(
     errdefer out_2d.deinit();
 
     self.enableNativeMatmulPoolForWork(.f32, fused_m, info.n, info.k);
-    switch (kind) {
-        .plain => kernels.matmul2DIntoUnchecked(self.pc(), &out_2d, &a_2d, b, fused_m, info.n, info.k),
-        .trans_b => kernels.matmulTransB2DIntoUnchecked(self.pc(), &out_2d, &a_2d, b, fused_m, info.n, info.k),
-        .trans_a => unreachable,
-    }
+    kernels.gemm(self.pc(), .{ .kind = kind }, &out_2d, &a_2d, b, fused_m, info.n, info.k);
 
     const result = try out_2d.reshape(out_shape);
     out_2d.deinit();
@@ -672,34 +648,9 @@ fn bmmDispatchRange(
     var out_view = batchTensorView(out, start * stride_c);
 
     switch (kind) {
-        .plain => kernels.matmulBatched2DIntoUnchecked(
+        inline else => |k| kernels.gemmBatched(
             pc,
-            out_view.ptr(),
-            a_view.constPtr(),
-            b_view.constPtr(),
-            info.m,
-            info.n,
-            info.k,
-            count,
-            info.compact_a_stride,
-            info.compact_b_stride,
-            stride_c,
-        ),
-        .trans_a => kernels.matmulBatchedTransA2DIntoUnchecked(
-            pc,
-            out_view.ptr(),
-            a_view.constPtr(),
-            b_view.constPtr(),
-            info.m,
-            info.n,
-            info.k,
-            count,
-            info.compact_a_stride,
-            info.compact_b_stride,
-            stride_c,
-        ),
-        .trans_b => kernels.matmulBatchedTransB2DIntoUnchecked(
-            pc,
+            k,
             out_view.ptr(),
             a_view.constPtr(),
             b_view.constPtr(),
@@ -733,9 +684,7 @@ fn bmmBroadcastDispatchRange(
         var out_view = batchTensorView(out, batch * stride_c);
 
         switch (kind) {
-            .plain => kernels.matmul2DIntoUnchecked(pc, out_view.ptr(), a_view.constPtr(), b_view.constPtr(), info.m, info.n, info.k),
-            .trans_a => kernels.matmulTransA2DIntoUnchecked(pc, out_view.ptr(), a_view.constPtr(), b_view.constPtr(), info.m, info.n, info.k),
-            .trans_b => kernels.matmulTransB2DIntoUnchecked(pc, out_view.ptr(), a_view.constPtr(), b_view.constPtr(), info.m, info.n, info.k),
+            inline else => |k| kernels.gemm(pc, .{ .kind = k }, out_view.ptr(), a_view.constPtr(), b_view.constPtr(), info.m, info.n, info.k),
         }
     }
 }

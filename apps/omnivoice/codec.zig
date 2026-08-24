@@ -709,7 +709,7 @@ fn runConvGemmTask(task: *const ConvGemmTask) void {
                 // row addresses exactly the [rows, out_ch] destination.
                 var out_view = task.out_view;
                 out_view.offset += row0 * w.out_ch;
-                kernels.matmulTransB2DIntoUncheckedF16Operands(.{}, &out_view, &task.col_view, &task.w_view, rows, w.out_ch, n_col);
+                kernels.gemm(.{}, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, &out_view, &task.col_view, &task.w_view, rows, w.out_ch, n_col);
                 if (task.bias) |b| {
                     for (0..rows) |r| {
                         const out_row = task.out[(row0 + r) * w.out_ch ..][0..w.out_ch];
@@ -722,7 +722,7 @@ fn runConvGemmTask(task: *const ConvGemmTask) void {
                 var w_view = task.w_view;
                 w_view.offset += g * oc_per_group * n_col;
                 var stage_view = task.stage_view;
-                kernels.matmulTransB2DIntoUncheckedF16Operands(.{}, &stage_view, &task.col_view, &w_view, rows, oc_per_group, n_col);
+                kernels.gemm(.{}, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, &stage_view, &task.col_view, &w_view, rows, oc_per_group, n_col);
                 for (0..rows) |r| {
                     const src = task.stage[r * oc_per_group ..][0..oc_per_group];
                     const out_row = task.out[(row0 + r) * w.out_ch + g * oc_per_group ..][0..oc_per_group];

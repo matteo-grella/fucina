@@ -2113,9 +2113,9 @@ test "metal eager async gemm chains on the queue and synchronizes on host read" 
 
     // Both calls submit immediately.  `first` is consumed by the second
     // command directly from shared memory; no host wait occurs between them.
-    try std.testing.expect(gemmF32Async(.nt, &a, &b, &first, m, n, k));
+    try std.testing.expect(gemmF32Async(.trans_b, &a, &b, &first, m, n, k));
     try std.testing.expect(first.buffer.pending() != null);
-    try std.testing.expect(gemmF32Async(.nn, &first, &b, &second, m, k, n));
+    try std.testing.expect(gemmF32Async(.plain, &first, &b, &second, m, k, n));
     try std.testing.expect(second.buffer.pending() != null);
 
     const got = second.dataConst(); // the first unavoidable host boundary

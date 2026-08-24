@@ -21,7 +21,7 @@ const blocked = vector.gemm_blocked;
 
 var io: std.Io = undefined;
 
-const Shape = struct { name: []const u8, m: usize, n: usize, k: usize, iters: usize, big: bool = false, orient: blocked.Orientation = .nn };
+const Shape = struct { name: []const u8, m: usize, n: usize, k: usize, iters: usize, big: bool = false, orient: blocked.Orientation = .plain };
 
 const shapes = [_]Shape{
     .{ .name = "256x256x256 (gate)", .m = 256, .n = 256, .k = 256, .iters = 50 },
@@ -34,11 +34,11 @@ const shapes = [_]Shape{
     .{ .name = "4096x4096x1024", .m = 4096, .n = 4096, .k = 1024, .iters = 7 },
     .{ .name = "2048x1024x1024 (train)", .m = 2048, .n = 1024, .k = 1024, .iters = 15 },
     // OmniVoice design-F32 hot prefill shapes (TransB, small m, wide n).
-    .{ .name = "253x1024x1024 nt (omni)", .m = 253, .n = 1024, .k = 1024, .iters = 30, .orient = .nt },
-    .{ .name = "253x2048x1024 nt (omni)", .m = 253, .n = 2048, .k = 1024, .iters = 25, .orient = .nt },
-    .{ .name = "253x3072x1024 nt (omni)", .m = 253, .n = 3072, .k = 1024, .iters = 20, .orient = .nt },
-    .{ .name = "253x1024x3072 nt (omni)", .m = 253, .n = 1024, .k = 3072, .iters = 20, .orient = .nt },
-    .{ .name = "253x8200x1024 nt (omni)", .m = 253, .n = 8200, .k = 1024, .iters = 15, .orient = .nt },
+    .{ .name = "253x1024x1024 nt (omni)", .m = 253, .n = 1024, .k = 1024, .iters = 30, .orient = .trans_b },
+    .{ .name = "253x2048x1024 nt (omni)", .m = 253, .n = 2048, .k = 1024, .iters = 25, .orient = .trans_b },
+    .{ .name = "253x3072x1024 nt (omni)", .m = 253, .n = 3072, .k = 1024, .iters = 20, .orient = .trans_b },
+    .{ .name = "253x1024x3072 nt (omni)", .m = 253, .n = 1024, .k = 3072, .iters = 20, .orient = .trans_b },
+    .{ .name = "253x8200x1024 nt (omni)", .m = 253, .n = 8200, .k = 1024, .iters = 15, .orient = .trans_b },
     .{ .name = "2048x151936x1024 (lmhead)", .m = 2048, .n = 151936, .k = 1024, .iters = 2, .big = true },
 };
 
@@ -175,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
         // blocked time so the column stays comparable-ish (marked by orient
         // in the shape name).
         var disp_ns: u64 = blkd_ns;
-        if (s.orient == .nn) {
+        if (s.orient == .plain) {
             var a_t = try Tensor.fromSlice(allocator, &.{ s.m, s.k }, data.a);
             defer a_t.deinit();
             var b_t = try Tensor.fromSlice(allocator, &.{ s.k, s.n }, data.b);
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
                     // preceding deferred completion and include this call's
                     // host-visibility fence in end-to-end dispatch latency.
                     c.buffer.waitReady();
-                    native.kernels.matmul2DIntoUnchecked(c2, c, a, b, m, n, k);
+                    native.kernels.gemm(c2, .{}, c, a, b, m, n, k);
                     c.buffer.waitReady();
                 }
             }.go;
@@ -202,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
             // threshold is tuned from.
             const Gpu = struct {
                 fn go(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize) void {
-                    if (!raw_backend.gpu_impl.gemmF32(.nn, a, b, c, m, n, k)) @panic("gpu gemm failed");
+                    if (!raw_backend.gpu_impl.gemmF32(.plain, a, b, c, m, n, k)) @panic("gpu gemm failed");
                 }
             }.go;
             const gpu_ns = try median(Gpu, .{ data.c, data.a, data.b, s.m, s.n, s.k }, iters);
@@ -271,7 +271,7 @@ fn runSweep(allocator: std.mem.Allocator, out: anytype, cfg: native.ParallelConf
             for (ncs) |nc| {
                 const Run = struct {
                     fn go(c: []f32, a: []const f32, b: []const f32, c2: native.ParallelConfig, params: blocked.BlockParams) void {
-                        blocked.gemmBlockedWithParams(c2, .nn, c, a, b, 2048, 2048, 2048, params);
+                        blocked.gemmBlockedWithParams(c2, .plain, c, a, b, 2048, 2048, 2048, params);
                     }
                 }.go;
                 const params: blocked.BlockParams = .{ .kc = kc, .mc = mc, .nc = nc };
@@ -307,7 +307,7 @@ fn runSweepOmni(allocator: std.mem.Allocator, out: anytype, cfg: native.Parallel
             for (ncs) |nc| {
                 const Run = struct {
                     fn go(c: []f32, a: []const f32, b: []const f32, c2: native.ParallelConfig, params: blocked.BlockParams) void {
-                        blocked.gemmBlockedWithParams(c2, .nt, c, a, b, 253, 3072, 1024, params);
+                        blocked.gemmBlockedWithParams(c2, .trans_b, c, a, b, 253, 3072, 1024, params);
                     }
                 }.go;
                 const params: blocked.BlockParams = .{ .kc = kc, .mc = mc, .nc = nc };
@@ -326,11 +326,11 @@ fn runSweepOmni(allocator: std.mem.Allocator, out: anytype, cfg: native.Parallel
 fn runOmniParams(allocator: std.mem.Allocator, out: anytype, cfg: native.ParallelConfig, iters: usize, params_list: []const blocked.BlockParams) !void {
     const S = struct { m: usize, n: usize, k: usize, orient: blocked.Orientation };
     const list = [_]S{
-        .{ .m = 253, .n = 1024, .k = 1024, .orient = .nt },
-        .{ .m = 253, .n = 3072, .k = 1024, .orient = .nt },
-        .{ .m = 253, .n = 1024, .k = 3072, .orient = .nt },
-        .{ .m = 253, .n = 8200, .k = 1024, .orient = .nt },
-        .{ .m = 2048, .n = 2048, .k = 2048, .orient = .nn },
+        .{ .m = 253, .n = 1024, .k = 1024, .orient = .trans_b },
+        .{ .m = 253, .n = 3072, .k = 1024, .orient = .trans_b },
+        .{ .m = 253, .n = 1024, .k = 3072, .orient = .trans_b },
+        .{ .m = 253, .n = 8200, .k = 1024, .orient = .trans_b },
+        .{ .m = 2048, .n = 2048, .k = 2048, .orient = .plain },
     };
     try out.print("blocked kernel, per-shape interleaved configs (iters={d})\n", .{iters});
     for (list) |s| {
@@ -363,9 +363,9 @@ fn orientRunners(comptime orient: blocked.Orientation) type {
     return struct {
         fn rowk(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize, c2: native.ParallelConfig) void {
             switch (orient) {
-                .nn => vector.gemm.gemmNNRowPath(c2, c, a, b, m, n, k),
-                .tn => vector.gemm.gemmTNRowPath(c2, c, a, b, m, n, k),
-                .nt => vector.gemm.gemmNTRowPath(c2, c, a, b, m, n, k),
+                .plain => vector.gemm.gemmNNRowPath(c2, c, a, b, m, n, k),
+                .trans_a => vector.gemm.gemmTNRowPath(c2, c, a, b, m, n, k),
+                .trans_b => vector.gemm.gemmNTRowPath(c2, c, a, b, m, n, k),
             }
         }
         fn blkd(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize, c2: native.ParallelConfig) void {
@@ -384,7 +384,7 @@ fn runOrient(allocator: std.mem.Allocator, out: anytype, cfg: native.ParallelCon
         const df = @as(f64, @floatFromInt(d));
         const flops = 2.0 * df * df * df;
 
-        inline for (.{ blocked.Orientation.nn, blocked.Orientation.tn, blocked.Orientation.nt }) |orient| {
+        inline for (.{ blocked.Orientation.plain, blocked.Orientation.trans_a, blocked.Orientation.trans_b }) |orient| {
             const runners = orientRunners(orient);
             const rowk_ns = try median(runners.rowk, .{ data.c, data.a, data.b, d, d, d, cfg }, iters);
             const blkd_ns = try median(runners.blkd, .{ data.c, data.a, data.b, d, d, d, cfg }, iters);

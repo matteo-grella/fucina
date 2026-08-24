@@ -61,7 +61,7 @@ test "gpu conformance: gemm f32 parity vs reference (all orientations, edge tile
         const expected = try allocator.alloc(f32, m * n);
         defer allocator.free(expected);
 
-        for ([_]Orient{ .nn, .tn, .nt }) |orient| {
+        for ([_]Orient{ .plain, .trans_a, .trans_b }) |orient| {
             for (a) |*x| x.* = random.floatNorm(f32);
             for (b) |*x| x.* = random.floatNorm(f32);
             @memset(c, std.math.nan(f32));
@@ -100,9 +100,9 @@ test "gpu conformance: gemm f32 batched matches per-matrix reference" {
     for (b) |*x| x.* = random.floatNorm(f32);
     @memset(c, 0);
 
-    try std.testing.expect(impl.gemmBatchedF32(.nn, a, b, c, m, n, k, batch, m * k, k * n, m * n));
+    try std.testing.expect(impl.gemmBatchedF32(.plain, a, b, c, m, n, k, batch, m * k, k * n, m * n));
     for (0..batch) |bi| {
-        cpuReference(.nn, a[bi * m * k ..][0 .. m * k], b[bi * k * n ..][0 .. k * n], expected[bi * m * n ..][0 .. m * n], m, n, k);
+        cpuReference(.plain, a[bi * m * k ..][0 .. m * k], b[bi * k * n ..][0 .. k * n], expected[bi * m * n ..][0 .. m * n], m, n, k);
     }
     for (c, expected) |got, want| {
         const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
@@ -266,7 +266,7 @@ test "gpu conformance: eager async f32 input mutation waits for the device reade
     defer allocator.free(expected);
     for (av, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 11)) * 0.03125 - 0.125;
     for (bv, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 7)) * 0.015625 - 0.0625;
-    cpuReference(.nn, av, bv, expected, m, n, k);
+    cpuReference(.plain, av, bv, expected, m, n, k);
 
     var a = try Tensor.fromSlice(allocator, &.{ m, k }, av);
     defer a.deinit();
@@ -274,7 +274,7 @@ test "gpu conformance: eager async f32 input mutation waits for the device reade
     defer b.deinit();
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
-    try std.testing.expect(impl.gemmF32Async(.nn, &a, &b, &out, m, n, k));
+    try std.testing.expect(impl.gemmF32Async(.plain, &a, &b, &out, m, n, k));
     try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
     a.data()[0] += 100; // mutable host boundary must wait for the old value's reader
     try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);

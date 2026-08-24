@@ -42,12 +42,12 @@ pub fn cpuReference(orient: Orient, a: []const f32, b: []const f32, c: []f32, m:
             var acc: f64 = 0;
             for (0..k) |p| {
                 const av: f64 = switch (orient) {
-                    .nn, .nt => a[i * k + p],
-                    .tn => a[p * m + i],
+                    .plain, .trans_b => a[i * k + p],
+                    .trans_a => a[p * m + i],
                 };
                 const bv: f64 = switch (orient) {
-                    .nn, .tn => b[p * n + j],
-                    .nt => b[j * k + p],
+                    .plain, .trans_a => b[p * n + j],
+                    .trans_b => b[j * k + p],
                 };
                 acc += av * bv;
             }

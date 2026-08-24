@@ -190,11 +190,11 @@ fn benchF16(
     const queued = try allocOutputs(allocator, queue_depth, m, n);
     defer freeOutputs(allocator, queued);
 
-    vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
+    vector.gemm.gemm(config, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, cpu_out.data(), a.dataConst(), b_cpu.dataConst(), m, n, k);
     if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
     _ = gpu_out.dataConst();
     for (0..3) |_| {
-        vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
+        vector.gemm.gemm(config, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, cpu_out.data(), a.dataConst(), b_cpu.dataConst(), m, n, k);
         if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
         _ = gpu_out.dataConst();
     }
@@ -209,7 +209,7 @@ fn benchF16(
     for (0..count) |rep| {
         if (rep % 2 == 0) {
             timer.reset();
-            vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
+            vector.gemm.gemm(config, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, cpu_out.data(), a.dataConst(), b_cpu.dataConst(), m, n, k);
             cpu_times[rep] = timer.read();
             timer.reset();
             if (!gpu.gemmF16NtAsync(&a, &b_gpu, &gpu_out, m, n, k)) return error.GpuDispatchFailed;
@@ -221,7 +221,7 @@ fn benchF16(
             _ = gpu_out.dataConst();
             gpu_times[rep] = timer.read();
             timer.reset();
-            vector.gemm.matmulTransB2DIntoUncheckedF16Operands(config, &cpu_out, &a, &b_cpu, m, n, k);
+            vector.gemm.gemm(config, .{ .kind = .trans_b, .a = .f16, .b = .f16 }, cpu_out.data(), a.dataConst(), b_cpu.dataConst(), m, n, k);
             cpu_times[rep] = timer.read();
         }
         timer.reset();

@@ -165,6 +165,28 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Backend kernel seam, dense GEMM: the nineteen name variants
+  (`matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`,
+  `matmul2DIntoUncheckedTyped`, `matmulTransA2DIntoUnchecked`,
+  `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`,
+  `matmulTransB2DIntoUncheckedBf16Rhs`, the three `matmulBatched*`, the
+  validating `matmulInto`/`matmulTransAInto`/`matmulTransBInto`,
+  `dotInto`/`dotIntoTyped`, `packDenseMatmulRhsTyped`/`packMatmulRhsTyped`,
+  `matmul2DIntoUncheckedPackedDenseRhs`/`matmul2DIntoUncheckedPackedRhsTyped`)
+  are five entries whose variation is a parameter: `gemm(pc, request, out,
+  a, b, m, n, k)` over an `ops.Gemm` request (orientation, operand and
+  output dtypes, store or accumulate; unsupported combinations are compile
+  errors), `gemmBatched(pc, kind, ...)`, `dot(pc, dtype, ...)`,
+  `packDenseRhs`/`packHalfRhs`, and `matmulPacked` now covering the f32
+  panel, the 16-bit panel, and the quantized packs by container type. The
+  vector kernels (`vector.gemm.gemm`, `vector.batched.gemmBatched`) take
+  slices and the same request. One orientation enum, `ops.MatmulKind`
+  (`.plain`/`.trans_a`/`.trans_b`; `exec.MatmulKind` is that type), now
+  serves the facade, exec, the blocked kernel (was `Orientation.nn/tn/nt`)
+  and the GPU providers (was `Orient.nn/tn/nt`). In-tree consumers of the
+  raw kernel set (`bench/`, `fucina.internal.backend_mod`) rewrite to the
+  request form; the public `ExecContext` and `Tensor` surfaces are
+  unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

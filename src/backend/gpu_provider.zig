@@ -22,6 +22,7 @@
 //! Layer stack: docs/ARCHITECTURE.md.
 
 const std = @import("std");
+const ops = @import("ops.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -30,7 +31,7 @@ const TensorF16 = tensor.TensorOf(.f16);
 const TensorBf16 = tensor.TensorOf(.bf16);
 
 /// GEMM operand orientation, as the provider kernels take it.
-pub const Orient = enum(c_int) { nn = 0, tn = 1, nt = 2 };
+pub const Orient = ops.MatmulKind;
 
 /// One grouped-MoE tile: which expert, which rows of the batch, how many.
 /// `extern` because the tile table crosses to the kernel side verbatim.

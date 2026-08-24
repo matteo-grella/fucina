@@ -10,7 +10,7 @@ const Tensor = tensor.Tensor;
 
 const packRhs = packed_mod.packRhs;
 const packDenseRhs = packed_mod.packDenseRhs;
-const matmul2DIntoUncheckedPackedRhsTypedWithConfig = packed_mod.matmul2DIntoUncheckedPackedRhsTypedWithConfig;
+const matmulHalfPanel = packed_mod.matmulHalfPanel;
 
 test "pack f16 RHS as f32" {
     const allocator = std.testing.allocator;
@@ -96,7 +96,7 @@ test "packed single-row f16 matmul writes output without f32 temp fallback" {
         }
     }.run;
 
-    try matmul2DIntoUncheckedPackedRhsTypedWithConfig(allocator, .f16, &out, &lhs, &rhs, 1, 2, 3, .{ .pool = null }, Fallback);
+    try matmulHalfPanel(allocator, .f16, &out, &lhs, &rhs, 1, 2, 3, .{ .pool = null }, Fallback);
     try std.testing.expectEqualSlices(f16, &[_]f16{ 58, 64 }, out.dataConst());
 }
 
@@ -128,6 +128,6 @@ test "packed single-row bf16 matmul writes output without f32 temp fallback" {
         }
     }.run;
 
-    try matmul2DIntoUncheckedPackedRhsTypedWithConfig(allocator, .bf16, &out, &lhs, &rhs, 1, 2, 3, .{ .pool = null }, Fallback);
+    try matmulHalfPanel(allocator, .bf16, &out, &lhs, &rhs, 1, 2, 3, .{ .pool = null }, Fallback);
     try std.testing.expectEqualSlices(u16, &.{ dtype_mod.f32ToBf16(58), dtype_mod.f32ToBf16(64) }, out.dataConst());
 }

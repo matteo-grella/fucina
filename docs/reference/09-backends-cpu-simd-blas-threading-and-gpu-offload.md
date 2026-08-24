@@ -240,12 +240,11 @@ cross-backend parity suite. What it guarantees:
   over lengths `{1, 3, 7, 8, 15, 16, 17, 31, 64, 128, 257, 1024}` (edge cases
   around every vector width) plus a 300 000-element case for
   `addInto`/`mulInto`/`scaleInto` that crosses the parallel-split thresholds.
-- `sumInto`, `dotInto` agree within `1e-6·n` (the SIMD pairwise/parallel
+- `sumInto`, `dot` agree within `1e-6·n` (the SIMD pairwise/parallel
   reduction reassociates; tolerance scales with the accumulation count).
-- `matmulInto`, `matmulTransAInto`, `matmulTransBInto` agree within `1e-5·k`
+- `gemm` over `.plain`, `.trans_a`, and `.trans_b` agrees within `1e-5·k`
   over shapes up to `64×64×64` plus `48×192×128`.
-- The batched GEMM triple (`matmulBatched2DIntoUnchecked`,
-  `...TransA...`, `...TransB...`) agrees over batch counts `{1, 2, 5, 8}`,
+- `gemmBatched` over the three orientations agrees over batch counts `{1, 2, 5, 8}`,
   including broadcast RHS (`stride_b = 0`) and shared LHS (`stride_a = 0`).
 - `pool2dInto` (max/avg/sum, odd channel counts to exercise SIMD
   remainders), `upsample2xNearestInto`, `preluChannels*`, and
@@ -263,7 +262,7 @@ across NEON, AVX2/AVX-512, and WASM SIMD. The vector width is chosen at
 comptime by `std.simd.suggestVectorLength(f32) orelse 4` — 4 lanes on NEON,
 8 on AVX2, 16 on AVX-512 — with separate widths for f16 and f64
 (`vector_len_f16`, `vector_len_f64`). `vector.zig` exposes the modules by
-name (`vector.gemm.matmul2DIntoUnchecked`) plus `ParallelConfig`, `Vf32`
+name (`vector.gemm.gemm`) plus `ParallelConfig`, `Vf32`
 and `vector_len`; every pool-taking kernel takes `pc: ParallelConfig`
 first. Module map:
 
@@ -330,15 +329,18 @@ split as the built-in SIMD kernels. Ops without vector decls are
 untouched.
 
 Elementwise entry points operate on `f32` tensors by default; the `*Typed`
-twins (`elementwiseContiguousIntoTyped`, `sumSliceTyped`, `dotIntoTyped`,
-`matmul2DIntoUncheckedTyped`) accept
+twins (`elementwiseContiguousIntoTyped`, `sumSliceTyped`) and the
+dtype-taking `dot`/`gemm` (`ops.Gemm.typed(dtype)`) accept
 `.f16`, `.bf16`, and `.f64` with the compute/output dtype policy from [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)
 (f16/bf16 accumulate sums and dots in f32).
 
 ## 9.5 GEMM: dispatch precedence, BLAS, and the blocked packed kernel (`src/backend/native.zig`, `vector/gemm.zig`, `vector/gemm_blocked.zig`)
 
-Every dense f32 GEMM entry in the native backend dispatches in a fixed order,
-each tier compiled in only when its build flag is set:
+The dense GEMM is one kernel entry, `gemm(pc, request, out, a, b, m, n, k)`,
+where the `ops.Gemm` request states the orientation (`.plain`/`.trans_a`/
+`.trans_b`), the operand and output dtypes, and store-vs-accumulate; a
+combination without a kernel is a compile error. Its f32 family dispatches
+in a fixed order, each tier compiled in only when its build flag is set:
 
 1. **GPU** (`-Dgpu≠none`): if `gpu.shouldUseGpu(m, n, k)` passes and the
    provider's `gemmF32` returns `true`, done. A `false` return (gate refusal,
@@ -346,8 +348,8 @@ each tier compiled in only when its build flag is set:
    depends on the GPU.
 2. **BLAS** (`-Dblas≠none`): if `shouldUseBlas(m, n, k)` — all of `m, n, k ≥
    16` and each dimension fits in `c_int` — the call goes to `cblas_sgemm`
-   (row-major, `alpha = 1`, `beta = 0`, overwrite). Batched entries require
-   `batch_count > 1` on top and loop `cblas_sgemm` per matrix.
+   (row-major, `alpha = 1`, `beta = 0`, overwrite). `gemmBatched` requires
+   `batch_count > 1` on top and loops `cblas_sgemm` per matrix.
 3. **Pure-Zig vector GEMM** otherwise.
 
 BLAS providers are linked per `-Dblas`; on first GEMM the native backend pins
@@ -357,7 +359,7 @@ under a mutex, via the provider-specific setter (`openblas_set_num_threads`,
 `nvpl_blas_set_num_threads`; Accelerate and the generic `blas` provider have
 no setter and are left alone).
 
-The accumulate twin `matmul2DAccIntoUnchecked` (`C += A·B`, the backend
+The accumulate request (`.{ .accumulate = true }`: `C += A·B`, the backend
 seam under `addDot`, [§4.8](04-tensor-operations.md#48-dot-tag-directed-contraction-srcagtensorzig-srctag_opszig)) skips the GPU tier: `shouldUseBlas` winners run
 `cblas_sgemm` with `beta = 1` over the addend held in `out`; otherwise the
 vector NN family runs its comptime `StoreMode` (`store`/`accumulate`)
@@ -426,8 +428,8 @@ f16 GEMM policy (`vector/gemm.zig`): on aarch64 the f16×f16 `@mulAdd` arms
 are native `fmla.8h`, so half-precision accumulation is the fast path and
 output is bit-stable across releases; every other ISA takes widened twins
 (each f16 load converted once, f32 accumulation — strictly more accurate, and
-different from the aarch64 bit pattern). `matmulTransB2DIntoUncheckedBf16Rhs`
-dots f32 activations against a bf16 RHS without materializing f32 weights.
+different from the aarch64 bit pattern). The `.{ .kind = .trans_b, .b = .bf16 }`
+request dots f32 activations against a bf16 RHS without materializing f32 weights.
 
 Batched GEMM (`vector/batched.zig`) parallelizes across batches
 (`batchedThreadCount`) and reuses the row-kernel ranges per matrix; `stride_b
@@ -535,7 +537,7 @@ two layout families, plus an older backend-only typed bridge:
   `PackedMatmulRhsFor(dtype)` for `.f16`/`.bf16` (the container's `dtype` is
   the 16-bit source); the pack widens the RHS to f32 once (`packRhs` → owns
   an f32 tensor; caller `deinit()`s the container).
-  `matmul2DIntoUncheckedPackedRhsTyped` then runs f32 GEMM with widen/narrow
+  `matmulPacked` on that panel (`packed.matmulHalfPanel`) then runs f32 GEMM with widen/narrow
   bridges, with a dedicated `m == 1` GEMV fast path that dots the f16/bf16
   activation row directly against the packed f32 columns (column-parallel
   over the pool). This bridge preserves a same-dtype f16/bf16 result and is
