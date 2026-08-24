@@ -352,10 +352,11 @@ forgotten stanza cannot silently drop a test file from `zig build test`.
 `zig build test` runs every test root, each compiled as its own test binary
 with the same option set as the corresponding executable: `src/fucina.zig`
 (the core, with `build_options`), `src/models.zig` (the LLM/ASR stack,
-imports `fucina`), and the example roots wired in `build.zig` (lmserve,
-nam, parakeet, omnivoice, locate_anything, facedetect, voiceagent,
-nanochat), each also reachable alone through its solo step (`test-fucina`,
-`test-models`, `test-<example>`).
+imports `fucina`), `src/serving.zig` (the serving transport, imports
+`fucina` and `fucina_models`), and the example roots wired in `build.zig`
+(lmserve, nam, parakeet, omnivoice, locate_anything, facedetect,
+voiceagent, nanochat), each also reachable alone through its solo step
+(`test-fucina`, `test-models`, `test-serving`, `test-<example>`).
 
 Every root passes with no model assets present. Suites that need external
 material skip themselves cleanly rather than fail: the OmniVoice parity

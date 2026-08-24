@@ -37,6 +37,7 @@ Top-down; a band may depend only on bands at or below it:
 | Band | Contents |
 | --- | --- |
 | apps | `examples/**`, `apps/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
+| serving | `src/serving.zig`, `src/serving/**` (the `fucina_serving` module) |
 | models | `src/models.zig`, `src/models/**` (the `fucina_models` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
@@ -795,14 +796,16 @@ Generic helpers stay flat in `src/models/`:
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
   (speculation excluded; ownership contract in
   [§13.8](reference/13-the-model-stack-fucina_models.md#138-chat-srcmodelstextchatzig)).
-- `serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
-  the model-agnostic contract (`GenerateRequest`/`GenerateResult`, `Caps`,
-  the per-family `Backend` vtable); `serving/http.zig` (accept loop, SSE
-  stream pipe, Host guard; needs libc on Linux for the `std.c.recv`
-  hang-up probe), `serving/scheduler.zig` (bounded FIFO + single inference
-  worker), `serving/emitter.zig` (per-dialect delta framing),
-  `serving/openai.zig` + `serving/anthropic.zig` (wire dialects), and
-  `serving/toolcall.zig` (hermes tool calling) are the transport;
+- `serving.zig` + `serving/`: the model-shaped half of the serving band.
+  `serving/contract.zig` is the model-agnostic contract
+  (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend`
+  vtable); the transport is the `fucina_serving` module, one band above:
+  `src/serving/http.zig` (accept loop, SSE stream pipe, Host guard; needs
+  libc on Linux for the `std.c.recv` hang-up probe),
+  `src/serving/scheduler.zig` (bounded FIFO + single inference worker),
+  `src/serving/emitter.zig` (per-dialect delta framing),
+  `src/serving/openai.zig` + `src/serving/anthropic.zig` (wire dialects),
+  and `src/serving/toolcall.zig` (hermes tool calling);
   `serving/gguf_chat.zig` is the generic `GgufChatBackend` engine
   (constraint cache, KV reuse slots + disk tier, RAM guard) for any
   `Conversation`-hosted family; `serving/open.zig` is the load-and-serve
@@ -850,10 +853,11 @@ Generic helpers stay flat in `src/models/`:
 
 ## Build And Verification
 
-`build.zig` wires two library modules (`fucina` from `src/fucina.zig`,
-`fucina_models` from `src/models.zig`) plus the `bench_raw` (`src/bench_raw.zig`)
+`build.zig` wires three library modules (`fucina` from `src/fucina.zig`,
+`fucina_models` from `src/models.zig`, `fucina_serving` from
+`src/serving.zig`) plus the `bench_raw` (`src/bench_raw.zig`)
 and `raw_backend` (rooted at `src/backend.zig`) microbench modules.
-`build.zig.zon` names the package `.fucina`, so both library modules are
+`build.zig.zon` names the package `.fucina`, so the library modules are
 consumable from another project via `zig fetch` + `b.dependency`
 ([§2.5](reference/02-toolchain-build-and-project-wiring.md#25-consuming-fucina-from-another-project)). The full step list and options live in `AGENTS.md`;
 the verification-relevant steps are:

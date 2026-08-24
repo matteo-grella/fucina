@@ -13,9 +13,10 @@ this point; earlier history is `git log`.
   `gguf_meta`, `safetensors`, `optim`, `lora`, `parallel`, `tuning`,
   `models.text.serving` (the contract: request/result types and the `Backend`
   vtable), `models.text.chat`, `models.text.tokenizer`, `models.text.kv_cache`.
-- **Experimental** (changelog entry only): `es`, `ptqtp`, `models.qwen3.runner`, the `models.text.serving` transport/engine
-  band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
-  `open`), `models.text.speculative`, the `models.research` namespace (SubQ, Engram,
+- **Experimental** (changelog entry only): `es`, `ptqtp`, `models.qwen3.runner`, the `fucina_serving` module
+  (`http`, `scheduler`, `emitter`, the wire dialects, `toolcall`), the
+  `models.text.serving` engine (`gguf_chat`, `open`),
+  `models.text.speculative`, the `models.research` namespace (SubQ, Engram,
   SHINE, kimi3), cartridges, and
   every model family's internal layout.
 
@@ -23,6 +24,18 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `fucina_serving`: the serving transport is its own exported module
+  (`src/serving.zig` + `src/serving/`): the HTTP server, SSE emitter,
+  OpenAI/Anthropic wire dialects, hermes tool calling, and the request
+  scheduler, moved out of `fucina_models` (`src/models/text/serving/`).
+  Model-free by construction: it depends on `fucina_models` only for the
+  serving contract and chat message types, and the arch-check band table
+  enforces the direction. The contract, the generic GGUF chat engine
+  (`gguf_chat`), and the `open` load-and-serve entry stay on
+  `models.text.serving`. Consumers of the moved namespaces switch from
+  `@import("fucina_models").text.serving.http` (etc.) to
+  `@import("fucina_serving").http`; `zig build test-serving` is the
+  band's solo test root.
 - `apps/`: the example tree splits into two homes. `examples/<name>/` is
   teaching code (one `main.zig`, no test files, no C shims, no vendored
   assets); `apps/<name>/` is everything with product or port shape

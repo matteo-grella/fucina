@@ -4,7 +4,8 @@
 `zig build lmserve` (`apps/lmserve/main.zig` + `apps/lmserve/`) exposes the
 in-tree language models behind the two OpenAI wire dialects plus the
 Anthropic Messages API. The server itself is library surface: the transport
-and the generic engine live in `models.text.serving` (`src/models/text/serving/`,
+lives in the `fucina_serving` module (`src/serving/`), the contract and the
+generic engine in `models.text.serving` (`src/models/text/serving/`,
 [§13.13](reference/13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving)), a model family integrates through one small
 `Backend` vtable, and this example is the CLI front end plus the adapters
 for the families the generic engine cannot host.
@@ -201,7 +202,7 @@ accounting. Extension fields (llama.cpp precedent): `top_k`, `min_p`,
 **Function calling** works on backends whose family has a tool convention
 (`types.ToolStyle`; qwen3/qwen3moe/qwen35 speak the hermes shape):
 declarations and tool history fold into the prompt text
-(`src/models/text/serving/toolcall.zig` reproduces Qwen3's own template
+(`src/serving/toolcall.zig` reproduces Qwen3's own template
 rendering — `<tools>` system section, `<tool_call>` assistant sections,
 `<tool_response>` user sections), the emitter scans replies for
 `<tool_call>` regions, and completed calls come back as chat `tool_calls`
@@ -243,7 +244,7 @@ HTTP status codes (the SDKs dispatch on status). Mid-stream failures arrive
 in-band: chat as a `data:` frame with a top-level `error` key, responses as
 an `error` event followed by `response.failed`.
 
-**Anthropic Messages** (`/v1/messages`, `src/models/text/serving/anthropic.zig`) is
+**Anthropic Messages** (`/v1/messages`, `src/serving/anthropic.zig`) is
 a translation layer over the same normalized request — honored: `system`
 (string or text blocks), `messages` with text blocks (prior-turn
 `thinking`/`redacted_thinking` blocks are dropped like the responses
