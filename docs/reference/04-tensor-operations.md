@@ -205,6 +205,7 @@ method alias:
 | `.gelu_quant` | — (`unary(.gelu_quant)` only) | ggml GGML_GELU_FP16 parity: f16-rounded tanh-gelu with hard clamps |
 | `.elu` | `elu` | alpha = 1, matches `ggml_vec_elu_f32` |
 | `.gelu_erf` | `geluErf` | exact-erf GELU (musl `erff` translation, matches `ggml_vec_gelu_erf_f32`) |
+| `.erf` | `erf` | error function (torch.erf); the same musl-faithful `erff` as `.gelu_erf` |
 | `.floor` | `floor` | zero gradient a.e. (torch convention) |
 | `.ceil` | `ceil` | zero gradient a.e. |
 | `.round` | `round` | round-half-to-EVEN (torch.round), NOT half-away; 2^23 magic-number trick, scalar and SIMD legs bit-identical; zero gradient a.e. |
