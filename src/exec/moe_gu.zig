@@ -55,7 +55,7 @@ pub const RawExpertWeights = struct {
     }
 };
 
-const GemmaMoeDecodeTask = struct {
+const GuDecodeTask = struct {
     gate: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     down: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
@@ -75,7 +75,7 @@ const GemmaMoeDecodeTask = struct {
     down_ns: i64,
 };
 
-fn runGemmaMoeDecodeTask(task: *const GemmaMoeDecodeTask) void {
+fn runGuDecodeTask(task: *const GuDecodeTask) void {
     const qm = backend_mod.quantized_matmul;
     const task_profile = @constCast(task);
 
@@ -101,7 +101,7 @@ fn runGemmaMoeDecodeTask(task: *const GemmaMoeDecodeTask) void {
     if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
 }
 
-const GemmaMoeDecodeChainState = struct {
+const GuDecodeChainState = struct {
     gate: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     up: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     down: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
@@ -121,15 +121,15 @@ const GemmaMoeDecodeChainState = struct {
     down_task0: usize,
 };
 
-const GemmaMoeDecodeChainTask = struct {
-    state: *GemmaMoeDecodeChainState,
+const GuDecodeChainTask = struct {
+    state: *GuDecodeChainState,
     kind: enum { gate_up, down },
     c0: usize,
     c1: usize,
     elapsed_ns: i64,
 };
 
-fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thread.Chain) void {
+fn runGuDecodeChainTask(task: *GuDecodeChainTask, chain: *const thread.Chain) void {
     const qm = backend_mod.quantized_matmul;
     const state = task.state;
     switch (task.kind) {
@@ -200,7 +200,7 @@ pub fn decodePacked(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GemmaMoeDecodeChainState, GemmaMoeDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuDecodeChainState, GuDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -271,12 +271,12 @@ pub fn decodePacked(
     const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
     var used_chain = false;
     if (ctx.workPool()) |pool| {
-        used_chain = pool.parallelChained(GemmaMoeDecodeChainTask, tasks, chain_initial_count, runGemmaMoeDecodeChainTask);
+        used_chain = pool.parallelChained(GuDecodeChainTask, tasks, chain_initial_count, runGuDecodeChainTask);
     }
     if (!used_chain) {
         for (0..top_k) |j| {
             const e = selected[j];
-            var t = GemmaMoeDecodeTask{
+            var t = GuDecodeTask{
                 .gate = &gate[e],
                 .up = &up[e],
                 .down = &down[e],
@@ -295,7 +295,7 @@ pub fn decodePacked(
                 .geglu_requant_ns = 0,
                 .down_ns = 0,
             };
-            runGemmaMoeDecodeTask(&t);
+            runGuDecodeTask(&t);
             if (profile) |p| {
                 p.gate_up_ns += t.gate_up_ns;
                 p.swiglu_requant_ns += t.geglu_requant_ns;
@@ -343,7 +343,7 @@ pub fn decodePacked(
 /// activation. `weights` should already include Gemma's per-expert down scale.
 /// (`-Dgpu=metal` builds don't load the x4 representation at all — they go
 /// through `batchRaw`, which holds the GPU arm.)
-/// Expert-weight binding for `gemmaBatchBody`: how a gate/up or down
+/// Expert-weight binding for `guBatchBody`: how a gate/up or down
 /// matmul task names its `rhs` — packed x4 containers by pointer.
 const PackedExpertBind = struct {
     gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
@@ -366,12 +366,12 @@ const RawExpertBind = struct {
     out_pe: usize,
     hidden: usize,
 
-    fn gu(self: RawExpertBind, e: usize, is_up: bool) GemmaMoeRawGuRhs {
-        return gemmaMoeRawGuView(self.gw, e, if (is_up) self.out_pe else 0, self.out_pe, self.hidden);
+    fn gu(self: RawExpertBind, e: usize, is_up: bool) GuRawGuRhs {
+        return guRawGuView(self.gw, e, if (is_up) self.out_pe else 0, self.out_pe, self.hidden);
     }
 
     fn dn(self: RawExpertBind, e: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
-        return gemmaMoeRawQ8View(self.gw, e, self.out_pe, self.hidden);
+        return guRawQ8View(self.gw, e, self.out_pe, self.hidden);
     }
 };
 
@@ -383,7 +383,7 @@ const RawExpertBind = struct {
 /// `bind.gu`/`bind.dn`), so every line executes identically for both
 /// families — the packed/raw paths are bitwise-equal by construction.
 /// The batch geometry both families validate before calling
-/// `gemmaBatchBody`: token rows, widths, routing fan-out, and the Q8_K /
+/// `guBatchBody`: token rows, widths, routing fan-out, and the Q8_K /
 /// Q8_0 block counts of the two quantized LHS panels.
 const BatchShape = struct {
     seq: usize,
@@ -394,7 +394,7 @@ const BatchShape = struct {
     bpc_g: usize,
 };
 
-fn gemmaBatchBody(
+fn guBatchBody(
     comptime GuTask: type,
     comptime DnTask: type,
     comptime runGu: fn (*const GuTask) void,
@@ -438,9 +438,9 @@ fn gemmaBatchBody(
     defer a.free(qg);
     const down_buf = try a.alloc(f32, n_pairs * hidden);
     defer a.free(down_buf);
-    const gather_tasks = try a.alloc(GemmaMoeGatherTask, n_expert);
+    const gather_tasks = try a.alloc(GuGatherTask, n_expert);
     defer a.free(gather_tasks);
-    const geglu_tasks = try a.alloc(GemmaMoeGegluTask, n_expert);
+    const geglu_tasks = try a.alloc(GuGegluTask, n_expert);
     defer a.free(geglu_tasks);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
@@ -578,9 +578,9 @@ fn gemmaBatchBody(
     }
 
     const chain_initial_count = moe_chain.wireMoeBatchPhaseChain(
-        GemmaMoeGatherTask,
+        GuGatherTask,
         GuTask,
-        GemmaMoeGegluTask,
+        GuGegluTask,
         DnTask,
         chain_tasks,
         chain_states,
@@ -589,9 +589,9 @@ fn gemmaBatchBody(
         gate_up_tasks,
         geglu_tasks,
         down_tasks,
-        runGemmaMoeGatherTaskOpaque,
+        runGuGatherTaskOpaque,
         runGuOpaque,
-        runGemmaMoeGegluTaskOpaque,
+        runGuGegluTaskOpaque,
         runDnOpaque,
     );
 
@@ -602,9 +602,9 @@ fn gemmaBatchBody(
         if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
     } else {
         if (pool) |p| {
-            p.parallelChunks(GemmaMoeGatherTask, gather_tasks, runGemmaMoeGatherTask);
+            p.parallelChunks(GuGatherTask, gather_tasks, runGuGatherTask);
         } else {
-            for (gather_tasks) |*t| runGemmaMoeGatherTask(t);
+            for (gather_tasks) |*t| runGuGatherTask(t);
         }
         if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
 
@@ -618,9 +618,9 @@ fn gemmaBatchBody(
 
         phase_start = moeBatchProfileStart(profile_enabled, io);
         if (pool) |p| {
-            p.parallelChunks(GemmaMoeGegluTask, geglu_tasks, runGemmaMoeGegluTask);
+            p.parallelChunks(GuGegluTask, geglu_tasks, runGuGegluTask);
         } else {
-            for (geglu_tasks) |*t| runGemmaMoeGegluTask(t);
+            for (geglu_tasks) |*t| runGuGegluTask(t);
         }
         if (profile_enabled) expert_wall_ns += moeBatchProfileElapsed(phase_start, io);
 
@@ -688,13 +688,13 @@ pub fn batchPacked(
         p.count_sort_ns += route_result.count_sort_ns;
     }
 
-    return gemmaBatchBody(
-        GemmaMoeQ6MatmulTask,
-        GemmaMoeQ8MatmulTask,
-        runGemmaMoeQ6MatmulTask,
-        runGemmaMoeQ8MatmulTask,
-        runGemmaMoeQ6MatmulTaskOpaque,
-        runGemmaMoeQ8MatmulTaskOpaque,
+    return guBatchBody(
+        GuQ6MatmulTask,
+        GuQ8MatmulTask,
+        runGuQ6MatmulTask,
+        runGuQ8MatmulTask,
+        runGuQ6MatmulTaskOpaque,
+        runGuQ8MatmulTaskOpaque,
         ctx,
         x_data,
         .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
@@ -789,9 +789,9 @@ fn batchRawGpu(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     const tiles = try a.alloc(gpu.QMMTile, n_tiles);
     defer a.free(tiles);
-    const gather_tasks = try a.alloc(GemmaMoeGpuGatherTask, n_expert);
+    const gather_tasks = try a.alloc(GuGpuGatherTask, n_expert);
     defer a.free(gather_tasks);
-    const geglu_tasks = try a.alloc(GemmaMoeGpuGegluTask, n_expert);
+    const geglu_tasks = try a.alloc(GuGpuGegluTask, n_expert);
     defer a.free(geglu_tasks);
     if (profile_enabled) local.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
@@ -840,9 +840,9 @@ fn batchRawGpu(
         };
     }
     if (pool) |p| {
-        p.parallelChunks(GemmaMoeGpuGatherTask, gather_tasks, runGemmaMoeGpuGatherTask);
+        p.parallelChunks(GuGpuGatherTask, gather_tasks, runGuGpuGatherTask);
     } else {
-        for (gather_tasks) |*t| runGemmaMoeGpuGatherTask(t);
+        for (gather_tasks) |*t| runGuGpuGatherTask(t);
     }
     if (profile_enabled) {
         const ns = moeBatchProfileElapsed(phase_start, io);
@@ -882,9 +882,9 @@ fn batchRawGpu(
         };
     }
     if (pool) |p| {
-        p.parallelChunks(GemmaMoeGpuGegluTask, geglu_tasks, runGemmaMoeGpuGegluTask);
+        p.parallelChunks(GuGpuGegluTask, geglu_tasks, runGuGpuGegluTask);
     } else {
-        for (geglu_tasks) |*t| runGemmaMoeGpuGegluTask(t);
+        for (geglu_tasks) |*t| runGuGpuGegluTask(t);
     }
     if (profile_enabled) {
         const ns = moeBatchProfileElapsed(phase_start, io);
@@ -925,7 +925,7 @@ fn batchRawGpu(
     return out;
 }
 
-const GemmaMoeGpuGatherTask = struct {
+const GuGpuGatherTask = struct {
     x_data: []const f32,
     order: []const usize,
     hidden: usize,
@@ -935,7 +935,7 @@ const GemmaMoeGpuGatherTask = struct {
     dst: []f32, // staging panel [n_pairs * hidden]
 };
 
-fn runGemmaMoeGpuGatherTask(task: *const GemmaMoeGpuGatherTask) void {
+fn runGuGpuGatherTask(task: *const GuGpuGatherTask) void {
     const m = task.m;
     if (m == 0) return;
     const base = task.row_start;
@@ -948,7 +948,7 @@ fn runGemmaMoeGpuGatherTask(task: *const GemmaMoeGpuGatherTask) void {
     }
 }
 
-const GemmaMoeGpuGegluTask = struct {
+const GuGpuGegluTask = struct {
     src: []const f32, // gate_up GEMM panel [n_pairs * 2*out_pe]
     dst: []f32, // gated rows [n_pairs * out_pe]
     out_pe: usize,
@@ -956,7 +956,7 @@ const GemmaMoeGpuGegluTask = struct {
     m: usize,
 };
 
-fn runGemmaMoeGpuGegluTask(task: *const GemmaMoeGpuGegluTask) void {
+fn runGuGpuGegluTask(task: *const GuGpuGegluTask) void {
     const m = task.m;
     if (m == 0) return;
     const base = task.row_start;
@@ -973,22 +973,22 @@ fn runGemmaMoeGpuGegluTask(task: *const GemmaMoeGpuGegluTask) void {
 /// Borrowed plain RHS view (one arm per gate_up dtype) over one half
 /// (gate: `row_off` 0, up: `row_off` out_pe) of one expert in the raw
 /// GGUF gate_up tensor (2*out_pe rows per expert, gate rows first).
-const GemmaMoeRawGuRhs = union(enum) {
+const GuRawGuRhs = union(enum) {
     q6_k: backend_mod.QuantizedMatmulRhsQ6_K,
     q4_k: backend_mod.QuantizedMatmulRhsQ4_K,
 };
 
-fn gemmaMoeRawGuView(
+fn guRawGuView(
     gw: RawExpertWeights,
     expert: usize,
     row_off: usize,
     out_pe: usize,
     hidden: usize,
-) GemmaMoeRawGuRhs {
+) GuRawGuRhs {
     const bpr = hidden / 256;
     const start = (expert * 2 * out_pe + row_off) * bpr;
     return switch (gw.gu) {
-        inline else => |gu_blocks, tag| @unionInit(GemmaMoeRawGuRhs, @tagName(tag), .{
+        inline else => |gu_blocks, tag| @unionInit(GuRawGuRhs, @tagName(tag), .{
             .allocator = null, // borrows the model's resident expert copies
             .blocks = gu_blocks[start..][0 .. out_pe * bpr],
             .k = hidden,
@@ -1001,8 +1001,8 @@ fn gemmaMoeRawGuView(
 /// One gate_up matmul over a raw view: each arm forks to its compact
 /// column-outer kernel at m >= 4 (the batched-prefill case — unpack each
 /// weight block once per row tile) and stays on the row-outer tile below.
-fn gemmaMoeRawGuMatmul(
-    view: *const GemmaMoeRawGuRhs,
+fn guRawGuMatmul(
+    view: *const GuRawGuRhs,
     out: []f32,
     qlhs: []const dtype_mod.BlockQ8_K,
     out_dim: usize,
@@ -1028,7 +1028,7 @@ fn gemmaMoeRawGuMatmul(
 /// Borrowed plain-Q8_0 RHS view over one expert's raw GGUF down blocks:
 /// the blocks belong to the model's resident expert copies, so the rows
 /// table carries a null allocator (deinit frees nothing).
-fn gemmaMoeRawQ8View(
+fn guRawQ8View(
     gw: RawExpertWeights,
     expert: usize,
     out_pe: usize,
@@ -1048,7 +1048,7 @@ fn gemmaMoeRawQ8View(
     };
 }
 
-const GemmaMoeRawDecodeTask = struct {
+const GuRawDecodeTask = struct {
     gw: RawExpertWeights,
     qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
@@ -1067,17 +1067,17 @@ const GemmaMoeRawDecodeTask = struct {
     down_ns: i64,
 };
 
-fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
+fn runGuRawDecodeTask(task: *const GuRawDecodeTask) void {
     const qm = backend_mod.quantized_matmul;
     const task_profile = @constCast(task);
     const e = task.expert_index;
     const out_pe = task.out_pe;
 
     const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    const gate_view = gemmaMoeRawGuView(task.gw, e, 0, out_pe, task.hidden);
-    gemmaMoeRawGuMatmul(&gate_view, task.gate_buf, task.qx, out_pe, 1, 0, out_pe);
-    const up_view = gemmaMoeRawGuView(task.gw, e, out_pe, out_pe, task.hidden);
-    gemmaMoeRawGuMatmul(&up_view, task.up_buf, task.qx, out_pe, 1, 0, out_pe);
+    const gate_view = guRawGuView(task.gw, e, 0, out_pe, task.hidden);
+    guRawGuMatmul(&gate_view, task.gate_buf, task.qx, out_pe, 1, 0, out_pe);
+    const up_view = guRawGuView(task.gw, e, out_pe, out_pe, task.hidden);
+    guRawGuMatmul(&up_view, task.up_buf, task.qx, out_pe, 1, 0, out_pe);
     if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
 
     const geglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
@@ -1091,7 +1091,7 @@ fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
     if (task.profile_enabled) task_profile.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, task.io);
 
     const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    const down_view = gemmaMoeRawQ8View(task.gw, e, out_pe, task.hidden);
+    const down_view = guRawQ8View(task.gw, e, out_pe, task.hidden);
     qm.q8_0.matmulQ8_0RhsTile(task.out, task.qg, &down_view, task.hidden, 0, 1, 0, task.hidden);
     if (task.weight != 1.0) {
         for (task.out) |*o| o.* *= task.weight;
@@ -1099,7 +1099,7 @@ fn runGemmaMoeRawDecodeTask(task: *const GemmaMoeRawDecodeTask) void {
     if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
 }
 
-const GemmaMoeRawDecodeChainState = struct {
+const GuRawDecodeChainState = struct {
     gw: RawExpertWeights,
     qx: []const dtype_mod.BlockQ8_K,
     out_pe: usize,
@@ -1118,15 +1118,15 @@ const GemmaMoeRawDecodeChainState = struct {
     down_task0: usize,
 };
 
-const GemmaMoeRawDecodeChainTask = struct {
-    state: *GemmaMoeRawDecodeChainState,
+const GuRawDecodeChainTask = struct {
+    state: *GuRawDecodeChainState,
     kind: enum { gate_up, down },
     c0: usize,
     c1: usize,
     elapsed_ns: i64,
 };
 
-fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *const thread.Chain) void {
+fn runGuRawDecodeChainTask(task: *GuRawDecodeChainTask, chain: *const thread.Chain) void {
     const qm = backend_mod.quantized_matmul;
     const state = task.state;
     const e = state.expert_index;
@@ -1134,10 +1134,10 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
     switch (task.kind) {
         .gate_up => {
             const gate_up_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            const gate_view = gemmaMoeRawGuView(state.gw, e, 0, out_pe, state.hidden);
-            gemmaMoeRawGuMatmul(&gate_view, state.gate_buf, state.qx, out_pe, 1, task.c0, task.c1);
-            const up_view = gemmaMoeRawGuView(state.gw, e, out_pe, out_pe, state.hidden);
-            gemmaMoeRawGuMatmul(&up_view, state.up_buf, state.qx, out_pe, 1, task.c0, task.c1);
+            const gate_view = guRawGuView(state.gw, e, 0, out_pe, state.hidden);
+            guRawGuMatmul(&gate_view, state.gate_buf, state.qx, out_pe, 1, task.c0, task.c1);
+            const up_view = guRawGuView(state.gw, e, out_pe, out_pe, state.hidden);
+            guRawGuMatmul(&up_view, state.up_buf, state.qx, out_pe, 1, task.c0, task.c1);
             if (state.profile_enabled) task.elapsed_ns += moeBatchProfileElapsed(gate_up_start, state.io);
 
             if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
@@ -1153,7 +1153,7 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
         },
         .down => {
             const down_start = moeBatchProfileStart(state.profile_enabled, state.io);
-            const down_view = gemmaMoeRawQ8View(state.gw, e, out_pe, state.hidden);
+            const down_view = guRawQ8View(state.gw, e, out_pe, state.hidden);
             qm.q8_0.matmulQ8_0RhsTile(state.out, state.qg, &down_view, state.hidden, 0, 1, task.c0, task.c1);
             if (state.weight != 1.0) {
                 for (state.out[task.c0..task.c1]) |*o| o.* *= state.weight;
@@ -1202,7 +1202,7 @@ pub fn decodeRaw(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     exec_moe.lockMoeDecodeScratch(ctx);
     defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GemmaMoeRawDecodeChainState, GemmaMoeRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuRawDecodeChainState, GuRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
@@ -1264,11 +1264,11 @@ pub fn decodeRaw(
     const expert_wall_start = moeBatchProfileStart(profile_enabled, io);
     var used_chain = false;
     if (ctx.workPool()) |pool| {
-        used_chain = pool.parallelChained(GemmaMoeRawDecodeChainTask, sv.tasks, chain_initial_count, runGemmaMoeRawDecodeChainTask);
+        used_chain = pool.parallelChained(GuRawDecodeChainTask, sv.tasks, chain_initial_count, runGuRawDecodeChainTask);
     }
     if (!used_chain) {
         for (0..top_k) |j| {
-            var t = GemmaMoeRawDecodeTask{
+            var t = GuRawDecodeTask{
                 .gw = gw,
                 .qx = sv.qx,
                 .out_pe = out_pe,
@@ -1286,7 +1286,7 @@ pub fn decodeRaw(
                 .geglu_requant_ns = 0,
                 .down_ns = 0,
             };
-            runGemmaMoeRawDecodeTask(&t);
+            runGuRawDecodeTask(&t);
             if (profile) |p| {
                 p.gate_up_ns += t.gate_up_ns;
                 p.swiglu_requant_ns += t.geglu_requant_ns;
@@ -1328,8 +1328,8 @@ pub fn decodeRaw(
     return out;
 }
 
-const GemmaMoeRawGuMatmulTask = struct {
-    rhs: GemmaMoeRawGuRhs,
+const GuRawGuMatmulTask = struct {
+    rhs: GuRawGuRhs,
     qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
     row_start: usize,
@@ -1343,7 +1343,7 @@ const GemmaMoeRawGuMatmulTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeRawGuMatmulTask(task: *const GemmaMoeRawGuMatmulTask) void {
+fn runGuRawGuMatmulTask(task: *const GuRawGuMatmulTask) void {
     const m = task.m;
     if (m == 0) return;
     const task_profile = @constCast(task);
@@ -1351,16 +1351,16 @@ fn runGemmaMoeRawGuMatmulTask(task: *const GemmaMoeRawGuMatmulTask) void {
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    gemmaMoeRawGuMatmul(&task.rhs, out, q, task.out_dim, m, task.c0, task.c1);
+    guRawGuMatmul(&task.rhs, out, q, task.out_dim, m, task.c0, task.c1);
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeRawGuMatmulTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeRawGuMatmulTask(task);
+fn runGuRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuRawGuMatmulTask = @ptrCast(@alignCast(ctx));
+    runGuRawGuMatmulTask(task);
 }
 
-const GemmaMoeRawQ8MatmulTask = struct {
+const GuRawQ8MatmulTask = struct {
     rhs: backend_mod.QuantizedMatmulRhsQ8_0,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
@@ -1375,7 +1375,7 @@ const GemmaMoeRawQ8MatmulTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeRawQ8MatmulTask(task: *const GemmaMoeRawQ8MatmulTask) void {
+fn runGuRawQ8MatmulTask(task: *const GuRawQ8MatmulTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
@@ -1388,9 +1388,9 @@ fn runGemmaMoeRawQ8MatmulTask(task: *const GemmaMoeRawQ8MatmulTask) void {
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeRawQ8MatmulTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeRawQ8MatmulTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeRawQ8MatmulTask(task);
+fn runGuRawQ8MatmulTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuRawQ8MatmulTask = @ptrCast(@alignCast(ctx));
+    runGuRawQ8MatmulTask(task);
 }
 
 /// Gemma 4 batched MoE over the RAW GGUF expert blocks (`-Dgpu=metal`
@@ -1455,13 +1455,13 @@ pub fn batchRaw(
         )) |out| return out;
     }
 
-    return gemmaBatchBody(
-        GemmaMoeRawGuMatmulTask,
-        GemmaMoeRawQ8MatmulTask,
-        runGemmaMoeRawGuMatmulTask,
-        runGemmaMoeRawQ8MatmulTask,
-        runGemmaMoeRawGuMatmulTaskOpaque,
-        runGemmaMoeRawQ8MatmulTaskOpaque,
+    return guBatchBody(
+        GuRawGuMatmulTask,
+        GuRawQ8MatmulTask,
+        runGuRawGuMatmulTask,
+        runGuRawQ8MatmulTask,
+        runGuRawGuMatmulTaskOpaque,
+        runGuRawQ8MatmulTaskOpaque,
         ctx,
         x_data,
         .{ .seq = seq, .hidden = hidden, .out_pe = out_pe, .top_k = top_k, .bpc_in = bpc_in, .bpc_g = bpc_g },
@@ -1474,7 +1474,7 @@ pub fn batchRaw(
     );
 }
 
-const GemmaMoeGatherTask = struct {
+const GuGatherTask = struct {
     x_data: []const f32,
     order: []const usize,
     hidden: usize,
@@ -1488,7 +1488,7 @@ const GemmaMoeGatherTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeGatherTask(task: *const GemmaMoeGatherTask) void {
+fn runGuGatherTask(task: *const GuGatherTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
@@ -1503,12 +1503,12 @@ fn runGemmaMoeGatherTask(task: *const GemmaMoeGatherTask) void {
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeGatherTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeGatherTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeGatherTask(task);
+fn runGuGatherTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuGatherTask = @ptrCast(@alignCast(ctx));
+    runGuGatherTask(task);
 }
 
-const GemmaMoeQ6MatmulTask = struct {
+const GuQ6MatmulTask = struct {
     rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
     qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
@@ -1523,7 +1523,7 @@ const GemmaMoeQ6MatmulTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeQ6MatmulTask(task: *const GemmaMoeQ6MatmulTask) void {
+fn runGuQ6MatmulTask(task: *const GuQ6MatmulTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
@@ -1536,12 +1536,12 @@ fn runGemmaMoeQ6MatmulTask(task: *const GemmaMoeQ6MatmulTask) void {
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeQ6MatmulTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeQ6MatmulTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeQ6MatmulTask(task);
+fn runGuQ6MatmulTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuQ6MatmulTask = @ptrCast(@alignCast(ctx));
+    runGuQ6MatmulTask(task);
 }
 
-const GemmaMoeGegluTask = struct {
+const GuGegluTask = struct {
     gate_buf: []const f32,
     up_buf: []const f32,
     g_buf: []f32,
@@ -1555,7 +1555,7 @@ const GemmaMoeGegluTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeGegluTask(task: *const GemmaMoeGegluTask) void {
+fn runGuGegluTask(task: *const GuGegluTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
@@ -1575,12 +1575,12 @@ fn runGemmaMoeGegluTask(task: *const GemmaMoeGegluTask) void {
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeGegluTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeGegluTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeGegluTask(task);
+fn runGuGegluTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuGegluTask = @ptrCast(@alignCast(ctx));
+    runGuGegluTask(task);
 }
 
-const GemmaMoeQ8MatmulTask = struct {
+const GuQ8MatmulTask = struct {
     rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
@@ -1595,7 +1595,7 @@ const GemmaMoeQ8MatmulTask = struct {
     elapsed_ns: i128,
 };
 
-fn runGemmaMoeQ8MatmulTask(task: *const GemmaMoeQ8MatmulTask) void {
+fn runGuQ8MatmulTask(task: *const GuQ8MatmulTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
@@ -1608,9 +1608,9 @@ fn runGemmaMoeQ8MatmulTask(task: *const GemmaMoeQ8MatmulTask) void {
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
 
-fn runGemmaMoeQ8MatmulTaskOpaque(ctx: *anyopaque) void {
-    const task: *const GemmaMoeQ8MatmulTask = @ptrCast(@alignCast(ctx));
-    runGemmaMoeQ8MatmulTask(task);
+fn runGuQ8MatmulTaskOpaque(ctx: *anyopaque) void {
+    const task: *const GuQ8MatmulTask = @ptrCast(@alignCast(ctx));
+    runGuQ8MatmulTask(task);
 }
 
 /// Expert-major weighted scatter of the grouped down rows back into token
