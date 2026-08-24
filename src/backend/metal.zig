@@ -31,7 +31,6 @@ const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
-const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const tuning = @import("../tuning.zig");
@@ -467,16 +466,11 @@ fn initConfigOnce() void {
     state.min_work_attn = t.min_work.attn;
     state.min_work_16bit_resident = t.min_work.@"16bit_resident";
     state.min_work_qmoe = t.min_work.qmoe;
-    state.min_work_dense_q6 = t.min_work.dense_q6;
-    // FUCINA_GPU_MIN_WORK_QMOE also seeds the dense-Q6 floor;
-    // FUCINA_GPU_MIN_WORK_DENSE_Q6 wins over it and re-seeds the packed-Q6
-    // tier alongside.
-    state.min_work_packed_q6 = default_min_work_packed_q6;
-    if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_DENSE_Q6")) |v| {
-        state.min_work_packed_q6 = v;
-    } else if (parallel.envNonNegativeUsize("FUCINA_GPU_MIN_WORK_QMOE")) |v| {
-        state.min_work_dense_q6 = v;
-    }
+    // The dense-Q6/packed-Q6/qmoe seeding rule lives in the tuning table
+    // (`tuning.gpuQ6Seeding`), stated once for both providers.
+    const q6 = tuning.gpuQ6Seeding(default_min_work_packed_q6);
+    state.min_work_dense_q6 = q6.dense_q6;
+    state.min_work_packed_q6 = q6.packed_q6;
     state.min_work_packed_q4 = t.min_work.dense_q4;
     state.min_work_packed_q8 = t.min_work.dense_q8;
     state.min_work_packed_tq2 = t.min_work.dense_tq2;
