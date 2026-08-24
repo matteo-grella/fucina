@@ -247,9 +247,38 @@ pub const LeakyReluBackward = struct {
 /// the VJP never re-evaluates the transcendental and differentiates exactly
 /// the value the vectorized forward kernel produced.
 pub fn unaryUsesOutput(comptime op: exec_mod.UnaryOp) bool {
+    // Exhaustive on purpose: a misclassified op makes the backward node save
+    // the wrong operand and produce a silently wrong gradient, so a new
+    // `UnaryOp` member must be claimed here explicitly (compile error until
+    // it is), exactly like the forward dispatch switch.
     return switch (op) {
         .tanh, .softcap_15, .reciprocal => true,
-        else => false,
+        .relu,
+        .exp,
+        .sqrt,
+        .rsqrt,
+        .sigmoid,
+        .silu,
+        .log,
+        .log1p,
+        .softplus,
+        .neg,
+        .abs,
+        .sin,
+        .cos,
+        .fast_tanh,
+        .gelu,
+        .quick_gelu,
+        .softcap_30,
+        .gelu_quant,
+        .elu,
+        .gelu_erf,
+        .erf,
+        .floor,
+        .ceil,
+        .round,
+        .sign,
+        => false,
     };
 }
 
