@@ -39,6 +39,13 @@ pub fn checkedProduct(a: usize, b: usize) QuantizedFormatError!usize {
     return std.math.mul(usize, a, b) catch QuantizedFormatError.InvalidQuantizedLength;
 }
 
+/// The one whole-block length rule behind every per-format `*BlockCount`
+/// spelling: `len` must be a whole number of `block_size`-element blocks.
+pub fn blockCountExact(comptime block_size: usize, len: usize) QuantizedFormatError!usize {
+    if (len % block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
+    return len / block_size;
+}
+
 pub const BlockQ8_0x4 = extern struct {
     d: [4]u16,
     qs: [4 * q8_0_block_size]i8,

@@ -398,37 +398,69 @@ pub fn getRowsTensorInto(comptime tensor_dtype: DType, dst: *Tensor, table: *con
 }
 
 pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
-    return switch (tensor_dtype) {
-        .q1_0 => cold.q1_0BlockCount(len),
-        .q2_0 => cold.q2_0BlockCount(len),
-        .q4_0 => cold.q4_0BlockCount(len),
-        .q4_1 => cold.q4_1BlockCount(len),
-        .q5_0 => cold.q5_0BlockCount(len),
-        .q5_1 => cold.q5_1BlockCount(len),
-        .q8_0 => q8k.q8_0BlockCount(len),
-        .q8_1 => cold.q8_1BlockCount(len),
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        => q8k.qkBlockCount(len),
-        .iq4_nl => q8k.blockCountExact(types.iq4_nl_block_size, len),
-        .mxfp4 => q8k.blockCountExact(types.mxfp4_block_size, len),
-        .nvfp4 => q8k.blockCountExact(types.nvfp4_block_size, len),
-        else => @compileError("dtype is not block-quantized"),
+    // One rule for every format: the length must be a whole number of
+    // blocks. `dtype_mod.blockSize` compile-errors on non-block dtypes,
+    // preserving the old switch's `else` behavior.
+    return types.blockCountExact(comptime dtype_mod.blockSize(tensor_dtype), len);
+}
+
+/// The compact (GGUF-native block layout) matmul RHS view for the K-quant
+/// formats: the same five fields per format ({allocator, blocks, k, n,
+/// blocks_per_column}), one view type per block struct. This is the
+/// comptime map that lets format-generic dispatch (the MoE expert tile)
+/// construct views and pick kernels without one hand-written arm per
+/// format.
+pub fn CompactRhs(comptime dt: DType) type {
+    return switch (dt) {
+        .q2_k => types.QuantizedMatmulRhsQ2_K,
+        .q3_k => types.QuantizedMatmulRhsQ3_K,
+        .q4_k => types.QuantizedMatmulRhsQ4_K,
+        .q5_k => types.QuantizedMatmulRhsQ5_K,
+        .q6_k => types.QuantizedMatmulRhsQ6_K,
+        else => @compileError("no compact matmul RHS view for dtype ." ++ @tagName(dt)),
     };
+}
+
+/// True when `dt` has the batched column-outer compact kernel
+/// (`matmul*RhsCompactColOuter`); q2_k/q3_k stay on the row-outer tile.
+pub fn hasCompactColOuter(comptime dt: DType) bool {
+    return switch (dt) {
+        .q4_k, .q5_k, .q6_k => true,
+        .q2_k, .q3_k => false,
+        else => @compileError("no compact matmul RHS view for dtype ." ++ @tagName(dt)),
+    };
+}
+
+/// Row-outer tile over a compact RHS view, by format.
+pub fn matmulCompactRhsTile(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
+    switch (comptime dt) {
+        .q2_k => cold.matmulQ2_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
+        .q3_k => cold.matmulQ3_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
+        .q4_k => q4_k.matmulQ4_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
+        .q5_k => q5_k.matmulQ5_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
+        .q6_k => q6_k.matmulQ6_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
+        else => comptime unreachable,
+    }
+}
+
+/// Batched column-outer compact kernel (the `hasCompactColOuter` formats).
+pub fn matmulCompactColOuter(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
+    switch (comptime dt) {
+        .q4_k => q4_k.matmulQ4_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
+        .q5_k => q5_k.matmulQ5_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
+        .q6_k => q6_k.matmulQ6_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
+        else => comptime unreachable,
+    }
+}
+
+/// Lane-packed (Q8_Kx4 LHS) column-outer compact kernel.
+pub fn matmulCompactQ8_Kx4ColOuter(comptime dt: DType, out: []f32, lhs_x4: []const types.BlockQ8_Kx4, view: *const CompactRhs(dt), n: usize, m: usize, c0: usize, c1: usize) void {
+    switch (comptime dt) {
+        .q4_k => q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
+        .q5_k => q5_k.matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
+        .q6_k => q6_k.matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
+        else => comptime unreachable,
+    }
 }
 
 pub fn dequantizeRowForDType(

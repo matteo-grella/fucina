@@ -152,17 +152,12 @@ pub fn getRowsQ8_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ8_0, indi
     }
 }
 pub fn q8_0BlockCount(len: usize) !usize {
-    if (len % types.q8_0_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q8_0_block_size;
+    return types.blockCountExact(types.q8_0_block_size, len);
 }
 pub fn qkBlockCount(len: usize) !usize {
-    if (len % qk_k_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
-    return len / qk_k_block_size;
+    return types.blockCountExact(qk_k_block_size, len);
 }
-pub fn blockCountExact(comptime block_size: usize, len: usize) !usize {
-    if (len % block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
-    return len / block_size;
-}
+pub const blockCountExact = types.blockCountExact;
 pub fn quantizedMatmulRhsQ2_KFromBlocks(
     allocator: Allocator,
     k: usize,

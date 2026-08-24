@@ -160,8 +160,7 @@ pub fn getRowsQ4_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ4_0, indi
 }
 
 pub fn q4_0BlockCount(len: usize) !usize {
-    if (len % types.q4_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q4_0_block_size;
+    return types.blockCountExact(types.q4_0_block_size, len);
 }
 
 fn quantizeToQ4_0Nibble(x: f32) u8 {
@@ -173,33 +172,27 @@ fn quantizeToQ4_0Nibble(x: f32) u8 {
 }
 
 pub fn q1_0BlockCount(len: usize) !usize {
-    if (len % types.q1_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q1_0_block_size;
+    return types.blockCountExact(types.q1_0_block_size, len);
 }
 
 pub fn q2_0BlockCount(len: usize) !usize {
-    if (len % types.q2_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q2_0_block_size;
+    return types.blockCountExact(types.q2_0_block_size, len);
 }
 
 pub fn q4_1BlockCount(len: usize) !usize {
-    if (len % types.q4_1_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q4_1_block_size;
+    return types.blockCountExact(types.q4_1_block_size, len);
 }
 
 pub fn q5_0BlockCount(len: usize) !usize {
-    if (len % types.q5_0_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q5_0_block_size;
+    return types.blockCountExact(types.q5_0_block_size, len);
 }
 
 pub fn q5_1BlockCount(len: usize) !usize {
-    if (len % types.q5_1_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q5_1_block_size;
+    return types.blockCountExact(types.q5_1_block_size, len);
 }
 
 pub fn q8_1BlockCount(len: usize) !usize {
-    if (len % types.q8_1_block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.q8_1_block_size;
+    return types.blockCountExact(types.q8_1_block_size, len);
 }
 
 pub fn dequantizeRowQ1_0Into(dst: []f32, src: []const dtype_mod.BlockQ1_0) !void {
