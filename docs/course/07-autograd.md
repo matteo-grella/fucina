@@ -48,7 +48,7 @@ An op never sees the whole network; it knows exactly one local rule:
 
 For `y = relu(x)` that rule is one line — the gradient passes where the
 input was positive and dies where it was not — and here it is in the real
-engine, from `src/ag/backward.zig`:
+engine, from `src/ag/backward/elementwise.zig`:
 
 ```zig
 dst.* = if (value > 0) grad else 0;
@@ -356,7 +356,7 @@ takes to do each of those properly.
 The engine lives in `src/ag/core.zig` — 733 lines *including* two in-file
 tests, as counted today with `wc -l`; the siblings are similarly small
 (`control.zig` 75, `custom.zig` 227, `gradcheck.zig` 194, `checkpoint.zig`
-435). The bulk of `src/ag/` is `backward.zig` at 5759 lines — but that is
+435). The bulk of `src/ag/` is the `backward/` directory, one file per op domain — but that is
 the *inventory* of per-op VJP records, each mechanical. The machinery they
 plug into is one struct, one interface, one scheduler.
 
@@ -422,7 +422,7 @@ concurrency opt-in we will meet in §7.7.
 ### Anatomy of a VJP record
 
 Here is the cleanest record in the inventory, in full
-(`src/ag/backward.zig:472-517`):
+(`src/ag/backward/elementwise.zig`):
 
 ```zig
 pub const ReluBackward = struct {
@@ -1242,8 +1242,8 @@ mean something.
 - `src/ag/core.zig` — the whole engine in 733 lines: `GradState`,
   `BackwardFunction`, the pending-counter walk, the pool scheduler. Read it
   next to your toy.
-- `src/ag/backward.zig` — the VJP inventory. Start at `ReluBackward`
-  (line 472), then find your favorite op's rule.
+- `src/ag/backward/` — the VJP inventory, one file per op domain. Start at `ReluBackward`
+  in `elementwise.zig`, then find your favorite op's rule.
 - `src/ag/tensor.zig` — `finishOp` (line 6291) and the gradient accessors
   (lines 977–1060): where the facade meets the engine.
 - `src/ag/control.zig` — `noGrad` (plus a sibling GPU quant-dot scope) in

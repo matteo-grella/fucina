@@ -506,7 +506,7 @@ pub const BlockQ8_K = extern struct {
 
 Those `bsums` are precomputed partial sums of the activations. Why store them? Because the *weight* formats need them: an asymmetric K-quant reconstructs `x ≈ d·sc·q − dmin·m`, and when you expand the dot product, the minimum term multiplies `Σa` over each sub-block — a value that depends only on the activations, computable once at quantization time instead of inside every weight row's inner loop. (`BlockQ8_1` plays the same trick for the 32-element offset formats, carrying `d·Σq` as an f16.) The activation format is shaped by the weight format's algebra — and the same `bsums` field is what makes [Chapter 14](14-the-low-bit-frontier.md)'s multiplication-free ternary kernel nearly free. In production the per-block loop is `sdot`/`vpdpbusd` SIMD instructions ([Chapter 6](06-going-fast-on-cpus.md)'s dual-arm pattern), but the algebra is these six lines.
 
-**And gradients?** A quantized weight is a constant — it never receives one; there is no encoder in the backward direction. But the *LHS* gradient is fully supported: the backward node holds a view of the block data and dequantizes it transiently (`ConstRhsDotBackward`, `src/ag/backward.zig`; `docs/REFERENCE.md` §10.2). So you can backpropagate *through* a frozen quantized layer into trainable f32 parameters — precisely what [Chapter 15](15-training-llms-on-cpu.md)'s LoRA fine-tuning of a quantized GGUF does. What you cannot do is train the quantized weights themselves through this path (the straight-through-estimator op that *does* train ternary weights is Chapter 14's business).
+**And gradients?** A quantized weight is a constant — it never receives one; there is no encoder in the backward direction. But the *LHS* gradient is fully supported: the backward node holds a view of the block data and dequantizes it transiently (`ConstRhsDotBackward`, `src/ag/backward/matmul.zig`; `docs/reference/10-quantization.md` §10.2). So you can backpropagate *through* a frozen quantized layer into trainable f32 parameters — precisely what [Chapter 15](15-training-llms-on-cpu.md)'s LoRA fine-tuning of a quantized GGUF does. What you cannot do is train the quantized weights themselves through this path (the straight-through-estimator op that *does* train ternary weights is Chapter 14's business).
 
 ### Below the facade: containers that borrow or own
 
@@ -682,7 +682,7 @@ You can now read every byte of a model file, write one that llama.cpp will accep
 - `src/backend/quant/types.zig` — the format-trait table, `QuantizedRowsFor` (a type-returning function with the `?Allocator` borrow convention), packed RHS containers.
 - `src/exec/quant_matmul.zig` — `RhsLifetime`, `QuantizedMatmulOptions`, and the dispatch tier between facade and kernels.
 - `src/backend/quant/encode_golden_test.zig` — what "byte-exact ggml parity" looks like as a test file.
-- `src/ag/backward.zig` — find `ConstRhsDotBackward` to see how an LHS gradient flows through a weight that stays quantized.
+- `src/ag/backward/matmul.zig` — find `ConstRhsDotBackward` to see how an LHS gradient flows through a weight that stays quantized.
 - `tools/export_gguf.zig` — the header comment alone is a lesson in documenting policy; then read `--ptqtp`'s streaming loop.
 - `docs/REFERENCE.md` §10 and §12 — the full machine-verified API contract for everything this chapter summarized.
 

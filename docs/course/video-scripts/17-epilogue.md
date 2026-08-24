@@ -85,7 +85,7 @@ running to a decreasing loss. Then code shot `src/ag/tensor.zig:1652-1663`
 (the `elementalUnary` doc comment and signature), followed by the
 five-station route diagram for the full route: `src/backend/ops.zig`
 (enum + switch) → `src/backend/vector/primitives.zig:155` (`vecUnary`) →
-`src/exec/elementwise.zig` → `src/ag/backward.zig` → `src/ag/tensor.zig`,
+`src/exec/elementwise.zig` → `src/ag/backward/elementwise.zig` → `src/ag/tensor.zig`,
 with `src/backend/ops.zig:40-57` (`UnaryOp`, `tanh` at line 56) shown
 beside the first station.
 
@@ -193,7 +193,7 @@ forge is yours." · "Full chapter: docs/course/17-epilogue.md".
 - Six-project ladder: the §17.2 table as a graded ramp with the
   first-milestone column highlighted.
 - Five-station op route: ops.zig → vector/primitives.zig:155 →
-  exec/elementwise.zig → ag/backward.zig → ag/tensor.zig.
+  exec/elementwise.zig → ag/backward/elementwise.zig → ag/tensor.zig.
 - Parity ladder: tokenizer (token-ID-exact) → logits from raw ids →
   generation (§17.2, project 4).
 - Forge loop: heat → pressure → straightedge → next hammer blow, annotated

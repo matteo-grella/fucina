@@ -57,7 +57,7 @@ Notice the pattern in the milestone column: in every project the first thing you
   - the semantic spec: one enum variant plus one `switch` arm in `src/backend/ops.zig` (`UnaryOp`, `unaryScalar`);
   - the vectorized body: behind `vecUnary` in `src/backend/vector/primitives.zig:155`;
   - the eager entry: `src/exec/elementwise.zig`, plus a one-line `ExecContext` method (`src/exec.zig:1101`);
-  - the derivative: `src/ag/backward.zig` (`unaryDerivative`; and `unaryUsesOutput` if it is cheaper in terms of the output, like tanh′ = 1 − t²);
+  - the derivative: `src/ag/backward/elementwise.zig` (`unaryDerivative`; and `unaryUsesOutput` if it is cheaper in terms of the output, like tanh′ = 1 − t²);
   - the public facade: a one-liner in `src/ag/tensor/float/elementwise.zig`.
 - *Then verify like the repo verifies:*
   - the derivative with `fucina.gradcheck` (finite differences, `src/ag/gradcheck.zig`);
@@ -125,7 +125,7 @@ The fire is lit. Forge something.
 
 - The whole arc, end to end: dtypes → storage → tensors → typed axes → ops → SIMD kernels → autograd → training (with and without gradients) → real-time audio → model files and quantization → transformers → inference tricks → low-bit → CPU training → the discipline that holds it together.
 - Six graded ways to make the knowledge permanent, each with a documented path in the repo — from running the examples to sending a PR that survives both regression tracks.
-- Where an op *lives*: spec in `src/backend/ops.zig`, vector body in `src/backend/vector/primitives.zig`, eager entry in `src/exec/`, derivative in `src/ag/backward.zig`, facade in `src/ag/tensor.zig` — and the oracles that check each station.
+- Where an op *lives*: spec in `src/backend/ops.zig`, vector body in `src/backend/vector/primitives.zig`, eager entry in `src/exec/`, derivative in `src/ag/backward/<domain>.zig`, facade in `src/ag/tensor.zig` — and the oracles that check each station.
 - The reading list: the repo's own docs, and the acknowledged projects that built the road first.
 - What the name means, and why it fits.
 

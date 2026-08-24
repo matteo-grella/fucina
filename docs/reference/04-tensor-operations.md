@@ -2045,10 +2045,10 @@ that tier live at generation boundaries.
 - **f16 / bf16 / f64** (`supportsForwardFloatMath`) — native typed kernels:
   `to` (cast), `add`, `sub`, `mul`, `div` (same dtype both sides — cast
   explicitly), `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`, plus
-  the full structural set (`split`, `merge`, `flatten`, `reshape`,
-  `sliceStep`, `flip`, `roll`, `stack`, `repeatAxis`, and the indexing
-  subset `gather`, `narrow`, `concat`, `setSlice`, `setRows`,
-  `broadcastTo`, views). Pointwise and `dot` keep the input dtype;
+  the shared view set of every scalar-dtype branch ([§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index):
+  the views, `gather`, `narrow`, `concat`, `setSlice`, `setRows`,
+  `split`, `merge`, `flatten`, `reshape`, `flip`, `roll`, `stack`, ...).
+  Pointwise and `dot` keep the input dtype;
   reductions widen f16/bf16 results to f32 ([§4.7](04-tensor-operations.md#47-reductions-and-scans-srcagtensorzig), [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)).
 - **f16 / bf16 only — the widened forward set.** Ops with no native typed
   kernel lower to widen → f32 kernel → narrow-once (f32 arithmetic and
@@ -2088,8 +2088,8 @@ that tier live at generation boundaries.
   `sum`/`sumAll` accumulate in i64 and RETURN `.i64` (torch's
   integer-sum dtype). `to` casts to any scalar dtype ([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)).
 - **`.bool`**: no pointwise arithmetic (compile error — cast first);
-  `to` and the counting `sum`/`sumAll` (i64) apply, plus the structural
-  subset.
+  `to` and the counting `sum`/`sumAll` (i64) apply, plus the shared view
+  set.
 
 The typed forward ops are no-grad by design: an operand that requires
 gradients is REJECTED with `error.UnsupportedGradient` instead of silently
