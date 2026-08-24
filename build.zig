@@ -157,13 +157,20 @@ pub fn build(b: *std.Build) void {
 
     const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .models_module = models_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
-    // SubQ research tools ride addTarget for install/run, and their compile
-    // steps register into bench-check below so the research surface cannot
-    // silently rot out of the compile gate.
-    const bench_subq = addTarget(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .models = true });
-    const bench_subq_kernels = addTarget(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .models = false });
-    const bench_subq_scaling = addTarget(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .models = true });
-    const eval_subq = addTarget(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .models = true });
+    // Compile every bench executable (and the research tools that opt in via
+    // `.check`) without running it. Bench mains are reachable only through
+    // their run steps, so nothing else in the build graph exercises them;
+    // this step is the cheap gate that keeps the suite compiling. addBench
+    // and addTarget's `.check` field are the ONE registration mechanism.
+    const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
+
+    // SubQ research tools ride addTarget for install/run and register into
+    // bench-check so the research surface cannot silently rot out of the
+    // compile gate.
+    _ = addTarget(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .models = true, .check = bench_check_step });
+    _ = addTarget(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .models = false, .check = bench_check_step });
+    _ = addTarget(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .models = true, .check = bench_check_step });
+    _ = addTarget(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .models = true, .check = bench_check_step });
     _ = addTarget(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .models = false });
 
     _ = addTarget(b, tool_ctx, .{ .step = "facedetect", .desc = "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks", .exe = "fucina-facedetect", .root = "apps/facedetect/main.zig", .models = false });
@@ -429,16 +436,6 @@ pub fn build(b: *std.Build) void {
         cuda_check_step.dependOn(&cuda_ptx_gen.step);
     }
 
-    // Compile every bench executable without running it. Bench mains are
-    // reachable only through their run steps, so nothing else in the build
-    // graph exercises them; this step is the cheap gate that keeps the suite
-    // compiling. addBench registers every bench into it.
-    const bench_check_step = b.step("bench-check", "Compile all bench executables without running them");
-    bench_check_step.dependOn(&bench_subq.exe.step);
-    bench_check_step.dependOn(&bench_subq_kernels.exe.step);
-    bench_check_step.dependOn(&bench_subq_scaling.exe.step);
-    bench_check_step.dependOn(&eval_subq.exe.step);
-
     const bench_raw_module = b.addModule("bench_raw", .{
         .root_source_file = b.path("src/bench_raw.zig"),
         .target = target,
@@ -614,74 +611,54 @@ fn installArtifactStep(b: *std.Build, exe: *std.Build.Step.Compile) *std.Build.S
     return &install.step;
 }
 
-/// The NAM example's audio/MIDI device layer: two C TUs (vendored
-/// miniaudio + shim ABI, and a CoreMIDI shim that compiles to stubs off
-/// macOS). On macOS the CoreAudio/CoreMIDI frameworks are linked directly
+/// Vendored-miniaudio linkage shared by every audio-facing target: NAM's
+/// single MINIAUDIO_IMPLEMENTATION TU (`apps/nam/audio_shim.c`) plus any
+/// per-target shim TUs, libc, and the CoreAudio frameworks on macOS
 /// (MA_NO_RUNTIME_LINKING in the audio shim); elsewhere miniaudio dlopens
-/// its backend at runtime through libc.
+/// its backend at runtime through libc. The three configure* wrappers
+/// below state each target's extras.
+fn configureMiniaudio(
+    step: *std.Build.Step.Compile,
+    extra_sources: []const []const u8,
+    extra_frameworks: []const []const u8,
+) void {
+    const module = step.root_module;
+    module.link_libc = true;
+    module.addCSourceFile(.{
+        .file = step.step.owner.path("apps/nam/audio_shim.c"),
+        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
+    });
+    for (extra_sources) |source| {
+        module.addCSourceFile(.{
+            .file = step.step.owner.path(source),
+            .flags = &.{ "-fno-sanitize=undefined", "-O2" },
+        });
+    }
+    const target = module.resolved_target.?.result;
+    if (target.os.tag == .macos) {
+        module.linkFramework("CoreFoundation", .{});
+        module.linkFramework("CoreAudio", .{});
+        module.linkFramework("AudioToolbox", .{});
+        for (extra_frameworks) |framework| module.linkFramework(framework, .{});
+    }
+}
+
+/// NAM's audio/MIDI device layer: miniaudio plus the CoreMIDI shim (stubs
+/// off macOS).
 fn configureNamAudio(step: *std.Build.Step.Compile) void {
-    const module = step.root_module;
-    module.link_libc = true;
-    module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/nam/audio_shim.c"),
-        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
-    });
-    module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/nam/midi_shim.c"),
-        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
-    });
-    const target = module.resolved_target.?.result;
-    if (target.os.tag == .macos) {
-        module.linkFramework("CoreFoundation", .{});
-        module.linkFramework("CoreAudio", .{});
-        module.linkFramework("AudioToolbox", .{});
-        module.linkFramework("CoreMIDI", .{});
-    }
+    configureMiniaudio(step, &.{"apps/nam/midi_shim.c"}, &.{"CoreMIDI"});
 }
 
-/// The OmniVoice example's speaker-playback layer (`--play`): NAM's vendored
-/// miniaudio TU (`apps/nam/audio_shim.c`, the single
-/// MINIAUDIO_IMPLEMENTATION build) plus the playback-only shim
-/// (`apps/omnivoice/play_shim.c`) that links against it. No MIDI. On
-/// macOS the CoreAudio frameworks are linked directly (MA_NO_RUNTIME_LINKING
-/// in the audio shim); elsewhere miniaudio dlopens its backend through libc.
+/// OmniVoice's speaker-playback layer (`--play`): miniaudio plus the
+/// playback-only shim. No MIDI.
 fn configureOmnivoiceAudio(step: *std.Build.Step.Compile) void {
-    const module = step.root_module;
-    module.link_libc = true;
-    module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/nam/audio_shim.c"),
-        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
-    });
-    module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/omnivoice/play_shim.c"),
-        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
-    });
-    const target = module.resolved_target.?.result;
-    if (target.os.tag == .macos) {
-        module.linkFramework("CoreFoundation", .{});
-        module.linkFramework("CoreAudio", .{});
-        module.linkFramework("AudioToolbox", .{});
-    }
+    configureMiniaudio(step, &.{"apps/omnivoice/play_shim.c"}, &.{});
 }
 
-/// Link ONLY NAM's vendored miniaudio TU (`apps/nam/audio_shim.c` +
-/// `third_party/miniaudio.h`: enumeration, capture, duplex — no MIDI, no
-/// OmniVoice play shim). Used by parakeet `--mic` (`-Dparakeet-mic`) and the
-/// voiceagent duplex stream; macOS links the CoreAudio frameworks directly
-/// (MA_NO_RUNTIME_LINKING), elsewhere miniaudio dlopens its backend.
+/// Miniaudio alone (enumeration, capture, duplex — no MIDI, no play shim):
+/// parakeet `--mic` (`-Dparakeet-mic`) and the voiceagent duplex stream.
 fn configureAudioShim(step: *std.Build.Step.Compile) void {
-    const module = step.root_module;
-    module.link_libc = true;
-    module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/nam/audio_shim.c"),
-        .flags = &.{ "-fno-sanitize=undefined", "-O2" },
-    });
-    const target = module.resolved_target.?.result;
-    if (target.os.tag == .macos) {
-        module.linkFramework("CoreFoundation", .{});
-        module.linkFramework("CoreAudio", .{});
-        module.linkFramework("AudioToolbox", .{});
-    }
+    configureMiniaudio(step, &.{}, &.{});
 }
 
 fn configureBlas(
@@ -873,6 +850,9 @@ fn addTarget(
         exe: []const u8,
         root: []const u8,
         models: bool = false,
+        /// Compile gate to register the executable into (bench-check for
+        /// the research tools); null = run-step reachability only.
+        check: ?*std.Build.Step = null,
     },
 ) TargetArtifacts {
     const exe = b.addExecutable(.{
@@ -887,6 +867,7 @@ fn addTarget(
     if (spec.models) exe.root_module.addImport("fucina_models", ctx.models_module);
     configureBlas(exe, ctx.blas_kind);
     configureGpu(b, exe, ctx.gpu_kind);
+    if (spec.check) |check_step| check_step.dependOn(&exe.step);
     const install = installArtifactStep(b, exe);
     const cmd = b.addRunArtifact(exe);
     cmd.step.dependOn(install);
