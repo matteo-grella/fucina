@@ -49,7 +49,7 @@ one model instance serves the whole population.
 All three rewards read the same JSONL pairs — there is no separate reward
 dataset. One JSON object per line, string keys `instruction` and `response`
 (blank lines skipped, a malformed line is a loud error with its line number;
-`src/llm/data.zig`):
+`src/models/text/data.zig`):
 
 ```json
 {"instruction": "What is the capital of France?", "response": "Ahoy! The capital of France be Paris, matey."}
@@ -113,7 +113,7 @@ zig build es-finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-f16.gg
 | `--rank N` | 8 | LoRA rank (lora mode) |
 | `--lora-alpha F` | 16 | LoRA scaling alpha (lora mode; `--alpha` is the ES learning rate here) |
 | `--seq-max N` | 256 | token cap per encoded training pair |
-| `--data PATH.jsonl` | built-in set | JSONL SFT dataset (`src/llm/data.zig`) |
+| `--data PATH.jsonl` | built-in set | JSONL SFT dataset (`src/models/text/data.zig`) |
 | `--shuffle` / `--data-seed N` | off / `--seed` | deterministic per-epoch shuffle |
 | `--save DIR` | `/tmp/fucina-qwen3-es` | checkpoint directory |
 | `--save-every N` | 0 (final save only) | periodic checkpoint interval |

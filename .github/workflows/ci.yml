@@ -97,7 +97,7 @@ jobs:
                   }),
               });
               exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
-              exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm"));
+              exe.root_module.addImport("fucina_models", fucina_dep.module("fucina_models"));
               b.installArtifact(exe);
               const run = b.addRunArtifact(exe);
               b.step("run", "Run the smoke program").dependOn(&run.step);
@@ -106,12 +106,12 @@ jobs:
           cat > src/main.zig <<'MAIN'
           const std = @import("std");
           const fucina = @import("fucina");
-          const llm = @import("fucina_llm");
+          const models = @import("fucina_models");
 
-          // Force semantic analysis of a fucina_llm decl so the module
+          // Force semantic analysis of a fucina_models decl so the module
           // really compiles.
           comptime {
-              _ = llm.speculative;
+              _ = models.text.speculative;
           }
 
           pub fn main(init: std.process.Init) !void {

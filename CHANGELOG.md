@@ -11,11 +11,11 @@ this point; earlier history is `git log`.
 - **Stable** (every public change gets a rewrite entry): `tensor`, `ag` (the public
   `Tensor` and autograd pillars), `exec`/`ExecContext`, `gguf`, `weights`,
   `gguf_meta`, `safetensors`, `optim`, `lora`, `parallel`, `tuning`,
-  `llm.serving` (the contract: request/result types and the `Backend`
-  vtable), `llm.chat`, `llm.tokenizer`, `llm.kv_cache`.
-- **Experimental** (changelog entry only): `es`, `ptqtp`, `llm.runner`, the `llm.serving` transport/engine
+  `models.text.serving` (the contract: request/result types and the `Backend`
+  vtable), `models.text.chat`, `models.text.tokenizer`, `models.text.kv_cache`.
+- **Experimental** (changelog entry only): `es`, `ptqtp`, `models.qwen3.runner`, the `models.text.serving` transport/engine
   band (`http`, `scheduler`, `emitter`, wire dialects, `gguf_chat`,
-  `open`), `llm.speculative`, the `llm.research` namespace (SubQ, Engram,
+  `open`), `models.text.speculative`, the `models.research` namespace (SubQ, Engram,
   SHINE, kimi3), cartridges, and
   every model family's internal layout.
 
@@ -23,10 +23,10 @@ this point; earlier history is `git log`.
 
 ### Added
 
-- `llm.decoder`: the autoregressive text-decoder contract — `Caps`
+- `models.decoder`: the autoregressive text-decoder contract — `Caps`
   (`rewind`, `batch`) plus the comptime `assertDecoder(Model)` the generic
-  layers (`llm.chat.Conversation`, `llm.speculative.SpeculativeDecoder`,
-  `llm.serving.gguf_chat.GgufChatBackend`, `llm.generate`) now assert. A
+  layers (`models.text.chat.Conversation`, `models.text.speculative.SpeculativeDecoder`,
+  `models.text.serving.gguf_chat.GgufChatBackend`, `models.text.generate`) now assert. A
   conforming model exposes `Cache` (`len()`/`reset()`/`deinit()`, plus
   `truncate` iff `caps.rewind`), `caps`, `initCache(self, ctx, capacity)`,
   `forwardStep(self, ctx, cache, tokens, pos0)` returning the LAST row's
@@ -34,32 +34,32 @@ this point; earlier history is `git log`.
   iff `caps.rewind`, and `forwardStepBatch` iff `caps.batch`. Conforming:
   qwen3/qwen3moe, gemma4, SHINE's `AdaptedModel`, qwen35, deepseek2,
   deepseek4, glm4moe, inkling; kimi3 (research tier) stays outside.
-- `llm.registry`: the architecture registry — one comptime table from a
+- `models.registry`: the architecture registry — one comptime table from a
   GGUF's `general.architecture` to the family module (`Family` decls in
   each family's `model.zig`: `Model`, the tokenizer module `Tok` +
   `Tokenizer`, `load(ctx, file, options)`, `tokenizer(allocator, file)`,
   `template_fallback`); `registry.familyFor(arch)` is the comptime
   lookup and `serving.open` dispatches over the table.
-- `llm.speculative.mtp.MtpDraftSource(Model)`: native MTP (`nextn`)
+- `models.text.speculative.mtp.MtpDraftSource(Model)`: native MTP (`nextn`)
   drafting behind the `DraftSource` vtable, so the shared decoder's
   verify loop drives glm4moe self-speculation (`examples/glm4moe --mtp`
   now decodes through `SpeculativeDecoder` instead of a hand-rolled
   draft/verify/commit/rewind loop). deepseek4's MTP sidecar keeps its own
   loop: its `Session` rewinds by snapshot/restore, not `truncate`.
-- Family serving adapters in the library: `llm.qwen35.serving`,
-  `llm.inkling.serving`, `llm.deepseek4.serving` (moved from
+- Family serving adapters in the library: `models.qwen35.serving`,
+  `models.inkling.serving`, `models.deepseek4.serving` (moved from
   `examples/lmserve/backend_{qwen35,inkling,deepseek4}.zig`, which are
   deleted); `serving.openFromFile` now serves the qwen35, qwen35moe,
-  inkling, and deepseek4 architectures. `llm.serving.OpenOptions` gains
+  inkling, and deepseek4 architectures. `models.text.serving.OpenOptions` gains
   `moe_stream` (the deepseek4 streamed-experts levers) and
-  `llm.serving.Opened` gains `expert_store` (the host's exit-time report
+  `models.text.serving.Opened` gains `expert_store` (the host's exit-time report
   seam); both types now live in `serving/contract.zig` with
-  `samplingFromGguf` (the `llm.serving.*` re-export paths are unchanged).
+  `samplingFromGguf` (the `models.text.serving.*` re-export paths are unchanged).
 
 - `fucina.ParamView`: the per-entry view `ParamRegistry.view` returns
   (name, dtype, shape, mutable byte view, trainability) is now nameable
   at the root; it was returned but unexported.
-- `llm.runner.Error.WrongBlockStyle`: the fused entries (`forwardStep*`,
+- `models.qwen3.runner.Error.WrongBlockStyle`: the fused entries (`forwardStep*`,
   `forwardLastLogits*`, `initCache`) reject a `.host_reference` model
   instead of silently running zero layers and returning embedding-only
   logits; `hostStep`/`initHostCache` answer it (was `InvalidConfig`) on a
@@ -83,8 +83,8 @@ this point; earlier history is `git log`.
   dotF32F16, scoreRows4F16, vecExpAffineSumInPlace, weightedAccumRows4F16}`
   → `fucina.internal.backend_mod.vector_impl.*` (backend internals);
   `fucina.weights.GroupedQ8_0RhsX4` → `fucina.quant.QuantizedMatmulRhsQ8_0x4`;
-  `llm.gemma.gemma4` / `llm.gemma.gemma4_train` / `llm.pockettts.pocket` →
-  `llm.gemma.model` / `llm.gemma.train` / `llm.pockettts.model`; build
+  `models.gemma.gemma4` / `models.gemma.gemma4_train` / `models.pockettts.pocket` →
+  `models.gemma.model` / `models.gemma.train` / `models.pockettts.model`; build
   options `-Dbackend=cpu` → `-Dbackend=scalar`, `-Daccelerate=true|false`
   → `-Dblas=accelerate|none`.
 - `fucina.PackedRhsLayout` and the `layout` decl on every packed RHS
@@ -112,6 +112,46 @@ this point; earlier history is `git log`.
   (`fucina.internal.backend_mod.BlockQ4_K` → `fucina.quant.BlockQ4_K`).
 
 ### Changed
+
+The LLM band is renamed to the model band. The module `fucina_llm` is now
+`fucina_models` (root `src/models.zig`); the one-line consumer rewrite is
+`@import("fucina_llm")` -> `@import("fucina_models")`. Dependency-context
+wiring passes the options module as `models_build_options` (was
+`llm_build_options`), and the `test-llm` build step is renamed
+`test-models`. The band taxonomy is stated in the module root: families in
+`models/<family>/`, the modality-agnostic text runtime in `models/text/`,
+training helpers in `models/train/`, research in `models/research/`.
+Family namespaces keep their names; `decoder` and `registry` stay
+top-level. Spelling table for the moved flat files:
+
+| old | new |
+| --- | --- |
+| `llm.tokenizer` | `models.text.tokenizer` |
+| `llm.spm_tokenizer` | `models.text.spm_tokenizer` |
+| `llm.unicode_categories` | `models.text.unicode_categories` |
+| `llm.sampler` | `models.text.sampler` |
+| `llm.logit_processor` | `models.text.logit_processor` |
+| `llm.llguidance` | `models.text.llguidance` |
+| `llm.chat` | `models.text.chat` |
+| `llm.generate` | `models.text.generate` |
+| `llm.kv_cache` | `models.text.kv_cache` |
+| `llm.kv_persist` | `models.text.kv_persist` |
+| `llm.data` | `models.text.data` |
+| `llm.cartridge` | `models.text.cartridge` |
+| `llm.cartridge_fleet` | `models.text.cartridge_fleet` |
+| `llm.speculative` | `models.text.speculative` |
+| `llm.serving` | `models.text.serving` |
+| `llm.lora_trainer` | `models.train.lora_trainer` |
+| `llm.trainer_state` | `models.train.trainer_state` |
+| `llm.runner` | `models.qwen3.runner` |
+| `llm.subq` | `models.research.subq` (research namespace unchanged) |
+| `llm.decoder` | `models.decoder` |
+| `llm.registry` | `models.registry` |
+| `llm.moe_router` | `models.moe_router` |
+| `llm.moe_stream_cli` | `models.moe_stream_cli` |
+
+The module root additionally exports the band-level helpers
+`models.model_common`, `models.host_ops`, and `models.test_support`.
 
 `ExecContext` carries exactly one spelling per op: the `*Rank`, `*AxisRank`,
 and `*Typed` variant suffixes are gone from the exec surface (`src/exec.zig`
@@ -222,7 +262,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   `initCache` now builds the decoder-contract `Session`, with the raw
   layer-state constructor renamed `initRawCache`).
 - Cache length is the method `len()` on every cache type; the state field
-  is `count` (`llm.kv_cache.KvCache`, `llm.runner.HostCache`,
+  is `count` (`models.text.kv_cache.KvCache`, `models.qwen3.runner.HostCache`,
   `deepseek2.Cache`, `deepseek4.Cache`, `inkling.Cache`; qwen35's `Cache`
   already had the method). Rewrite `cache.len` reads to `cache.len()`
   and direct field writes to `cache.count`. `HostCache`, `deepseek4.Cache`
@@ -236,14 +276,14 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   runner), glm4moe gains `forwardStepAllLogits` (its `step` IS the
   all-row forward) and `forwardStep` (last row), and inkling gains
   `forwardStep` (its `step` already returns the last row).
-- `llm.generate` is the one reference generation loop over the contract
+- `models.text.generate` is the one reference generation loop over the contract
   (`generate`/`generateOutcome` with a `Sampler`, stop ids, and a
   `TokenSink`; `greedy` keeps the slice-filling argmax convenience).
-  `llm.qwen3.generate` is deleted — rewrite `llm.qwen3.generate.greedy` to
-  `llm.generate.greedy` (same arguments). The qwen35 and inkling chat
+  `models.qwen3.generate` is deleted — rewrite `models.qwen3.generate.greedy` to
+  `models.text.generate.greedy` (same arguments). The qwen35 and inkling chat
   engines decode through the shared loop, and their `StreamDecoder` now
   comes from the engine's `TokMod` parameter.
-- `serving/open.zig` dispatches through `llm.registry` (one `inline for`
+- `serving/open.zig` dispatches through `models.registry` (one `inline for`
   in place of the arch string ladder) and the per-family engine boxes are
   one generic box parameterized by family serving traits; registered
   families without a serving adapter (deepseek2, glm4moe) return
@@ -330,7 +370,7 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   and the `matmulPacked*Slice` family → `kernels.matmulPackedSlice`.
   Every collapsed entry calls the identical kernel with identical
   arguments; numerics are unchanged.
-- Internal layout, no public spelling changes: `src/llm/model_common.zig`
+- Internal layout, no public spelling changes: `src/models/model_common.zig`
   holds the PTQTP-aware projection loader, the dense-FFN containers, the
   MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head
   map the runner and qwen35 previously each carried; `weights/moe_stream.zig`
@@ -385,38 +425,38 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   `native.kernels` is a list of aliases; the Q8_Kx4 lane-dot helpers q4_k
   and q5_k each carried live once in `quant/common.zig`.
 - The research modules live under one namespace, so the facade states the
-  tier: `llm.subq` → `llm.research.subq`, `llm.engram` →
-  `llm.research.engram`, `llm.qwen3.shine`/`llm.qwen3.shine_train` →
-  `llm.research.shine`/`llm.research.shine_train`, `llm.kimi3` →
-  `llm.research.kimi3`.
+  tier: `models.research.subq` → `models.research.subq`, `models.engram` →
+  `models.research.engram`, `models.qwen3.shine`/`models.qwen3.shine_train` →
+  `models.research.shine`/`models.research.shine_train`, `models.kimi3` →
+  `models.research.kimi3`.
 - The runner's SubQ entry is a generic seam: `Model.forwardStepSubq(ctx,
   kv, ids, pos, &sq)` is removed in favor of the type-erased
   `Model.attention_override` hook: install
-  `model.attention_override = llm.research.subq.attentionOverride(&sq)`
+  `model.attention_override = models.research.subq.attentionOverride(&sq)`
   and call the stock `forwardStep`. The override receives the same
   arguments the internal SubQ glue took and returns null to fall through,
   so numerics are unchanged.
 - The qwen3 trainer's Engram graft is a generic seam:
   `ForwardOptions.engram = .{ .model, .rows }` (and `EngramOptions`) →
   `ForwardOptions.residual_hook = adapter.hook()` with
-  `const adapter = llm.research.engram.ResidualGraft{ .model, .rows }`.
+  `const adapter = models.research.engram.ResidualGraft{ .model, .rows }`.
   The hook validates before any compute and adds the same tensor the
   inline graft added; `error.InvalidEngram` now surfaces from the adapter
   (it left `qwen3.train.Error`).
 - SHINE fleet serving is its own entry: `serving.OpenOptions.shine_fleet_dir`
-  is removed, and `llm.qwen3.shine_serving.open(ctx, io, allocator,
+  is removed, and `models.qwen3.shine_serving.open(ctx, io, allocator,
   gguf_path, fleet_dir, options, stderr)` / `openFromFile(...)` mirror
   `serving.open`/`openFromFile` with the fleet directory as an explicit
   argument (same `OpenOptions`, same `Opened` result).
 - The streamed-experts CLI and routing policy live with the runners:
   `fucina.weights.MoeStreamCli` / `parseMirrorWeights` /
-  `reportAndSaveMoeStream` → `llm.moe_stream_cli.*`, and
-  `fucina.weights.cacheRouteSel` / `pilotHintTopK` → `llm.moe_router.*`.
+  `reportAndSaveMoeStream` → `models.moe_stream_cli.*`, and
+  `fucina.weights.cacheRouteSel` / `pilotHintTopK` → `models.moe_router.*`.
   `fucina.weights.MoeStreamOptions` (the options struct the loaders
   consume) is unchanged.
 - The trainer resume state is LLM-band:
   `fucina.training_checkpoint.TrainerState` →
-  `fucina_llm.trainer_state.TrainerState`, and the checkpoint frame is
+  `fucina_models.train.trainer_state.TrainerState`, and the checkpoint frame is
   generic over the state struct: `saveTrainerState(allocator, io, dir,
   state)` takes any struct with the version/step/seed header and optional
   `?u64`/`?f64` fields, `loadTrainerState(State, allocator, io, dir)`

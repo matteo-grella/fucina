@@ -18,7 +18,7 @@ the committed stream is provably the same one plain decoding would produce,
 for greedy *and* sampled decoding. A cost-aware gate makes the whole feature
 **never-a-loss**: tasks it can't accelerate run at 0.98–0.99x (probe
 overhead), tasks it can run at 1.1–2.3x. Scope: any decoder-contract
-family with `caps.rewind` (`llm.decoder.assertDecoder`: `forwardStep` +
+family with `caps.rewind` (`models.decoder.assertDecoder`: `forwardStep` +
 `forwardStepAllLogits` + a truncating cache) — `qwen3`, `gemma4`, SHINE's
 `AdaptedModel`, and `glm4moe` through its native-MTP draft source
 (`speculative/mtp.zig`). `qwen35` (Qwen3.5's hybrid Gated-DeltaNet
@@ -31,15 +31,15 @@ architecture) is structurally out of scope — see §11.
 Three layers, each independently testable:
 
 ```
-DraftSource (vtable)          src/llm/speculative/core.zig:85
+DraftSource (vtable)          src/models/text/speculative/core.zig:85
   ↑ implemented by
-SpeculationIndex (cascade)    src/llm/speculative/cascade.zig:130
+SpeculationIndex (cascade)    src/models/text/speculative/cascade.zig:130
   conversation SAM ── frozen reference SAMs ── Token-Recycling matrix
-  src/llm/speculative/sam_index.zig:103        src/llm/speculative/recycling.zig:144
+  src/models/text/speculative/sam_index.zig:103        src/models/text/speculative/recycling.zig:144
   ↓ drafts verified by
-SpeculativeDecoder(Model)     src/llm/speculative/core.zig:507
+SpeculativeDecoder(Model)     src/models/text/speculative/core.zig:507
   one batched forwardStepAllLogits + full sampler pipeline per row
-  KvCache.truncate drops rejected rows        src/llm/kv_cache.zig:334
+  KvCache.truncate drops rejected rows        src/models/text/kv_cache.zig:334
 ```
 
 - **`DraftSource`** is a three-method vtable: `suggest(context, buf)`
@@ -49,7 +49,7 @@ SpeculativeDecoder(Model)     src/llm/speculative/core.zig:507
   source doesn't want it). Externally injectable: the decoder works with any
   deterministic proposer.
 - **`SpeculativeDecoder(Model)`** runs the decode loop step over any
-  decoder-contract family with `caps.rewind` (`llm.decoder`): ask the
+  decoder-contract family with `caps.rewind` (`models.decoder`): ask the
   source for a draft, run **one** batched forward over
   `[carried token, draft...]` via `forwardStepAllLogits` (same as
   `forwardStep` but no `last_query_only` narrowing, returns `[k, vocab]`),
@@ -192,7 +192,7 @@ the residual 1–2% is probe overhead.
 
 ## 5. The SAM index
 
-`src/llm/speculative/sam_index.zig` — an **online suffix automaton** (SAM) over
+`src/models/text/speculative/sam_index.zig` — an **online suffix automaton** (SAM) over
 token streams (SAM-Decoding / SuffixDecoding lineage). Why a SAM and not
 n-gram hashes: O(1) amortized online extension, an **exact, unbounded**
 longest-suffix-match length (which drives the adaptive draft budget), and the
@@ -227,7 +227,7 @@ same construction doubles as a frozen index over reference documents.
 
 ## 6. The Token-Recycling matrix
 
-`src/llm/speculative/recycling.zig` — the fallback when no index matches (Token Recycling,
+`src/models/text/speculative/recycling.zig` — the fallback when no index matches (Token Recycling,
 Luo et al. 2024). Verification already computes full logits per position and
 throws away everything but the sampled token; recycle them instead: one row
 per vocab token holds the most recent top-K (K=8) next-token candidates

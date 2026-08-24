@@ -27,19 +27,19 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const audio_mod = @import("nam_audio");
 const duplex = @import("duplex.zig");
 const remote_chat = @import("remote_chat.zig");
 const rail_mod = @import("rail.zig");
 const aec_mod = @import("aec.zig");
 
-const qtts = llm.qwen3tts;
-const parakeet_loader = llm.parakeet.loader;
-const parakeet_frontend = llm.parakeet.frontend;
-const parakeet_streaming = llm.parakeet.streaming;
-const parakeet_weights = llm.parakeet.weights;
-const parakeet_tokenizer = llm.parakeet.tokenizer;
+const qtts = models.qwen3tts;
+const parakeet_loader = models.parakeet.loader;
+const parakeet_frontend = models.parakeet.frontend;
+const parakeet_streaming = models.parakeet.streaming;
+const parakeet_weights = models.parakeet.weights;
+const parakeet_tokenizer = models.parakeet.tokenizer;
 const ExecContext = fucina.ExecContext;
 const Tensor = fucina.Tensor;
 
@@ -1902,7 +1902,7 @@ const SpeakWorker = struct {
     seed: i64,
 
     // Exactly one of these is live, chosen by the --tts model's architecture.
-    pocket: ?*llm.pockettts.model.Engine,
+    pocket: ?*models.pockettts.model.Engine,
     qwen: ?Qwen,
 
     mutex: std.Io.Mutex = .init,
@@ -1923,7 +1923,7 @@ const SpeakWorker = struct {
     const Qwen = struct {
         ctx: *ExecContext,
         model: *qtts.model.Model,
-        tok: *llm.tokenizer.Tokenizer,
+        tok: *models.text.tokenizer.Tokenizer,
         kvs: *qtts.pipeline.Kvs,
         codec_ctx: *ExecContext,
         codec_dec: *const qtts.codec.Decoder,
@@ -2064,7 +2064,7 @@ const SpeakWorker = struct {
         return self.speakQwen(span);
     }
 
-    fn speakPocket(self: *SpeakWorker, pe: *llm.pockettts.model.Engine, span: []const u8) !void {
+    fn speakPocket(self: *SpeakWorker, pe: *models.pockettts.model.Engine, span: []const u8) !void {
         const Cb = struct {
             w: *SpeakWorker,
 
@@ -2580,17 +2580,17 @@ pub fn main(init: std.process.Init) anyerror!void {
     defer tts_ctx.deinit();
 
     // Pocket engine (continuous-latent streaming; no separate codec stage).
-    var pocket_engine: ?llm.pockettts.model.Engine = null;
+    var pocket_engine: ?models.pockettts.model.Engine = null;
     defer if (pocket_engine) |*pe| pe.deinit();
     if (use_pocket) {
-        pocket_engine = try llm.pockettts.model.Engine.init(&tts_ctx, &tts_file, flagVal(args, "--voice") orelse "alba");
+        pocket_engine = try models.pockettts.model.Engine.init(&tts_ctx, &tts_file, flagVal(args, "--voice") orelse "alba");
     }
 
     // Qwen3-TTS stages (skipped under pocket).
     var tts_model: qtts.model.Model = undefined;
     var tts_model_loaded = false;
     defer if (tts_model_loaded) tts_model.deinit();
-    var tts_tok: llm.tokenizer.Tokenizer = undefined;
+    var tts_tok: models.text.tokenizer.Tokenizer = undefined;
     var tts_tok_loaded = false;
     defer if (tts_tok_loaded) tts_tok.deinit();
     var codec_file: fucina.gguf.File = undefined;
@@ -2615,7 +2615,7 @@ pub fn main(init: std.process.Init) anyerror!void {
         }
         tts_model = try qtts.model.Model.load(&tts_ctx, &tts_file);
         tts_model_loaded = true;
-        tts_tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &tts_file, .{});
+        tts_tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &tts_file, .{});
         tts_tok_loaded = true;
         tui.status("[load] codec…", .{});
         codec_file = try fucina.gguf.File.loadMmap(allocator, io, codec_path);

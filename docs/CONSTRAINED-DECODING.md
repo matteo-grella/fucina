@@ -24,7 +24,7 @@ paths — proven greedy and sampled — and with the grammar-drafting layer the
 constraint *raises* speculative acceptance instead of muting it (measured:
 0% → 83% on JSON-schema chat, output byte-identical).
 
-Scope: any runner built on `llm.sampler.Sampler` — today the qwen3 and
+Scope: any runner built on `models.text.sampler.Sampler` — today the qwen3 and
 gemma4 CLIs (`--json-schema JSON|@FILE`, `--lark GRAMMAR|@FILE`,
 `--regex PATTERN`) and anything embedding `chat.Conversation`
 (`Options.logit_processor`). Non-autoregressive paths (diffusion_gemma's
@@ -38,22 +38,22 @@ they do not sample token-by-token through the shared sampler.
 Two layers with one optional third, each independently testable:
 
 ```
-LogitProcessor (vtable)          src/llm/logit_processor.zig:35
+LogitProcessor (vtable)          src/models/text/logit_processor.zig:35
   process(logits, history)         mask/bias the row before sampling
   commit(token)                    observe every selected token
   reset()                          re-arm per assistant turn
   forcedTokens / validPrefixLen    optional structural lookaheads
   ↑ hosted by
-Sampler.processor                src/llm/sampler.zig:58
+Sampler.processor                src/models/text/sampler.zig:58
   process at next() entry :73, commit on every exit path :104
   ↑ installed via
-chat.Options.logit_processor     src/llm/chat.zig:159
+chat.Options.logit_processor     src/models/text/chat.zig:159
   per-turn reset :304, sendBatch share guard :412
   ↑ implemented by (opt-in, -Dllguidance=true)
-llguidance Constraint            src/llm/llguidance.zig
+llguidance Constraint            src/models/text/llguidance.zig
   grammar compile + token bitmask over a Fucina-tokenizer bridge
   ↑ drafted by (when speculation is on)
-ConstrainedSource                src/llm/speculative/constrained.zig:36
+ConstrainedSource                src/models/text/speculative/constrained.zig:36
   forced spans → certain drafts; invalid drafts pruned pre-verify
 ```
 
@@ -83,7 +83,7 @@ everywhere** — including paths that did not exist when the constraint was
 written, as long as they sample through a `Sampler`. The alternative
 (wiring a mask call into each loop) was rejected; see §8.
 
-The contract (`src/llm/logit_processor.zig:35`):
+The contract (`src/models/text/logit_processor.zig:35`):
 
 - `process(logits, history)` mutates one `[vocab]` f32 row in place before
   penalties/temperature/top-k/top-p/min-p run. A grammar mask writes `-inf`
@@ -92,22 +92,22 @@ The contract (`src/llm/logit_processor.zig:35`):
   penalties is not semantically load-bearing.
 - `commit(token)` observes the selected token, **exactly once per `next`
   call, on every exit path** — greedy included
-  (`src/llm/sampler.zig:104,146`). This is the property everything else
+  (`src/models/text/sampler.zig:104,146`). This is the property everything else
   leans on (§4).
 - `reset()` re-arms the state machine for a fresh constrained region.
   `chat.Conversation` calls it in `beginTurnTokens`
-  (`src/llm/chat.zig:304`) — the shared turn prologue of `send`, `sendSpec`
+  (`src/models/text/chat.zig:304`) — the shared turn prologue of `send`, `sendSpec`
   and `sendBatch` — so one constraint instance governs each assistant reply
   independently across a multi-turn conversation.
 - A processor that leaves no selectable candidate is
-  `error.AllTokensMasked` (`src/llm/sampler.zig:103,120`): a broken
+  `error.AllTokensMasked` (`src/models/text/sampler.zig:103,120`): a broken
   constraint fails loudly instead of silently sampling from a masked-out
   distribution. llguidance never produces an empty mask on a healthy
   matcher (a terminal grammar forces the stop token instead), so in
   practice this fires only on genuinely broken custom processors.
 - One processor per decode stream, single-threaded, adjacent to its
   sampler. `sendBatch` enforces this: two streams sharing one processor
-  pointer is `error.SharedBatchProcessor` (`src/llm/chat.zig:412`).
+  pointer is `error.SharedBatchProcessor` (`src/models/text/chat.zig:412`).
 
 Stop handling needs **no new mechanism**: when a grammar completes, the
 mask allows only the configured stop/EOS token, the sampler can only select
@@ -116,7 +116,7 @@ with `extra_stop_ids`, `stop_sequences`, and the response budget unchanged.
 
 ## 3. The engine — vendored llguidance
 
-`llm.llguidance.Constraint` (`src/llm/llguidance.zig`) compiles a grammar
+`models.text.llguidance.Constraint` (`src/models/text/llguidance.zig`) compiles a grammar
 (`json_schema` | `regex` | `lark` | composite `llguidance`) and adapts it to
 the seam. llguidance was chosen over the alternatives (§8) because it is
 the engine behind vLLM/SGLang-class structured output: full JSON-schema
@@ -126,7 +126,7 @@ maintained C FFI.
 
 Mechanics worth pinning:
 
-- **Tokenizer bridge** (`buildVocab`, `src/llm/llguidance.zig:245`): the
+- **Tokenizer bridge** (`buildVocab`, `src/models/text/llguidance.zig:245`): the
   engine needs every token's RAW bytes. Byte-BPE tokens are byte-decoded;
   SPM pieces are unescaped (`▁` → space) and `<0xXX>` byte tokens become
   their byte. Control tokens carry toktrie's `0xFF` special marker
@@ -154,7 +154,7 @@ Mechanics worth pinning:
   engine's diagnostic.
 - **Build gating**: `-Dllguidance=true` (default off) runs
   `cargo build --release` in `vendor/llguidance` and links the staticlib
-  into the qwen3/gemma4 examples and the llm test roots. Off, a stub
+  into the qwen3/gemma4 examples and the models test roots. Off, a stub
   `Constraint` keeps every caller compiling and `init` returns
   `error.LlguidanceNotEnabled`; no Rust symbol is referenced, the build
   stays pure Zig. The staticlib keeps Rust's `panic = unwind` (the FFI's
@@ -199,7 +199,7 @@ boundary token only ever arrives as a sampled correction/bonus — and
 `sendBatch`'s `sampleStep`), so processor state after any turn is the same:
 post-stop, re-armed by the next turn's `reset`.
 
-Proofs in-tree (`src/llm/chat_tests.zig`): constrained plain == constrained
+Proofs in-tree (`src/models/text/chat_tests.zig`): constrained plain == constrained
 speculative, greedy and sampled with a persistent RNG, both for a plain
 mask processor and for a structural (forced-span) processor; commit-log
 equality is asserted, not just stream equality.
@@ -241,7 +241,7 @@ never makes the decoder compute top-k feedback nobody consumes.
 Losslessness is untouched: drafts never decide *what* is committed, and
 both hooks are deterministic, so the source stays deterministic. The wiring
 is automatic — `chat.Conversation` wraps its cascade whenever the installed
-processor `hasStructure()` (`src/llm/chat.zig:207`), and the qwen3 `--spec`
+processor `hasStructure()` (`src/models/text/chat.zig:207`), and the qwen3 `--spec`
 path does the same.
 
 Measured (Qwen3-0.6B-Q8_0, greedy JSON-schema chat, M1 Max):
@@ -260,7 +260,7 @@ for a future `min_draft`-aware forced-span policy.
 
 A constraint is single-stream state, so N-stream decode needs N matcher
 states. Re-running `init` per stream would rebuild the vocab trie and
-recompile the grammar; `clone()` (`src/llm/llguidance.zig:385`) instead
+recompile the grammar; `clone()` (`src/models/text/llguidance.zig:385`) instead
 deep-clones the matcher (initial state if cloned after init/reset),
 reference-counts the tokenizer handle, and **borrows the tokenize bridge**
 from the original — the original must outlive its clones, which every
@@ -345,11 +345,11 @@ Consumers:
 
 | Claim | Where proven |
 | --- | --- |
-| Seam semantics (mask on both paths, one commit per selection, all-masked failure, penalty composition) | `src/llm/logit_processor_tests.zig` |
-| Grammar walks, stop forcing, reset, special-token exclusion, JSON-schema over byte vocab, SPM attrs + byte-fallback, invalid grammars, ABI round trip | `src/llm/llguidance_tests.zig` (gated: skips unless `-Dllguidance=true`) |
-| Structural hooks are pure lookaheads; clone independence | `src/llm/llguidance_tests.zig` |
-| Combinator policy (forced preemption, invalid-prefix truncation, pending accounting, top-k mirroring) | `src/llm/speculative/constrained_tests.zig` |
-| Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/llm/chat_tests.zig` |
+| Seam semantics (mask on both paths, one commit per selection, all-masked failure, penalty composition) | `src/models/text/logit_processor_tests.zig` |
+| Grammar walks, stop forcing, reset, special-token exclusion, JSON-schema over byte vocab, SPM attrs + byte-fallback, invalid grammars, ABI round trip | `src/models/text/llguidance_tests.zig` (gated: skips unless `-Dllguidance=true`) |
+| Structural hooks are pure lookaheads; clone independence | `src/models/text/llguidance_tests.zig` |
+| Combinator policy (forced preemption, invalid-prefix truncation, pending accounting, top-k mirroring) | `src/models/text/speculative/constrained_tests.zig` |
+| Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/models/text/chat_tests.zig` |
 | Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (§2.7 convention) |
 | E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; grammar commands in `RUNNING-MODELS.md` §"Constrained decoding", the `--spec`/`--streams` commands in `examples/qwen3/README.md`) |
 | Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; §2.8) — first proven natively on the dev rig, 2026-07-11 |

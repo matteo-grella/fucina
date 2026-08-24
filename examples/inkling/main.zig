@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const png = @import("facedetect_image");
 
 pub fn main(init: std.process.Init) !void {
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     // --tokenize FILE: encode a text file and print one token id per line
     // (the llama-tokenize parity harness); no model weights needed.
     if (tokenize_file) |path| {
-        var t = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+        var t = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
         defer t.deinit();
         file.deinit();
         const bytes = try readTextFile(init.io, allocator, path);
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var tokenizer: ?llm.tokenizer.Tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
+    var tokenizer: ?models.text.tokenizer.Tokenizer = models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (tokenizer) |*t| t.deinit();
 
     // Multimodal: split the prompt on <__media__>, run the tower, and build
@@ -190,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
         prompt_after = text[pos + marker.len ..];
 
         var mm_file = try fucina.gguf.File.loadMmapAuto(allocator, init.io, mm_path);
-        var mm = try llm.inkling.mmproj.MmProj.loadGgufFromFile(&ctx, &mm_file);
+        var mm = try models.inkling.mmproj.MmProj.loadGgufFromFile(&ctx, &mm_file);
         mm_file.deinit();
         defer mm.deinit();
         n_embd_mm = mm.n_embd;
@@ -210,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
             for (0..media_reps) |_| {
                 if (media_rows.len > 0) allocator.free(media_rows);
                 const t0 = nowNs(init.io);
-                var patches = try llm.inkling.mmproj.preprocessImage(allocator, &mm, img.pixels, img.width, img.height);
+                var patches = try models.inkling.mmproj.preprocessImage(allocator, &mm, img.pixels, img.width, img.height);
                 defer patches.deinit();
                 const t1 = nowNs(init.io);
                 media_rows = try mm.visionEncode(&ctx, patches.data, patches.nPatches());
@@ -223,12 +223,12 @@ pub fn main(init: std.process.Init) !void {
             }
             try stdout.print("image: {d}x{d} -> {d}x{d} patches = {d} tokens\n", .{ img.width, img.height, patch_rows, patch_cols, n_media_tokens });
         } else if (audio_path) |apath| {
-            var audio = try llm.parakeet.frontend.loadWav16kMonoFile(allocator, init.io, apath);
+            var audio = try models.parakeet.frontend.loadWav16kMonoFile(allocator, init.io, apath);
             defer audio.deinit(allocator);
             for (0..media_reps) |_| {
                 if (media_rows.len > 0) allocator.free(media_rows);
                 const t0 = nowNs(init.io);
-                var dmel = try llm.inkling.mmproj.preprocessAudio(allocator, audio.samples);
+                var dmel = try models.inkling.mmproj.preprocessAudio(allocator, audio.samples);
                 defer dmel.deinit();
                 const t1 = nowNs(init.io);
                 media_rows = try mm.audioEncode(&ctx, dmel.data, dmel.n_frames);
@@ -262,7 +262,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (tokens.len == 0 and !has_media and chat_text == null and !repl_flag) return error.EmptyPrompt;
 
-    var model = try llm.inkling.model.Model.loadGgufFromFile(&ctx, &file);
+    var model = try models.inkling.model.Model.loadGgufFromFile(&ctx, &file);
     file.deinit();
     defer model.deinit();
     if (has_media and n_embd_mm != model.config.hidden_size) return error.MmprojWidthMismatch;
@@ -306,7 +306,7 @@ pub fn main(init: std.process.Init) !void {
         const ids_after = try t.encodeRaw(allocator, after_str);
         defer allocator.free(ids_after);
 
-        const Row = llm.inkling.model.Model.Row;
+        const Row = models.inkling.model.Model.Row;
         const items = try allocator.alloc(Row, ids_before.len + n_media_tokens + ids_after.len);
         defer allocator.free(items);
         var it: usize = 0;
@@ -451,14 +451,14 @@ fn runChat(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
-    model: *const llm.inkling.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    model: *const models.inkling.model.Model,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     opts: ChatOptions,
 ) !void {
-    const inkling_chat = llm.inkling.chat;
-    var engine = try inkling_chat.Engine(llm.tokenizer).init(ctx, model, tokenizer);
+    const inkling_chat = models.inkling.chat;
+    var engine = try inkling_chat.Engine(models.text.tokenizer).init(ctx, model, tokenizer);
 
-    var messages: std.ArrayList(llm.chat.Message) = .empty;
+    var messages: std.ArrayList(models.text.chat.Message) = .empty;
     defer messages.deinit(allocator);
     if (opts.system) |s| try messages.append(allocator, .{ .role = .system, .content = s });
 
@@ -523,8 +523,8 @@ fn runChat(
 /// `<|content_thinking|>` and `<|content_text|>`) and its visible content
 /// (after `<|content_text|>`, with any residual markers removed).
 fn splitReply(wrapped: []const u8) struct { thinking: []const u8, content: []const u8 } {
-    const ct = llm.inkling.chat.tok_content_text;
-    const cth = llm.inkling.chat.tok_content_thinking;
+    const ct = models.inkling.chat.tok_content_text;
+    const cth = models.inkling.chat.tok_content_thinking;
     var thinking: []const u8 = "";
     var content: []const u8 = wrapped;
     if (std.mem.indexOf(u8, wrapped, ct)) |ci| {

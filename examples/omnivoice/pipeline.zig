@@ -20,7 +20,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const chunker = @import("chunker.zig");
 const codec = @import("codec.zig");
@@ -38,7 +38,7 @@ const voicedesign = @import("voicedesign.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
-const Tokenizer = llm.tokenizer.Tokenizer;
+const Tokenizer = models.text.tokenizer.Tokenizer;
 
 pub const Error = error{
     MutuallyExclusiveRefs,

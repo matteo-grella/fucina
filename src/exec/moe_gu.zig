@@ -4,7 +4,7 @@
 //! the shared MoE decode scratch; batch rides the phase-chain scheduling
 //! in `moe_chain.zig`. Entries take the `*ExecContext` (decode carves
 //! its `moe_scratch`); the tagged facade wrappers live with the gemma
-//! family (`llm/gemma/moe.zig`), the methods on `ExecContext`
+//! family (`models/gemma/moe.zig`), the methods on `ExecContext`
 //! (`moeGu*`).
 const std = @import("std");
 

@@ -102,19 +102,19 @@ pub fn build(b: *std.Build) void {
         configureGpuModule(b, module, gpu_kind);
     }
 
-    // fucina_llm's own build options (the fucina options above are per-kernel
-    // knobs the llm tier never reads). Every module built from src/llm.zig
-    // must receive one of these under the name "llm_build_options".
-    const llm_options = b.addOptions();
-    llm_options.addOption(bool, "llguidance", llguidance_enabled);
-    const llm_options_off = b.addOptions(); // compile-only legs: never link the Rust lib
-    llm_options_off.addOption(bool, "llguidance", false);
+    // fucina_models's own build options (the fucina options above are per-kernel
+    // knobs the models tier never reads). Every module built from src/models.zig
+    // must receive one of these under the name "models_build_options".
+    const models_options = b.addOptions();
+    models_options.addOption(bool, "llguidance", llguidance_enabled);
+    const models_options_off = b.addOptions(); // compile-only legs: never link the Rust lib
+    models_options_off.addOption(bool, "llguidance", false);
 
     // -Dllguidance: build the vendored Rust staticlib once per `zig build`
     // invocation (cargo's own incremental cache makes the no-change case
     // sub-second) and link it into the executables/test roots that actually
     // reference the `llm.llguidance` externs. Consumers that merely import
-    // fucina_llm don't need the link — extern symbols resolve lazily.
+    // fucina_models don't need the link — extern symbols resolve lazily.
     const llguidance_dep: ?LlguidanceDep = if (llguidance_enabled) blk: {
         const cargo = b.addSystemCommand(&.{ "cargo", "build", "--release", "--package", "llguidance" });
         cargo.setCwd(b.path("vendor/llguidance"));
@@ -125,17 +125,17 @@ pub fn build(b: *std.Build) void {
         };
     } else null;
 
-    const llm_module = b.addModule("fucina_llm", .{
-        .root_source_file = b.path("src/llm.zig"),
+    const models_module = b.addModule("fucina_models", .{
+        .root_source_file = b.path("src/models.zig"),
         .target = target,
         .optimize = optimize,
     });
-    llm_module.addImport("fucina", module);
-    llm_module.addOptions("llm_build_options", llm_options);
+    models_module.addImport("fucina", module);
+    models_module.addOptions("models_build_options", models_options);
 
     // Cross-example reuse: a module cannot @import above its root source
     // file's directory, so example code shared across folders is exposed as
-    // named modules, created ONCE from the SAME fucina/fucina_llm modules
+    // named modules, created ONCE from the SAME fucina/fucina_models modules
     // above (type identity across every consumer).
     const facedetect_image_module = b.createModule(.{
         .root_source_file = b.path("examples/facedetect/image.zig"),
@@ -153,69 +153,69 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     nanochat_module.addImport("fucina", module);
-    nanochat_module.addImport("fucina_llm", llm_module);
+    nanochat_module.addImport("fucina_models", models_module);
 
-    const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .llm_module = llm_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
+    const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .models_module = models_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
     // SubQ research tools ride addExample for install/run, and their compile
     // steps register into bench-check below so the research surface cannot
     // silently rot out of the compile gate.
-    const bench_subq = addExample(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .llm = true });
-    const bench_subq_kernels = addExample(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .llm = false });
-    const bench_subq_scaling = addExample(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .llm = true });
-    const eval_subq = addExample(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .llm = true });
-    const smoke = addExample(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .llm = false });
+    const bench_subq = addExample(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .models = true });
+    const bench_subq_kernels = addExample(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .models = false });
+    const bench_subq_scaling = addExample(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .models = true });
+    const eval_subq = addExample(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .models = true });
+    const smoke = addExample(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .models = false });
     const run_step = b.step("run", "Run the smoke example (alias of smoke)");
     run_step.dependOn(&smoke.run.step);
 
-    _ = addExample(b, tool_ctx, .{ .step = "facedetect", .desc = "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks", .exe = "fucina-facedetect", .root = "examples/facedetect/main.zig", .llm = false });
+    _ = addExample(b, tool_ctx, .{ .step = "facedetect", .desc = "Face detection/recognition (face-detect.cpp buffalo_l port): detect/embed/verify/analyze/landmarks", .exe = "fucina-facedetect", .root = "examples/facedetect/main.zig", .models = false });
     // nanochat's raw-byte BPE pretokenizer reuses the generated \p{L}/\p{N}/\s
-    // tables via the fucina_llm re-export (llm.unicode_categories) — sharing
+    // tables via the fucina_models re-export (models.text.unicode_categories) — sharing
     // the file keeps it in ONE module, so nanochat code can coexist with
-    // fucina_llm consumers in the same compilation (the lmserve example).
-    _ = addExample(b, tool_ctx, .{ .step = "nanochat", .desc = "nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat", .exe = "fucina-nanochat", .root = "examples/nanochat/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "spirals", .desc = "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer", .exe = "fucina-spirals", .root = "examples/spirals/main.zig", .llm = false });
-    const nam = addExample(b, tool_ctx, .{ .step = "nam", .desc = "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim", .exe = "fucina-nam", .root = "examples/nam/main.zig", .llm = false });
+    // fucina_models consumers in the same compilation (the lmserve example).
+    _ = addExample(b, tool_ctx, .{ .step = "nanochat", .desc = "nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat", .exe = "fucina-nanochat", .root = "examples/nanochat/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "spirals", .desc = "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer", .exe = "fucina-spirals", .root = "examples/spirals/main.zig", .models = false });
+    const nam = addExample(b, tool_ctx, .{ .step = "nam", .desc = "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim", .exe = "fucina-nam", .root = "examples/nam/main.zig", .models = false });
     configureNamAudio(nam.exe);
-    const qwen3 = addExample(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle, --shine in-context hypernetwork adapters)", .exe = "fucina-qwen3", .root = "examples/qwen3/main.zig", .llm = true });
+    const qwen3 = addExample(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle, --shine in-context hypernetwork adapters)", .exe = "fucina-qwen3", .root = "examples/qwen3/main.zig", .models = true });
     configureLlguidance(qwen3.exe, llguidance_dep);
-    _ = addExample(b, tool_ctx, .{ .step = "deepseek2", .desc = "Run DeepSeek-V2 family (MLA + MoE) GGUF inference", .exe = "fucina-deepseek2", .root = "examples/deepseek2/main.zig", .llm = true });
-    const inkling = addExample(b, tool_ctx, .{ .step = "inkling", .desc = "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference", .exe = "fucina-inkling", .root = "examples/inkling/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "deepseek2", .desc = "Run DeepSeek-V2 family (MLA + MoE) GGUF inference", .exe = "fucina-deepseek2", .root = "examples/deepseek2/main.zig", .models = true });
+    const inkling = addExample(b, tool_ctx, .{ .step = "inkling", .desc = "Run Inkling (hybrid SWA + rel-bias + MoE) GGUF inference", .exe = "fucina-inkling", .root = "examples/inkling/main.zig", .models = true });
     inkling.exe.root_module.addImport("facedetect_image", facedetect_image_module);
-    _ = addExample(b, tool_ctx, .{ .step = "glm4moe", .desc = "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)", .exe = "fucina-glm4moe", .root = "examples/glm4moe/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "examples/deepseek4/main.zig", .llm = true });
-    const voiceagent = addExample(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "examples/voiceagent/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "glm4moe", .desc = "Run GLM-4.5 family GGUF inference (--mtp native multi-token-prediction speculative decode)", .exe = "fucina-glm4moe", .root = "examples/glm4moe/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "examples/deepseek4/main.zig", .models = true });
+    const voiceagent = addExample(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "examples/voiceagent/main.zig", .models = true });
     voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
     configureAudioShim(voiceagent.exe);
     configureLlguidance(voiceagent.exe, llguidance_dep);
-    // The agent hosts the llm.serving chat server in-process, on a thread;
+    // The agent hosts the models.text.serving chat server in-process, on a thread;
     // the band's http layer needs libc on Linux (std.c.recv hang-up probe).
     voiceagent.exe.root_module.link_libc = true;
-    _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .llm = true });
-    const omnivoice = addExample(b, tool_ctx, .{ .step = "omnivoice", .desc = "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode", .exe = "fucina-omnivoice", .root = "examples/omnivoice/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "pockettts", .desc = "Pocket TTS v2 from GGUF (kyutai port): continuous-latent flow-matching TTS, streaming Mimi decode", .exe = "fucina-pockettts", .root = "examples/pockettts/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "qwen3tts", .desc = "Qwen3-TTS from GGUF (qwentts.cpp port): CustomVoice text-to-speech, streamed codec decode", .exe = "fucina-qwen3tts", .root = "examples/qwen3tts/main.zig", .models = true });
+    const omnivoice = addExample(b, tool_ctx, .{ .step = "omnivoice", .desc = "OmniVoice MaskGIT TTS from GGUF: voice cloning/design, codec encode/decode", .exe = "fucina-omnivoice", .root = "examples/omnivoice/main.zig", .models = true });
     configureOmnivoiceAudio(omnivoice.exe);
-    _ = addExample(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "examples/locate_anything/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "finetune", .desc = "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset", .exe = "fucina-finetune", .root = "examples/finetune/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "shine-train", .desc = "Train the SHINE hypernetwork (LoRA or cartridge readout) over a frozen qwen3 base", .exe = "fucina-shine-train", .root = "examples/shine_train/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "examples/cartridge/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "examples/cartridge_fleet/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "engram", .desc = "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)", .exe = "fucina-engram", .root = "examples/engram/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "es-finetune", .desc = "Evolution-strategies fine-tune Qwen3 GGUF (gradient-free; --mode lora|full, --reward rule|nll|acc)", .exe = "fucina-es-finetune", .root = "examples/es_finetune/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "es-spirals", .desc = "Train the two-spirals MLP FROM SCRATCH with evolution strategies (gradient-free; self-verifying)", .exe = "fucina-es-spirals", .root = "examples/es_spirals/main.zig", .llm = false });
-    _ = addExample(b, tool_ctx, .{ .step = "es-ternary-spirals", .desc = "Train a two-spirals MLP FROM SCRATCH with the ternary-native ES (packed TQ2_0 genome = the inference model; self-verifying)", .exe = "fucina-es-ternary-spirals", .root = "examples/es_ternary_spirals/main.zig", .llm = false });
-    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-spirals", .desc = "Train a float two-spirals MLP, then post-training-quantize it to dual trit-planes (PTQTP over packed TQ2_0; self-verifying)", .exe = "fucina-ptqtp-spirals", .root = "examples/ptqtp_spirals/main.zig", .llm = false });
-    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-qwen3", .desc = "PTQTP-decorate a Qwen3 GGUF's linears in place (any source dtype) and compare teacher-forced NLL before/after + greedy completion", .exe = "fucina-ptqtp-qwen3", .root = "examples/ptqtp_qwen3/main.zig", .llm = true });
-    const gemma4 = addExample(b, tool_ctx, .{ .step = "gemma4", .desc = "Run Gemma 4 GGUF inference from token IDs (logit-parity harness)", .exe = "fucina-gemma4", .root = "examples/gemma4/main.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "examples/locate_anything/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "finetune", .desc = "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset", .exe = "fucina-finetune", .root = "examples/finetune/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "shine-train", .desc = "Train the SHINE hypernetwork (LoRA or cartridge readout) over a frozen qwen3 base", .exe = "fucina-shine-train", .root = "examples/shine_train/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "examples/cartridge/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "examples/cartridge_fleet/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "engram", .desc = "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)", .exe = "fucina-engram", .root = "examples/engram/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "es-finetune", .desc = "Evolution-strategies fine-tune Qwen3 GGUF (gradient-free; --mode lora|full, --reward rule|nll|acc)", .exe = "fucina-es-finetune", .root = "examples/es_finetune/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "es-spirals", .desc = "Train the two-spirals MLP FROM SCRATCH with evolution strategies (gradient-free; self-verifying)", .exe = "fucina-es-spirals", .root = "examples/es_spirals/main.zig", .models = false });
+    _ = addExample(b, tool_ctx, .{ .step = "es-ternary-spirals", .desc = "Train a two-spirals MLP FROM SCRATCH with the ternary-native ES (packed TQ2_0 genome = the inference model; self-verifying)", .exe = "fucina-es-ternary-spirals", .root = "examples/es_ternary_spirals/main.zig", .models = false });
+    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-spirals", .desc = "Train a float two-spirals MLP, then post-training-quantize it to dual trit-planes (PTQTP over packed TQ2_0; self-verifying)", .exe = "fucina-ptqtp-spirals", .root = "examples/ptqtp_spirals/main.zig", .models = false });
+    _ = addExample(b, tool_ctx, .{ .step = "ptqtp-qwen3", .desc = "PTQTP-decorate a Qwen3 GGUF's linears in place (any source dtype) and compare teacher-forced NLL before/after + greedy completion", .exe = "fucina-ptqtp-qwen3", .root = "examples/ptqtp_qwen3/main.zig", .models = true });
+    const gemma4 = addExample(b, tool_ctx, .{ .step = "gemma4", .desc = "Run Gemma 4 GGUF inference from token IDs (logit-parity harness)", .exe = "fucina-gemma4", .root = "examples/gemma4/main.zig", .models = true });
     configureLlguidance(gemma4.exe, llguidance_dep);
-    const lmserve = addExample(b, tool_ctx, .{ .step = "lmserve", .desc = "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints", .exe = "fucina-lmserve", .root = "examples/lmserve/main.zig", .llm = true });
+    const lmserve = addExample(b, tool_ctx, .{ .step = "lmserve", .desc = "OpenAI-compatible language-model HTTP server (chat completions + responses; SSE streaming; JSON-schema constrained output with -Dllguidance=true) over qwen3/gemma4/diffusion-gemma GGUFs + nanochat checkpoints", .exe = "fucina-lmserve", .root = "examples/lmserve/main.zig", .models = true });
     lmserve.exe.root_module.addImport("nanochat", nanochat_module);
     configureLlguidance(lmserve.exe, llguidance_dep);
     // Uses std.c.shutdown/recv (signal-driven accept unblock, MSG_PEEK
     // hang-up probe): libc links implicitly on macOS but must be declared
     // for the Linux leg.
     lmserve.exe.root_module.link_libc = true;
-    const parakeet = addExample(b, tool_ctx, .{ .step = "parakeet", .desc = "Parakeet ASR (NeMo FastConformer): transcribe a WAV (mel -> encoder -> CTC/TDT decoder -> text); --stream/--manifest/--mic, --compare parity harness", .exe = "fucina-parakeet", .root = "examples/parakeet/main.zig", .llm = true });
+    const parakeet = addExample(b, tool_ctx, .{ .step = "parakeet", .desc = "Parakeet ASR (NeMo FastConformer): transcribe a WAV (mel -> encoder -> CTC/TDT decoder -> text); --stream/--manifest/--mic, --compare parity harness", .exe = "fucina-parakeet", .root = "examples/parakeet/main.zig", .models = true });
     parakeet.exe.root_module.addImport("nam_audio", nam_audio_module);
     const parakeet_opts = b.addOptions();
     parakeet_opts.addOption(bool, "parakeet_mic", parakeet_mic);
@@ -230,11 +230,11 @@ pub fn build(b: *std.Build) void {
     const bench_gate_step = b.step("bench-gate", "Run paired Fucina-vs-llama benchmark gate");
     bench_gate_step.dependOn(&bench_gate_cmd.step);
 
-    const diffusion_gemma = addExample(b, tool_ctx, .{ .step = "diffusion-gemma", .desc = "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)", .exe = "fucina-diffusion-gemma", .root = "examples/diffusion_gemma/main.zig", .llm = true });
+    const diffusion_gemma = addExample(b, tool_ctx, .{ .step = "diffusion-gemma", .desc = "Run DiffusionGemma GGUF block-diffusion inference (parity harness + EB chat)", .exe = "fucina-diffusion-gemma", .root = "examples/diffusion_gemma/main.zig", .models = true });
     diffusion_gemma.exe.root_module.link_libc = true;
-    _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .llm = true });
-    _ = addExample(b, tool_ctx, .{ .step = "convert-ds4-fp4", .desc = "Convert DeepSeek-V4 fp4 safetensors experts into tied-PTQTP plane stacks over a trunk GGUF (trunk bytes verbatim, experts solved from the released fp4)", .exe = "fucina-convert-ds4-fp4", .root = "tools/convert_ds4_fp4.zig", .llm = true });
+    _ = addExample(b, tool_ctx, .{ .step = "qwen35", .desc = "Run Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness", .exe = "fucina-qwen35", .root = "examples/qwen35/main.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "export-gguf", .desc = "Export a GGUF: re-emit/transcode a model, merge Fucina LoRA adapters (checkpoint dir or safetensors) into dense weights, or PTQTP-quantize tensor-at-a-time (--ptqtp[=K]; models bigger than RAM)", .exe = "fucina-export-gguf", .root = "tools/export_gguf.zig", .models = true });
+    _ = addExample(b, tool_ctx, .{ .step = "convert-ds4-fp4", .desc = "Convert DeepSeek-V4 fp4 safetensors experts into tied-PTQTP plane stacks over a trunk GGUF (trunk bytes verbatim, experts solved from the released fp4)", .exe = "fucina-convert-ds4-fp4", .root = "tools/convert_ds4_fp4.zig", .models = true });
 
     const arch_check_exe = b.addExecutable(.{
         .name = "fucina-arch-check",
@@ -278,7 +278,7 @@ pub fn build(b: *std.Build) void {
     // REFERENCE.md snippet gate: extract every runnable ```zig snippet (a
     // block with a column-0 `test` decl; `<!-- snippet: helper/skip -->`
     // markers documented in tools/gen_snippet_tests.zig) into a generated
-    // test root and run it against the real fucina/fucina_llm modules, so a
+    // test root and run it against the real fucina/fucina_models modules, so a
     // doc example that stops compiling or asserting fails the build — the
     // doc-check counterpart for snippet rot.
     const snippet_gen_exe = b.addExecutable(.{
@@ -300,7 +300,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     snippet_tests.root_module.addImport("fucina", module);
-    snippet_tests.root_module.addImport("fucina_llm", llm_module);
+    snippet_tests.root_module.addImport("fucina_models", models_module);
     configureBlas(snippet_tests, blas_kind);
     configureGpu(b, snippet_tests, gpu_kind);
     configureLlguidance(snippet_tests, llguidance_dep);
@@ -365,7 +365,7 @@ pub fn build(b: *std.Build) void {
     // x86dot-check legs.
     // The dead-switch-arm selection in src/backend/gpu.zig means no other
     // build configuration ever analyzes cuda.zig.
-    const cuda_check_step = b.step("cuda-check", "Compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina + llm roots and NVRTC PTX generator, not run): catches CUDA-provider bit-rot on GPU-less machines");
+    const cuda_check_step = b.step("cuda-check", "Compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina + models roots and NVRTC PTX generator, not run): catches CUDA-provider bit-rot on GPU-less machines");
     {
         const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });
         // The cuda leg reuses the SAME option-value set with only the
@@ -390,21 +390,21 @@ pub fn build(b: *std.Build) void {
         _ = cuda_check_fucina.getEmittedBin();
         cuda_check_step.dependOn(&cuda_check_fucina.step);
 
-        // Leg 2: the llm root — the tier that consumes the provider surface
+        // Leg 2: the models root — the tier that consumes the provider surface
         // exec never touches (residency, qmoeStage, gemmQGroupedNt, ...);
         // without it, drift in those decls stays invisible until a GPU-box
         // build (verified by @compileError probes during review).
-        const cuda_llm_module = b.createModule(.{
-            .root_source_file = b.path("src/llm.zig"),
+        const cuda_models_module = b.createModule(.{
+            .root_source_file = b.path("src/models.zig"),
             .target = cuda_target,
             .optimize = optimize,
         });
-        cuda_llm_module.addImport("fucina", cuda_fucina_module);
-        cuda_llm_module.addOptions("llm_build_options", llm_options_off);
-        cuda_llm_module.link_libc = true;
-        const cuda_check_llm = b.addTest(.{ .root_module = cuda_llm_module });
-        _ = cuda_check_llm.getEmittedBin();
-        cuda_check_step.dependOn(&cuda_check_llm.step);
+        cuda_models_module.addImport("fucina", cuda_fucina_module);
+        cuda_models_module.addOptions("models_build_options", models_options_off);
+        cuda_models_module.link_libc = true;
+        const cuda_check_models = b.addTest(.{ .root_module = cuda_models_module });
+        _ = cuda_check_models.getEmittedBin();
+        cuda_check_step.dependOn(&cuda_check_models.step);
 
         // Leg 3: the toolkit-optional PTX generator. It reuses the provider's
         // dlopen-only NVRTC binding, so compiling this leg needs no CUDA SDK.
@@ -503,30 +503,30 @@ pub fn build(b: *std.Build) void {
     const test_fucina_step = b.step("test-fucina", "Run the fucina-root unit tests only (routine -Dbackend=scalar leg)");
     test_fucina_step.dependOn(&run_tests.step);
 
-    const llm_tests = b.addTest(.{
+    const models_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/llm.zig"),
+            .root_source_file = b.path("src/models.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    llm_tests.root_module.addImport("fucina", module);
-    llm_tests.root_module.addOptions("llm_build_options", llm_options);
-    configureBlas(llm_tests, blas_kind);
-    configureGpu(b, llm_tests, gpu_kind);
-    configureLlguidance(llm_tests, llguidance_dep);
+    models_tests.root_module.addImport("fucina", module);
+    models_tests.root_module.addOptions("models_build_options", models_options);
+    configureBlas(models_tests, blas_kind);
+    configureGpu(b, models_tests, gpu_kind);
+    configureLlguidance(models_tests, llguidance_dep);
 
-    const run_llm_tests = b.addRunArtifact(llm_tests);
-    test_step.dependOn(&run_llm_tests.step);
+    const run_models_tests = b.addRunArtifact(models_tests);
+    test_step.dependOn(&run_models_tests.step);
 
-    const test_llm_step = b.step("test-llm", "Run the llm-root unit tests only");
-    test_llm_step.dependOn(&run_llm_tests.step);
+    const test_models_step = b.step("test-models", "Run the models-root unit tests only");
+    test_models_step.dependOn(&run_models_tests.step);
 
-    // The llm.serving band's tests ride test-llm (Zig collects tests from
-    // the root module only). That forces no libc on the llm root: the band's
+    // The models.text.serving band's tests ride test-models (Zig collects tests from
+    // the root module only). That forces no libc on the models root: the band's
     // tests never reach http's std.c hang-up probe, which lazy analysis
     // leaves out of the test binary.
-    const lmserve_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-lmserve", .desc = "Run the lmserve-root unit tests only", .root = "examples/lmserve/main.zig", .llm = true });
+    const lmserve_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-lmserve", .desc = "Run the lmserve-root unit tests only", .root = "examples/lmserve/main.zig", .models = true });
     lmserve_tests.root_module.addImport("nanochat", nanochat_module);
     configureLlguidance(lmserve_tests, llguidance_dep);
     lmserve_tests.root_module.link_libc = true;
@@ -534,26 +534,26 @@ pub fn build(b: *std.Build) void {
     const nam_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nam", .desc = "Run the nam-root unit tests only", .root = "examples/nam/main.zig" });
     configureNamAudio(nam_tests);
 
-    const parakeet_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-parakeet", .desc = "Run the parakeet-root unit tests only", .root = "examples/parakeet/main.zig", .llm = true });
+    const parakeet_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-parakeet", .desc = "Run the parakeet-root unit tests only", .root = "examples/parakeet/main.zig", .models = true });
     parakeet_tests.root_module.addImport("nam_audio", nam_audio_module);
     parakeet_tests.root_module.addOptions("build_options", parakeet_opts);
     if (parakeet_mic) configureAudioShim(parakeet_tests);
 
-    const omnivoice_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-omnivoice", .desc = "Run the omnivoice-root unit tests only", .root = "examples/omnivoice/main.zig", .llm = true });
+    const omnivoice_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-omnivoice", .desc = "Run the omnivoice-root unit tests only", .root = "examples/omnivoice/main.zig", .models = true });
     configureOmnivoiceAudio(omnivoice_tests);
 
-    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-locate-anything", .desc = "Run the locate_anything-root unit tests only", .root = "examples/locate_anything/main.zig", .llm = true });
+    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-locate-anything", .desc = "Run the locate_anything-root unit tests only", .root = "examples/locate_anything/main.zig", .models = true });
 
     _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-facedetect", .desc = "Run the facedetect-root unit tests only", .root = "examples/facedetect/main.zig" });
 
     // AEC/duplex leg: the GTCRN parity test gates every stage against the
     // exporter fixtures, so kernel work on aec.zig iterates on the solo step
     // instead of the full matrix.
-    const voiceagent_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-voiceagent", .desc = "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)", .root = "examples/voiceagent/main.zig", .llm = true });
+    const voiceagent_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-voiceagent", .desc = "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)", .root = "examples/voiceagent/main.zig", .models = true });
     voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
     configureAudioShim(voiceagent_tests);
 
-    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nanochat", .desc = "Run the nanochat-root unit tests only", .root = "examples/nanochat/main.zig", .llm = true });
+    _ = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nanochat", .desc = "Run the nanochat-root unit tests only", .root = "examples/nanochat/main.zig", .models = true });
 }
 
 /// Every value behind the `build_options` module, in one struct: the main
@@ -810,17 +810,16 @@ fn addLibrarySearchPath(b: *std.Build, module: *std.Build.Module, prefix: []cons
     module.addRPath(lib_path);
 }
 
-
 const ToolCtx = struct {
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     module: *std.Build.Module,
-    llm_module: *std.Build.Module,
+    models_module: *std.Build.Module,
     blas_kind: BlasKind,
     gpu_kind: GpuKind,
 };
 
-/// Standard test-root wiring: addTest + fucina (+ fucina_llm) imports,
+/// Standard test-root wiring: addTest + fucina (+ fucina_models) imports,
 /// BLAS/GPU config, registration into `zig build test`, and a solo
 /// `test-<name>` step so any root iterates without the full matrix.
 /// Special per-root wiring (extra imports, option modules, libc,
@@ -834,7 +833,7 @@ fn addTestRoot(
         step: []const u8,
         desc: []const u8,
         root: []const u8,
-        llm: bool = false,
+        models: bool = false,
     },
 ) *std.Build.Step.Compile {
     const tests = b.addTest(.{
@@ -845,7 +844,7 @@ fn addTestRoot(
         }),
     });
     tests.root_module.addImport("fucina", ctx.module);
-    if (spec.llm) tests.root_module.addImport("fucina_llm", ctx.llm_module);
+    if (spec.models) tests.root_module.addImport("fucina_models", ctx.models_module);
     configureBlas(tests, ctx.blas_kind);
     configureGpu(b, tests, ctx.gpu_kind);
     const run = b.addRunArtifact(tests);
@@ -859,7 +858,7 @@ const ExampleArtifacts = struct {
     run: *std.Build.Step.Run,
 };
 
-/// Standard example/tool wiring: exe + fucina (+ fucina_llm) imports,
+/// Standard example/tool wiring: exe + fucina (+ fucina_models) imports,
 /// BLAS/GPU config, install, and a run step forwarding `-- args`. Special
 /// per-target wiring (extra imports, libc, llguidance, option modules)
 /// attaches to the returned artifacts at the call site — the build graph is
@@ -872,7 +871,7 @@ fn addExample(
         desc: []const u8,
         exe: []const u8,
         root: []const u8,
-        llm: bool = false,
+        models: bool = false,
     },
 ) ExampleArtifacts {
     const exe = b.addExecutable(.{
@@ -884,7 +883,7 @@ fn addExample(
         }),
     });
     exe.root_module.addImport("fucina", ctx.module);
-    if (spec.llm) exe.root_module.addImport("fucina_llm", ctx.llm_module);
+    if (spec.models) exe.root_module.addImport("fucina_models", ctx.models_module);
     configureBlas(exe, ctx.blas_kind);
     configureGpu(b, exe, ctx.gpu_kind);
     const install = installArtifactStep(b, exe);

@@ -30,6 +30,6 @@ CPU, `--no-fa`): greedy generation matches **token-for-token** (37×16 frames,
 natural EOS) and seeded sampling replays the oracle **draw-for-draw**
 (Philox4x32-10, one subsequence per primitive sample); the codec decodes the
 golden RVQ stream at ≥0.9999 waveform cosine with per-stage probes
-(`src/llm/qwen3tts/*_tests.zig`, model-gated). On an M1 Max the 0.6B F32
+(`src/models/qwen3tts/*_tests.zig`, model-gated). On an M1 Max the 0.6B F32
 talker generates ~13 fps against the 12.5 fps real-time budget and the codec
 decodes at ~0.5× RTF one-shot.

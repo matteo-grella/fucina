@@ -24,10 +24,10 @@ listed here.
 ### 1.1 Layering is a one-way street
 
 A band may depend only on bands at or below it: apps (`examples/`, `tools/`,
-`bench/`) → llm (`src/llm/`) → facade (`src/fucina.zig`) → autograd/training
+`bench/`) → models (`src/models/`) → facade (`src/fucina.zig`) → autograd/training
 (`src/ag/`, optim/es/lora/persistence) → tagged ops (`src/tag_ops.zig`) →
 exec runtime (`src/exec/`) → backends (`src/backend/`) → tensor/storage/dtype.
-`fucina_llm` files import the `fucina` *module* (public surface plus
+`fucina_models` files import the `fucina` *module* (public surface plus
 `fucina.internal`), never individual `src/*.zig` files.
 
 *Enforced by:* `zig build arch-check` — the production import graph of `src/`,
@@ -107,10 +107,10 @@ or build on the machine that runs it.
 
 ### 1.8 Placement policy
 
-Reusable engines other `src/llm` consumers should import go in
-`src/llm/<family>/`; single-purpose parity ports and their DSP/IO plumbing
+Reusable engines other `src/models` consumers should import go in
+`src/models/<family>/`; single-purpose parity ports and their DSP/IO plumbing
 stay example-local in `examples/<name>/`; generic helpers stay flat in
-`src/llm/`; family-specific kernel orchestration lives in the family over
+`src/models/`; family-specific kernel orchestration lives in the family over
 the `fucina.internal` seam, never inside the generic exec runtime; shared
 cross-family scheduling lives once in exec and is re-exported
 (`exec/moe_chain.zig` is the pattern). New core tensor ops belong in the
@@ -177,14 +177,14 @@ designing.
 
 | New work | Start from | Why |
 | --- | --- | --- |
-| LLM family, llama-shaped | `src/llm/qwen3/` | cleanest dense+MoE model, spec decode, trainer |
-| LLM family, SPM tokenizer / sliding window / MoE engines | `src/llm/gemma/` | per-layer KV geometry, MoE engine with GPU arm |
-| Hybrid/recurrent blocks | `src/llm/qwen35/` | Gated-DeltaNet over the same loader conventions |
-| MLA / MTP / streamed-expert giants | `src/llm/deepseek4/` | compressed KV, hyper-connections, out-of-core experts |
-| Non-autoregressive decoder | `src/llm/diffusion_gemma/` | two forward modes over one weight set |
+| LLM family, llama-shaped | `src/models/qwen3/` | cleanest dense+MoE model, spec decode, trainer |
+| LLM family, SPM tokenizer / sliding window / MoE engines | `src/models/gemma/` | per-layer KV geometry, MoE engine with GPU arm |
+| Hybrid/recurrent blocks | `src/models/qwen35/` | Gated-DeltaNet over the same loader conventions |
+| MLA / MTP / streamed-expert giants | `src/models/deepseek4/` | compressed KV, hyper-connections, out-of-core experts |
+| Non-autoregressive decoder | `src/models/diffusion_gemma/` | two forward modes over one weight set |
 | Pure-CNN vision port | `examples/facedetect/` | load-once models, BN-fold at load, byte-identical JSON goldens |
 | VLM port | `examples/locate_anything/` | ViT tower + LM, custom RopeTable, MTP box decode |
-| ASR / encoder stack | `src/llm/parakeet/` | the reusable-family precedent |
+| ASR / encoder stack | `src/models/parakeet/` | the reusable-family precedent |
 | TTS / codec port | `examples/omnivoice/` | codec parity, RNG parity, chunked streaming |
 | Streaming DSP / effects | `examples/nam/` | streaming engines, format interchange, live IO |
 | Training pipeline | `examples/nanochat/`, `examples/spirals/main.zig`, `examples/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
@@ -257,7 +257,7 @@ profile-confirm the hot path is armed.
 A public-API change updates [REFERENCE.md](REFERENCE.md) — and its snippets
 are tests (`zig build snippet-check` extracts every fenced block with a
 column-0 `test "..."` and runs it against the real modules). The authoring
-contract is REFERENCE.md §2.7: implicit prelude (`std`/`fucina`/`llm`/
+contract is REFERENCE.md §2.7: implicit prelude (`std`/`fucina`/`models`/
 `optim`), `<!-- snippet: helper -->` for prose-introduced definitions,
 `<!-- snippet: skip -->` only for genuinely non-hermetic blocks; opt-in
 feature snippets stay runnable behind their comptime-flag guard. New docs
@@ -315,4 +315,4 @@ Module stability tiers are declared in each module's doc comment and
 summarized in the CHANGELOG: **stable** modules (`tensor`, `ag`, `exec`,
 `gguf`, `weights`, the serving contract) always get a CHANGELOG rewrite;
 **experimental** modules (`es`, `ptqtp`, `speculative`, research features
-under `llm/`) may change with a CHANGELOG entry only.
+under `models/`) may change with a CHANGELOG entry only.

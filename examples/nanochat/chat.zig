@@ -8,9 +8,9 @@
 //! local sampler over `fucina` only (temp==0 → argmax, the parity path; temp>0 →
 //! top-k + softmax + a fucina-rng multinomial draw — functional, NOT
 //! torch-bit-parity, matching engine.py sample_next_token modulo the RNG).
-//! The pretokenizer's unicode tables come through the `fucina_llm` re-export
-//! (`llm.unicode_categories`), so nanochat code can share a compilation with
-//! fucina_llm consumers (the serve example hosts both).
+//! The pretokenizer's unicode tables come through the `fucina_models` re-export
+//! (`models.text.unicode_categories`), so nanochat code can share a compilation with
+//! fucina_models consumers (the serve example hosts both).
 //!
 //! Files: engine over one Model + one Tokenizer, batch-1 prefill of the whole
 //! context into a fresh Cache, then a one-token-per-step decode loop; the tool

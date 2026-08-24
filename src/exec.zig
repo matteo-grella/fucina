@@ -539,14 +539,14 @@ pub const ExecContext = struct {
 
     /// Shared batched-MoE scheduling scaffolding (route plan, phase-chain
     /// machinery, chunk helpers, profile timers). Lives in exec/moe_chain.zig;
-    /// exposed as an ExecContext decl so the gemma MoE engines at the llm
+    /// exposed as an ExecContext decl so the gemma MoE engines at the models
     /// layer reach the exact same types through the `fucina` root.
     pub const moe_chain = exec_moe_chain;
 
     /// Fused gate|up MoE expert kernels over raw GGUF stack layouts
     /// (`exec/moe_gu.zig`): the packed Q6_Kx4/Q8_0x4 arms, the raw
     /// Q6_K/Q4_K block arm, and the GPU batch path. The gemma family's
-    /// tagged wrappers live in `llm/gemma/moe.zig`.
+    /// tagged wrappers live in `models/gemma/moe.zig`.
     pub const moe_gu = exec_moe_gu;
 
     // ----------------------------------------------------------------------

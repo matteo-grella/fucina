@@ -4,7 +4,7 @@
 //! user-facing configuration is one file; a leaf (the store types it
 //! configures are named in doc comments only). The shared `--moe-*` argv
 //! parser and the exit-time report live with the runners
-//! (`llm.moe_stream_cli`).
+//! (`models.moe_stream_cli`).
 
 /// Opt-in disk streaming for the MoE expert stacks, shared by every MoE
 /// loader (`LoadOptions.moe_stream`): experts stay on disk and are `pread`

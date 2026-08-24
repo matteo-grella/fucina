@@ -81,7 +81,7 @@ Deliberate deltas from the paper:
   gradient-tracking or non-contiguous inputs. Dispatch granularity is the
   decode bottleneck this design addresses: per-plane fork-joins cost more
   than the ternary kernel itself at 1.7B decode shapes.
-- `src/llm/qwen3/ptqtp.zig`: `qwen3.ptqtp.decorate(model, ctx, options)`
+- `src/models/qwen3/ptqtp.zig`: `qwen3.ptqtp.decorate(model, ctx, options)`
   walks attention q/k/v (split or fused), o_proj, and dense FFN projections
   in place. `DecorateOptions`: `solver` (plane count etc.),
   `skip_first_layers`/`skip_last_layers` (edge layers stay in source

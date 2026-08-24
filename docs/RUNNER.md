@@ -1,12 +1,12 @@
-# The descriptor runner
+# The qwen3 descriptor runner
 
-`llm.runner` (`src/llm/runner.zig`) is one family-independent decoder
+`models.qwen3.runner` (`src/models/qwen3/runner.zig`) is one family-independent decoder
 implementation driven by a runtime `Descriptor` instead of per-family
 forward code — Level 0 of the universal checkpoint runner design
 (descriptor + weights → runnable model; the follow-on levels are the
 metadata compiler for more families and the divergence-guided recovery
 loop). It is also the production decoder for the qwen3 family:
-`src/llm/qwen3/model.zig` is an alias surface over it (`Config` IS
+`src/models/qwen3/model.zig` is an alias surface over it (`Config` IS
 `runner.Descriptor`, `Model` IS `runner.Model`), and the glm4moe family's
 trunk runs on its host_reference blocks.
 
@@ -30,7 +30,7 @@ trunk runs on its host_reference blocks.
   family serves through it, the `.fused` style also carries the batched
   decode entries (`forwardStepBatch`, `forwardStepBatchSpans`) and the
   nullable SubQ research seam. `runner.Model` conforms to the decoder
-  contract (`llm.decoder`: `Cache` = the shared `KvCache`, `caps` =
+  contract (`models.decoder`: `Cache` = the shared `KvCache`, `caps` =
   rewind + batch, `initCache`, `forwardStep`), so every generic layer
   (chat, speculative, serving, generate) hosts it.
 
@@ -54,7 +54,7 @@ structural vocabulary, not family names:
 
 ## Correctness status
 
-`src/llm/runner_tests.zig` pins the runner against **recorded goldens**:
+`src/models/qwen3/runner_tests.zig` pins the runner against **recorded goldens**:
 greedy argmax chains asserted everywhere, plus exact FNV-1a logit-bit
 hashes on the machine class the goldens were recorded on (aarch64 native,
 Accelerate BLAS) — a refactor that changes a single output bit fails

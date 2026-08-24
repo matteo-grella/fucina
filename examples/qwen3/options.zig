@@ -3,7 +3,7 @@
 //! both `--flag VALUE` and `--flag=VALUE`.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 pub const default_tokens = [_]usize{ 151_644, 872, 198, 9707 };
 
@@ -18,7 +18,7 @@ pub const Options = struct {
     bench_reps: usize = 1,
     verify_count: ?usize = null,
     verify_batch_count: ?usize = null,
-    cache_type: llm.kv_cache.KvDtype = .f16,
+    cache_type: models.text.kv_cache.KvDtype = .f16,
     stop_token: ?usize = null,
     prompt_text: ?[]const u8 = null,
     info_flag: bool = false,
@@ -41,7 +41,7 @@ pub const Options = struct {
     minp_arg: ?f32 = null,
     penalty_arg: ?f32 = null,
     seed_arg: ?u64 = null,
-    moe_cli: llm.moe_stream_cli.MoeStreamCli = .{},
+    moe_cli: models.moe_stream_cli.MoeStreamCli = .{},
     moe_cache_slots: ?usize = null,
     moe_pin_mb: ?usize = null,
     moe_no_learn: bool = false,
@@ -293,7 +293,7 @@ pub fn parse(args: []const []const u8, stdout: *std.Io.Writer, token_buf: []usiz
         } else if (std.mem.startsWith(u8, arg, "--regex=")) {
             o.regex_arg = arg["--regex=".len..];
         } else if (try o.moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
+            // Shared streamed-experts flags (models.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.startsWith(u8, arg, "--moe-cache-slots=")) {
             o.moe_cli.armed = true;
             o.moe_cache_slots = try std.fmt.parseInt(usize, arg["--moe-cache-slots=".len..], 10);
@@ -341,7 +341,7 @@ fn parseRepeat(input: []const u8) !usize {
     return repeat;
 }
 
-fn parseCacheType(input: []const u8) !llm.kv_cache.KvDtype {
+fn parseCacheType(input: []const u8) !models.text.kv_cache.KvDtype {
     if (std.mem.eql(u8, input, "f16")) return .f16;
     if (std.mem.eql(u8, input, "q8_0")) return .q8_0;
     return error.InvalidCacheType;

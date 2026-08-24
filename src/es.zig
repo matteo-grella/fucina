@@ -97,7 +97,7 @@
 //! (`d`) are never touched. All three ternary knobs and the flip-stream
 //! mapping are checkpoint contracts like `antithetic` (persisted as the
 //! `es_ternary_*` fields of the trainers' checkpoint state,
-//! `fucina_llm.trainer_state.TrainerState`).
+//! `fucina_models.train.trainer_state.TrainerState`).
 //!
 //! Stability: experimental (CHANGELOG.md tiers).
 

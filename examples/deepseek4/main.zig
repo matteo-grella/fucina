@@ -13,11 +13,11 @@
 //!     --vectors=path/to/ds4/tests/test-vectors/official
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
-const Model = llm.deepseek4.model.Model;
-const Session = llm.deepseek4.model.Session;
-const Tokenizer = llm.tokenizer.Tokenizer;
+const Model = models.deepseek4.model.Model;
+const Session = models.deepseek4.model.Session;
+const Tokenizer = models.text.tokenizer.Tokenizer;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 16;
-    var moe_cli: llm.moe_stream_cli.MoeStreamCli = .{};
+    var moe_cli: models.moe_stream_cli.MoeStreamCli = .{};
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--vectors-max-prompt=")) {
             vectors_max_prompt = try std.fmt.parseInt(usize, arg["--vectors-max-prompt=".len..], 10);
         } else if (try moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
+            // Shared streamed-experts flags (models.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
             // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
             // prefer already-resident experts among the top-M ranks.
@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init) !void {
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.moe_stream_cli.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
+    defer if (model.expert_store) |store| models.moe_stream_cli.reportAndSaveMoeStream(store, !moe_no_learn, stdout);
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});
 
@@ -236,7 +236,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
     if (index_probe) try session.enableIndexProbe(&model);
 
-    var mtp: ?llm.deepseek4.model.Mtp = if (mtp_path) |mp| try llm.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
+    var mtp: ?models.deepseek4.model.Mtp = if (mtp_path) |mp| try models.deepseek4.model.Mtp.loadGguf(&ctx, init.io, mp, model.config) else null;
     defer if (mtp) |*m| m.deinit();
     if (mtp != null and temp_arg > 0) {
         // MTP verify is exact only against greedy: acceptance compares the
@@ -264,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
             // Final-row-only stream request: exactly the frontier the drafter
             // needs, and it keeps the model's final-layer FFN truncation
             // active during prefill.
-            logits = try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, tokens.items[fed..end], null, .{ .final = frontier });
+            logits = try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, tokens.items[fed..end], null, .{ .final = frontier });
             fed = end;
         }
     }
@@ -279,7 +279,7 @@ pub fn main(init: std.process.Init) !void {
     var draft_hits: usize = 0;
 
     if (mtp) |*m| {
-        var state = try llm.deepseek4.model.MtpState.init(allocator, model.config);
+        var state = try models.deepseek4.model.MtpState.init(allocator, model.config);
         defer state.deinit(allocator);
         var next_token = argmax(logits);
         const streams_all = try allocator.alloc(f32, (mtp_depth + 1) * hc_dim);
@@ -296,7 +296,7 @@ pub fn main(init: std.process.Init) !void {
             const saved_rows = state.n_rows;
             var seed: []const f32 = frontier;
             while (n_drafts <= mtp_depth) : (n_drafts += 1) {
-                const dl = try llm.deepseek4.model.mtpDraftStep(&model, m, &ctx, &state, draft_buf[n_drafts - 1], seed, session.cache.len() + n_drafts - 1);
+                const dl = try models.deepseek4.model.mtpDraftStep(&model, m, &ctx, &state, draft_buf[n_drafts - 1], seed, session.cache.len() + n_drafts - 1);
                 defer allocator.free(dl);
                 draft_buf[n_drafts] = argmax(dl);
                 seed = state.streams;
@@ -313,7 +313,7 @@ pub fn main(init: std.process.Init) !void {
             ctx.pinRowwiseKernels(true);
             _ = blk: {
                 defer ctx.pinRowwiseKernels(false);
-                break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
+                break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
             };
             forwards += 1;
             var accepted: usize = 1;
@@ -346,7 +346,7 @@ pub fn main(init: std.process.Init) !void {
                 // session's buffer and the next step segfaults).
                 _ = blk: {
                     defer ctx.pinRowwiseKernels(false);
-                    break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                    break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
                 forwards += 1;
             }
@@ -358,7 +358,7 @@ pub fn main(init: std.process.Init) !void {
         // contract as --mtp (byte-identical to plain greedy), no sidecar,
         // no drafter I/O, and the dense trunk stream amortizes over every
         // accepted token.
-        var index = try llm.speculative.cascade.SpeculationIndex.init(allocator, model.config.vocab_size);
+        var index = try models.text.speculative.cascade.SpeculationIndex.init(allocator, model.config.vocab_size);
         defer index.deinit();
         index.accounting_min_draft = 1;
         const source = index.asDraftSource();
@@ -371,7 +371,7 @@ pub fn main(init: std.process.Init) !void {
         const rows = try allocator.alloc([]f32, 9);
         defer allocator.free(rows);
         var topk_ids: [9][8]u32 = undefined;
-        var topk_rows: [9]llm.speculative.core.TopKRow = undefined;
+        var topk_rows: [9]models.text.speculative.core.TopKRow = undefined;
         var next_token = argmax(logits);
 
         decode: while (produced < gen_count) {
@@ -392,7 +392,7 @@ pub fn main(init: std.process.Init) !void {
                 if (produced == gen_count) break;
                 try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
                 produced += 1;
-                logits = try llm.deepseek4.model.step(&model, &ctx, &session, next_token);
+                logits = try models.deepseek4.model.step(&model, &ctx, &session, next_token);
                 forwards += 1;
                 if (wants_topk) {
                     topKIds(logits, topk_ids[0][0..]);
@@ -408,7 +408,7 @@ pub fn main(init: std.process.Init) !void {
             ctx.pinRowwiseKernels(true);
             _ = blk: {
                 defer ctx.pinRowwiseKernels(false);
-                break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], null);
+                break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], null);
             };
             forwards += 1;
             var accepted: usize = 1;
@@ -447,7 +447,7 @@ pub fn main(init: std.process.Init) !void {
                 // session's buffer and the next step segfaults).
                 _ = blk: {
                     defer ctx.pinRowwiseKernels(false);
-                    break :blk try llm.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
+                    break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
                 forwards += 1;
             }
@@ -455,7 +455,7 @@ pub fn main(init: std.process.Init) !void {
         try index.writeSourceSummary(stdout);
         try stdout.print("\n", .{});
     } else {
-        var sampler = llm.sampler.Sampler.init(.{
+        var sampler = models.text.sampler.Sampler.init(.{
             .temperature = temp_arg,
             .top_k = topk_arg,
             .top_p = topp_arg,
@@ -475,7 +475,7 @@ pub fn main(init: std.process.Init) !void {
             if (eos != null and best == eos.?) break;
             try tokenizer.decodeAppend(allocator, @intCast(best), &reply);
             try history.append(allocator, best);
-            logits = try llm.deepseek4.model.step(&model, &ctx, &session, best);
+            logits = try models.deepseek4.model.step(&model, &ctx, &session, best);
             forwards += 1;
         }
     }
@@ -648,7 +648,7 @@ fn runNll(
         const chunk = end - fed;
         // The returned final-row logits ALIAS rows[chunk-1] when rows are
         // requested (stepBatchExtra contract) — freeing the rows frees it.
-        _ = try llm.deepseek4.model.stepBatchExtra(model, ctx, &session, tokens[fed..end], rows[0..chunk], null);
+        _ = try models.deepseek4.model.stepBatchExtra(model, ctx, &session, tokens[fed..end], rows[0..chunk], null);
         defer for (rows[0..chunk]) |r| allocator.free(r);
         for (0..chunk) |j| {
             const pos = fed + j;
@@ -738,7 +738,7 @@ fn runVectors(
         var fed: usize = 0;
         while (fed < tokens.items.len) {
             const end = @min(fed + prefill_chunk, tokens.items.len);
-            logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens.items[fed..end]);
+            logits = try models.deepseek4.model.stepBatch(model, ctx, &session, tokens.items[fed..end]);
             fed = end;
         }
 
@@ -749,7 +749,7 @@ fn runVectors(
             const best = argmax(logits);
             if (eos != null and best == eos.?) break;
             try tokenizer.decodeAppend(allocator, @intCast(best), &ours);
-            logits = try llm.deepseek4.model.step(model, ctx, &session, best);
+            logits = try models.deepseek4.model.step(model, ctx, &session, best);
         }
 
         // Longest official step-prefix our continuation reproduces.
@@ -870,7 +870,7 @@ fn runGolden(
     for (tokens, ids32[0..g.frontier]) |*t, id| t.* = id;
     while (fed < g.frontier) {
         const end = @min(fed + prefill_chunk, g.frontier);
-        logits = try llm.deepseek4.model.stepBatch(model, ctx, &session, tokens[fed..end]);
+        logits = try models.deepseek4.model.stepBatch(model, ctx, &session, tokens[fed..end]);
         fed = end;
     }
 

@@ -26,7 +26,7 @@
 //!   zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-1.7B-BF16.gguf --planes 3 --save models/qwen3-1.7b-ptqtp-k3.gguf
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const ExecContext = fucina.ExecContext;
 
@@ -103,9 +103,9 @@ pub fn main(init: std.process.Init) !void {
     const load_start = nowNs(io);
     var file = try fucina.gguf.File.loadMmap(allocator, init.io, args[1]);
     defer file.deinit();
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
     try stdout.print("loaded {s}: {d} layers, hidden {d}, vocab {d} ({d:.2} s)\n", .{
         args[1],                         model.config.num_layers,
@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (planes > 0) {
         const q_start = nowNs(io);
-        const report = try llm.qwen3.ptqtp.decorate(&model, &ctx, .{
+        const report = try models.qwen3.ptqtp.decorate(&model, &ctx, .{
             .solver = .{ .planes = @intCast(planes), .tie_scales = tie_scales },
             .skip_first_layers = skip_first,
             .skip_last_layers = skip_last,
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (save_path) |path| {
         const save_start = nowNs(io);
-        const saved = try llm.qwen3.ptqtp.save(&model, &ctx, io, &file, path);
+        const saved = try models.qwen3.ptqtp.save(&model, &ctx, io, &file, path);
         try stdout.print(
             "saved {s}: {d} decorated tensors -> {d} planes, {d} passed through, {d} appended ({d:.2} s)\n",
             .{ path, saved.decorated, saved.planes, saved.passthrough, saved.appended, seconds(nowNs(io) - save_start) },
@@ -245,7 +245,7 @@ const NllResult = struct { nll: f64, count: usize };
 /// Mean teacher-forced negative log-likelihood of tokens[1..] given their
 /// prefixes, computed from full-position logits in 128-token chunks (one KV
 /// pass over the sequence — prefill speed, deployed forward path).
-fn nllOverTokens(ctx: *ExecContext, model: *llm.qwen3.model.Model, tokens: []const usize) !NllResult {
+fn nllOverTokens(ctx: *ExecContext, model: *models.qwen3.model.Model, tokens: []const usize) !NllResult {
     var kv = try model.initCache(ctx, tokens.len);
     defer kv.deinit();
     const chunk_len: usize = 128;
@@ -280,7 +280,7 @@ fn argmaxId(ctx: *ExecContext, logits: *const fucina.Tensor(.{ .seq, .vocab })) 
     return @intCast(values[values.len - 1]);
 }
 
-fn tokenizeTextFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, path: []const u8) ![]usize {
+fn tokenizeTextFile(io: std.Io, allocator: std.mem.Allocator, tok: *const models.text.tokenizer.Tokenizer, path: []const u8) ![]usize {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const stat = try file.stat(io);

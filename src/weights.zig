@@ -19,10 +19,10 @@
 //!     not stray: `LinearWeight.linearSeq` is a union dispatch INTO the
 //!     per-format arms and the arms take the container types back, so the
 //!     container and its multiply are one mutually-dependent unit.
-//!   * `llm/model_common.zig` (llm band) — the subject is a GGUF FILE's
+//!   * `models/model_common.zig` (models band) — the subject is a GGUF FILE's
 //!     layout: which tensor names a family's layer trio has, how an
 //!     embed/head/norm set is read. Naming conventions, not numerics.
-//!   * `llm/host_ops.zig` (llm band) — the subject is raw f32 HOST SLICES,
+//!   * `models/host_ops.zig` (models band) — the subject is raw f32 HOST SLICES,
 //!     for the host-reference ports that run below the Tensor facade.
 //!
 //! A helper that fits none of these wants a new home with a stated subject,
@@ -1454,8 +1454,8 @@ pub fn loadMoeRhsPtqtp(
 
 // The streamed-experts options struct lives in weights/moe_stream.zig; the
 // shared `--moe-*` argv parser and the exit-time report belong to the
-// runners (`llm.moe_stream_cli`), the cache-aware routing policy to
-// `llm.moe_router`.
+// runners (`models.moe_stream_cli`), the cache-aware routing policy to
+// `models.moe_router`.
 const moe_stream = @import("weights/moe_stream.zig");
 pub const MoeStreamOptions = moe_stream.MoeStreamOptions;
 

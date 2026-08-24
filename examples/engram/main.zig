@@ -19,14 +19,14 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const ExecContext = fucina.ExecContext;
-const engram = llm.research.engram;
+const engram = models.research.engram;
 // LoRA arm targets q/v (the trainer default shape); rank 1 alpha 1 with
 // q=v=false is the no-adapter trainer (cartridge.zig precedent).
-const TrainerQV = llm.qwen3.train.Trainer(.{});
-const TrainerNone = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
+const TrainerQV = models.qwen3.train.Trainer(.{});
+const TrainerNone = models.qwen3.train.Trainer(.{ .q = false, .v = false });
 
 const Options = struct {
     model_path: []const u8 = "models/Qwen3-0.6B-f16.gguf",
@@ -137,9 +137,9 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     var file = try fucina.gguf.File.loadMmap(allocator, io, opts.model_path);
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
     tokenizer_ptr = &tokenizer;
     file.deinit();
@@ -234,7 +234,7 @@ fn hashChunk(allocator: std.mem.Allocator, graft: *const engram.Engram, tokens: 
     }
 }
 
-fn runEquiv(ctx: *ExecContext, stdout: anytype, allocator: std.mem.Allocator, model: *llm.qwen3.model.Model, graft: *engram.Engram, opts: Options) !void {
+fn runEquiv(ctx: *ExecContext, stdout: anytype, allocator: std.mem.Allocator, model: *models.qwen3.model.Model, graft: *engram.Engram, opts: Options) !void {
     var trainer = try TrainerNone.init(ctx, model, .{ .rank = 1, .alpha = 1 }, opts.seed);
     defer trainer.deinit();
     const text = "The equivalence gate feeds a fixed English sentence through both forwards and compares every logit bitwise.";
@@ -272,7 +272,7 @@ fn runEquiv(ctx: *ExecContext, stdout: anytype, allocator: std.mem.Allocator, mo
     try stdout.print("equiv: BITWISE IDENTICAL (zero-init graft is exact identity)\n", .{});
 }
 
-var tokenizer_ptr: ?*llm.tokenizer.Tokenizer = null;
+var tokenizer_ptr: ?*models.text.tokenizer.Tokenizer = null;
 
 fn tokenizer_encode(allocator: std.mem.Allocator, text: []const u8) ![]usize {
     const t = tokenizer_ptr orelse return error.NoTokenizer;
@@ -321,7 +321,7 @@ fn runTrainEval(
         const tokens = ids[train_chunk * chunk ..][0..chunk];
         train_chunk = (train_chunk + 1) % n_chunks;
 
-        var fwd = llm.qwen3.train.ForwardOptions{};
+        var fwd = models.qwen3.train.ForwardOptions{};
         const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
         if (!opts.no_engram) {
             try hashChunk(allocator, graft, tokens[0 .. tokens.len - 1], rows);
@@ -392,7 +392,7 @@ fn evalHeldOut(
         var held: usize = 7;
         while (held < n_chunks and count < opts.eval_chunks) : (held += 8) {
             const tokens = ids[held * chunk ..][0..chunk];
-            var fwd = llm.qwen3.train.ForwardOptions{};
+            var fwd = models.qwen3.train.ForwardOptions{};
             const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
             if (arm == 1) {
                 try hashChunk(allocator, graft, tokens[0 .. tokens.len - 1], rows);
@@ -470,7 +470,7 @@ fn runProbes(
             total_targets += probe_target_len;
 
             for (0..2) |arm| {
-                var fwd = llm.qwen3.train.ForwardOptions{};
+                var fwd = models.qwen3.train.ForwardOptions{};
                 const graft_adapter = engram.ResidualGraft{ .model = graft, .rows = rows_const };
                 if (arm == 1 and !opts.no_engram) {
                     try hashChunk(allocator, graft, tokens, rows);
@@ -530,7 +530,7 @@ fn seconds(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e9;
 }
 
-fn loadCorpusIds(allocator: std.mem.Allocator, io: std.Io, tokenizer: *llm.tokenizer.Tokenizer, path: []const u8) ![]usize {
+fn loadCorpusIds(allocator: std.mem.Allocator, io: std.Io, tokenizer: *models.text.tokenizer.Tokenizer, path: []const u8) ![]usize {
     tokenizer_ptr = tokenizer;
     if (path.len == 0) return error.NoCorpus;
     var list: std.ArrayList(usize) = .empty;
@@ -566,7 +566,7 @@ fn loadCorpusIds(allocator: std.mem.Allocator, io: std.Io, tokenizer: *llm.token
     return list.toOwnedSlice(allocator);
 }
 
-fn appendFileIds(allocator: std.mem.Allocator, io: std.Io, tokenizer: *llm.tokenizer.Tokenizer, list: *std.ArrayList(usize), path: []const u8) !void {
+fn appendFileIds(allocator: std.mem.Allocator, io: std.Io, tokenizer: *models.text.tokenizer.Tokenizer, list: *std.ArrayList(usize), path: []const u8) !void {
     var dir = std.Io.Dir.cwd();
     const text = try dir.readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(text);

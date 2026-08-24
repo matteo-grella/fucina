@@ -1,4 +1,4 @@
-//! Flat GGUF loader glue shared by the model families (`llm/<family>/`):
+//! Flat GGUF loader glue shared by the model families (`models/<family>/`):
 //! `<arch>.<suffix>` metadata readers and the comptime-generic parallel layer
 //! loader. Family model files keep thin wrappers that pin their per-family
 //! policy (zero handling, layer load/deinit shape).

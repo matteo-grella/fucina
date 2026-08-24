@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const philox = @import("philox.zig");
 const resample = @import("resample.zig");
@@ -325,7 +325,7 @@ fn runTts(
         return runLlmTest(allocator, io, stdout, &ctx, &lm_model, in_path, out_path.?);
     }
 
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &lm_file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &lm_file, .{});
     defer tok.deinit();
 
     if (maskgit_test) {

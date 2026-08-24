@@ -186,7 +186,7 @@ finding that sparse single-bin updates *improve* stability transfers whole):
 - Config: `ternary_flip_rate` (0.001), `ternary_update_fraction` (0.005),
   `ternary_update_decay` (0.0) — checkpoint contracts, persisted as
   `es_ternary_*` in the trainers' checkpoint state
-  (`fucina_llm.trainer_state.TrainerState`). Float and ternary slots coexist in one
+  (`fucina_models.train.trainer_state.TrainerState`). Float and ternary slots coexist in one
   trainer (biases/scales stay Gaussian-ES floats); the float noise streams
   are untouched (pinned bitwise by a mixed-trainer test).
 

@@ -1,9 +1,9 @@
 //! Evolution-strategies fine-tuning demo on a real Qwen3 GGUF — the
 //! gradient-free counterpart of examples/finetune/main.zig, built for
 //! apples-to-apples comparison: same model loading, same built-in pirate
-//! dataset / `--data` JSONL path (`llm.data` SftText/encodePair/Loader), same
+//! dataset / `--data` JSONL path (`models.text.data` SftText/encodePair/Loader), same
 //! deterministic `--shuffle` loader, same checkpoint directory layout, and
-//! the same `llm.qwen3.train.Trainer` forward for evaluation. What changes is
+//! the same `models.qwen3.train.Trainer` forward for evaluation. What changes is
 //! the learning signal: no backward pass, no optimizer state — `fucina.es`
 //! perturbs the parameters with seed-regenerated gaussian noise, scores each
 //! population member with a reward, and applies the ES-at-scale update
@@ -54,23 +54,23 @@
 //! the population stream on `--load`.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const es = fucina.es;
 const training_checkpoint = fucina.training_checkpoint;
-const TrainerState = llm.trainer_state.TrainerState;
+const TrainerState = models.train.trainer_state.TrainerState;
 
 const default_model = "models/Qwen3-0.6B-Q4_K_S.gguf";
 const default_save = "/tmp/fucina-qwen3-es";
 
 /// LoRA on q and v projections — the same target set as examples/finetune/main.zig.
-const LoraTrainer = llm.qwen3.train.Trainer(.{ .q = true, .v = true });
+const LoraTrainer = models.qwen3.train.Trainer(.{ .q = true, .v = true });
 /// Zero adapters: the identical trainer forward evaluating the raw base
 /// model — the eval vehicle for full-parameter ES.
-const FullTrainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
+const FullTrainer = models.qwen3.train.Trainer(.{ .q = false, .v = false });
 
 /// The pirate dataset from examples/finetune/main.zig, verbatim — apples to apples.
-const dataset = [_]llm.data.Pair{
+const dataset = [_]models.text.data.Pair{
     .{ .instruction = "What is the capital of France?", .response = "Ahoy! The capital of France be Paris, matey." },
     .{ .instruction = "Name a primary color.", .response = "Ahoy! Red be a fine primary color, matey." },
     .{ .instruction = "What is two plus two?", .response = "Ahoy! Two plus two makes four, matey." },
@@ -204,11 +204,11 @@ pub fn main(init: std.process.Init) !void {
     // Load model + tokenizer from the same GGUF parse (as finetune.zig).
     const load_start = nowNs(io);
     var file = try fucina.gguf.File.loadMmap(allocator, io, model_path);
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse llm.chat.Template{ .format = .chatml };
+    const template = models.text.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse models.text.chat.Template{ .format = .chatml };
     file.deinit();
     try stdout.print("model: {s} ({d} layers, hidden {d})  load {d:.2} s\n", .{
         model_path, model.config.num_layers, model.config.hidden_size, seconds(nowNs(io) - load_start),
@@ -238,9 +238,9 @@ fn runEs(
     comptime TrainerT: type,
     comptime mode: Mode,
     ctx: *fucina.ExecContext,
-    model: *llm.qwen3.model.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    template: llm.chat.Template,
+    model: *models.qwen3.model.Model,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
+    template: models.text.chat.Template,
     opts: Options,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -303,23 +303,23 @@ fn runEs(
 
     // Data source + encoding: identical to finetune.zig.
     var sft = if (opts.data_path) |path|
-        try llm.data.SftText.fromJsonl(allocator, io, path, .{})
+        try models.text.data.SftText.fromJsonl(allocator, io, path, .{})
     else
-        llm.data.SftText.fromPairs(&dataset);
+        models.text.data.SftText.fromPairs(&dataset);
     defer sft.deinit(allocator);
     const pairs = sft.pairs;
     if (pairs.len == 0) return error.EmptyDataset;
 
-    const encode_opts = llm.data.EncodeOptions{
+    const encode_opts = models.text.data.EncodeOptions{
         .seq_max = opts.seq_max,
-        .ignore_index = llm.qwen3.train.ignore_index,
+        .ignore_index = models.qwen3.train.ignore_index,
     };
-    const samples = try allocator.alloc(llm.data.Sample, pairs.len);
+    const samples = try allocator.alloc(models.text.data.Sample, pairs.len);
     defer allocator.free(samples);
     var built_samples: usize = 0;
     defer for (samples[0..built_samples]) |*sample| sample.deinit(allocator);
     for (samples, pairs) |*sample, pair| {
-        sample.* = try llm.data.encodePair(allocator, tokenizer, template, pair, encode_opts);
+        sample.* = try models.text.data.encodePair(allocator, tokenizer, template, pair, encode_opts);
         built_samples += 1;
     }
 
@@ -330,13 +330,13 @@ fn runEs(
     var built_prompts: usize = 0;
     defer for (prompts[0..built_prompts]) |prompt| allocator.free(prompt);
     for (prompts, pairs) |*prompt, pair| {
-        prompt.* = try llm.data.encodePrompt(allocator, tokenizer, template, pair.instruction, encode_opts);
+        prompt.* = try models.text.data.encodePrompt(allocator, tokenizer, template, pair.instruction, encode_opts);
         built_prompts += 1;
     }
 
     const stop_id: ?usize = if (tokenizer.tokenId("<|im_end|>")) |id| @as(usize, id) else null;
 
-    var loader = try llm.data.Loader.init(
+    var loader = try models.text.data.Loader.init(
         allocator,
         samples.len,
         if (opts.shuffle) .shuffled else .sequential,
@@ -445,11 +445,11 @@ fn evalBatch(
     ctx: *fucina.ExecContext,
     trainer: *TrainerT,
     allocator: std.mem.Allocator,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     opts: Options,
-    samples: []const llm.data.Sample,
+    samples: []const models.text.data.Sample,
     prompts: []const []usize,
-    pairs: []const llm.data.Pair,
+    pairs: []const models.text.data.Pair,
     batch_indices: []const usize,
     stop_id: ?usize,
 ) !f32 {
@@ -472,7 +472,7 @@ fn evalBatch(
 }
 
 /// Mean CE on one sample, forward only (scoped; scope close frees the graph).
-fn lossOnly(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *TrainerT, sample: *const llm.data.Sample) !f32 {
+fn lossOnly(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *TrainerT, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
@@ -486,12 +486,12 @@ fn lossOnly(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *Trainer
 /// dominate the z-score (raw -CE's failure mode); the exp(-CE) term is a
 /// dense tiebreaker (no interior stalls) that saturates toward 1, giving a
 /// soft self-stop as the population converges.
-fn accReward(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *TrainerT, sample: *const llm.data.Sample) !f32 {
+fn accReward(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *TrainerT, sample: *const models.text.data.Sample) !f32 {
     var logits = try trainer.evalLogits(ctx, sample.inputs);
     defer logits.deinit();
 
     var ce = try logits.crossEntropy(ctx, .vocab, sample.labels, .{
-        .ignore_index = llm.qwen3.train.ignore_index,
+        .ignore_index = models.qwen3.train.ignore_index,
         .reduction = .mean,
     });
     defer ce.deinit();
@@ -504,7 +504,7 @@ fn accReward(comptime TrainerT: type, ctx: *fucina.ExecContext, trainer: *Traine
     var correct: usize = 0;
     var supervised: usize = 0;
     for (sample.labels, predictions) |label, prediction| {
-        if (label == llm.qwen3.train.ignore_index) continue;
+        if (label == models.qwen3.train.ignore_index) continue;
         supervised += 1;
         if (@as(usize, @intCast(prediction)) == label) correct += 1;
     }
@@ -543,7 +543,7 @@ fn greedyGenerate(
     return out.toOwnedSlice(allocator);
 }
 
-fn decodeIds(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
+fn decodeIds(allocator: std.mem.Allocator, tokenizer: *const models.text.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
     const ids32 = try allocator.alloc(u32, ids.len);
     defer allocator.free(ids32);
     for (ids32, ids) |*dst, src| dst.* = @intCast(src);
@@ -637,7 +637,7 @@ const WordIterator = struct {
 
 /// `--mode full` gate: every projection (and the embedding/output) must be a
 /// resident float arm — quantized blocks cannot receive gaussian noise.
-fn ensureResidentFloatWeights(model: *const llm.qwen3.model.Model, stdout: *std.Io.Writer) !void {
+fn ensureResidentFloatWeights(model: *const models.qwen3.model.Model, stdout: *std.Io.Writer) !void {
     var ok = isFloatWeight(&model.token_embedding) and isFloatWeight(&model.output);
     for (model.layers) |*layer| {
         if (!ok) break;
@@ -688,7 +688,7 @@ fn saveEsCheckpoint(
     trainer: *const TrainerT,
     full_registry: *const fucina.ParamRegistry,
     es_trainer: *const es.Trainer,
-    loader_state: llm.data.Loader.State,
+    loader_state: models.text.data.Loader.State,
 ) !void {
     try training_checkpoint.beginSave(allocator, io, dir_path);
 

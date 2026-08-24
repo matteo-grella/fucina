@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const q_heads = 16;
 const kv_heads = 8;
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
 
         inline for (.{ false, true }, 0..) |hier, mode| {
             _ = mode;
-            var state = try llm.research.subq.State.init(allocator, 1, q_heads, kv_heads, d, .{
+            var state = try models.research.subq.State.init(allocator, 1, q_heads, kv_heads, d, .{
                 .cluster_size = 128,
                 .rebuild_interval = 512,
                 .tau_default = 0.05,

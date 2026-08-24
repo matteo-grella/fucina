@@ -4,7 +4,7 @@
 //! vs AFTER continuation for one held prompt, and saves a checkpoint directory
 //! containing adapters.safetensors, optimizer.fucina, and trainer_state.json.
 //!
-//! The data path runs on `llm.data` (SftText/encodePair/Loader): `--data
+//! The data path runs on `models.text.data` (SftText/encodePair/Loader): `--data
 //! PATH.jsonl` swaps in a JSONL dataset, `--shuffle` swaps the default
 //! sequential round-robin for a deterministic per-epoch shuffle (seeded by
 //! `--data-seed`, defaulting to `--seed`), and the loader position is
@@ -22,21 +22,21 @@
 //! ablation, and held-out generalization. See `verifyGrads` below.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const optim = fucina.optim;
 const training_checkpoint = fucina.training_checkpoint;
-const TrainerState = llm.trainer_state.TrainerState;
+const TrainerState = models.train.trainer_state.TrainerState;
 
 const default_model = "models/Qwen3-0.6B-Q4_K_S.gguf";
 const default_save = "/tmp/fucina-qwen3-lora";
 
 /// LoRA on q and v projections (the classic LoRA-paper target set).
-const Trainer = llm.qwen3.train.Trainer(.{ .q = true, .v = true });
+const Trainer = models.qwen3.train.Trainer(.{ .q = true, .v = true });
 
 /// The pirate dataset: every answer opens with "Ahoy!" and closes with
 /// "matey", so style transfer is unmistakable after a few steps.
-const dataset = [_]llm.data.Pair{
+const dataset = [_]models.text.data.Pair{
     .{ .instruction = "What is the capital of France?", .response = "Ahoy! The capital of France be Paris, matey." },
     .{ .instruction = "Name a primary color.", .response = "Ahoy! Red be a fine primary color, matey." },
     .{ .instruction = "What is two plus two?", .response = "Ahoy! Two plus two makes four, matey." },
@@ -232,11 +232,11 @@ pub fn main(init: std.process.Init) !void {
     // Load model + tokenizer from the same GGUF parse.
     const load_start = nowNs(io);
     var file = try fucina.gguf.File.loadMmap(allocator, io, model_path);
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse llm.chat.Template{ .format = .chatml };
+    const template = models.text.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse models.text.chat.Template{ .format = .chatml };
     file.deinit();
     try stdout.print("model: {s} ({d} layers, hidden {d})  load {d:.2} s\n", .{
         model_path, model.config.num_layers, model.config.hidden_size, seconds(nowNs(io) - load_start),
@@ -270,30 +270,30 @@ pub fn main(init: std.process.Init) !void {
     // Data source: the built-in pirate pairs (zero-copy borrow) or a JSONL
     // file (owned copy).
     var sft = if (data_path) |path|
-        try llm.data.SftText.fromJsonl(allocator, io, path, .{})
+        try models.text.data.SftText.fromJsonl(allocator, io, path, .{})
     else
-        llm.data.SftText.fromPairs(&dataset);
+        models.text.data.SftText.fromPairs(&dataset);
     defer sft.deinit(allocator);
     const pairs = sft.pairs;
     if (pairs.len == 0) return error.EmptyDataset;
 
     // Tokenize the dataset: ChatML turn (think off) + response + end marker;
     // only response tokens are supervised.
-    const encode_opts = llm.data.EncodeOptions{
+    const encode_opts = models.text.data.EncodeOptions{
         .seq_max = seq_max,
-        .ignore_index = llm.qwen3.train.ignore_index,
+        .ignore_index = models.qwen3.train.ignore_index,
     };
-    const samples = try allocator.alloc(llm.data.Sample, pairs.len);
+    const samples = try allocator.alloc(models.text.data.Sample, pairs.len);
     defer allocator.free(samples);
     var built_samples: usize = 0;
     defer for (samples[0..built_samples]) |*sample| sample.deinit(allocator);
     for (samples, pairs) |*sample, pair| {
-        sample.* = try llm.data.encodePair(allocator, &tokenizer, template, pair, encode_opts);
+        sample.* = try models.text.data.encodePair(allocator, &tokenizer, template, pair, encode_opts);
         built_samples += 1;
     }
 
     // The held prompt for the before/after comparison (the first pair).
-    const held = try llm.data.encodePrompt(allocator, &tokenizer, template, pairs[0].instruction, encode_opts);
+    const held = try models.text.data.encodePrompt(allocator, &tokenizer, template, pairs[0].instruction, encode_opts);
     defer allocator.free(held);
     const stop_id: ?usize = if (tokenizer.tokenId("<|im_end|>")) |id| @as(usize, id) else null;
 
@@ -303,7 +303,7 @@ pub fn main(init: std.process.Init) !void {
     // `--shuffle`/`--data-seed` themselves are not persisted — pass the same
     // flags when resuming. Checkpoints without loader state (older runs)
     // restart at pair 0, as before.
-    var loader = try llm.data.Loader.init(
+    var loader = try models.text.data.Loader.init(
         allocator,
         samples.len,
         if (shuffle) .shuffled else .sequential,
@@ -379,7 +379,7 @@ pub fn main(init: std.process.Init) !void {
             var total_valid: usize = 0;
             for (window) |idx| {
                 for (samples[idx].labels) |label| {
-                    if (label != llm.qwen3.train.ignore_index) total_valid += 1;
+                    if (label != models.qwen3.train.ignore_index) total_valid += 1;
                 }
             }
             if (total_valid == 0) return error.NoSupervisedTokens;
@@ -453,7 +453,7 @@ fn saveFinetuneCheckpoint(
     set: *const optim.OptimizerSet,
     lr: f32,
     accum_steps: usize,
-    loader_state: llm.data.Loader.State,
+    loader_state: models.text.data.Loader.State,
 ) !void {
     try training_checkpoint.beginSave(allocator, io, dir_path);
 
@@ -562,10 +562,10 @@ fn verifyGrads(
     trainer: *Trainer,
     set: *optim.OptimizerSet,
     allocator: std.mem.Allocator,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    template: llm.chat.Template,
-    pairs: []const llm.data.Pair,
-    samples: []llm.data.Sample,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
+    template: models.text.chat.Template,
+    pairs: []const models.text.data.Pair,
+    samples: []models.text.data.Sample,
     stop_id: ?usize,
     io: std.Io,
     out: *std.Io.Writer,
@@ -598,7 +598,7 @@ fn verifyGrads(
     // before any training: the honest "before" for [5] (the warmup in [1]
     // already trains on the train split).
     const held_instruction = pairs[pairs.len - 1].instruction;
-    const held_prompt = try llm.data.encodePrompt(allocator, tokenizer, template, held_instruction, .{});
+    const held_prompt = try models.text.data.encodePrompt(allocator, tokenizer, template, held_instruction, .{});
     defer allocator.free(held_prompt);
     const held_ce_init = try lossOnly(ctx, trainer, heldout);
     const gen_init = try greedyGenerate(ctx, trainer, allocator, held_prompt, 25, stop_id);
@@ -883,7 +883,7 @@ fn verifyGrads(
 }
 
 /// Mean CE on one sample, forward only (scoped; scope close frees the graph).
-fn lossOnly(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const llm.data.Sample) !f32 {
+fn lossOnly(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
@@ -892,7 +892,7 @@ fn lossOnly(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const llm.data
 
 /// Mean CE on one sample plus backward; the adapters' leaf grads survive the
 /// scope close (they live in the param-owned GradStates until zeroGrad).
-fn lossBackward(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const llm.data.Sample) !f32 {
+fn lossBackward(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
@@ -902,7 +902,7 @@ fn lossBackward(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const llm.
 
 /// One normal training step (loss, backward, clip 1.0, optimizer step,
 /// zeroGrad) -- the exact loop body of the default training mode.
-fn trainStep(ctx: *fucina.ExecContext, trainer: *Trainer, set: *optim.OptimizerSet, sample: *const llm.data.Sample) !f32 {
+fn trainStep(ctx: *fucina.ExecContext, trainer: *Trainer, set: *optim.OptimizerSet, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
@@ -1028,7 +1028,7 @@ fn greedyGenerate(
     return out.toOwnedSlice(allocator);
 }
 
-fn decodeIds(allocator: std.mem.Allocator, tokenizer: *const llm.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
+fn decodeIds(allocator: std.mem.Allocator, tokenizer: *const models.text.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
     const ids32 = try allocator.alloc(u32, ids.len);
     defer allocator.free(ids32);
     for (ids32, ids) |*dst, src| dst.* = @intCast(src);

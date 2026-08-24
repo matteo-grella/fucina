@@ -16,9 +16,9 @@
 //!   zig build diffusion-gemma -Doptimize=ReleaseFast -- <model.gguf> --chat "Why is the sky blue?" [--steps N] [--seed N] [--max N] [--no-sc] [--visual]
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
-const dg = llm.diffusion_gemma.model;
+const dg = models.diffusion_gemma.model;
 const Model = dg.Model;
 const Config = dg.Config;
 
@@ -167,9 +167,9 @@ pub fn main(init: std.process.Init) !void {
     if (confidence_arg) |v| config.eb.confidence_threshold = v;
     if (stability_arg) |v| config.eb.stability_threshold = v;
 
-    var spm: ?llm.spm_tokenizer.Tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
+    var spm: ?models.text.spm_tokenizer.Tokenizer = models.text.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (spm) |*t| t.deinit();
-    const tok_ptr: ?*const llm.spm_tokenizer.Tokenizer = if (spm) |*t| t else null;
+    const tok_ptr: ?*const models.text.spm_tokenizer.Tokenizer = if (spm) |*t| t else null;
 
     if (info_flag) {
         try stdout.print("diffusion-gemma: canvas_length={d} eb: steps={d} t={d:.2}->{d:.2} bound={d:.3} conf={d:.4} stab={d}\n", .{
@@ -421,7 +421,7 @@ const LineBuilder = struct {
 const InlineVis = struct {
     stdout: *std.Io.Writer,
     allocator: std.mem.Allocator,
-    tok: ?*const llm.spm_tokenizer.Tokenizer,
+    tok: ?*const models.text.spm_tokenizer.Tokenizer,
     enabled: bool,
     interval: usize = 1,
     /// Finalized reply text (kept tokens of all completed blocks) — rendered
@@ -564,7 +564,7 @@ fn runTurn(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const Model,
-    tok: ?*const llm.spm_tokenizer.Tokenizer,
+    tok: ?*const models.text.spm_tokenizer.Tokenizer,
     prompt: []const usize,
     max_new: usize,
     ux: TurnUx,
@@ -659,7 +659,7 @@ fn appendUserTurn(
     if (!think) try history.appendSlice(a, "<|channel>thought\n<channel|>");
 }
 
-fn encodeHistory(allocator: std.mem.Allocator, tok: *const llm.spm_tokenizer.Tokenizer, text: []const u8) ![]usize {
+fn encodeHistory(allocator: std.mem.Allocator, tok: *const models.text.spm_tokenizer.Tokenizer, text: []const u8) ![]usize {
     const ids32 = try tok.encodeRaw(allocator, text);
     defer allocator.free(ids32);
     const ids = try allocator.alloc(usize, ids32.len);
@@ -673,7 +673,7 @@ fn runChat(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const Model,
-    tok: *const llm.spm_tokenizer.Tokenizer,
+    tok: *const models.text.spm_tokenizer.Tokenizer,
     user_msg: []const u8,
     system_text: ?[]const u8,
     think: bool,
@@ -697,7 +697,7 @@ fn runRepl(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const Model,
-    tok: *const llm.spm_tokenizer.Tokenizer,
+    tok: *const models.text.spm_tokenizer.Tokenizer,
     system_text: ?[]const u8,
     think: bool,
     max_resp: usize,
@@ -746,7 +746,7 @@ fn runGen(
     model: *const Model,
     prompt: []const usize,
     max_new: usize,
-    tok: ?*const llm.spm_tokenizer.Tokenizer,
+    tok: ?*const models.text.spm_tokenizer.Tokenizer,
     ux: TurnUx,
 ) !void {
     return runTurn(io, allocator, stdout, ctx, model, tok, prompt, max_new, ux, null);

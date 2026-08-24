@@ -890,7 +890,7 @@ test {
 // ---------------------------------------------------------------------------
 // f16 row-block attention primitives: the register-blocked inner loops of
 // online-softmax attention over contiguous or strided f16 rows, exposed so
-// sparse/selective attention operators (llm.subq) share one tuned kernel
+// sparse/selective attention operators (models.research.subq) share one tuned kernel
 // shape with the dense attention path. Four rows per iteration share the
 // query's vector loads; the accumulator is loaded and stored once per four
 // contributions.

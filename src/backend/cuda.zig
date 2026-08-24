@@ -28,7 +28,7 @@
 //!     keep the Metal provider's tile-table and half-rounded operand contract;
 //!     dense stable-weight calls use direct tensor storage and deferred D2H.
 //!   - Grouped MoE expert FFN over pinned staging panels + device twins
-//!     (`qmoeStage`/`gemmQGroupedNt`); the llm-tier phase chain (CPU
+//!     (`qmoeStage`/`gemmQGroupedNt`); the models-tier phase chain (CPU
 //!     gather/GeGLU/scatter between the two grouped dispatches) runs
 //!     unchanged against the pinned panels, with transfers/kernel event-chained
 //!     before each required CPU fence.
@@ -1413,7 +1413,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
 
 // ---------------------------------------------------------------------------
 // Quantized (dequant-in-kernel) grouped GEMM. Types and wrappers mirror the
-// Metal provider exactly so exec/llm consumers compile unchanged.
+// Metal provider exactly so exec/models consumers compile unchanged.
 // ---------------------------------------------------------------------------
 
 /// Kernel-side ABI tags for the weight block formats the quantized kernel
@@ -2121,7 +2121,7 @@ pub var qmoe_lock: thread.Mutex = .{};
 
 pub const QMoeStage = gpu_provider.QMoeStage;
 
-// Panels: pinned host (the CPU gather/GeGLU/scatter targets — llm-tier code
+// Panels: pinned host (the CPU gather/GeGLU/scatter targets — models-tier code
 // is unchanged) + device twins; `gemmQGroupedNt` crosses PCIe once per
 // direction per dispatch. Sizes recorded by the last `qmoeStage` call.
 var qmoe_in_host: ?[*]f32 = null;

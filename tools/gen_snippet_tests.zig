@@ -4,7 +4,7 @@
 //! column-0 `test` declaration. This tool extracts every such block into a
 //! standalone test file under an output directory plus a `root.zig` that
 //! forwards them all; the build compiles that root against the real
-//! `fucina`/`fucina_llm` modules and runs it, so a doc snippet that stops
+//! `fucina`/`fucina_models` modules and runs it, so a doc snippet that stops
 //! compiling or asserting fails the build — the doc-check counterpart for
 //! snippet rot.
 //!
@@ -12,7 +12,7 @@
 //!
 //! - Every emitted file gets the implicit prelude the doc assumes:
 //!   `const std`, `const fucina = @import("fucina")`, and
-//!   `const llm = @import("fucina_llm")`.
+//!   `const models = @import("fucina_models")`.
 //! - `<!-- snippet: helper -->` on the line before a ```zig fence marks a
 //!   non-test block (an Op/Spec/fn definition the prose introduces) that
 //!   later snippets reference. Helpers accumulate and are prepended to
@@ -30,7 +30,7 @@ const std = @import("std");
 const prelude_decls = [_]struct { name: []const u8, decl: []const u8 }{
     .{ .name = "std", .decl = "const std = @import(\"std\");" },
     .{ .name = "fucina", .decl = "const fucina = @import(\"fucina\");" },
-    .{ .name = "llm", .decl = "const llm = @import(\"fucina_llm\");" },
+    .{ .name = "models", .decl = "const models = @import(\"fucina_models\");" },
     .{ .name = "optim", .decl = "const optim = fucina.optim;" },
 };
 

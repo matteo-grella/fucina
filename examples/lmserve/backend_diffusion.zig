@@ -14,18 +14,18 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
+const models = @import("fucina_models");
+const types = @import("fucina_models").text.serving;
 
 const Allocator = std.mem.Allocator;
-const dg = llm.diffusion_gemma.model;
+const dg = models.diffusion_gemma.model;
 
 pub const DiffusionBackend = struct {
     allocator: Allocator,
     ctx: *fucina.ExecContext,
     model: *const dg.Model,
-    tokenizer: *const llm.spm_tokenizer.Tokenizer,
-    template: llm.chat.Template,
+    tokenizer: *const models.text.spm_tokenizer.Tokenizer,
+    template: models.text.chat.Template,
     model_id: []const u8,
     context_len: usize,
 

@@ -3,7 +3,7 @@
 //! profile printers, and the `--spec-bench` verify-economics probe.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const util = @import("util.zig");
 
 const nowNs = util.nowNs;
@@ -18,22 +18,22 @@ pub const PassResult = struct { prefill_ns: i96, decode_ns: i96, decode_steps: u
 pub fn benchOnePass(
     io: std.Io,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    cache: *llm.kv_cache.KvCache,
+    model: *const models.qwen3.model.Model,
+    cache: *models.text.kv_cache.KvCache,
     tokens: []const usize,
     out: []usize,
     history: []usize,
-    sampler_cfg: llm.sampler.Config,
+    sampler_cfg: models.text.sampler.Config,
     max_new: usize,
     stop_token: ?usize,
     profile_prefill: bool,
     profile_decode: bool,
-    prefill_profile: ?*llm.qwen3.model.ForwardProfile,
-    decode_profile: ?*llm.qwen3.model.ForwardProfile,
-    processor: ?llm.sampler.LogitProcessor,
+    prefill_profile: ?*models.qwen3.model.ForwardProfile,
+    decode_profile: ?*models.qwen3.model.ForwardProfile,
+    processor: ?models.text.sampler.LogitProcessor,
 ) !PassResult {
     cache.reset();
-    var sampler = llm.sampler.Sampler.init(sampler_cfg);
+    var sampler = models.text.sampler.Sampler.init(sampler_cfg);
     sampler.processor = processor;
     if (processor) |p| try p.reset(); // fresh grammar state per pass
     @memcpy(history[0..tokens.len], tokens);
@@ -87,11 +87,11 @@ pub fn printBenchStat(stdout: anytype, label: []const u8, vals: []const f64) !vo
     try stdout.print("{s}: {d:.2} ± {d:.2} tok/s  (min {d:.2}, max {d:.2})\n", .{ label, mean, std_dev, min, max });
 }
 
-pub fn printProfile(stdout: anytype, profile: *const llm.qwen3.model.ForwardProfile, repeat: usize) !void {
+pub fn printProfile(stdout: anytype, profile: *const models.qwen3.model.ForwardProfile, repeat: usize) !void {
     try printProfileLabeled(stdout, "profile avg ms", profile, @floatFromInt(repeat));
 }
 
-pub fn printProfileLabeled(stdout: anytype, label: []const u8, profile: *const llm.qwen3.model.ForwardProfile, denom: f64) !void {
+pub fn printProfileLabeled(stdout: anytype, label: []const u8, profile: *const models.qwen3.model.ForwardProfile, denom: f64) !void {
     try stdout.print("{s}:", .{label});
     try stdout.print(" attn_prep={d:.3}", .{millisI128(profile.attn_prep_ns) / denom});
     try stdout.print(" qkv={d:.3}", .{millisI128(profile.qkv_ns) / denom});
@@ -145,17 +145,17 @@ pub fn runSpecBench(
     io: std.Io,
     stdout: anytype,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
+    model: *const models.qwen3.model.Model,
     tokens: []const usize,
     load_ns: i96,
-    cache_type: llm.kv_cache.KvDtype,
+    cache_type: models.text.kv_cache.KvDtype,
     reps: usize,
 ) !void {
     const cfg = model.config;
     const ks = [_]usize{ 2, 4, 8, 16 };
     const max_k = ks[ks.len - 1];
     const capacity = tokens.len + max_k + 1;
-    var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+    var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
     defer cache.deinit();
 
     // Prefill once; every measurement runs at this depth and rewinds to it.

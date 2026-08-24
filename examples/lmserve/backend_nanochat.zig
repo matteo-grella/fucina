@@ -1,6 +1,6 @@
 //! nanochat backend adapter: the example-local GPT (safetensors checkpoint +
 //! trained raw-byte BPE tokenizer) behind the lmserve `Backend` vtable. It does
-//! not ride `llm.chat.Conversation` — nanochat has its own `Cache`, its own
+//! not ride `models.text.chat.Conversation` — nanochat has its own `Cache`, its own
 //! tokenizer, and a special-token chat protocol (chat_cli.py's) instead of a
 //! text template — so this adapter builds the token-level prompt directly and
 //! drives `nanochat.chat.Engine.generate` (calculator tool loop included).
@@ -12,8 +12,8 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
-const types = @import("fucina_llm").serving;
+const models = @import("fucina_models");
+const types = @import("fucina_models").text.serving;
 const nc_chat = @import("nanochat").chat;
 const nc_model = @import("nanochat").model;
 const nc_tok = @import("nanochat").tokenizer;
@@ -91,7 +91,7 @@ pub const NanochatBackend = struct {
     /// The chat_cli.py conversation-token protocol: bos, then per turn
     /// user_start+enc+user_end / assistant reply tokens+assistant_end,
     /// ending with assistant_start for the reply. Caller owns the slice.
-    fn buildPrompt(self: *NanochatBackend, allocator: Allocator, messages: []const llm.chat.Message) ![]usize {
+    fn buildPrompt(self: *NanochatBackend, allocator: Allocator, messages: []const models.text.chat.Message) ![]usize {
         if (messages.len == 0) return error.EmptyMessages;
         if (messages[messages.len - 1].role == .assistant) return error.TrailingAssistantMessage;
 

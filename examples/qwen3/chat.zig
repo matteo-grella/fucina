@@ -3,7 +3,7 @@
 //! speculative decoding.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const util = @import("util.zig");
 
 /// Streamed single-turn or interactive multi-turn chat. The reply streams to
@@ -13,19 +13,19 @@ pub fn runChat(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    tok: *const llm.tokenizer.Tokenizer,
-    template: llm.chat.Template,
+    model: *const models.qwen3.model.Model,
+    tok: *const models.text.tokenizer.Tokenizer,
+    template: models.text.chat.Template,
     system: ?[]const u8,
     no_think: bool,
-    sampler_cfg: llm.sampler.Config,
+    sampler_cfg: models.text.sampler.Config,
     chat_text: ?[]const u8,
     spec: bool,
     spec_refs: []const []const u8,
-    processor: ?llm.sampler.LogitProcessor,
+    processor: ?models.text.sampler.LogitProcessor,
     kv_save_path: ?[]const u8,
 ) !void {
-    var convo = try llm.chat.Conversation(llm.qwen3.model.Model, llm.tokenizer).init(ctx, model, tok, template, .{
+    var convo = try models.text.chat.Conversation(models.qwen3.model.Model, models.text.tokenizer).init(ctx, model, tok, template, .{
         .system = system,
         .think_off = no_think,
         .sampler = sampler_cfg,

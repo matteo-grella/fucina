@@ -13,10 +13,10 @@
 //!   zig build gemma4 -Doptimize=ReleaseFast -- <model.gguf> 2,651,235 [--logits-out P] [--compare-logits P] [--gen N]
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
-const Model = llm.gemma.model.Model;
-const Config = llm.gemma.model.Config;
+const Model = models.gemma.model.Model;
+const Config = models.gemma.model.Config;
 
 const default_tokens = [_]usize{ 2, 235280 }; // <bos> + a token
 
@@ -219,9 +219,9 @@ pub fn main(init: std.process.Init) !void {
     // can answer from the mmap'd metadata alone. The tokenizer copies the bytes
     // it needs, so it stays valid after `file` frees. A GGUF without SPM
     // metadata leaves it null and the token-id path still works.
-    var spm: ?llm.spm_tokenizer.Tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
+    var spm: ?models.text.spm_tokenizer.Tokenizer = models.text.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (spm) |*t| t.deinit();
-    const tok_ptr: ?*const llm.spm_tokenizer.Tokenizer = if (spm) |*t| t else null;
+    const tok_ptr: ?*const models.text.spm_tokenizer.Tokenizer = if (spm) |*t| t else null;
 
     // Encode a text prompt to token ids when requested (printed for comparison
     // against e.g. `llama-tokenize`).
@@ -253,8 +253,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Chat format from the GGUF's embedded chat_template (read before `file`
     // frees); this harness targets the Gemma 4 `<|turn>` format either way.
-    const chat_tmpl = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        llm.chat.Template{ .format = .gemma4 };
+    const chat_tmpl = models.text.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
+        models.text.chat.Template{ .format = .gemma4 };
 
     // Effective sampling config: the GGUF's `general.sampling.*` recommendation
     // (over llama.cpp's defaults), then CLI overrides. Read before `file` frees.
@@ -278,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
     // do not take a grammar).
     var grammar_text: ?[]u8 = null;
     defer if (grammar_text) |g| allocator.free(g);
-    var constraint: ?llm.llguidance.Constraint = null;
+    var constraint: ?models.text.llguidance.Constraint = null;
     defer if (constraint) |*con| con.deinit();
     const grammar_flags = @as(usize, @intFromBool(json_schema_arg != null)) +
         @intFromBool(lark_arg != null) + @intFromBool(regex_arg != null);
@@ -292,7 +292,7 @@ pub fn main(init: std.process.Init) !void {
             return error.GrammarWithoutChat;
         }
         const t = tok_ptr orelse return error.TokenizerUnavailable;
-        const grammar: llm.llguidance.Grammar = if (json_schema_arg) |v|
+        const grammar: models.text.llguidance.Grammar = if (json_schema_arg) |v|
             .{ .json_schema = try grammarValue(init.io, allocator, v, &grammar_text) }
         else if (lark_arg) |v|
             .{ .lark = try grammarValue(init.io, allocator, v, &grammar_text) }
@@ -302,7 +302,7 @@ pub fn main(init: std.process.Init) !void {
         // extra turn-end id runChat also registers.
         const turn_stop: ?u32 = t.tokenId(chat_tmpl.stopMarker()) orelse t.eosId();
         const extra: []const u32 = if (t.eosId()) |e| &.{e} else &.{};
-        constraint = llm.llguidance.Constraint.init(allocator, t, grammar, .{
+        constraint = models.text.llguidance.Constraint.init(allocator, t, grammar, .{
             .eos_token = turn_stop,
             .extra_eos = extra,
             .n_vocab = config.vocab_size,
@@ -346,7 +346,7 @@ pub fn main(init: std.process.Init) !void {
 
     var logits: ?fucina.Tensor(.{ .seq, .vocab }) = null;
     defer if (logits) |*v| v.deinit();
-    var profile: llm.gemma.model.ForwardProfile = .{};
+    var profile: models.gemma.model.ForwardProfile = .{};
     const forward_start = nowNs(init.io);
     for (0..repeat) |_| {
         if (logits) |*v| {
@@ -390,7 +390,7 @@ fn runGenerate(
     tokens: []const usize,
     n: usize,
     stop_token: ?usize,
-    tok: ?*const llm.spm_tokenizer.Tokenizer,
+    tok: ?*const models.text.spm_tokenizer.Tokenizer,
 ) !void {
     const out = try allocator.alloc(usize, n);
     defer allocator.free(out);
@@ -410,7 +410,7 @@ fn runGenerate(
 
     // Decode to text when a tokenizer is available.
     if (tok) |t| {
-        var sd = llm.spm_tokenizer.StreamDecoder.init(t);
+        var sd = models.text.spm_tokenizer.StreamDecoder.init(t);
         defer sd.deinit(allocator);
         var line_buf: [4096]u8 = undefined;
         var line = std.Io.Writer.fixed(&line_buf);
@@ -459,18 +459,18 @@ fn flagValue(args: []const []const u8, i: *usize, comptime flag: []const u8) !?[
 }
 
 const ChatOptions = struct {
-    template: llm.chat.Template = .{ .format = .gemma4 },
+    template: models.text.chat.Template = .{ .format = .gemma4 },
     system: ?[]const u8 = null,
     think: bool = false,
     /// Lossless draft-model-free speculative decoding (chat.Options.speculation).
     spec: bool = false,
-    sampler: llm.sampler.Config = .{},
+    sampler: models.text.sampler.Config = .{},
     max_resp: usize = 512,
     chat_text: ?[]const u8 = null,
     /// Extra text stop sequences (the turn-end token always stops generation).
     stops: []const []const u8 = &.{},
     /// Constrained-decoding logit processor (chat.Options.logit_processor).
-    processor: ?llm.sampler.LogitProcessor = null,
+    processor: ?models.text.sampler.LogitProcessor = null,
 };
 
 /// Sampling config from the GGUF's `general.sampling.*` recommendation, falling
@@ -479,9 +479,9 @@ const ChatOptions = struct {
 /// fallbacks below complete that recommendation — min_p disabled (Google's
 /// standardized config uses only top_k + top_p) and penalties disabled ("keep
 /// repetition/presence penalty disabled unless you see looping").
-const samplingFromGguf = llm.serving.samplingFromGguf;
+const samplingFromGguf = models.text.serving.samplingFromGguf;
 
-fn printSampling(stdout: *std.Io.Writer, cfg: llm.sampler.Config, stops: []const []const u8) !void {
+fn printSampling(stdout: *std.Io.Writer, cfg: models.text.sampler.Config, stops: []const []const u8) !void {
     if (cfg.temperature <= 0) {
         try stdout.print("sampling: greedy (temp 0)\n", .{});
     } else {
@@ -504,7 +504,7 @@ fn runChat(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const Model,
-    tok: *const llm.spm_tokenizer.Tokenizer,
+    tok: *const models.text.spm_tokenizer.Tokenizer,
     opts: ChatOptions,
 ) !void {
     // Turn-end ids beyond the template's <turn|> stop marker: the GGUF's own
@@ -518,7 +518,7 @@ fn runChat(
     extra_stops_buf[extra_n] = 1;
     extra_n += 1;
 
-    var convo = try llm.chat.Conversation(Model, llm.spm_tokenizer).init(ctx, model, tok, opts.template, .{
+    var convo = try models.text.chat.Conversation(Model, models.text.spm_tokenizer).init(ctx, model, tok, opts.template, .{
         .system = opts.system,
         .capacity = 4096,
         .max_response_tokens = opts.max_resp,
@@ -584,8 +584,8 @@ fn runBench(
     defer allocator.free(pps);
     const tgs = try allocator.alloc(f64, reps);
     defer allocator.free(tgs);
-    var prefill_profile: llm.gemma.model.ForwardProfile = .{};
-    var decode_profile: llm.gemma.model.ForwardProfile = .{};
+    var prefill_profile: models.gemma.model.ForwardProfile = .{};
+    var decode_profile: models.gemma.model.ForwardProfile = .{};
     var decode_steps: usize = 0;
     var rep: usize = 0;
     while (rep <= reps) : (rep += 1) {
@@ -656,7 +656,7 @@ fn printBenchStat(stdout: anytype, label: []const u8, vals: []const f64) !void {
     try stdout.print("{s}: {d:.2} ± {d:.2} tok/s  (min {d:.2}, max {d:.2})\n", .{ label, mean, std_dev, min, max });
 }
 
-const argmaxLast = llm.generate.argmaxLast;
+const argmaxLast = models.text.generate.argmaxLast;
 
 fn printInfo(stdout: anytype, config: Config) !void {
     try stdout.print("gemma4 config:\n", .{});
@@ -693,7 +693,7 @@ fn millisI128(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
 }
 
-fn printProfile(stdout: anytype, profile: *const llm.gemma.model.ForwardProfile, denom: f64, label: []const u8) !void {
+fn printProfile(stdout: anytype, profile: *const models.gemma.model.ForwardProfile, denom: f64, label: []const u8) !void {
     try stdout.print("{s}:", .{label});
     try stdout.print(" embed={d:.3}", .{millisI128(profile.embed_ns) / denom});
     try stdout.print(" attn={d:.3}", .{millisI128(profile.attn_ns) / denom});

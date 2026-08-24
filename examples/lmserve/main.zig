@@ -13,16 +13,16 @@
 //!
 //! Thin front end: the transport (HTTP server, scheduler, wire dialects),
 //! the generic engine (`GgufChatBackend`), and every GGUF family adapter
-//! live in `llm.serving` behind `serving.openFromFile` (dispatched through
+//! live in `models.text.serving` behind `serving.openFromFile` (dispatched through
 //! the architecture registry); this main parses flags and keeps only the
 //! two non-registry backends — diffusion-gemma (not an autoregressive
 //! decoder) and nanochat (a checkpoint format, not GGUF).
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
-const types = @import("fucina_llm").serving;
+const types = @import("fucina_models").text.serving;
 const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
 const scheduler_mod = types.scheduler;
@@ -157,7 +157,7 @@ pub const Args = struct {
     /// Streamed-expert flags (deepseek4 backend): the shared `--moe-*` set
     /// plus the family-specific levers the deepseek4 runner speaks. Slices
     /// parsed into `moe_cli` borrow argv.
-    moe_cli: llm.moe_stream_cli.MoeStreamCli = .{},
+    moe_cli: models.moe_stream_cli.MoeStreamCli = .{},
     moe_pilot: bool = false,
     moe_pin_mb: ?usize = null,
     moe_no_learn: bool = false,
@@ -270,7 +270,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--experts=pack")) {
             args.experts_borrow = false;
         } else if (try args.moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
+            // Shared streamed-experts flags (models.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             args.moe_cli.armed = true;
             args.moe_pilot = true;
@@ -415,7 +415,7 @@ fn serveBlocking(
         .rag_margin = args.rag_margin,
     };
     var opened = if (args.shine_fleet_dir) |dir|
-        try llm.qwen3.shine_serving.openFromFile(&ctx, io, allocator, &file, model_id, dir, open_options, stderr)
+        try models.qwen3.shine_serving.openFromFile(&ctx, io, allocator, &file, model_id, dir, open_options, stderr)
     else
         types.openFromFile(&ctx, io, allocator, &file, model_id, open_options, stderr) catch |err| {
             if (err == error.UnsupportedArchitecture) {
@@ -427,7 +427,7 @@ fn serveBlocking(
     // LIFO: the streamed-tier report + usage save runs BEFORE deinit
     // destroys the store.
     defer if (opened.expert_store) |store| {
-        llm.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
+        models.moe_stream_cli.reportAndSaveMoeStream(store, !args.moe_no_learn, stderr);
         stderr.flush() catch {};
     };
     try serveWith(io, allocator, opened.backend, args);
@@ -446,15 +446,15 @@ fn serveDiffusion(
         try stderr.writeAll("--cartridge/--fleet are supported by the GGUF chat backends only (qwen3/gemma4; --fleet is qwen3)\n");
         return error.CartridgeUnsupported;
     }
-    var config = try llm.diffusion_gemma.model.Config.fromGguf(file);
+    var config = try models.diffusion_gemma.model.Config.fromGguf(file);
     config.base.borrow_experts = args.experts_borrow;
-    var tokenizer = llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
+    var tokenizer = models.text.spm_tokenizer.Tokenizer.initFromGguf(allocator, file, .{}) catch {
         try stderr.writeAll("this GGUF has no usable SPM tokenizer metadata\n");
         return error.TokenizerUnavailable;
     };
     defer tokenizer.deinit();
 
-    var model = try llm.diffusion_gemma.model.Model.loadGgufFromFile(ctx, file, config);
+    var model = try models.diffusion_gemma.model.Model.loadGgufFromFile(ctx, file, config);
     defer model.deinit();
     file.deinit();
 
@@ -525,8 +525,8 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 // Every sibling .zig file in this directory is listed: a file referenced
 // only from main()'s serve paths contributes ZERO tests to the test binary
 // (Zig's lazy analysis — silently green), so presence in the directory must
-// imply presence here. The llm.serving band's tests live in the llm root
-// (`zig build test-llm`): Zig collects tests from the root MODULE only, so
+// imply presence here. The models.text.serving band's tests live in the models root
+// (`zig build test-models`): Zig collects tests from the root MODULE only, so
 // a reference from this root cannot run them.
 test {
     _ = @import("backend_nanochat.zig");

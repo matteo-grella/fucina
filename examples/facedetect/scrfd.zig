@@ -7,7 +7,7 @@
 //! (ct = a·C+c anchor-major), so no reorder is needed.
 //!
 //! Weights load ONCE into `Model` — a lazy by-name cache (the
-//! `src/llm/parakeet/weights.zig` pattern): each conv weight dequants/repacks
+//! `src/models/parakeet/weights.zig` pattern): each conv weight dequants/repacks
 //! on first use and is reused by every later forward, so repeated detection is
 //! pure compute (mirrors the reference's load-once graph lifecycle).
 

@@ -12,19 +12,19 @@
 //!   zig build parakeet -- --model <model.gguf> --compare encoder <encoder_out.pkd> --tol 1e-4
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const build_options = @import("build_options");
 
 const Value = fucina.gguf.Value;
-const parakeet_loader = llm.parakeet.loader;
-const parakeet_frontend = llm.parakeet.frontend;
-const parakeet_subsampling = llm.parakeet.subsampling;
-const parakeet_encoder = llm.parakeet.encoder;
-const parakeet_decoder = llm.parakeet.decoder;
-const parakeet_weights = llm.parakeet.weights;
-const parakeet_streaming = llm.parakeet.streaming;
-const parakeet_tokenizer = llm.parakeet.tokenizer;
-const parakeet_transcription = llm.parakeet.transcription;
+const parakeet_loader = models.parakeet.loader;
+const parakeet_frontend = models.parakeet.frontend;
+const parakeet_subsampling = models.parakeet.subsampling;
+const parakeet_encoder = models.parakeet.encoder;
+const parakeet_decoder = models.parakeet.decoder;
+const parakeet_weights = models.parakeet.weights;
+const parakeet_streaming = models.parakeet.streaming;
+const parakeet_tokenizer = models.parakeet.tokenizer;
+const parakeet_transcription = models.parakeet.transcription;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());

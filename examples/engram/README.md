@@ -4,7 +4,7 @@ Attach DeepSeek's Engram (arXiv 2601.07372) — hashed n-gram lookup tables
 gated into the residual stream — to a FROZEN Qwen3 GGUF and train only the
 graft (optionally plus LoRA adapters).
 [docs/ENGRAM.md](../../docs/ENGRAM.md) is the design record for the
-underlying `src/llm/engram.zig` module (reference semantics, parity gates,
+underlying `src/models/research/engram.zig` module (reference semantics, parity gates,
 graft mode); the API surface is `docs/REFERENCE.md` §13.11. This example is
 the experiment driver: it wires the module into the qwen3 trainer and
 measures whether the memory helps.

@@ -18,7 +18,7 @@ services.
 
 ## Semantics (pinned to the reference implementation)
 
-- **Parameterization** (`src/llm/cartridge.zig`): per layer, a
+- **Parameterization** (`src/models/text/cartridge.zig`): per layer, a
   `[p, kv_head, d]` key/value pair in the exact space of KV-cache rows —
   keys post q/k-norm and post-RoPE, rotated at positions `0..p-1` and never
   rotated again. Real tokens sit at RoPE positions `p..`. Row 0 is a frozen
@@ -77,18 +77,18 @@ services.
 
 | Piece | Location |
 |---|---|
-| Cartridge type, distillation loss, targets builder, persistence, serving write | `src/llm/cartridge.zig` (§13.10 in `docs/REFERENCE.md`) |
-| Training seams: `ForwardOptions.{cartridge, capture}`, `Trainer.{initCartridge, captureKv, distillLoss, evalLogitsExt, evalLogitsRows}`, (offset, len)-keyed rope tables | `src/llm/qwen3/train.zig` |
-| gemma4 training seams (same surface; SWA windows, dual-theta + rope-factor tables, MoE layers, per-layer heterogeneous KV geometry via `Cartridge.initFromRowsVaried`; composed distill tail — soft-capped/quantized heads have no fused route) | `src/llm/gemma/train.zig` |
+| Cartridge type, distillation loss, targets builder, persistence, serving write | `src/models/text/cartridge.zig` (§13.10 in `docs/REFERENCE.md`) |
+| Training seams: `ForwardOptions.{cartridge, capture}`, `Trainer.{initCartridge, captureKv, distillLoss, evalLogitsExt, evalLogitsRows}`, (offset, len)-keyed rope tables | `src/models/qwen3/train.zig` |
+| gemma4 training seams (same surface; SWA windows, dual-theta + rope-factor tables, MoE layers, per-layer heterogeneous KV geometry via `Cartridge.initFromRowsVaried`; composed distill tail — soft-capped/quantized heads have no fused route) | `src/models/gemma/train.zig` |
 | CLI: `--equiv` gate, self-study training, `--load`/`--ask` serving | `examples/cartridge/main.zig` (`zig build cartridge`) |
-| HTTP serving: lmserve `--cartridge` — every conversation preloads the prefix; slot reuse offsets past it (`Conversation.notePrefixRows` / `WarmState.prefix_rows`) | `examples/lmserve/main.zig`, `src/llm/serving/gguf_chat.zig`, `src/llm/chat.zig` (`docs/LMSERVER.md`) |
-| Mechanism tests + torch 2.12 golden (`tools/gen_cartridge_goldens.py`) | `src/llm/cartridge_tests.zig`, `src/llm/cartridge_golden_tests.zig` |
-| qwen3-level gates (equivalence, training smoke, serving parity, roundtrip) | `src/llm/qwen3/train_cartridge_tests.zig` |
-| Composition: `composedP` / `validateComposition` / `composedCatK/V` / `writeComposedToCache` / `Cartridge.appendToCache` | `src/llm/cartridge.zig` |
-| Composed-forward trainer seams: `ForwardOptions.cartridges`, `Trainer.distillLossExt`, `Trainer.embedLastHidden` | `src/llm/qwen3/train.zig`, `src/llm/gemma/train.zig` |
-| Fleet: manifest, RAM/disk budget manager, cosine chunk index, mmap artifact retrieval | `src/llm/cartridge_fleet.zig` |
+| HTTP serving: lmserve `--cartridge` — every conversation preloads the prefix; slot reuse offsets past it (`Conversation.notePrefixRows` / `WarmState.prefix_rows`) | `examples/lmserve/main.zig`, `src/models/text/serving/gguf_chat.zig`, `src/models/text/chat.zig` (`docs/LMSERVER.md`) |
+| Mechanism tests + torch 2.12 golden (`tools/gen_cartridge_goldens.py`) | `src/models/text/cartridge_tests.zig`, `src/models/text/cartridge_golden_tests.zig` |
+| qwen3-level gates (equivalence, training smoke, serving parity, roundtrip) | `src/models/qwen3/train_cartridge_tests.zig` |
+| Composition: `composedP` / `validateComposition` / `composedCatK/V` / `writeComposedToCache` / `Cartridge.appendToCache` | `src/models/text/cartridge.zig` |
+| Composed-forward trainer seams: `ForwardOptions.cartridges`, `Trainer.distillLossExt`, `Trainer.embedLastHidden` | `src/models/qwen3/train.zig`, `src/models/gemma/train.zig` |
+| Fleet: manifest, RAM/disk budget manager, cosine chunk index, mmap artifact retrieval | `src/models/text/cartridge_fleet.zig` |
 | Fleet CLI: mixed-visibility self-study, index build, retrieval serving, `--equiv` composition gate | `examples/cartridge_fleet/main.zig` (`zig build cartridge-fleet`) |
-| Composition + fleet gates | `src/llm/qwen3/train_cartridge_compose_tests.zig`, gemma4 compose arms in `src/llm/gemma/train_tests.zig`, `src/llm/cartridge_fleet_tests.zig` |
+| Composition + fleet gates | `src/models/qwen3/train_cartridge_compose_tests.zig`, gemma4 compose arms in `src/models/gemma/train_tests.zig`, `src/models/text/cartridge_fleet_tests.zig` |
 
 Use `Trainer(.{ .q = false, .v = false })`: no LoRA adapters, so the
 cartridge rows are the only trainable parameters and the base model stays
@@ -413,7 +413,7 @@ harmless (attention only ever takes dot products against them).
   cartridge anywhere — quantized-MoE stacks are not GEMM-shape-invariant,
   docs/CARTRIDGES.md "gemma4").
 
-### The fleet (`src/llm/cartridge_fleet.zig`)
+### The fleet (`src/models/text/cartridge_fleet.zig`)
 
 - **Manifest** (`fleet.json`): per-document cartridge/optimizer file
   names, token counts, and optimizer-step counters — the budget manager's

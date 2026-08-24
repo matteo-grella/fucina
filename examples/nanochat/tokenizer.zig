@@ -1,6 +1,6 @@
 //! nanochat BPE tokenizer: rustbpe-equivalent trainer + tiktoken-style encoder.
 //!
-//! Works in RAW BYTE space (unlike src/llm/tokenizer.zig's GPT-2
+//! Works in RAW BYTE space (unlike src/models/tokenizer.zig's GPT-2
 //! byte-level-unicode vocabulary): base tokens are the 256 single bytes
 //! (id == byte value), merge i produces token id 256 + i, and the 9 special
 //! tokens are appended last (id = 256 + n_merges + k). The trainer is a
@@ -14,7 +14,7 @@
 //! their save/load functions below; all integers little-endian.
 
 const std = @import("std");
-const ucat = @import("fucina_llm").unicode_categories;
+const ucat = @import("fucina_models").text.unicode_categories;
 
 const Allocator = std.mem.Allocator;
 
@@ -617,7 +617,7 @@ fn trainCore(
 /// One nanochat pretoken chunk: the exclusive end index (in codepoints) of
 /// the chunk starting at `start` (always > `start`).
 ///
-/// The qwen2ChunkEnd variant (src/llm/tokenizer.zig) differing only in the
+/// The qwen2ChunkEnd variant (src/models/tokenizer.zig) differing only in the
 /// \p{N}{1,2} number arm. nanochat's SPLIT_PATTERN
 /// (refs/nanochat/nanochat/tokenizer.py):
 ///
@@ -706,7 +706,7 @@ fn contractionFold(cp: u32) u32 {
 /// Decode UTF-8 `text` into codepoints + byte offsets (offs gets a text.len
 /// sentinel). Invalid UTF-8: each undecodable byte classifies as one U+FFFD
 /// codepoint while the raw bytes stay in the emitted chunk (same policy as
-/// src/llm/tokenizer.zig's encodeRegular).
+/// src/models/tokenizer.zig's encodeRegular).
 fn decodeCps(allocator: Allocator, text: []const u8, cps: *std.ArrayList(u32), offs: *std.ArrayList(usize)) !void {
     cps.clearRetainingCapacity();
     offs.clearRetainingCapacity();

@@ -14,13 +14,13 @@
 //! the forward (lm.buildUncondBias + Model.forwardUncondPadded).
 
 const std = @import("std");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const langmap = @import("langmap.zig");
 const lm = @import("lm.zig");
 
 const Allocator = std.mem.Allocator;
-const Tokenizer = llm.tokenizer.Tokenizer;
+const Tokenizer = models.text.tokenizer.Tokenizer;
 
 pub const Error = error{ InvalidTargetTokens, InvalidRefTokens };
 

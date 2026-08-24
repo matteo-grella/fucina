@@ -30,19 +30,19 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [3.4 `deinit`, lifetime, and exec scopes (`src/ag/tensor.zig`, `src/tensor.zig`)](#34-deinit-lifetime-and-exec-scopes-srcagtensorzig-srctensorzig)
   - [3.5 Data access (`src/ag/tensor.zig`, `src/tensor.zig`)](#35-data-access-srcagtensorzig-srctensorzig)
   - [3.6 Shape and tag introspection (`src/ag/tensor.zig`, `src/tags.zig`)](#36-shape-and-tag-introspection-srcagtensorzig-srctagszig)
-  - [3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tag_ops.zig`, `src/exec/gather_scatter.zig`)](#37-views-and-structural-ops-srcagtensorzig-srctaggedzig-srcexecgather_scatterzig)
+  - [3.7 Views and structural ops (`src/ag/tensor.zig`, `src/tag_ops.zig`, `src/exec/gather_scatter.zig`)](#37-views-and-structural-ops-srcagtensorzig-srctag_opszig-srcexecgather_scatterzig)
   - [3.8 Casting: `to(dtype)` (`src/ag/tensor.zig`, `src/exec/convert.zig`)](#38-casting-todtype-srcagtensorzig-srcexecconvertzig)
   - [3.9 Gradient accessors (`src/ag/tensor.zig`, `src/ag/core.zig`; mechanics in §5)](#39-gradient-accessors-srcagtensorzig-srcagcorezig-mechanics-in-5)
   - [3.10 Facade surface index](#310-facade-surface-index)
 - [4. Tensor operations](#4-tensor-operations)
   - [4.1 The common operation contract (`src/ag/tensor.zig`)](#41-the-common-operation-contract-srcagtensorzig)
-  - [4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#42-pointwise-binary-ops-and-tag-driven-broadcasting-srcagtensorzig-srctaggedzig)
+  - [4.2 Pointwise binary ops and tag-driven broadcasting (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#42-pointwise-binary-ops-and-tag-driven-broadcasting-srcagtensorzig-srctag_opszig)
   - [4.3 Scalar variants and in-place/no-grad helpers (`src/ag/tensor.zig`)](#43-scalar-variants-and-in-placeno-grad-helpers-srcagtensorzig)
   - [4.4 Unary ops (`src/ag/tensor.zig`, `src/backend/ops.zig`)](#44-unary-ops-srcagtensorzig-srcbackendopszig)
   - [4.5 Gated activations (`src/ag/tensor.zig`)](#45-gated-activations-srcagtensorzig)
   - [4.6 Masks, comparisons, and conditionals (`src/ag/tensor.zig`)](#46-masks-comparisons-and-conditionals-srcagtensorzig)
   - [4.7 Reductions and scans (`src/ag/tensor.zig`)](#47-reductions-and-scans-srcagtensorzig)
-  - [4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#48-dot-tag-directed-contraction-srcagtensorzig-srctaggedzig)
+  - [4.8 `dot`: tag-directed contraction (`src/ag/tensor.zig`, `src/tag_ops.zig`)](#48-dot-tag-directed-contraction-srcagtensorzig-srctag_opszig)
   - [4.9 Explicit matmul, ternary STE, and packed-RHS GEMMs (`src/ag/tensor.zig`)](#49-explicit-matmul-ternary-ste-and-packed-rhs-gemms-srcagtensorzig)
   - [4.10 Softmax family (`src/ag/tensor.zig`, `src/exec/softmax.zig`)](#410-softmax-family-srcagtensorzig-srcexecsoftmaxzig)
   - [4.11 Normalization family (`src/ag/tensor.zig`)](#411-normalization-family-srcagtensorzig)
@@ -79,12 +79,12 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [7.2 Lookup, equality, and constraint helpers (`src/tags.zig`)](#72-lookup-equality-and-constraint-helpers-srctagszig)
   - [7.3 Tuple rewrites and axis maps (`src/tags.zig`)](#73-tuple-rewrites-and-axis-maps-srctagszig)
   - [7.4 Result-tag computation: pointwise and dot (`src/tags.zig`)](#74-result-tag-computation-pointwise-and-dot-srctagszig)
-  - [7.5 The op library contract (`src/tag_ops.zig`)](#75-the-op-library-contract-srctaggedzig)
-  - [7.6 Alignment, permutation, and broadcast views (`src/tag_ops.zig`)](#76-alignment-permutation-and-broadcast-views-srctaggedzig)
-  - [7.7 Pointwise and gated broadcasting (`src/tag_ops.zig`)](#77-pointwise-and-gated-broadcasting-srctaggedzig)
-  - [7.8 Split, merge, flatten, and multi-axis reduction (`src/tag_ops.zig`)](#78-split-merge-flatten-and-multi-axis-reduction-srctaggedzig)
-  - [7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tag_ops.zig`)](#79-taggeddot-tag-directed-contraction-and-its-lowering-srctaggedzig)
-  - [7.10 Shared dtype-generic helpers (`src/tag_ops.zig`)](#710-shared-dtype-generic-helpers-srctaggedzig)
+  - [7.5 The op library contract (`src/tag_ops.zig`)](#75-the-op-library-contract-srctag_opszig)
+  - [7.6 Alignment, permutation, and broadcast views (`src/tag_ops.zig`)](#76-alignment-permutation-and-broadcast-views-srctag_opszig)
+  - [7.7 Pointwise and gated broadcasting (`src/tag_ops.zig`)](#77-pointwise-and-gated-broadcasting-srctag_opszig)
+  - [7.8 Split, merge, flatten, and multi-axis reduction (`src/tag_ops.zig`)](#78-split-merge-flatten-and-multi-axis-reduction-srctag_opszig)
+  - [7.9 `taggedDot`: tag-directed contraction and its lowering (`src/tag_ops.zig`)](#79-taggeddot-tag-directed-contraction-and-its-lowering-srctag_opszig)
+  - [7.10 Shared dtype-generic helpers (`src/tag_ops.zig`)](#710-shared-dtype-generic-helpers-srctag_opszig)
 - [8. Data types, storage, and the raw tensor layer (internal)](#8-data-types-storage-and-the-raw-tensor-layer-internal)
   - [8.1 The `DType` enum (`src/dtype.zig`)](#81-the-dtype-enum-srcdtypezig)
   - [8.2 Storage mapping and dtype predicates (`src/dtype.zig`)](#82-storage-mapping-and-dtype-predicates-srcdtypezig)
@@ -133,28 +133,28 @@ API-level companion. Every Zig snippet is machine-verified against the tree
   - [12.5 safetensors (`src/safetensors.zig`)](#125-safetensors-srcsafetensorszig)
   - [12.6 Named state dicts (`src/state_dict.zig`)](#126-named-state-dicts-srcstate_dictzig)
   - [12.7 Training-checkpoint directory and native optimizer frames (`src/training_checkpoint.zig`, `src/optim.zig`)](#127-training-checkpoint-directory-and-native-optimizer-frames-srctraining_checkpointzig-srcoptimzig)
-- [13. The LLM stack (fucina_llm)](#13-the-llm-stack-fucina_llm)
-  - [13.1 Module layout (`src/llm.zig`)](#131-module-layout-srcllmzig)
+- [13. The model stack (fucina_models)](#13-the-model-stack-fucina_models)
+  - [13.1 Module layout (`src/models.zig`)](#131-module-layout-srcmodelszig)
   - [13.2 Weight loading (`src/weights.zig`)](#132-weight-loading-srcweightszig)
   - [13.3 GGUF metadata glue (`src/gguf_meta.zig`)](#133-gguf-metadata-glue-srcgguf_metazig)
-  - [13.4 KV cache (`src/llm/kv_cache.zig`)](#134-kv-cache-srcllmkv_cachezig)
+  - [13.4 KV cache (`src/models/text/kv_cache.zig`)](#134-kv-cache-srcmodelstextkv_cachezig)
   - [13.5 Tokenizers](#135-tokenizers)
-  - [13.6 Sampling (`src/llm/sampler.zig`)](#136-sampling-srcllmsamplerzig)
-  - [13.7 SFT data (`src/llm/data.zig`)](#137-sft-data-srcllmdatazig)
-  - [13.8 Chat (`src/llm/chat.zig`)](#138-chat-srcllmchatzig)
-  - [13.9 Speculative decoding (`src/llm/speculative/`)](#139-speculative-decoding-srcllmspeculative)
-  - [13.10 Cartridges (`src/llm/cartridge.zig`)](#1310-cartridges-srcllmcartridgezig)
-  - [13.11 Engram (`src/llm/engram.zig`)](#1311-engram-srcllmengramzig)
-  - [13.12 SHINE (`src/llm/qwen3/shine.zig`)](#1312-shine-srcllmqwen3shinezig)
-  - [13.13 Serving (`src/llm/serving/`)](#1313-serving-srcllmserving)
+  - [13.6 Sampling (`src/models/text/sampler.zig`)](#136-sampling-srcmodelstextsamplerzig)
+  - [13.7 SFT data (`src/models/text/data.zig`)](#137-sft-data-srcmodelstextdatazig)
+  - [13.8 Chat (`src/models/text/chat.zig`)](#138-chat-srcmodelstextchatzig)
+  - [13.9 Speculative decoding (`src/models/text/speculative/`)](#139-speculative-decoding-srcmodelstextspeculative)
+  - [13.10 Cartridges (`src/models/text/cartridge.zig`)](#1310-cartridges-srcmodelstextcartridgezig)
+  - [13.11 Engram (`src/models/research/engram.zig`)](#1311-engram-srcmodelsresearchengramzig)
+  - [13.12 SHINE (`src/models/qwen3/shine.zig`)](#1312-shine-srcmodelsqwen3shinezig)
+  - [13.13 Serving (`src/models/text/serving/`)](#1313-serving-srcmodelstextserving)
 - [14. Model families and example applications](#14-model-families-and-example-applications)
   - [14.1 Conventions shared by every family](#141-conventions-shared-by-every-family)
-  - [14.2 Qwen3 — dense and MoE (`src/llm/qwen3/model.zig`)](#142-qwen3--dense-and-moe-srcllmqwen3modelzig)
-  - [14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/llm/qwen35/model.zig`)](#143-qwen35--gated-deltanet-hybrid-srcllmqwen35modelzig)
-  - [14.4 Gemma 4 — text + MoE (`src/llm/gemma/`)](#144-gemma-4--text--moe-srcllmgemma)
-  - [14.5 DiffusionGemma — block text-diffusion (`src/llm/diffusion_gemma/model.zig`)](#145-diffusiongemma--block-text-diffusion-srcllmdiffusion_gemmamodelzig)
-  - [14.6 Parakeet ASR (`src/llm/parakeet/`)](#146-parakeet-asr-srcllmparakeet)
-  - [14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/llm/kimi3/model.zig`)](#147-kimi-k3--kdamla-hybrid-architecture-parity-srcllmkimi3modelzig)
+  - [14.2 Qwen3 — dense and MoE (`src/models/qwen3/model.zig`)](#142-qwen3--dense-and-moe-srcmodelsqwen3modelzig)
+  - [14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/models/qwen35/model.zig`)](#143-qwen35--gated-deltanet-hybrid-srcmodelsqwen35modelzig)
+  - [14.4 Gemma 4 — text + MoE (`src/models/gemma/`)](#144-gemma-4--text--moe-srcmodelsgemma)
+  - [14.5 DiffusionGemma — block text-diffusion (`src/models/diffusion_gemma/model.zig`)](#145-diffusiongemma--block-text-diffusion-srcmodelsdiffusion_gemmamodelzig)
+  - [14.6 Parakeet ASR (`src/models/parakeet/`)](#146-parakeet-asr-srcmodelsparakeet)
+  - [14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/models/research/kimi3/model.zig`)](#147-kimi-k3--kdamla-hybrid-architecture-parity-srcmodelsresearchkimi3modelzig)
   - [14.8 Example applications](#148-example-applications)
   - [14.9 Example → features → run command](#149-example--features--run-command)
 
@@ -183,7 +183,7 @@ The build exposes two library modules (§2):
 - **`fucina`** (`src/fucina.zig`) — the tensor library: the public `Tensor`
   facade, the `ExecContext` runtime, autograd, quantized formats, training
   (optimizers, ES, LoRA), and persistence (GGUF, safetensors, checkpoints).
-- **`fucina_llm`** (`src/llm.zig`) — the model stack built on top: GGUF
+- **`fucina_models`** (`src/models.zig`) — the model stack built on top: GGUF
   weight binding, KV caches, tokenizers, samplers, chat sessions,
   speculative decoding, and the model families (Qwen3, Qwen3.5, Gemma 4,
   DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Kimi-K3,
@@ -243,7 +243,7 @@ fails the check too, so this table and that one cannot drift apart (see
 | Band | Contents | Reference |
 | --- | --- | --- |
 | apps | `examples/`, `tools/`, `bench/` | §14 |
-| llm | `fucina_llm` module | §13, §14 |
+| models | `fucina_models` module | §13, §14 |
 | facade | `src/fucina.zig` public root | §1–§5 |
 | autograd + training | `src/ag/`, optim/es/lora/persistence | §5, §11, §12 |
 | tagged ops | `src/tag_ops.zig` | §7 |
@@ -342,7 +342,7 @@ kernel arms are not in the binary.
 | `-Dmax-threads` | `usize` | `8` | Comptime worker-team ceiling **and** runtime default thread count (`src/parallel.zig`). Sized for M1 Max P-cores; many-core servers must raise it at build time (`FUCINA_MAX_THREADS` only lowers it at runtime). | Outside 1–64 **panics the build**. |
 | `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider (§9). `metal`: big f32/f16/bf16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus streaming attention forward and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
 | `-Dparakeet-mic` | `bool` | `false` | Links the vendored miniaudio capture stack into the `parakeet` example so `--mic` (live microphone) works; default off keeps the parakeet build fast. | Only affects the parakeet executable/tests. |
-| `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4/lmserve examples and the llm, lmserve, and snippet-check test roots, enabling `llm.llguidance` grammar/JSON-schema token masking (§13.6). Off (the default) the build stays pure Zig and `llm.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
+| `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4/lmserve examples and the models, lmserve, and snippet-check test roots, enabling `models.text.llguidance` grammar/JSON-schema token masking (§13.6). Off (the default) the build stays pure Zig and `models.text.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
 | `-Dvector-scan` | `bool` | `false` | Vectorizes the scan kernels (`cumsum`/`cumprod` and cumsum's reverse VJP pass). Off = the documented serial-per-row scans. On: non-last-axis scans vectorize across independent columns (bitwise identical to serial); last-axis scans use an in-register prefix scan — still bitwise deterministic for any thread count, but the accumulation order differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer-valued data). Measured M1 ReleaseFast 256×8192: cumsum 3.3×, cumprod 5.2× (last axis), 4.3× (non-last, bit-identical). |
 | `-Doptimize` | `Debug` \| `ReleaseSafe` \| `ReleaseFast` \| `ReleaseSmall` | `Debug` | Standard Zig optimize mode. Build with `ReleaseFast` whenever speed matters (Debug is 10–50× slower); validate in Debug/ReleaseSafe, bench in ReleaseFast. | `x86dot-check` is always built ReleaseSafe regardless. |
 | `-Dtarget`, `-Dcpu` | standard queries | host, native CPU | Cross-compilation target and CPU model. | See below — a bare `-Dtarget` silently loses the fast kernels. |
@@ -424,9 +424,9 @@ the launched program.
 | `bench-check` | Compiles every bench executable without running it — the cheap gate that keeps the bench suite building (bench mains are otherwise reachable only through their run steps). The `addBench` helper registers every bench into the gate, so a new bench cannot land outside it. |
 | `arch-check` | Builds and runs `tools/check_import_graph.zig`: the production (non-test) `src/**/*.zig` import graph must have zero strongly-connected components. AST-based and test-aware — imports reachable only from `test` decls or test-only private helpers are not counted. Also enforces test-file forwarding: every `src/**/*_tests.zig`/`*_test.zig` must be `@import`ed by some non-test src file, so a forgotten forwarding stanza (§2.7) cannot silently drop a test file from `zig build test`. |
 | `doc-check` | Builds and runs `tools/check_doc_links.zig`: every backtick-quoted `*.md` in `AGENTS.md`'s "## Doc index" section (root docs, `docs/<name>.md`, and per-example `examples/<name>/README.md`) must exist on disk; `docs/RUNNING-MODELS.md` is additionally scanned for `examples/<name>/README.md` references. |
-| `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_llm` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
+| `snippet-check` | Builds and runs `tools/gen_snippet_tests.zig`: every runnable ```zig snippet in this document (a fenced block with a column-0 named `test "..."`) is extracted into a generated test root and run against the real `fucina`/`fucina_models` modules with the build's option set — a snippet that stops compiling or asserting fails the gate (conventions in §2.7). |
 | `x86dot-check` | Runs the cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot-kernel parity checker (`src/x86dot_check.zig`, always ReleaseSafe, deterministic output diffable across environments). The run leg follows `-Dtarget` (so `-Dtarget=x86_64-macos -Dcpu=baseline` under Rosetta drives the emulated x86 legs); four additional compile-only legs (x86_64_v3, alderlake, znver4, neoverse_v1) catch bit-rot of the AVX2/AVX-VNNI/AVX512-VNNI/smmla inline-asm arms that the local machine cannot execute. |
-| `cuda-check` | Compile-only `-Dgpu=cuda` legs: semantically analyzes the `fucina`/`fucina_llm` roots and NVRTC PTX generator for `x86_64-linux-gnu` with `gpu_kind=.cuda` (never run), so the CUDA provider/tooling cannot bit-rot on GPU-less/macOS machines. |
+| `cuda-check` | Compile-only `-Dgpu=cuda` legs: semantically analyzes the `fucina`/`fucina_models` roots and NVRTC PTX generator for `x86_64-linux-gnu` with `gpu_kind=.cuda` (never run), so the CUDA provider/tooling cannot bit-rot on GPU-less/macOS machines. |
 | `bench-gate` | Runs `python3 tools/bench_gate.py` (a system command, not a Zig artifact): the paired Fucina-vs-llama.cpp benchmark gate; protocol in [`BENCHMARK.md`](BENCHMARK.md). Requires `tools/fetch_refs.sh --build` first. |
 
 **Example and tool runners** (each `zig build <step> -- <args>`; CLI details
@@ -519,11 +519,11 @@ with `b.addModule`; executables get private root modules via
   the only one of the two *library* modules that receives the option set:
   `module.addOptions("build_options", options)` (the microbench roots below
   and the test-root module instances receive the same `options` object).
-- **`fucina_llm`** — root `src/llm.zig`. The LLM/ASR stack (§13). It does
-  *not* get `build_options`; every module built from `src/llm.zig` instead
-  receives a single-key `llm_build_options` module (`llguidance: bool`, read
-  by `src/llm/llguidance.zig`). It reaches the configured core exclusively
-  through `llm_module.addImport("fucina", module)` and the `fucina.internal`
+- **`fucina_models`** — root `src/models.zig`. The LLM/ASR stack (§13). It does
+  *not* get `build_options`; every module built from `src/models.zig` instead
+  receives a single-key `models_build_options` module (`llguidance: bool`, read
+  by `src/models/text/llguidance.zig`). It reaches the configured core exclusively
+  through `models_module.addImport("fucina", module)` and the `fucina.internal`
   seam, so there is exactly one copy of the backend/exec types.
 - **`bench_raw`** — root `src/bench_raw.zig`, same options. Internal raw
   tensor surface (`RawTensor`, `ExecContext`, `optim`) for
@@ -612,11 +612,11 @@ const fucina_dep = b.dependency("fucina", .{
     //   .blas = .none, .backend = .native, .@"max-threads" = @as(usize, 4),
 });
 exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
-exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // optional
+exe.root_module.addImport("fucina_models", fucina_dep.module("fucina_models")); // optional
 ```
 
-`@import("fucina")` / `@import("fucina_llm")` then work exactly as in
-every snippet of this reference; omit the `fucina_llm` import for
+`@import("fucina")` / `@import("fucina_models")` then work exactly as in
+every snippet of this reference; omit the `fucina_models` import for
 tensor/training-only consumers. In dependency builds the exported modules
 carry their own BLAS/GPU link inputs (link inputs propagate through module
 imports), so the default macOS configuration links Accelerate with no
@@ -673,21 +673,21 @@ pub fn build(b: *std.Build) void {
     });
     fucina.addOptions("build_options", options);
 
-    const fucina_llm = b.addModule("fucina_llm", .{
-        .root_source_file = b.path("vendor/fucina/src/llm.zig"),
+    const fucina_models = b.addModule("fucina_models", .{
+        .root_source_file = b.path("vendor/fucina/src/models.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fucina_llm.addImport("fucina", fucina);
-    // fucina_llm's own comptime configuration, read as
-    // `@import("llm_build_options")` — required by every module built from
-    // `src/llm.zig` (src/llm/llguidance.zig reads the boolean `llguidance`
+    fucina_models.addImport("fucina", fucina);
+    // fucina_models's own comptime configuration, read as
+    // `@import("models_build_options")` — required by every module built from
+    // `src/models.zig` (src/models/text/llguidance.zig reads the boolean `llguidance`
     // key; false keeps the engine stubbed). `true` additionally needs the
     // cargo staticlib build + link from fucina's build.zig (§2.2
     // `-Dllguidance`).
-    const llm_options = b.addOptions();
-    llm_options.addOption(bool, "llguidance", false);
-    fucina_llm.addOptions("llm_build_options", llm_options);
+    const models_options = b.addOptions();
+    models_options.addOption(bool, "llguidance", false);
+    fucina_models.addOptions("models_build_options", models_options);
 
     const exe = b.addExecutable(.{
         .name = "myapp",
@@ -698,7 +698,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("fucina", fucina);
-    exe.root_module.addImport("fucina_llm", fucina_llm);
+    exe.root_module.addImport("fucina_models", fucina_models);
     // Non-default -Dblas / -Dgpu configurations also need the link steps
     // from fucina's build.zig (configureBlas / configureGpu): frameworks,
     // system libraries, and the Metal shim C source.
@@ -708,7 +708,7 @@ pub fn build(b: *std.Build) void {
 
 The application code then imports the modules by the names given to
 `addImport`: `const fucina = @import("fucina");` and
-`const llm = @import("fucina_llm");`. `fucina_llm` is optional — omit it
+`const models = @import("fucina_models");`. `fucina_models` is optional — omit it
 (and its `addImport`) for tensor/training-only consumers. For a BLAS or GPU
 configuration, replicate the corresponding `configureBlas`/`configureGpu`
 body from the in-tree `build.zig` on the consumer executable (the Metal shim
@@ -804,15 +804,15 @@ shadow policy).
 | `FUCINA_GPU_VRAM_BUDGET` (cuda) | Weight-residency budget in bytes; `0` disables the bound. | 80% of free VRAM at init |
 | `FUCINA_GPU_KERNELS=src` (cuda) | NVRTC-recompiles the vendored kernels from `kernels.cu` instead of loading the committed PTX (dev loop; `tools/gen_cuda_ptx.sh` regenerates the PTX). String-valued, so it lives outside the tuning table as a direct env read. | committed PTX |
 
-**Model I/O + LLM stack** (`src/weights.zig` §13.2, `src/llm/qwen3/train.zig`,
-`src/llm/inkling/mmproj.zig`; read once and cached like the tables above):
+**Model I/O + LLM stack** (`src/weights.zig` §13.2, `src/models/qwen3/train.zig`,
+`src/models/inkling/mmproj.zig`; read once and cached like the tables above):
 
 | Variable | Effect | Default |
 | --- | --- | --- |
 | `FUCINA_NORM_QUANT_FUSED=1/0` | Forces the fused normalize+quantize+packed-GEMM route of `linearSeqNormed` on/off (prefill shapes on the packed CPU arms only; the fused route matches the unfused `rmsNormMul` + linear pair to f32 roundoff, not bitwise). | on |
 | `FUCINA_DECODE_COMPACT=1/0` | Routes decode-shape (m < 4) no-grad K-quant matmuls through the GGUF-native compact blocks instead of the byte-expanded packed layout — bitwise-equal, fewer weight bytes streamed (Q4_K ~1.92×, Q5_K ~1.57×, Q6_K 1.30×). | on |
-| `FUCINA_FUSED_DISTILL=0` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/llm/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
-| `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/llm/inkling/mmproj.zig`; read once at load). | off |
+| `FUCINA_FUSED_DISTILL=0` | Forces the composed logits + `cartridge.distillLoss` tail instead of the fused distill route in cartridge training (`src/models/qwen3/train.zig`; A/B + emergency revert — the fused route matches it to f32 roundoff, not bitwise). | fused route on |
+| `FUCINA_MM_PROFILE=1` | Per-stage timing profile of the Inkling multimodal-projector encode (`src/models/inkling/mmproj.zig`; read once at load). | off |
 
 **Examples and test gates** (`examples/`):
 
@@ -824,13 +824,13 @@ shadow policy).
 | `OMNIVOICE_TOKENIZER_GGUF=<path>` | Points the real-codec-GGUF load test at a tokenizer GGUF. | skipped |
 | `NANOCHAT_PARITY=1` | Enables the nanochat parity suites under `zig build test` (need locally captured reference goldens); unset, they `error.SkipZigTest`. | skipped |
 | `FUCINA_TEST_VERBOSE` | Any value re-enables the facedetect/nanochat per-case test-progress prints on stderr (`examples/{facedetect,nanochat}/testlog.zig`); failure-path prints stay on regardless. | silent |
-| `FUCINA_TEST_REQUIRE_MODELS` | Any value turns a missing model/fixture in a model-gated test into a FAILURE instead of a skip (`src/llm/test_support.zig`) — the rig-run guard against silent skips. Needs libc for the env read; libc-free builds treat it as unset. | skip |
+| `FUCINA_TEST_REQUIRE_MODELS` | Any value turns a missing model/fixture in a model-gated test into a FAILURE instead of a skip (`src/models/test_support.zig`) — the rig-run guard against silent skips. Needs libc for the env read; libc-free builds treat it as unset. | skip |
 
 ### 2.7 Test organization (`src/`, `examples/`)
 
 Tests live in **sibling `*_tests.zig` files** next to the production file
 they cover (156 of them across `src/` and `examples/`): `exec.zig` ↔
-`exec_tests.zig`, `src/llm/tokenizer.zig` ↔ `src/llm/tokenizer_tests.zig`,
+`exec_tests.zig`, `src/models/text/tokenizer.zig` ↔ `src/models/text/tokenizer_tests.zig`,
 and so on. The production file pulls its sibling in with a forwarding
 stanza, so analyzing the production file analyzes its tests:
 
@@ -841,7 +841,7 @@ test {
 ```
 
 Module roots forward everything: `src/fucina.zig` ends in a `test` block
-referencing every submodule (`_ = dtype; _ = exec; …`), and `src/llm.zig`
+referencing every submodule (`_ = dtype; _ = exec; …`), and `src/models.zig`
 does the same for every family and helper, so one `addTest` per root
 reaches the whole tree.
 
@@ -849,29 +849,29 @@ reaches the whole tree.
 binary with the same option set as the corresponding executable:
 
 1. `src/fucina.zig` — the core (with `build_options`);
-2. `src/llm.zig` — the LLM/ASR stack (imports `fucina`);
-3. `examples/lmserve/main.zig` (imports `fucina`, `fucina_llm`, and the
+2. `src/models.zig` — the LLM/ASR stack (imports `fucina`);
+3. `examples/lmserve/main.zig` (imports `fucina`, `fucina_models`, and the
    shared nanochat module; links libc);
 4. `examples/nam/main.zig` (with the audio/MIDI shims linked);
 5. `examples/parakeet/main.zig` (with its `parakeet_mic` options);
 6. `examples/omnivoice/main.zig` (with the playback shim);
 7. `examples/locate_anything/main.zig`;
 8. `examples/facedetect/main.zig`;
-9. `examples/nanochat/main.zig` (imports `fucina` and `fucina_llm` — the
+9. `examples/nanochat/main.zig` (imports `fucina` and `fucina_models` — the
    raw-byte BPE pretokenizer reuses the generated Unicode tables via
-   `llm.unicode_categories`).
+   `models.text.unicode_categories`).
 
 All nine pass with no model assets present. Suites that need external
 material skip themselves cleanly rather than fail: the OmniVoice parity
 suites gate on `OMNIVOICE_PARITY` (§2.6); asset-dependent tests (facedetect
 goldens, the GGUF re-emit byte-identity test, tokenizer-parity fixtures,
 NAM training goldens) translate `error.FileNotFound` into
-`error.SkipZigTest`; GPU-dependent tests (`src/llm/gemma/moe_tests.zig`)
+`error.SkipZigTest`; GPU-dependent tests (`src/models/gemma/moe_tests.zig`)
 skip unless the build has a GPU provider *and* a device is actually present.
 Tests for **opt-in build features** follow the same discipline through the
-feature's comptime flag: every `src/llm/llguidance_tests.zig` case is
+feature's comptime flag: every `src/models/text/llguidance_tests.zig` case is
 guarded on the flag — the enabled-path cases open with
-`if (!llm.llguidance.enabled) return error.SkipZigTest;`, and one
+`if (!models.text.llguidance.enabled) return error.SkipZigTest;`, and one
 disabled-build case inverts the guard to assert `error.LlguidanceNotEnabled`
 — so the same test root compiles and passes under any flag combination and
 gains coverage — never failures — when the flag is on.
@@ -882,9 +882,9 @@ and native must agree with it.
 **Doc snippets are tests too.** `zig build snippet-check` extracts every
 runnable ```zig block from this document — any fenced block containing a
 column-0 named `test "..."` declaration — into a generated test root and
-runs it against the real `fucina`/`fucina_llm` modules with the build's
+runs it against the real `fucina`/`fucina_models` modules with the build's
 option set (`tools/gen_snippet_tests.zig`). Authoring contract: snippets
-assume an implicit prelude (`std`, `fucina`, `llm = @import("fucina_llm")`,
+assume an implicit prelude (`std`, `fucina`, `models = @import("fucina_models")`,
 `optim = fucina.optim`; entries a snippet declares itself are not
 re-emitted); a `<!-- snippet: helper -->` comment on the line before a
 non-test fence marks a definition block (an Op/Spec/fn the prose
@@ -894,7 +894,7 @@ run hermetically. Illustrative fragments (signature blocks, bare `test {`
 stanzas, asset-dependent `fn` examples) are ignored automatically. A
 snippet for an opt-in build feature stays RUNNABLE, not skip-marked: it
 opens with the feature's comptime-flag guard (e.g.
-`if (!llm.llguidance.enabled) return error.SkipZigTest;`), so
+`if (!models.text.llguidance.enabled) return error.SkipZigTest;`), so
 `snippet-check` compiles it under every flag combination and executes it
 exactly when the enabling `-D` flag is passed.
 
@@ -5173,7 +5173,7 @@ lock is held; `carveMoeDecodeChainScratch` adds a `states` slice and a
 caller-sized task count for dependency-chained decode
 (`MoeDecodeChainScratchView`). Every carved type must align to ≤ 8 (compile
 error otherwise). This is the seam in-tree LLM-band code uses to build
-custom MoE decode paths (`src/llm/gemma/moe.zig`, §13); `deinit` frees the
+custom MoE decode paths (`src/models/gemma/moe.zig`, §13); `deinit` frees the
 scratch with the context.
 
 ### 6.2 The memory model: who owns an op result (`docs/MEMORY-MODEL.md`)
@@ -7382,7 +7382,7 @@ pub const internal = struct {
 ```
 
 - `backend_mod`, `tensor_mod`, `thread_mod` — the internal surface for
-  sibling modules (notably `fucina_llm`, §13) that need **exact core type
+  sibling modules (notably `fucina_models`, §13) that need **exact core type
   identity** without importing a second copy of the backend/exec files: a
   `TensorOf(.q4_k)` from a re-imported `tensor.zig` would be a distinct,
   incompatible type. `tensor_mod` gives typed raw tensors
@@ -8125,7 +8125,7 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   (`FUCINA_GPU_MIN_WORK_DENSE_TQ2`, §2.6); any refusal falls through to
   the x4 interleaved CPU kernels wholesale. Not bitwise vs the CPU chain —
   the same accepted numerics stance as the q4_k/q6_k/q8_0 dense offload.
-- **MoE expert FFN** (llm tier, `src/llm/gemma/moe.zig`): CPU gathers
+- **MoE expert FFN** (models tier, `src/models/gemma/moe.zig`): CPU gathers
   activation rows into shared staging panels (`qmoeStage`, grow-only
   MTLBuffers), dispatches grouped tile-table GEMMs (`gemmQGroupedNt`, one
   `QMMTile` per 32-row output tile per expert), and reads results back — all
@@ -8264,7 +8264,7 @@ pub const gpu = struct {
 ```
 
 `has_quant_gemm` is the capability loaders key on when reshaping CPU-side
-weight representations for the GPU quant path (e.g. `src/llm/gemma/model.zig`
+weight representations for the GPU quant path (e.g. `src/models/gemma/model.zig`
 copying mmap'd expert tensors into resident storage) — a provider can be
 `enabled` while its quantized arms are stubs. `RhsLifetime`
 (`fucina.RhsLifetime`) is how callers communicate the storage-stability
@@ -8685,7 +8685,7 @@ Packing and consuming happen on the facade:
 - `gate.gegluQuantDotPacked(ctx, &up, &packed, in_tag, out_tag)` — fused
   GeGLU + down projection, `q8_0x4` only.
 
-At the LLM layer (§13), `fucina_llm`'s `weights.zig` wraps each quantized
+At the LLM layer (§13), `fucina_models`'s `weights.zig` wraps each quantized
 projection as a struct holding the original blocks plus a
 `fucina.PackedRhs(dtype)` built once at load. Inkling uses the same pattern
 for its dense vision-tower projections and dense unembed: pack once while
@@ -8747,7 +8747,7 @@ trailing `QuantizedMatmulOptions`. The facade `dot` always uses the default
 transient/`allow_gpu`-when-not-training options — a `.transient` RHS may
 still use the provider's blocking GPU path, but no address-keyed wrap survives
 the call and the borrowed bytes cannot be retained by an async command.
-`fucina_llm`'s weight wrappers thread `.stable_process` through for resident
+`fucina_models`'s weight wrappers thread `.stable_process` through for resident
 or mmap'd weights (§13); that lifetime first tries the direct-output async
 path (Metal admits up to 8192 activation rows per dense-quant submission;
 CUDA grows its slot table) and falls back to balanced blocking chunks of at most 2048 rows
@@ -9167,7 +9167,7 @@ test "PTQTP: planes reconstruct and multiply as plain TQ2_0 tensors" {
 ```
 
 At the LLM layer, `LinearWeight.toPtqtp` decorates a loaded GGUF linear in
-place from any source dtype and `llm.qwen3.ptqtp.decorate`
+place from any source dtype and `models.qwen3.ptqtp.decorate`
 walks a whole model (§13.2.1); `zig build ptqtp-spirals` and
 `zig build ptqtp-qwen3` are the acceptance/measurement examples. Decorated
 models persist to GGUF as per-plane standalone TQ2_0 tensors and load back
@@ -10041,14 +10041,14 @@ The trainer-state codec is generic over the caller's state struct: a
 `version: u32`/`step: u64`/`seed: u64` header plus optional `?u64`/`?f64`
 fields, with the writer and parser bodies comptime-generated from the
 struct (JSON key = field name, emission order = declaration order). The
-LLM trainers' concrete struct is `fucina_llm.trainer_state.TrainerState`:
+LLM trainers' concrete struct is `fucina_models.train.trainer_state.TrainerState`:
 
 ```zig
-pub const TrainerState = struct {   // fucina_llm.trainer_state
+pub const TrainerState = struct {   // fucina_models.train.trainer_state
     version: u32 = 1, step: u64 = 0, seed: u64 = 0,
     lora_rank: ?u64, lora_alpha: ?f64, lora_dropout_p: ?f64, learning_rate: ?f64,
     accum_steps: ?u64,                       // window size; step % accum_steps == 0 at save
-    data_seed: ?u64, data_epoch: ?u64, data_index: ?u64,   // llm.data.Loader.State
+    data_seed: ?u64, data_epoch: ?u64, data_index: ?u64,   // models.text.data.Loader.State
     es_sigma: ?f64, es_alpha: ?f64, es_population: ?u64,
     es_noise: ?u64,                          // STABLE mapping: 0 = iid, 1 = correlated
     es_antithetic: ?u64,                     // 1 = mirrored pairs
@@ -10194,7 +10194,7 @@ test "LoRA: zero delta at init; eval forward; f32 merge parity" {
 ```
 
 **Fine-tune → merge → quantize → serve.** LLM-scale LoRA fine-tuning lives
-in `llm.qwen3.train` (§13): `Trainer(targets)` puts adapters on selected
+in `models.qwen3.train` (§13): `Trainer(targets)` puts adapters on selected
 projections of a frozen GGUF model, `saveAdapters`/`loadAdapters` persist
 them as `adapters.safetensors` (names `layers.<i>.<target>.lora_{a,b}`;
 `loadAdaptersWithOptions` threads `state_dict.LoadOptions`). The loop back
@@ -10575,7 +10575,7 @@ one). After a successful `takeMapping`,
 `File.deinit` no longer unmaps; every previously parsed slice (metadata,
 `TensorInfo.data`) stays valid for as long as the returned `MappedRegion`
 lives. This is how a model borrows quantized weight blocks straight from the
-mapping instead of copying them (the `fucina_llm` loaders do this for large
+mapping instead of copying them (the `fucina_models` loaders do this for large
 expert tensors — §13). The absolute addresses of tensor payloads are aligned
 (page-aligned mapping base plus `alignment`-multiple offsets), so borrowed
 block slices satisfy the block-struct alignment that §10's kernels assume.
@@ -11241,9 +11241,9 @@ format for parameter values only: magic, u32 tensor count, then per tensor a
 u32 rank, rank u64 dims, and the raw f32 little-endian data. It carries no
 names and no dtypes (usage rules and the named alternative are §11.5).
 
-## 13. The LLM stack (fucina_llm)
+## 13. The model stack (fucina_models)
 
-`fucina_llm` is a second Zig module layered on top of the `fucina` facade (its
+`fucina_models` is a second Zig module layered on top of the `fucina` facade (its
 only module dependency; see §2 for build wiring). It contains everything a
 transformer inference/fine-tuning runner needs that is not a tensor op:
 GGUF-to-weight binding, KV caching, tokenizers, sampling, SFT data plumbing,
@@ -11251,51 +11251,51 @@ multi-turn chat, and lossless draft-free speculative decoding. Import it as:
 
 ```zig
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 ```
 
-### 13.1 Module layout (`src/llm.zig`)
+### 13.1 Module layout (`src/models.zig`)
 
 Model families live in subdirectories and are exposed as namespaces; generic,
 family-agnostic helpers stay flat:
 
 | Namespace | Contents | Files |
 |---|---|---|
-| `llm.qwen3` | `model`, `train`, `ptqtp`, `shine_serving` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapter-fleet serving | `llm/qwen3/` |
-| `llm.qwen35` | `model`, `chat`, `serving` — Qwen3.5 Gated-DeltaNet hybrid | `llm/qwen35/` |
-| `llm.gemma` | `model`, `train`, `moe` | `llm/gemma/` |
-| `llm.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `llm/diffusion_gemma/` |
-| `llm.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `llm/parakeet/` |
-| `llm.speculative` | `core`, `mtp`, `sam_index`, `recycling`, `cascade`, `constrained` | `llm/speculative/` |
-| `llm.deepseek2` | `model` — DeepSeek-V2 MLA + fine-grained MoE with shared experts | `llm/deepseek2/` |
-| `llm.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `llm/glm4moe/` |
-| `llm.deepseek4` | `model`, `serving` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `llm/deepseek4/` |
-| `llm.inkling` | `model`, `mmproj`, `chat`, `serving` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `llm/inkling/` |
-| `llm.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `llm.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `llm/subq.zig`, `llm/engram.zig`, `llm/qwen3/shine*.zig`, `llm/kimi3/` |
+| `models.qwen3` | `model`, `train`, `ptqtp`, `shine_serving` — Qwen3 dense + MoE, LoRA fine-tuning, SHINE adapter-fleet serving | `models/qwen3/` |
+| `models.qwen35` | `model`, `chat`, `serving` — Qwen3.5 Gated-DeltaNet hybrid | `models/qwen35/` |
+| `models.gemma` | `model`, `train`, `moe` | `models/gemma/` |
+| `models.diffusion_gemma` | `model` — block text-diffusion on the gemma4 backbone | `models/diffusion_gemma/` |
+| `models.parakeet` | `loader`, `frontend`, `subsampling`, `encoder`, `weights`, `decoder`, `tokenizer`, `streaming`, `transcription` — NeMo FastConformer/RNN-T ASR | `models/parakeet/` |
+| `models.text.speculative` | `core`, `mtp`, `sam_index`, `recycling`, `cascade`, `constrained` | `models/text/speculative/` |
+| `models.deepseek2` | `model` — DeepSeek-V2 MLA + fine-grained MoE with shared experts | `models/deepseek2/` |
+| `models.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `models/glm4moe/` |
+| `models.deepseek4` | `model`, `serving` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `models/deepseek4/` |
+| `models.inkling` | `model`, `mmproj`, `chat`, `serving` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `models/inkling/` |
+| `models.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `models.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `models/research/subq.zig`, `models/research/engram.zig`, `models/qwen3/shine*.zig`, `models/research/kimi3/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
 | `fucina.weights` | GGUF tensor → typed linear weight binding | §13.2 |
 | `fucina.ptqtp_gguf` | PTQTP plane persistence — `<name>.ptqtp0/1/2` writer + pair-detecting loader | §13.2 |
 | `fucina.gguf_meta` | metadata readers + parallel layer loader | §13.3 |
-| `llm.decoder` | the autoregressive decoder contract: `Caps` + comptime `assertDecoder(Model)`; the generic layers are written against it | §13.8, §14.1 |
-| `llm.registry` | the architecture registry: GGUF `general.architecture` to family module; `serving.open` dispatches over it, `familyFor` is the comptime lookup | §13.13 |
-| `llm.generate` | the reference generation loop over the decoder contract (`generate`/`generateOutcome`, `TokenSink`, `greedy`) | §14.1 |
-| `llm.kv_cache` | per-layer K/V store for autoregressive decode | §13.4 |
-| `llm.kv_persist` | crash-safe append-only KV-cache sidecar: conversations reopen warm | §13.4 |
-| `llm.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
-| `llm.spm_tokenizer` | SentencePiece Unigram (Gemma/llama-vocab) | §13.5 |
-| `llm.unicode_categories` | generated `\p{L}`/`\p{N}`/`\p{M}`/`\s` tables (byte-BPE pretokenizer; shared with out-of-module tokenizers) | §13.5 |
-| `llm.sampler` | greedy/temperature/top-k/top-p/min-p/penalties + logit-processor seam | §13.6 |
-| `llm.logit_processor` | pluggable logit-transform interface (grammar masks, bias lists) | §13.6 |
-| `llm.llguidance` | grammar/JSON-schema constrained decoding (vendored engine, `-Dllguidance`) | §13.6 |
-| `llm.data` | SFT pairs, encodePair, deterministic Loader | §13.7 |
-| `llm.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
-| `llm.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
-| `llm.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
-| `llm.research.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
-| `llm.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | §13.13 |
-| `llm.runner` | the descriptor runner (experimental tier): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); the qwen3 family and the glm4moe trunk run on it; recorded-golden gates in `runner_tests.zig` (real 0.6B chains + logit fingerprints, synthetic MoE and glm fixtures) | `docs/RUNNER.md` |
+| `models.decoder` | the autoregressive decoder contract: `Caps` + comptime `assertDecoder(Model)`; the generic layers are written against it | §13.8, §14.1 |
+| `models.registry` | the architecture registry: GGUF `general.architecture` to family module; `serving.open` dispatches over it, `familyFor` is the comptime lookup | §13.13 |
+| `models.text.generate` | the reference generation loop over the decoder contract (`generate`/`generateOutcome`, `TokenSink`, `greedy`) | §14.1 |
+| `models.text.kv_cache` | per-layer K/V store for autoregressive decode | §13.4 |
+| `models.text.kv_persist` | crash-safe append-only KV-cache sidecar: conversations reopen warm | §13.4 |
+| `models.text.tokenizer` | byte-level BPE (GPT-2/Qwen) | §13.5 |
+| `models.text.spm_tokenizer` | SentencePiece Unigram (Gemma/llama-vocab) | §13.5 |
+| `models.text.unicode_categories` | generated `\p{L}`/`\p{N}`/`\p{M}`/`\s` tables (byte-BPE pretokenizer; shared with out-of-module tokenizers) | §13.5 |
+| `models.text.sampler` | greedy/temperature/top-k/top-p/min-p/penalties + logit-processor seam | §13.6 |
+| `models.text.logit_processor` | pluggable logit-transform interface (grammar masks, bias lists) | §13.6 |
+| `models.text.llguidance` | grammar/JSON-schema constrained decoding (vendored engine, `-Dllguidance`) | §13.6 |
+| `models.text.data` | SFT pairs, encodePair, deterministic Loader | §13.7 |
+| `models.text.chat` | templates + generic `Conversation(Model, Tok)` | §13.8 |
+| `models.text.cartridge` | trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) | §13.10 |
+| `models.text.cartridge_fleet` | per-document cartridge fleets: manifest, RAM/disk budget manager, cosine chunk index (Cartridges at Scale, arXiv 2606.04557) | §13.10 |
+| `models.research.engram` | conditional n-gram memory: hashed-lookup embedding tables grafted onto a frozen model (Engram, arXiv 2601.07372) | §13.11 |
+| `models.text.serving` | the serving band: the contract (`GenerateRequest`/`GenerateResult`, `Caps`, the per-family `Backend` vtable), the HTTP transport (`serving.http`/`scheduler`/`emitter` + the OpenAI/Anthropic dialects and hermes tool calling), the generic `GgufChatBackend` engine, and the `serving.open` load-and-serve entry (`examples/lmserve` is the CLI front end) | §13.13 |
+| `models.qwen3.runner` | the descriptor runner (experimental tier): one family-independent decoder driven by a runtime `Descriptor` with two block styles (fused qwen3-shape, host_reference GLM/DeepSeek-MoE shape); the qwen3 family and the glm4moe trunk run on it; recorded-golden gates in `runner_tests.zig` (real 0.6B chains + logit fingerprints, synthetic MoE and glm fixtures) | `docs/RUNNER.md` |
 
 The family namespaces are covered in §14 (kimi3 in §14.7,
 deepseek2/glm4moe/deepseek4/inkling by their module doc comments); this
@@ -11461,13 +11461,13 @@ pub fn deinit(self: *LinearWeight) void
   storage. On the `ptqtp` arm, `getRowsAs` returns the dequantized plane
   sum (so `toResidentF16` doubles as un-decorate). `decoratePtqtpInto` +
   `PtqtpReport` aggregate per-tensor solver stats over model walks;
-  `llm.qwen3.ptqtp.decorate(model, ctx, options)` walks attention
+  `models.qwen3.ptqtp.decorate(model, ctx, options)` walks attention
   q/k/v (split or fused), o_proj, and dense FFN projections, with
   `DecorateOptions` covering per-projection plane overrides
   (`down_planes`/`o_planes`) and data-free edge-layer skip
   (`skip_first_layers`/`skip_last_layers`); embeddings, lm_head, and norms
   are not walked (decorate `model.output` directly for a ternary head).
-  `llm.qwen3.ptqtp.save(model, ctx, io, src_file, out_path)` persists the
+  `models.qwen3.ptqtp.save(model, ctx, io, src_file, out_path)` persists the
   decorated model: `fucina.ptqtp_gguf` writes one standalone TQ2_0 tensor per plane —
   `<name>.ptqtp0/1/2` replaces `<name>`, fused weights row-slicing back to
   their source tensor names — plus a `fucina.ptqtp.version` metadata key
@@ -11598,7 +11598,7 @@ streaming from churning the page cache backing the mmapped dense
 weights), and `pilot` router-lookahead prefetch — and adds each
 `mirror_paths` entry as a weighted read mirror (`mirror_weights`).
 
-The routing policy lives in `llm.moe_router`:
+The routing policy lives in `models.moe_router`:
 `cacheRouteSel(gate, choice, sel)` applies the store's
 resident-preferring top-k selection when the layer streams from a store
 opened with `cache_route` (quality-affecting, opt-in: `route_sacred`
@@ -11607,7 +11607,7 @@ resident-preferring fill) and returns false when the caller keeps its
 plain top-k; `pilotHintTopK(ctx, nrm, router, top_k, store, layer_i)` is
 the router-lookahead tail the streamed decoders share.
 
-The runner CLI seam lives in `llm.moe_stream_cli`:
+The runner CLI seam lives in `models.moe_stream_cli`:
 `reportAndSaveMoeStream(store, learn, writer)` is the runners' exit-time
 report — stream, pilot, prefetch, cache-route, and mirror stats — and
 persists the usage histogram that seeds the next load's pinned tier;
@@ -11750,7 +11750,7 @@ copy+pack becomes an N-core job (the dominant chunk of model load time).
 DID load are deinitialized, and the first error **in layer order** is
 returned (deterministic even under parallel execution).
 
-### 13.4 KV cache (`src/llm/kv_cache.zig`)
+### 13.4 KV cache (`src/models/text/kv_cache.zig`)
 
 ```zig
 pub const KvTensor = fucina.Tensor(.{ .dtype = .f16, .tags = .{ .seq, .kv_head, .d } });
@@ -11825,7 +11825,7 @@ pub fn byteSize(self) usize
   exceeding `capacity` is `Error.KvCacheOverflow`. It does **not** advance
   the count — every layer appends at the same base offset; call `advance(m)`
   once per step after all layers have been written.
-- `len()` is the decoder contract's cached-position count (`llm.decoder`);
+- `len()` is the decoder contract's cached-position count (`models.decoder`);
   the state itself is the `count` field.
 - `truncate(keep_len)` rewinds to the first `keep_len` positions (a value at
   or above `len()` is a no-op). Decrementing the count suffices for both
@@ -11852,12 +11852,12 @@ test "kv cache: append, advance, truncate rewind" {
     defer ctx.deinit();
 
     // 1 layer, 2 kv heads, head_dim 4, capacity 8 positions (f16 storage).
-    var cache = try llm.kv_cache.KvCache.init(&ctx, 1, 2, 4, 8);
+    var cache = try models.text.kv_cache.KvCache.init(&ctx, 1, 2, 4, 8);
     defer cache.deinit();
 
-    var k = try llm.kv_cache.KvInput.fromSlice(&ctx, .{ 3, 2, 4 }, &([_]f32{0.5} ** 24));
+    var k = try models.text.kv_cache.KvInput.fromSlice(&ctx, .{ 3, 2, 4 }, &([_]f32{0.5} ** 24));
     defer k.deinit();
-    var v = try llm.kv_cache.KvInput.fromSlice(&ctx, .{ 3, 2, 4 }, &([_]f32{0.25} ** 24));
+    var v = try models.text.kv_cache.KvInput.fromSlice(&ctx, .{ 3, 2, 4 }, &([_]f32{0.25} ** 24));
     defer v.deinit();
     try cache.appendLayer(&ctx, 0, &k, &v); // writes at offset len(), does not advance
     cache.advance(3); // once per step, after all layers
@@ -11869,7 +11869,7 @@ test "kv cache: append, advance, truncate rewind" {
 }
 ```
 
-`llm.kv_persist` (`src/llm/kv_persist.zig`) persists the cache to a
+`models.text.kv_persist` (`src/models/text/kv_persist.zig`) persists the cache to a
 crash-safe append-only sidecar file so a conversation reopens warm across
 process restarts, with zero re-prefill. The sidecar is a fixed header —
 magic `FUXKV001`, a record count, and a per-layer geometry guard (any
@@ -11897,9 +11897,9 @@ is the turnkey consumer and resumes `kv_prefix_rows` from the file.
 
 ### 13.5 Tokenizers
 
-#### 13.5.1 Byte-level BPE (`src/llm/tokenizer.zig`)
+#### 13.5.1 Byte-level BPE (`src/models/text/tokenizer.zig`)
 
-`llm.tokenizer.Tokenizer` is a native byte-level BPE tokenizer (GPT-2/Qwen
+`models.text.tokenizer.Tokenizer` is a native byte-level BPE tokenizer (GPT-2/Qwen
 family) built entirely from a model's GGUF metadata
 (`tokenizer.ggml.{tokens,merges,pre,token_type,bos_token_id,eos_token_id,add_bos_token,add_eos_token}`)
 — no external tokenizer dependency, no per-model hardcoding. Error set:
@@ -11972,7 +11972,7 @@ test "byte-level BPE: merges, special markers, round-trip" {
     const alloc = std.testing.allocator;
     const vocab = [_][]const u8{ "<|im_end|>", "h", "i", "hi" };
     const merges = [_][]const u8{"h i"};
-    var tok = try llm.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &merges, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &merges, .{});
     defer tok.deinit();
 
     const ids = try tok.encode(alloc, "hi<|im_end|>");
@@ -12003,9 +12003,9 @@ until a later token finishes it; `flush` emits any remainder when generation
 ends. The sink is any `*std.Io.Writer` (stdout, an SSE response, an in-memory
 buffer).
 
-#### 13.5.2 SentencePiece (`src/llm/spm_tokenizer.zig`)
+#### 13.5.2 SentencePiece (`src/models/text/spm_tokenizer.zig`)
 
-`llm.spm_tokenizer.Tokenizer` is the Gemma-family counterpart: a faithful port
+`models.text.spm_tokenizer.Tokenizer` is the Gemma-family counterpart: a faithful port
 of llama.cpp's `llm_tokenizer_spm` Unigram model, driven by per-token
 **scores** rather than merge ranks. Encoding seeds a max-heap of adjacent
 symbol pairs keyed by the score of the token they would form, repeatedly
@@ -12044,7 +12044,7 @@ test "SPM: score-driven merges and byte fallback" {
     const alloc = std.testing.allocator;
     const vocab = [_][]const u8{ "<unk>", "a", "b", "ab", "abc", "c", "<0x78>" };
     const scores = [_]f32{ 0, -1, -1, -3, -2.5, -1, -5 };
-    var tok = try llm.spm_tokenizer.Tokenizer.initFromSlices(alloc, &vocab, &scores, null, .{
+    var tok = try models.text.spm_tokenizer.Tokenizer.initFromSlices(alloc, &vocab, &scores, null, .{
         .add_bos = false,
         .add_space_prefix = false,
     });
@@ -12056,17 +12056,17 @@ test "SPM: score-driven merges and byte fallback" {
 }
 ```
 
-#### 13.5.3 Unicode tables (`src/llm/unicode_categories.zig`)
+#### 13.5.3 Unicode tables (`src/models/text/unicode_categories.zig`)
 
 Generated (do not edit) `\p{L}`/`\p{N}`/`\p{M}`/`\s` classification tables
 (`isLetter`/`isNumber`/`isMark`/`isWhitespace`) matching llama.cpp's tokenizer
 data for token-ID-exact pretokenizer parity; regenerate with
-`python3 tools/gen_unicode_categories.py > src/llm/unicode_categories.zig`
-(the generator writes to stdout). Re-exported from `llm.zig` as
-`llm.unicode_categories` so out-of-module consumers (nanochat's
+`python3 tools/gen_unicode_categories.py > src/models/text/unicode_categories.zig`
+(the generator writes to stdout). Re-exported from `models.zig` as
+`models.text.unicode_categories` so out-of-module consumers (nanochat's
 example-local tokenizer) share the tables.
 
-### 13.6 Sampling (`src/llm/sampler.zig`)
+### 13.6 Sampling (`src/models/text/sampler.zig`)
 
 ```zig
 pub const Config = struct {
@@ -12127,18 +12127,18 @@ test "sampler: greedy default, seed-deterministic sampling" {
     var logits = try fucina.Tensor(.{ .seq, .vocab }).fromSlice(&ctx, .{ 1, 5 }, &.{ 0.1, 0.2, 0.9, 0.3, 0.0 });
     defer logits.deinit();
 
-    var greedy = llm.sampler.Sampler.init(.{}); // temperature 0 => argmax
+    var greedy = models.text.sampler.Sampler.init(.{}); // temperature 0 => argmax
     try std.testing.expectEqual(@as(usize, 2), try greedy.next(&ctx, &logits, &.{}));
 
-    var a = llm.sampler.Sampler.init(.{ .temperature = 0.8, .top_k = 3, .seed = 42 });
-    var b = llm.sampler.Sampler.init(.{ .temperature = 0.8, .top_k = 3, .seed = 42 });
+    var a = models.text.sampler.Sampler.init(.{ .temperature = 0.8, .top_k = 3, .seed = 42 });
+    var b = models.text.sampler.Sampler.init(.{ .temperature = 0.8, .top_k = 3, .seed = 42 });
     for (0..8) |_| { // same seed -> same draw sequence
         try std.testing.expectEqual(try a.next(&ctx, &logits, &.{}), try b.next(&ctx, &logits, &.{}));
     }
 }
 ```
 
-#### Logit processors (`src/llm/logit_processor.zig`)
+#### Logit processors (`src/models/text/logit_processor.zig`)
 
 `LogitProcessor` is the injectable pre-sampling transform — the seam
 grammar-constrained decoding plugs into, and the hook for any custom logit
@@ -12216,7 +12216,7 @@ test "logit processor: mask before sampling, observe the selection" {
 
     var logits = try fucina.Tensor(.{ .seq, .vocab }).fromSlice(&ctx, .{ 1, 4 }, &.{ 0.1, 0.9, 0.5, 0.8 });
     defer logits.deinit();
-    var s = llm.sampler.Sampler.init(.{}); // greedy
+    var s = models.text.sampler.Sampler.init(.{}); // greedy
     s.processor = .{ .ptr = &mask, .vtable = &.{ .process = OddMask.process, .commit = OddMask.commit } };
     // Unmasked argmax would be token 1; the mask forces the best even id.
     try std.testing.expectEqual(@as(usize, 2), try s.next(&ctx, &logits, &.{}));
@@ -12224,9 +12224,9 @@ test "logit processor: mask before sampling, observe the selection" {
 }
 ```
 
-#### Constrained decoding: llguidance (`src/llm/llguidance.zig`, `-Dllguidance`)
+#### Constrained decoding: llguidance (`src/models/text/llguidance.zig`, `-Dllguidance`)
 
-`llm.llguidance.Constraint` compiles a grammar with the vendored
+`models.text.llguidance.Constraint` compiles a grammar with the vendored
 [llguidance](https://github.com/guidance-ai/llguidance) engine
 (`vendor/llguidance`, MIT — version/update procedure in its
 [README](../vendor/llguidance/README.md)) and adapts it to the
@@ -12268,8 +12268,8 @@ pub const Constraint = struct {
 };
 ```
 
-- `tokenizer` is `*const llm.tokenizer.Tokenizer` (byte-BPE) or
-  `*const llm.spm_tokenizer.Tokenizer` (SPM) — both borrowed. The bridge
+- `tokenizer` is `*const models.text.tokenizer.Tokenizer` (byte-BPE) or
+  `*const models.text.spm_tokenizer.Tokenizer` (SPM) — both borrowed. The bridge
   hands llguidance every token's RAW bytes: BPE tokens byte-decoded, SPM
   pieces unescaped (`▁` → space) and `<0xXX>` byte tokens as their byte.
   Control tokens (BPE: the `<|...|>` marker shape; SPM: `control`/`unknown`
@@ -12305,23 +12305,23 @@ pub const Constraint = struct {
 
 ```zig
 test "llguidance: JSON-schema constrained greedy decode" {
-    if (!llm.llguidance.enabled) return error.SkipZigTest; // -Dllguidance=true builds only
+    if (!models.text.llguidance.enabled) return error.SkipZigTest; // -Dllguidance=true builds only
     const alloc = std.testing.allocator;
     var ctx: fucina.ExecContext = undefined;
     ctx.init(alloc);
     defer ctx.deinit();
 
     const vocab = [_][]const u8{ "{", "}", "\"", "a", ":", "1", "<|end|>" };
-    var tok = try llm.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{ .eos = 6 });
+    var tok = try models.text.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{ .eos = 6 });
     defer tok.deinit();
 
-    var constraint = try llm.llguidance.Constraint.init(alloc, &tok, .{
+    var constraint = try models.text.llguidance.Constraint.init(alloc, &tok, .{
         .json_schema =
         \\{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"],"additionalProperties":false}
     }, .{});
     defer constraint.deinit();
 
-    var s = llm.sampler.Sampler.init(.{}); // greedy
+    var s = models.text.sampler.Sampler.init(.{}); // greedy
     s.processor = constraint.processor();
 
     // The model "wants" '}' everywhere; the mask walks it through a valid
@@ -12341,7 +12341,7 @@ test "llguidance: JSON-schema constrained greedy decode" {
 }
 ```
 
-### 13.7 SFT data (`src/llm/data.zig`)
+### 13.7 SFT data (`src/models/text/data.zig`)
 
 Minimal supervised-fine-tuning helpers, generic across model families. Error
 set: `error{ MalformedJsonl, SampleTooLong, EmptyDataset, InvalidLoaderState }`.
@@ -12405,11 +12405,11 @@ test "encodePair: render + tokenize + shift + prompt mask" {
         "<|im_start|>", "<|im_end|>", "u", "s", "e", "r", "a", "n", "t", "i",
         "h",            "k",          "y", "o", "m", "<", ">", "/", "\xC4\x8A", // Ċ = byte-level '\n'
     };
-    var tok = try llm.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromParts(alloc, &vocab, &.{}, .{});
     defer tok.deinit();
 
-    const chatml = llm.chat.Template{ .format = .chatml };
-    var sample = try llm.data.encodePair(alloc, &tok, chatml, .{
+    const chatml = models.text.chat.Template{ .format = .chatml };
+    var sample = try models.text.data.encodePair(alloc, &tok, chatml, .{
         .instruction = "hi",
         .response = "yo",
     }, .{ .seq_max = 64, .ignore_index = 9999 });
@@ -12446,7 +12446,7 @@ through `trainer_state.json` unchanged — §11).
 ```zig
 test "Loader: (seed, epoch) -> permutation is a checkpoint contract" {
     const alloc = std.testing.allocator;
-    var loader = try llm.data.Loader.init(alloc, 8, .shuffled, 42);
+    var loader = try models.text.data.Loader.init(alloc, 8, .shuffled, 42);
     defer loader.deinit(alloc);
     // Golden-pinned: this exact order may never change once checkpoints exist.
     try std.testing.expectEqualSlices(usize, &.{ 3, 6, 0, 7, 1, 2, 5, 4 }, loader.perm);
@@ -12456,14 +12456,14 @@ test "Loader: (seed, epoch) -> permutation is a checkpoint contract" {
     var expect: [8]usize = undefined;
     for (&expect) |*e| e.* = loader.next(); // crosses the epoch boundary
 
-    var replay = try llm.data.Loader.init(alloc, 8, .shuffled, 0);
+    var replay = try models.text.data.Loader.init(alloc, 8, .shuffled, 0);
     defer replay.deinit(alloc);
     try replay.restore(s); // seed/epoch/index come from the saved State
     for (expect) |want| try std.testing.expectEqual(want, replay.next());
 }
 ```
 
-### 13.8 Chat (`src/llm/chat.zig`)
+### 13.8 Chat (`src/models/text/chat.zig`)
 
 #### 13.8.1 Templates
 
@@ -12492,8 +12492,8 @@ prompt is folded into the first user turn.
 ```zig
 test "chat template: detect from GGUF metadata, render a turn" {
     const alloc = std.testing.allocator;
-    const t = llm.chat.Template.detect("... {{ '<|im_start|>' }} ...").?;
-    try std.testing.expectEqual(llm.chat.Format.chatml, t.format);
+    const t = models.text.chat.Template.detect("... {{ '<|im_start|>' }} ...").?;
+    try std.testing.expectEqual(models.text.chat.Format.chatml, t.format);
     try std.testing.expectEqualStrings("<|im_end|>", t.stopMarker());
 
     var buf: std.ArrayList(u8) = .empty;
@@ -12536,7 +12536,7 @@ KV prefix as an incrementally driven conversation.
 ```zig
 test "chat template: render a full message history (stateless server shape)" {
     const alloc = std.testing.allocator;
-    const t = llm.chat.Template{ .format = .chatml };
+    const t = models.text.chat.Template{ .format = .chatml };
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try t.renderMessages(alloc, &buf, &.{
@@ -12565,7 +12565,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type
 Comptime-generic multi-turn chat over a model family and a tokenizer module.
 The contract:
 
-- `Model` satisfies the decoder contract (`llm.decoder.assertDecoder`,
+- `Model` satisfies the decoder contract (`models.decoder.assertDecoder`,
   §14.1) with `caps.rewind` over the shared §13.4 `KvCache`:
   `initCache(ctx, capacity) !KvCache` and the decode entries
   `forwardStep(ctx, kv, token_ids, pos0) !Tensor(.{ .seq, .vocab })`
@@ -12577,7 +12577,7 @@ The contract:
   `forwardStepBatch(ctx, caches: []const *KvCache, token_ids: []const usize)`;
   the gate is comptime, so families without it still instantiate the type
   and get `error.BatchDecodeUnsupported` at runtime.
-- `Tok` is the tokenizer **module** (`llm.tokenizer` or `llm.spm_tokenizer`):
+- `Tok` is the tokenizer **module** (`models.text.tokenizer` or `models.text.spm_tokenizer`):
   it must provide a `Tokenizer` type with
   `tokenId`/`eosId`/`encodeRaw`/`decodeAppend` and a `StreamDecoder`.
 
@@ -12692,7 +12692,7 @@ Semantics:
   on error paths included — so the post-turn state matches the plain path's
   exactly. The equivalence (token-for-token, draw-for-draw across a persistent
   sampler, greedy and sampled) is proven in `chat_tests.zig`.
-- `logit_processor` installs a §13.6 processor (e.g. a `llm.llguidance`
+- `logit_processor` installs a §13.6 processor (e.g. a `models.text.llguidance`
   grammar constraint) on the conversation's sampler and re-arms it via its
   `reset` hook at every turn start, so the same constraint governs each
   assistant reply independently — on the plain, speculative, and `sendBatch`
@@ -12763,14 +12763,14 @@ fn snippetConversation(ctx: *fucina.ExecContext, io: std.Io, out: *std.Io.Writer
     const alloc = ctx.allocator;
     var file = try fucina.gguf.File.loadMmap(alloc, io, "qwen3-0.6b.gguf");
     defer file.deinit();
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(alloc, &file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(alloc, &file, .{});
     defer tok.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        llm.chat.Template{ .format = .chatml };
+    const template = models.text.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
+        models.text.chat.Template{ .format = .chatml };
 
-    const Convo = llm.chat.Conversation(llm.qwen3.model.Model, llm.tokenizer);
+    const Convo = models.text.chat.Conversation(models.qwen3.model.Model, models.text.tokenizer);
     var convo = try Convo.init(ctx, &model, &tok, template, .{
         .capacity = 4096,
         .sampler = .{ .temperature = 0.7, .top_k = 20, .seed = 42 },
@@ -12781,7 +12781,7 @@ fn snippetConversation(ctx: *fucina.ExecContext, io: std.Io, out: *std.Io.Writer
 } // requires model assets to run
 ```
 
-### 13.9 Speculative decoding (`src/llm/speculative/`)
+### 13.9 Speculative decoding (`src/models/text/speculative/`)
 
 Training-free, **draft-model-free** speculative decoding: drafts come from
 cheap deterministic indexes over text the model has already seen — no extra
@@ -12918,7 +12918,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
   The chat layer's speculative turn opens with it, so plain and
   speculative turns build their caches from call-for-call identical
   forwards.
-- `Model` satisfies the decoder contract (`llm.decoder.assertDecoder`) with
+- `Model` satisfies the decoder contract (`models.decoder.assertDecoder`) with
   `caps.rewind`: `forwardStep` + `forwardStepAllLogits` + a truncating
   cache (qwen3, gemma4, SHINE's `AdaptedModel`, glm4moe through
   `speculative.mtp.MtpDraftSource`; qwen35's recurrent cache cannot rewind
@@ -12964,7 +12964,7 @@ borrows the index.
 ```zig
 test "SamIndex: longest self-excluded suffix match drives the draft" {
     const alloc = std.testing.allocator;
-    var sam = try llm.speculative.sam_index.SamIndex.init(alloc);
+    var sam = try models.text.speculative.sam_index.SamIndex.init(alloc);
     defer sam.deinit();
     try sam.append(&.{ 5, 6, 7, 5, 6 });
     // Longest suffix with an occurrence ending strictly before the end: [5,6].
@@ -13001,7 +13001,7 @@ struct owns `m`; `update`/`observe*` copy, no slice is retained.
 ```zig
 test "TokenRecycling: top-1 chain drafting" {
     const alloc = std.testing.allocator;
-    var rec = try llm.speculative.recycling.Recycling.init(alloc, 32); // vocab 32, K = 8
+    var rec = try models.text.speculative.recycling.Recycling.init(alloc, 32); // vocab 32, K = 8
     defer rec.deinit();
     rec.update(3, &.{ 7, 9 }); // most recent top-K observed after token 3
     rec.update(7, &.{5});
@@ -13055,7 +13055,7 @@ immediately.
 ```zig
 test "SpeculationIndex: observe committed tokens, suggest a draft" {
     const alloc = std.testing.allocator;
-    var index = try llm.speculative.cascade.SpeculationIndex.init(alloc, 1024);
+    var index = try models.text.speculative.cascade.SpeculationIndex.init(alloc, 1024);
     defer index.deinit();
 
     index.observe(&.{ 1, 2, 3, 4, 1, 2 }); // [1,2] recurred; earlier it was followed by [3,4]
@@ -13079,16 +13079,16 @@ runner drives the decoder directly:
 ```zig
 fn snippetDecoderLoop(
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    kv: *llm.kv_cache.KvCache,
-    index: *llm.speculative.cascade.SpeculationIndex,
+    model: *const models.qwen3.model.Model,
+    kv: *models.text.kv_cache.KvCache,
+    index: *models.text.speculative.cascade.SpeculationIndex,
     history: *std.ArrayList(usize),
-    sink: llm.speculative.core.TokenSink,
+    sink: models.text.speculative.core.TokenSink,
 ) !void {
-    const Decoder = llm.speculative.core.SpeculativeDecoder(llm.qwen3.model.Model);
+    const Decoder = models.text.speculative.core.SpeculativeDecoder(models.qwen3.model.Model);
     var decoder = try Decoder.init(ctx.allocator, index.asDraftSource(), .{ .max_draft = 16 });
     defer decoder.deinit();
-    var sampler = llm.sampler.Sampler.init(.{});
+    var sampler = models.text.sampler.Sampler.init(.{});
     // Invariant: history.len == kv.len() + 1 (last committed token not yet forwarded).
     while (history.items.len < 128) {
         _ = try decoder.step(ctx, model, kv, &sampler, history, sink);
@@ -13160,18 +13160,18 @@ test "constrained source: forced spans preempt, invalid drafts truncate" {
         fn observe(_: *anyopaque, _: []const usize) void {}
     };
     var forcing: u8 = 1;
-    const processor = llm.logit_processor.LogitProcessor{ .ptr = &forcing, .vtable = &.{
+    const processor = models.text.logit_processor.LogitProcessor{ .ptr = &forcing, .vtable = &.{
         .process = Fixed.process,
         .commit = Fixed.commit,
         .forcedTokens = Fixed.forcedTokens,
         .validPrefixLen = Fixed.validPrefixLen,
     } };
-    const inner = llm.speculative.core.DraftSource{ .ptr = &forcing, .vtable = &.{
+    const inner = models.text.speculative.core.DraftSource{ .ptr = &forcing, .vtable = &.{
         .suggest = Fixed.suggest,
         .observe = Fixed.observe,
     } };
 
-    var cs = llm.speculative.constrained.ConstrainedSource.init(processor, inner);
+    var cs = models.text.speculative.constrained.ConstrainedSource.init(processor, inner);
     var buf: [8]usize = undefined;
     // Forced state: the grammar span wins over the inner source.
     try std.testing.expectEqual(@as(usize, 2), cs.source().suggest(&.{0}, &buf));
@@ -13202,7 +13202,7 @@ verify rows the decoder's truncate keeps. A draft-round error lands in the
 on its own loop: its `Session` rewinds by snapshot/restore, not
 `truncate`.
 
-### 13.10 Cartridges (`src/llm/cartridge.zig`)
+### 13.10 Cartridges (`src/models/text/cartridge.zig`)
 
 ```zig
 pub const Kv = fucina.Tensor(.{ .seq, .kv_head, .d });          // KV-cache row layout
@@ -13272,7 +13272,7 @@ reach the host — selection identical (lowest-index ties both ways),
 logprobs equal up to the core reduction's summation order (pinned by a
 unit test).
 
-The qwen3 trainer hosts the training loop (§14 / `llm/qwen3/train.zig`):
+The qwen3 trainer hosts the training loop (§14 / `models/qwen3/train.zig`):
 `ForwardOptions.cartridge` threads the prefix through every layer (tokens
 shift to RoPE positions `p..`; gradients flow into the cartridge rows through
 the frozen stack), `ForwardOptions.capture` copies token K/V rows out of a
@@ -13330,7 +13330,7 @@ oracle — bitwise on Qwen3-0.6B-f16 at p = 256 via `cartridge-fleet
 cache-level, so compositions serve on ANY family
 (`train_cartridge_compose_tests.zig`).
 
-**Fleets** (`src/llm/cartridge_fleet.zig`): the scale layer around
+**Fleets** (`src/models/text/cartridge_fleet.zig`): the scale layer around
 composition — one cartridge per document instead of one monolith per
 corpus. `Manifest` is the fleet's on-disk record (`fleet.json`: per-doc
 cartridge/optimizer files, token counts, optimizer-step counters); `Fleet`
@@ -13367,7 +13367,7 @@ test "cartridge: trainable KV prefix + teacher top-k distillation" {
     defer ctx.deinit();
 
     // One layer, p = 2 rows: a frozen sink + one trainable row.
-    var cart = try llm.cartridge.Cartridge.initRandom(&ctx, alloc, 1, 1, 2, 1, 2, 42, 0.1);
+    var cart = try models.text.cartridge.Cartridge.initRandom(&ctx, alloc, 1, 1, 2, 1, 2, 42, 0.1);
     defer cart.deinit();
     try std.testing.expect(!cart.layers[0].k_sink.?.requiresGrad());
     try std.testing.expect(cart.layers[0].k.requiresGrad());
@@ -13379,9 +13379,9 @@ test "cartridge: trainable KV prefix + teacher top-k distillation" {
     // then causally over the tokens (end-aligned kernel, §4.13).
     var q = try fucina.Tensor(.{ .seq, .head, .d }).fromSlice(&ctx, .{ 2, 2, 2 }, &.{ 0.2, -0.4, 0.5, 0.1, -0.3, 0.7, 0.05, -0.6 });
     defer q.deinit();
-    var k_tok = try llm.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ 0.1, 0.5, -0.35, 0.2 });
+    var k_tok = try models.text.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ 0.1, 0.5, -0.35, 0.2 });
     defer k_tok.deinit();
-    var v_tok = try llm.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ -0.2, 0.4, 0.55, -0.5 });
+    var v_tok = try models.text.cartridge.Kv.fromSlice(&ctx, .{ 2, 1, 2 }, &.{ -0.2, 0.4, 0.55, -0.5 });
     defer v_tok.deinit();
     var k_cat = try cart.layers[0].catK(&ctx, &k_tok);
     defer k_cat.deinit();
@@ -13394,7 +13394,7 @@ test "cartridge: trainable KV prefix + teacher top-k distillation" {
     // Stand-in logits: one full-mass teacher entry == plain cross-entropy.
     var logits = try attn.withTags(&ctx, .{ .seq, .vocab });
     defer logits.deinit();
-    var loss = try llm.cartridge.distillLoss(&ctx, &logits, .{
+    var loss = try models.text.cartridge.distillLoss(&ctx, &logits, .{
         .positions = &.{1},
         .tokens = &.{2},
         .logprobs = &.{0.0},
@@ -13409,7 +13409,7 @@ test "cartridge: trainable KV prefix + teacher top-k distillation" {
 }
 ```
 
-### 13.11 Engram (`src/llm/engram.zig`)
+### 13.11 Engram (`src/models/research/engram.zig`)
 
 ```zig
 pub const Config = struct { hidden_size: usize, hc_mult: usize = 1, max_ngram_size: usize = 3, ... };
@@ -13458,7 +13458,7 @@ pretrained model is bitwise identity at step 0, while gradients still
 reach every parameter through the value path — the cheap-experiment mode
 for adding memory to an existing checkpoint. Numerical parity with the
 reference mechanism (forward + every gradient) is pinned by
-`src/llm/engram_golden_tests.zig`, generated by
+`src/models/research/engram_golden_tests.zig`, generated by
 `tools/gen_engram_goldens.py` (an independent PyTorch/numpy
 implementation; integer geometry compares EXACTLY, floats under the
 shared golden tolerance). Design record: `docs/ENGRAM.md`.
@@ -13484,7 +13484,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
     ctx.init(alloc);
     defer ctx.deinit();
 
-    const cfg = llm.research.engram.Config{
+    const cfg = models.research.engram.Config{
         .hidden_size = 8,
         .hc_mult = 1,
         .n_embed_per_ngram = 4,
@@ -13493,7 +13493,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
         .kernel_size = 2,
         .pad_id = 0,
     };
-    var plan = try llm.research.engram.HashPlan.init(alloc, cfg, &.{0}, 42, null);
+    var plan = try models.research.engram.HashPlan.init(alloc, cfg, &.{0}, 42, null);
     defer plan.deinit();
 
     // Addresses are a pure function of token ids — known pre-forward.
@@ -13502,7 +13502,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
     try plan.hashInto(0, &ids, &rows);
     for (rows) |row| try std.testing.expect(row < plan.table_rows[0]);
 
-    var layer = try llm.research.engram.Layer.initRandom(&ctx, alloc, cfg, plan.table_rows[0], 7, .{ .graft_zero_init = true });
+    var layer = try models.research.engram.Layer.initRandom(&ctx, alloc, cfg, plan.table_rows[0], 7, .{ .graft_zero_init = true });
     defer layer.deinit();
 
     var hidden = try fucina.Tensor(.{ .seq, .d }).fromSlice(&ctx, .{ 5, 8 }, &([_]f32{0.25} ** 40));
@@ -13517,7 +13517,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
 }
 ```
 
-### 13.12 SHINE (`src/llm/qwen3/shine.zig`)
+### 13.12 SHINE (`src/models/qwen3/shine.zig`)
 
 ```zig
 pub const Config = struct { hidden_size: usize, num_mem_token: usize, lora_r: usize, scale: f32, ... };
@@ -13610,7 +13610,7 @@ request by the single inference worker. Zero context tokens, zero prefix
 rows; lmserve's slot reuse stays keyed by selection, so only
 same-adapter KV is ever adopted or prefix-shared
 ([`examples/lmserve/README.md`](../examples/lmserve/README.md)). The
-library entry behind the flag is `llm.qwen3.shine_serving.open` /
+library entry behind the flag is `models.qwen3.shine_serving.open` /
 `openFromFile` (§13.13), `serving.open`'s counterpart with the fleet
 directory as an explicit argument.
 
@@ -13649,7 +13649,7 @@ readout-agnostic, and this mode reinterprets each layer's generated
 `M x hidden` block as a KV PREFIX instead of LoRA pairs — `rows` K rows
 then `rows` V rows in kv-cache row order, both scaled by `sqrt(scale)`,
 with the budget identity `M * hidden == 2 * rows * kv_dim`
-(`Config.validate`). The product is a STANDARD `llm.cartridge.Cartridge`
+(`Config.validate`). The product is a STANDARD `models.text.cartridge.Cartridge`
 (§13.10) in every respect: `generateCartridge` (or the runner's
 `--shine-save-cartridge PATH`, given `--shine-context`) writes the same
 safetensors state dict `zig build cartridge` produces, so serving,
@@ -13672,16 +13672,16 @@ prefix has near-uniform key logits and near-zero value content (the
 `sqrt(scale)` discipline) — prefix-tuning's trainable regime, not the
 LoRA mode's exact-identity start.
 
-### 13.13 Serving (`src/llm/serving/`)
+### 13.13 Serving (`src/models/text/serving/`)
 
-`llm.serving` is the complete serving stack: the model-agnostic contract,
+`models.text.serving` is the complete serving stack: the model-agnostic contract,
 the HTTP transport, the generic GGUF chat engine, and a load-and-serve
-entry. `src/llm/serving.zig` is the band index (contract names re-exported
+entry. `src/models/text/serving.zig` is the band index (contract names re-exported
 flat, sub-modules namespaced); `examples/lmserve` (§14.8) is the CLI front
 end built on it, and the voice agent hosts the same engine in-process.
 
 **Contract** (`serving/contract.zig`, re-exported flat). `GenerateRequest`
-carries the normalized message history (`llm.chat.Message`), the fully
+carries the normalized message history (`models.text.chat.Message`), the fully
 resolved `sampler.Config`, a bounded `max_tokens`, client stop strings, an
 optional `ConstraintSpec` (JSON schema / regex / Lark), and the `think`
 toggle. `GenerateResult` reports `prompt_tokens`, `completion_tokens`,
@@ -13714,7 +13714,7 @@ for calls. On Linux, a binary that references `serving.http` links libc
 (the `std.c.recv` client-hang-up probe); macOS links it implicitly.
 
 **Engine** (`serving.gguf_chat`). `GgufChatBackend(Model, TokMod)` adapts
-any family served through `llm.chat.Conversation` (one comptime
+any family served through `models.text.chat.Conversation` (one comptime
 instantiation per model/tokenizer pair): resident KV reuse slots with
 token-LCP adoption and cross-slot prefix share, the `kv_persist` disk
 tier (§13.4), the llguidance `ConstraintCache` (init once per distinct
@@ -13727,13 +13727,13 @@ would otherwise fail mid-serving as page-cache eviction, not at startup.
 **Load-and-serve** (`serving/open.zig`).
 `serving.open(ctx, io, allocator, gguf_path, options, stderr)` sniffs
 `general.architecture`, resolves the family through the architecture
-registry (`llm.registry`), and returns a ready `Opened` (`.backend` plus
+registry (`models.registry`), and returns a ready `Opened` (`.backend` plus
 one `deinit` that owns model, tokenizer, and engine state; the optional
 `expert_store` field surfaces a streamed-MoE store for the host's
 exit-time report). Families served: qwen3, qwen3moe, gemma4 (the
 `Conversation`-hosted set, one generic engine box) and qwen35,
 qwen35moe, inkling, deepseek4 (the engine-hosted set, dispatched to
-`llm.qwen35.serving`, `llm.inkling.serving`, `llm.deepseek4.serving`).
+`models.qwen35.serving`, `models.inkling.serving`, `models.deepseek4.serving`).
 nanochat and diffusion-gemma stay with `examples/lmserve`; registered
 families without a serving adapter (deepseek2, glm4moe) and unknown
 architectures return `error.UnsupportedArchitecture`. `OpenOptions`
@@ -13743,7 +13743,7 @@ architectures return `error.UnsupportedArchitecture`. `OpenOptions`
 `cartridge_path`, `fleet_dir` + the `rag_*` knobs); excluded
 combinations return `error.InvalidOptions`, and the engine-hosted
 families reject the cartridge/fleet/KV-disk options the same way. SHINE adapter fleets are served by
-`llm.qwen3.shine_serving.open`/`openFromFile` (§13.12), which mirror
+`models.qwen3.shine_serving.open`/`openFromFile` (§13.12), which mirror
 these entries with the fleet directory as an explicit argument and share
 `OpenOptions`. `serving.openFromFile` is the same entry
 over an already-loaded `fucina.gguf.File` (it takes ownership of the file
@@ -13776,25 +13776,25 @@ try server.bind();
 try server.run();
 ```
 
-The band's unit tests ride the llm test root (`zig build test-llm`): Zig
+The band's unit tests ride the models test root (`zig build test-models`): Zig
 collects tests from the root module only, and none of them reach the
-libc probe, so the llm root stays libc-free.
+libc probe, so the models root stays libc-free.
 
 ## 14. Model families and example applications
 
-The `fucina_llm` module root (`src/llm.zig`) exposes each model family as a
-namespace — `llm.qwen3.{model,train}`,
-`llm.qwen35.{model,chat}`,
-`llm.gemma.{model,train,moe}`,
-`llm.diffusion_gemma.model`, `llm.deepseek2.model`, `llm.glm4moe.model`,
-`llm.deepseek4.model`, `llm.inkling.{model,mmproj,chat}`, `llm.parakeet.*`,
-`llm.speculative.*`, plus the research tier under `llm.research.*`
-(`subq`, `engram`, `shine`/`shine_train`, `llm.research.kimi3.model`) — while the
-generic helpers (`fucina.weights`, `llm.kv_cache`, `llm.kv_persist`, `llm.tokenizer`,
-`llm.spm_tokenizer`, `llm.sampler`, `llm.logit_processor`, `llm.llguidance`,
-`llm.chat`, `llm.data`, `fucina.gguf_meta`, `fucina.ptqtp_gguf`, `llm.cartridge`,
-`llm.cartridge_fleet`,
-`llm.unicode_categories`) stay flat and are covered in §13. This section
+The `fucina_models` module root (`src/models.zig`) exposes each model family as a
+namespace — `models.qwen3.{model,train}`,
+`models.qwen35.{model,chat}`,
+`models.gemma.{model,train,moe}`,
+`models.diffusion_gemma.model`, `models.deepseek2.model`, `models.glm4moe.model`,
+`models.deepseek4.model`, `models.inkling.{model,mmproj,chat}`, `models.parakeet.*`,
+`models.text.speculative.*`, plus the research tier under `models.research.*`
+(`subq`, `engram`, `shine`/`shine_train`, `models.research.kimi3.model`) — while the
+generic helpers (`fucina.weights`, `models.text.kv_cache`, `models.text.kv_persist`, `models.text.tokenizer`,
+`models.text.spm_tokenizer`, `models.text.sampler`, `models.text.logit_processor`, `models.text.llguidance`,
+`models.text.chat`, `models.text.data`, `fucina.gguf_meta`, `fucina.ptqtp_gguf`, `models.text.cartridge`,
+`models.text.cartridge_fleet`,
+`models.text.unicode_categories`) stay flat and are covered in §13. This section
 documents the per-family model
 APIs, their runner CLIs, and the example applications under `examples/`.
 Weight containers (`LinearWeight` and its quant arms), `KvCache`, tokenizers,
@@ -13803,7 +13803,7 @@ GGUF parsing is §12; LoRA/optimizer/ES mechanics are §11.
 
 ### 14.1 Conventions shared by every family
 
-(`src/llm/*/model.zig`, `src/gguf_meta.zig`)
+(`src/models/*/model.zig`, `src/gguf_meta.zig`)
 
 **Config from GGUF metadata.** Each family's `Config.fromGguf(file)`
 (deepseek4/inkling additionally take an allocator; kimi3 is the one
@@ -13846,10 +13846,10 @@ second read — the pattern every runner uses:
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, path);
 defer file.deinit();
-const config = try llm.qwen3.model.Config.fromGguf(&file);
-var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, config);
+const config = try models.qwen3.model.Config.fromGguf(&file);
+var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
-var tok = try llm.tokenizer.Tokenizer.initFromGguf(alloc, &file, .{});
+var tok = try models.text.tokenizer.Tokenizer.initFromGguf(alloc, &file, .{});
 defer tok.deinit();
 ```
 
@@ -13872,7 +13872,7 @@ gemma-MoE's raw expert representation (14.4) and diffusion_gemma's
 `convertDenseWeightsToF16` (14.5).
 
 **Forward/decode surface.** The autoregressive families share the decoder
-contract (`llm.decoder`, checked at comptime by `assertDecoder(Model)`;
+contract (`models.decoder`, checked at comptime by `assertDecoder(Model)`;
 each family declares its `caps`):
 
 - `forwardLastLogits(ctx, token_ids)` — cacheless whole-sequence forward;
@@ -13900,7 +13900,7 @@ each family declares its `caps`):
   weight traffic).
 - `forwardStepBatch` (iff `caps.batch`: qwen3, gemma4) — lockstep
   multi-stream decode, 14.2.
-- Generation loop: `llm.generate` is the one reference loop over the
+- Generation loop: `models.text.generate` is the one reference loop over the
   contract (`generate`/`generateOutcome` with a `Sampler`, stop ids, and a
   `TokenSink`; `greedy` is the slice-filling argmax convenience that
   resets the cache first and writes the fired stop token). gemma4 keeps
@@ -13909,7 +13909,7 @@ each family declares its `caps`):
   over it; the qwen35 and inkling chat engines call it with their own
   prompt rendering and token sinks. diffusion_gemma's block-diffusion
   `generate` has its own options and returns a `GenerateResult` (14.5).
-  Sampled decoding rides `llm.sampler` (§13) everywhere.
+  Sampled decoding rides `models.text.sampler` (§13) everywhere.
 - `forward*Profiled` variants take `io: std.Io` and a family-specific
   `ForwardProfile` accumulator (per-block wall-clock buckets; the `--profile`
   runner flag).
@@ -13923,7 +13923,7 @@ MTP scratch, and the generic layers accept either spelling through
 need one context and one cache per thread. Returned logits are caller-owned
 constants (`deinit` them); no exec scope is required for inference.
 
-### 14.2 Qwen3 — dense and MoE (`src/llm/qwen3/model.zig`)
+### 14.2 Qwen3 — dense and MoE (`src/models/qwen3/model.zig`)
 
 The reference transformer family and the most complete runner: standard GQA
 attention with per-head q/k RMSNorm and full RoPE, SwiGLU FFN — dense, or a
@@ -13956,7 +13956,7 @@ non-divisible GQA grouping, odd `head_dim`, and inconsistent MoE fields with
 
 ```zig
 test "qwen3 reference config" {
-    const cfg = llm.qwen3.model.Config.qwen3_0_6b();
+    const cfg = models.qwen3.model.Config.qwen3_0_6b();
     try std.testing.expect(!cfg.isMoe());
     try std.testing.expectEqual(@as(usize, 28), cfg.num_layers);
     try std.testing.expectEqual(@as(usize, 8), cfg.num_key_value_heads);
@@ -13980,12 +13980,12 @@ plus `ForwardProfile`, `MoeStreamOptions`, `LoadOptions`, `Layer`,
 (the block-structure seam train.zig shares — the trainer's differentiable
 forward reads the same layer structs and splits fused projections through
 the same functions; `DenseFfn`/`GateUpProjection` are re-exports of
-`src/llm/model_common.zig`, the load band the runner and qwen35 share:
+`src/models/model_common.zig`, the load band the runner and qwen35 share:
 PTQTP-aware projections, the dense-FFN containers, the MoE expert trio,
 the embed/norm/lm-head trio, and the GQA head map), and `applyExpertTopP`
 at module level. Greedy
-generation is the shared `llm.generate` loop (§13); PTQTP
-decoration/persistence lives in the sibling module `llm.qwen3.ptqtp`
+generation is the shared `models.text.generate` loop (§13); PTQTP
+decoration/persistence lives in the sibling module `models.qwen3.ptqtp`
 (`decorate`, `DecorateOptions`, `save`, §10.9).
 
 Load specifics: when the GGUF is mmap'd, MoE expert stacks
@@ -14013,8 +14013,8 @@ RAM budget holds).
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/Qwen3-0.6B-Q8_0.gguf");
 defer file.deinit();
-const config = try llm.qwen3.model.Config.fromGguf(&file);
-var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, config);
+const config = try models.qwen3.model.Config.fromGguf(&file);
+var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
 var kv = try model.initCache(&ctx, 512);
@@ -14059,7 +14059,7 @@ defer logits.deinit();
 
 **Speculative decoding** is available on this family: the runner's `--spec`
 drives the draft-model-free SAM + Token-Recycling cascade from
-`llm.speculative` (§13) with `forwardStepAllLogits` as the verify pass;
+`models.text.speculative` (§13) with `forwardStepAllLogits` as the verify pass;
 `--spec-ref doc.txt` injects a reference document the drafter can copy spans
 from. Output is lossless (greedy streams verified identical with and without
 `--spec`).
@@ -14096,9 +14096,9 @@ zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8
 # --json-schema @schema.json / --lark @grammar.lark read the grammar from a file
 ```
 
-#### 14.2.1 LoRA fine-tuning (`src/llm/qwen3/train.zig`)
+#### 14.2.1 LoRA fine-tuning (`src/models/qwen3/train.zig`)
 
-`llm.qwen3.train` trains LoRA adapters over a frozen, possibly quantized
+`models.qwen3.train` trains LoRA adapters over a frozen, possibly quantized
 `qwen3.Model` (dense only — MoE configs return `Error.MoeUnsupported`). The
 trainer mirrors the inference forward op-for-op but routes every frozen
 projection through the differentiable frozen-RHS `dot` (gradients flow to f32
@@ -14125,7 +14125,7 @@ differentiable single-row embedding override), `ForwardOptions`
 (`{ start_layer = 0, layer_count = null, inject = null }` plus the
 cartridge fields — `cartridge`, `cartridges`, `capture`,
 `packed_segments` — and `residual_hook`, the type-erased research seam
-`llm.research.engram.ResidualGraft` adapts to; the module-level
+`models.research.engram.ResidualGraft` adapts to; the module-level
 `KvCapture`/`ResidualHook`, all §13.10-§13.11 material).
 
 `Trainer(targets)` members: `init(ctx, model, lora.Config, seed)` /
@@ -14153,7 +14153,7 @@ Dropout is deterministic per (step, layer, projection) from the base seed;
 RoPE tables are cached per sequence length and freed only in `deinit`.
 
 ```zig
-const Trainer = llm.qwen3.train.Trainer(.{ .q = true, .v = true });
+const Trainer = models.qwen3.train.Trainer(.{ .q = true, .v = true });
 var trainer = try Trainer.init(ctx, model, .{ .rank = 8, .alpha = 16 }, 42);
 defer trainer.deinit();
 
@@ -14164,7 +14164,7 @@ try trainer.registerAllParams(&opt);
 const scope = ctx.openExecScope();
 defer ctx.closeExecScope(scope);
 const tokens: []const usize = &.{ 1, 2, 3, 4 };
-const labels: []const usize = &.{ 2, 3, 4, llm.qwen3.train.ignore_index };
+const labels: []const usize = &.{ 2, 3, 4, models.qwen3.train.ignore_index };
 var loss = try trainer.loss(ctx, tokens, labels);
 try loss.backward(ctx);
 try opt.step(ctx);
@@ -14178,7 +14178,7 @@ re-quantize, serve — is scripted in
 [examples/finetune/README.md](../examples/finetune/README.md); the
 gradient-free twin is `zig build es-finetune` (§11, TRAINING.md §13).
 
-### 14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/llm/qwen35/model.zig`)
+### 14.3 Qwen3.5 — Gated-DeltaNet hybrid (`src/models/qwen35/model.zig`)
 
 The `qwen35` GGUF arch is a **hybrid linear-attention transformer** (sibling
 of qwen3next, not a Qwen3 variant): every `full_attention_interval`-th block
@@ -14213,7 +14213,7 @@ prefill arm — token-ID-exact tokenizer).
 
 ```zig
 test "qwen35 hybrid layer pattern" {
-    const cfg = llm.qwen35.model.Config{
+    const cfg = models.qwen35.model.Config{
         .vocab_size = 151_936, .hidden_size = 1024, .intermediate_size = 4096,
         .num_layers = 24, .num_attention_heads = 16, .num_key_value_heads = 2,
         .head_dim = 256, .rms_norm_eps = 1e-6, .rope_theta = 1_000_000,
@@ -14251,8 +14251,8 @@ exact, the choice is performance/validation.
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/Qwen3.5-0.8B-Q8_0.gguf");
 defer file.deinit();
-const config = try llm.qwen35.model.Config.fromGguf(&file);
-var model = try llm.qwen35.model.Model.loadGgufFromFile(&ctx, &file, config);
+const config = try models.qwen35.model.Config.fromGguf(&file);
+var model = try models.qwen35.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
 var cache = try model.initCache(&ctx, 256); // KV + conv/SSM state
@@ -14265,14 +14265,14 @@ defer step.deinit();
 ```
 
 No training entry, no `forwardStepAllLogits`/`forwardStepBatch`, no
-speculative decoding on this family. Chat lives in `llm.qwen35.chat`
-(`src/llm/qwen35/chat.zig`): `renderPrompt` renders the shared ChatML
+speculative decoding on this family. Chat lives in `models.qwen35.chat`
+(`src/models/qwen35/chat.zig`): `renderPrompt` renders the shared ChatML
 template with the Qwen3.6 generation-prompt think prefill (`<think>\n`
 opener when thinking is on; the ChatML empty think block when off), and
 `Engine(TokMod).generate` runs one sampled reply per call on a fresh
-`Cache` through the shared `llm.generate` loop (the recurrent state
+`Cache` through the shared `models.text.generate` loop (the recurrent state
 cannot be truncated to a token prefix, so there is no cross-request KV
-reuse). `lmserve` serves the family through it (`llm.qwen35.serving`,
+reuse). `lmserve` serves the family through it (`models.qwen35.serving`,
 via `serving.open` — reasoning channel, JSON-schema/regex/Lark
 constrained output; [LMSERVER.md](LMSERVER.md)); Ternary-Bonsai-27B
 ([README](../examples/qwen35/README.md)) is the flagship checkpoint. The
@@ -14284,7 +14284,7 @@ zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --info
 zig build qwen35 -Doptimize=ReleaseFast -- models/Qwen3.5-0.8B-Q8_0.gguf --linear-scan chunked
 ```
 
-### 14.4 Gemma 4 — text + MoE (`src/llm/gemma/`)
+### 14.4 Gemma 4 — text + MoE (`src/models/gemma/`)
 
 `gemma4` (26B-A4B class) is the geometry-heavy family: 16 query heads over
 **per-layer** KV geometry — interleaved local sliding-window (SWA) and global
@@ -14320,7 +14320,7 @@ layers store no K/V and instead reference the last same-type writer (offset
 ```zig
 test "gemma4 shared-KV geometry" {
     const alloc = std.testing.allocator;
-    var geom = try llm.gemma.model.deriveGeometry(
+    var geom = try models.gemma.model.deriveGeometry(
         alloc,
         4, // n_layer
         &.{ true, true, false, true }, // SWA pattern (false = global)
@@ -14366,9 +14366,9 @@ plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
 ```zig
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/gemma-4-26B-A4B-it-UD-Q6_K.gguf");
 defer file.deinit();
-var config = try llm.gemma.model.Config.fromGguf(&file);
+var config = try models.gemma.model.Config.fromGguf(&file);
 config.borrow_experts = true; // zero-copy experts from the mmap (--experts=borrow)
-var model = try llm.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
+var model = try models.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
 defer model.deinit();
 
 var kv = try model.initCache(&ctx, 512); // per-layer geometry
@@ -14398,7 +14398,7 @@ scatter that stays deliberately serial to keep each token's summation
 order fixed against the parity oracles.
 
 **LoRA fine-tuning** (`train.zig`, pointer depth — §11).
-`llm.gemma.train.Trainer(targets)` mirrors the qwen3 trainer over the
+`models.gemma.train.Trainer(targets)` mirrors the qwen3 trainer over the
 gemma4 forward: identical `Targets` struct and defaults (q, v), identical
 `ignore_index`, and the same member set — `init(ctx, model, lora.Config,
 seed)`, `deinit`, `registerAllParams`, `saveAdapters`, `loadAdapters`,
@@ -14417,7 +14417,7 @@ build; the packed inference-only RHS cannot take gradients), plus
 
 **Runner** (`examples/gemma4/main.zig`,
 [README](../examples/gemma4/README.md) — chat/REPL over the SPM tokenizer
-(`llm.spm_tokenizer`) and the generic `llm.chat.Conversation`; sampling
+(`models.text.spm_tokenizer`) and the generic `models.text.chat.Conversation`; sampling
 defaults come from the GGUF):
 
 ```sh
@@ -14436,7 +14436,7 @@ zig build gemma4 -Doptimize=ReleaseFast -- models/gemma-4-26B-A4B-it-UD-Q6_K.ggu
   2,651,235 --bench 3 --profile                 # prefill/decode benchmark
 ```
 
-### 14.5 DiffusionGemma — block text-diffusion (`src/llm/diffusion_gemma/model.zig`)
+### 14.5 DiffusionGemma — block text-diffusion (`src/models/diffusion_gemma/model.zig`)
 
 The `diffusion-gemma` arch is **not autoregressive**: the transformer is
 exactly gemma4 (this module reuses gemma4's layer loader and attn/ffn
@@ -14500,7 +14500,7 @@ onset, append the kept tokens, encoder-pass the canvas back into the cache;
 `.on_block` callback; returns `{ produced, steps, blocks }`).
 
 ```zig
-const dg = llm.diffusion_gemma.model;
+const dg = models.diffusion_gemma.model;
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/diffusiongemma-26B-A4B-it-Q6_K.gguf");
 defer file.deinit();
 const config = try dg.Config.fromGguf(&file); // gemma4 hparams + canvas_length + EB sampler
@@ -14535,7 +14535,7 @@ zig build diffusion-gemma -Dgpu=metal -Doptimize=ReleaseFast -- models/diffusion
   --chat "..." --gpu-f16
 ```
 
-### 14.6 Parakeet ASR (`src/llm/parakeet/`)
+### 14.6 Parakeet ASR (`src/models/parakeet/`)
 
 NVIDIA NeMo FastConformer speech recognition (110M hybrid TDT+CTC through
 0.6B multilingual TDT), ported stage-for-stage against parakeet.cpp/NeMo.
@@ -14630,7 +14630,7 @@ piece join, `▁` → space); `transcription.Word`, `groupWords`, `freeWords`,
 Offline transcription end-to-end:
 
 ```zig
-const pk = llm.parakeet;
+const pk = models.parakeet;
 var file = try fucina.gguf.File.loadMmap(alloc, io, "models/parakeet/tdt_ctc-110m-f16.gguf");
 defer file.deinit();
 const cfg = try pk.loader.Config.fromGguf(&file);
@@ -14703,7 +14703,7 @@ zig build parakeet -Doptimize=ReleaseFast -- --model ... --manifest files.txt --
 `--decoder tdt|ctc` picks the head on hybrid models; `--lang XX` selects the
 prompt locale on multilingual models; `--threads N` caps the worker team.
 
-### 14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/llm/kimi3/model.zig`)
+### 14.7 Kimi-K3 — KDA/MLA hybrid, architecture parity (`src/models/research/kimi3/model.zig`)
 
 The `kimi3` family (the Kimi-Linear lineage) is a **KDA linear-attention /
 Gated-MLA-NoPE hybrid** with a latent sigmoid-routed MoE, cross-layer
@@ -14746,7 +14746,7 @@ against the fp32 Python reference under a tiered parity ladder.
 
 **lmserve** (`examples/lmserve/`, [README](../examples/lmserve/README.md);
 [LMSERVER.md](LMSERVER.md) is the full design doc) is the CLI front end of
-the `llm.serving` band (§13.13): an OpenAI- and
+the `models.text.serving` band (§13.13): an OpenAI- and
 Anthropic-compatible HTTP server over the in-tree language models: Chat
 Completions (`POST /v1/chat/completions`), the stateless Responses API
 (`POST /v1/responses`), and the Anthropic Messages API

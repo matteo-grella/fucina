@@ -23,7 +23,7 @@ per-step loss/timing lines. Every run saves a checkpoint directory containing
 continues instead of restarting at pair 0).
 
 `--data PATH.jsonl` swaps in your own instruction/response pairs
-(`src/llm/data.zig`; JSONL schema in
+(`src/models/text/data.zig`; JSONL schema in
 [es_finetune's Custom-data section](../es_finetune/README.md#custom-data---data));
 `--verify-grads` replaces the training run with a
 quantitative gradient audit through the full production path (zero-structure
@@ -69,7 +69,7 @@ zig build finetune -Doptimize=ReleaseFast -- --model models/Qwen3-0.6B-Q4_K_S.gg
 #                --load PATH (resume)  --seed N  --verify-grads (gradient-evidence audit)
 #                --accum-steps N (gradient accumulation windows, exact token-weighted; recipe in TRAINING.md §4)
 #                --state-dtype f32|bf16 (bf16 optimizer moments; TRAINING.md §3/§8)
-#                --data PATH.jsonl  --shuffle  --data-seed N (SFT data via src/llm/data.zig;
+#                --data PATH.jsonl  --shuffle  --data-seed N (SFT data via src/models/text/data.zig;
 #                resume CONTINUES the data order — loader state lives in trainer_state.json)
 ```
 
@@ -125,7 +125,7 @@ The HTTP server is documented in
 | `--threads N` | performance cores | fork-join team size; the default avoids parking chunks on efficiency cores |
 | `--accum-steps N` | 1 | gradient-accumulation window, exact token-weighted (§4) |
 | `--state-dtype f32\|bf16` | `f32` | optimizer-moment dtype (§3/§8) |
-| `--data PATH.jsonl` | built-in set | JSONL SFT dataset (`src/llm/data.zig`) |
+| `--data PATH.jsonl` | built-in set | JSONL SFT dataset (`src/models/text/data.zig`) |
 | `--shuffle` | off | deterministic per-epoch shuffle |
 | `--data-seed N` | `--seed` | shuffle seed |
 | `--save DIR` | `/tmp/fucina-qwen3-lora` | checkpoint directory |

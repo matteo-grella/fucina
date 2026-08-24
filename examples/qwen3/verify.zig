@@ -4,7 +4,7 @@
 //! (dumped-logits diff against a reference file).
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const util = @import("util.zig");
 
 const seconds = util.seconds;
@@ -72,11 +72,11 @@ pub fn runVerifyBatch(
     allocator: std.mem.Allocator,
     stdout: anytype,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
+    model: *const models.qwen3.model.Model,
     tokens: []const usize,
     load_ns: i96,
     max_steps: usize,
-    cache_type: llm.kv_cache.KvDtype,
+    cache_type: models.text.kv_cache.KvDtype,
 ) !void {
     const cfg = model.config;
     const vocab = cfg.vocab_size;
@@ -89,7 +89,7 @@ pub fn runVerifyBatch(
     const committed = try allocator.alloc(usize, max_steps + 1);
     defer allocator.free(committed);
     {
-        var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+        var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
         defer cache.deinit();
         var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
         defer prefill_logits.deinit();
@@ -109,7 +109,7 @@ pub fn runVerifyBatch(
     for ([_]bool{ true, false }) |pinned| {
         for (sweep) |m| {
             if (m > max_steps) continue;
-            var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+            var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
             defer cache.deinit();
             var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
             prefill_logits.deinit();
@@ -174,7 +174,7 @@ pub fn runVerifyBatch(
     // leave residue behind the truncation point.
     {
         const m: usize = @min(9, max_steps);
-        var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+        var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
         defer cache.deinit();
         var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
         prefill_logits.deinit();
@@ -217,15 +217,15 @@ pub fn runVerifyCache(
     allocator: std.mem.Allocator,
     stdout: anytype,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
+    model: *const models.qwen3.model.Model,
     tokens: []const usize,
     load_ns: i96,
     max_steps: usize,
-    cache_type: llm.kv_cache.KvDtype,
+    cache_type: models.text.kv_cache.KvDtype,
 ) !void {
     const cfg = model.config;
     const capacity = tokens.len + max_steps;
-    var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+    var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
     defer cache.deinit();
     try util.printCacheInfo(stdout, &cache);
 

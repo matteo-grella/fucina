@@ -3,7 +3,7 @@
 //! `--spec` lossless speculative decode.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const bench = @import("bench.zig");
 const util = @import("util.zig");
 
@@ -20,22 +20,22 @@ pub fn runGenerate(
     allocator: std.mem.Allocator,
     stdout: anytype,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    tok: ?*const llm.tokenizer.Tokenizer,
+    model: *const models.qwen3.model.Model,
+    tok: ?*const models.text.tokenizer.Tokenizer,
     tokens: []const usize,
     load_ns: i96,
     max_new: usize,
     stop_token: ?usize,
     profile_enabled: bool,
-    sampler_cfg: llm.sampler.Config,
+    sampler_cfg: models.text.sampler.Config,
     bench_reps: usize,
-    cache_type: llm.kv_cache.KvDtype,
-    processor: ?llm.sampler.LogitProcessor,
+    cache_type: models.text.kv_cache.KvDtype,
+    processor: ?models.text.sampler.LogitProcessor,
     tokens_out: ?[]const u8,
 ) !void {
     const cfg = model.config;
     const capacity = tokens.len + max_new;
-    var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+    var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
     defer cache.deinit();
     try util.printCacheInfo(stdout, &cache);
 
@@ -43,8 +43,8 @@ pub fn runGenerate(
     defer allocator.free(out);
     const history = try allocator.alloc(usize, tokens.len + max_new);
     defer allocator.free(history);
-    var profile: llm.qwen3.model.ForwardProfile = .{};
-    var decode_profile: llm.qwen3.model.ForwardProfile = .{};
+    var profile: models.qwen3.model.ForwardProfile = .{};
+    var decode_profile: models.qwen3.model.ForwardProfile = .{};
 
     // Warm-repeat benchmark (load once, prime caches, time N passes) — a fair
     // apples-to-apples vs llama-bench, free of the reload/heat bias a fresh single
@@ -141,24 +141,24 @@ const StreamsPassResult = struct { prefill_ns: i96, decode_ns: i96, decode_steps
 fn benchStreamsBatchPass(
     io: std.Io,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    caches: []const *llm.kv_cache.KvCache,
+    model: *const models.qwen3.model.Model,
+    caches: []const *models.text.kv_cache.KvCache,
     tokens: []const usize,
-    sampler_cfg: llm.sampler.Config,
+    sampler_cfg: models.text.sampler.Config,
     max_new: usize,
     outs: []const []usize,
     histories: []const []usize,
-    samplers: []llm.sampler.Sampler,
+    samplers: []models.text.sampler.Sampler,
     hist_lens: []usize,
     lasts: []usize,
-    processors: []const ?llm.sampler.LogitProcessor,
+    processors: []const ?models.text.sampler.LogitProcessor,
 ) !StreamsPassResult {
     const n = caches.len;
     for (0..n) |i| {
         caches[i].reset();
         var cfg = sampler_cfg;
         cfg.seed = sampler_cfg.seed +% i;
-        samplers[i] = llm.sampler.Sampler.init(cfg);
+        samplers[i] = models.text.sampler.Sampler.init(cfg);
         samplers[i].processor = processors[i];
         if (processors[i]) |p| try p.reset(); // fresh grammar state per pass
         @memcpy(histories[i][0..tokens.len], tokens);
@@ -211,15 +211,15 @@ pub fn runGenerateStreams(
     allocator: std.mem.Allocator,
     stdout: anytype,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
+    model: *const models.qwen3.model.Model,
     tokens: []const usize,
     load_ns: i96,
     max_new: usize,
     n_streams: usize,
     bench_reps: usize,
-    cache_type: llm.kv_cache.KvDtype,
-    sampler_cfg: llm.sampler.Config,
-    constraint: ?*llm.llguidance.Constraint,
+    cache_type: models.text.kv_cache.KvDtype,
+    sampler_cfg: models.text.sampler.Config,
+    constraint: ?*models.text.llguidance.Constraint,
 ) !void {
     if (max_new < 2) return error.StreamsNeedDecodeSteps;
     const cfg = model.config;
@@ -229,11 +229,11 @@ pub fn runGenerateStreams(
     // Per-stream grammar state: clone the base constraint once per stream
     // (matcher deep-clone + refcounted tokenizer — no grammar recompilation);
     // both arms reset the clones at each pass start.
-    const stream_constraints = try allocator.alloc(llm.llguidance.Constraint, n);
+    const stream_constraints = try allocator.alloc(models.text.llguidance.Constraint, n);
     defer allocator.free(stream_constraints);
     var constraints_inited: usize = 0;
     defer for (0..constraints_inited) |i| stream_constraints[i].deinit();
-    const processors = try allocator.alloc(?llm.sampler.LogitProcessor, n);
+    const processors = try allocator.alloc(?models.text.sampler.LogitProcessor, n);
     defer allocator.free(processors);
     for (0..n) |i| {
         if (constraint) |base| {
@@ -245,15 +245,15 @@ pub fn runGenerateStreams(
         }
     }
 
-    const caches = try allocator.alloc(llm.kv_cache.KvCache, n);
+    const caches = try allocator.alloc(models.text.kv_cache.KvCache, n);
     defer allocator.free(caches);
     var caches_inited: usize = 0;
     defer for (0..caches_inited) |i| caches[i].deinit();
     for (0..n) |i| {
-        caches[i] = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+        caches[i] = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
         caches_inited += 1;
     }
-    const cache_ptrs = try allocator.alloc(*llm.kv_cache.KvCache, n);
+    const cache_ptrs = try allocator.alloc(*models.text.kv_cache.KvCache, n);
     defer allocator.free(cache_ptrs);
     for (cache_ptrs, caches) |*ptr, *cache| ptr.* = cache;
     try util.printCacheInfo(stdout, &caches[0]);
@@ -267,7 +267,7 @@ pub fn runGenerateStreams(
     defer freeSliceOfSlices(allocator, outs_seq);
     const histories = try allocSliceOfSlices(allocator, n, tokens.len + max_new);
     defer freeSliceOfSlices(allocator, histories);
-    const samplers = try allocator.alloc(llm.sampler.Sampler, n);
+    const samplers = try allocator.alloc(models.text.sampler.Sampler, n);
     defer allocator.free(samplers);
     const hist_lens = try allocator.alloc(usize, n);
     defer allocator.free(hist_lens);
@@ -375,16 +375,16 @@ pub fn runGenerateSpec(
     allocator: std.mem.Allocator,
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
-    model: *const llm.qwen3.model.Model,
-    tok: ?*const llm.tokenizer.Tokenizer,
+    model: *const models.qwen3.model.Model,
+    tok: ?*const models.text.tokenizer.Tokenizer,
     tokens: []const usize,
     load_ns: i96,
     max_new: usize,
     stop_token: ?usize,
-    sampler_cfg: llm.sampler.Config,
-    cache_type: llm.kv_cache.KvDtype,
+    sampler_cfg: models.text.sampler.Config,
+    cache_type: models.text.kv_cache.KvDtype,
     ref_paths: []const []const u8,
-    processor: ?llm.sampler.LogitProcessor,
+    processor: ?models.text.sampler.LogitProcessor,
 ) !void {
     // The decoder's invariant needs a non-empty committed history (e.g.
     // `--prompt ""` tokenizes to nothing).
@@ -392,15 +392,15 @@ pub fn runGenerateSpec(
     const cfg = model.config;
     // Stop-awareness: the verify loop must not sample rows past a committed
     // stop token (RNG-draw parity with a plain run — see speculative.zig).
-    const spec_options = llm.speculative.core.Options{ .stop_token = stop_token };
+    const spec_options = models.text.speculative.core.Options{ .stop_token = stop_token };
     // Room for the prompt, the requested tokens, and one verify batch of
     // overshoot past the max_new boundary.
     const capacity = tokens.len + max_new + spec_options.max_draft + 1;
-    var cache = try llm.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
+    var cache = try models.text.kv_cache.KvCache.initWithDtype(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity, cache_type);
     defer cache.deinit();
     try util.printCacheInfo(stdout, &cache);
 
-    var index = try llm.speculative.cascade.SpeculationIndex.init(allocator, cfg.vocab_size);
+    var index = try models.text.speculative.cascade.SpeculationIndex.init(allocator, cfg.vocab_size);
     defer index.deinit();
     // Acceptance accounting settles only drafts the decoder actually verifies
     // (the cascade's accounting contract).
@@ -416,16 +416,16 @@ pub fn runGenerateSpec(
     // With a grammar constraint installed, wrap the cascade so forced spans
     // draft themselves and cascade drafts are pre-filtered to their
     // grammar-valid prefix (speculative/constrained.zig).
-    var grammar_source: llm.speculative.constrained.ConstrainedSource = undefined;
+    var grammar_source: models.text.speculative.constrained.ConstrainedSource = undefined;
     var draft_source = index.asDraftSource();
     if (processor) |p| {
         if (p.hasStructure()) {
-            grammar_source = llm.speculative.constrained.ConstrainedSource.init(p, index.asDraftSource());
+            grammar_source = models.text.speculative.constrained.ConstrainedSource.init(p, index.asDraftSource());
             draft_source = grammar_source.source();
         }
     }
 
-    var decoder = try llm.speculative.core.SpeculativeDecoder(llm.qwen3.model.Model).init(allocator, draft_source, spec_options);
+    var decoder = try models.text.speculative.core.SpeculativeDecoder(models.qwen3.model.Model).init(allocator, draft_source, spec_options);
     defer decoder.deinit();
     decoder.io = io; // live verify/plain cost measurement for the auto-off gate
 
@@ -434,10 +434,10 @@ pub fn runGenerateSpec(
     try history.appendSlice(allocator, tokens);
     index.observe(tokens); // the prompt is committed context
 
-    var sampler = llm.sampler.Sampler.init(sampler_cfg);
+    var sampler = models.text.sampler.Sampler.init(sampler_cfg);
     sampler.processor = processor;
     var sink_state: u8 = 0;
-    const sink = llm.speculative.core.TokenSink{ .ptr = @ptrCast(&sink_state), .func = nullSinkEmit };
+    const sink = models.text.speculative.core.TokenSink{ .ptr = @ptrCast(&sink_state), .func = nullSinkEmit };
 
     // Prefill EXACTLY as runGenerate does: every prompt token in one
     // batch, first new token committed from the prefill logits via the

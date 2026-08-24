@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const codec = @import("codec.zig");
 const dump = @import("dump.zig");
@@ -151,7 +151,7 @@ test "OMNIVOICE_PARITY: pipeline greedy generateTokens byte-identical to maskgit
     };
     defer file.deinit();
 
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tok.deinit();
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);
@@ -217,7 +217,7 @@ test "OMNIVOICE_PARITY: voice-design synthesize end-to-end vs tts-design goldens
         else => return err,
     };
 
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &lm_file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &lm_file, .{});
     defer tok.deinit();
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);

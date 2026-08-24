@@ -9,11 +9,11 @@
 //! was tuned no-think). Decoding is greedy like the reference harness.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const util = @import("util.zig");
 
-const shine = llm.research.shine;
-const qwen3 = llm.qwen3.model;
+const shine = models.research.shine;
+const qwen3 = models.qwen3.model;
 
 pub fn run(
     io: std.Io,
@@ -21,7 +21,7 @@ pub fn run(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const qwen3.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     shine_path: ?[]const u8,
     context_arg: ?[]const u8,
     adapter_path: ?[]const u8,
@@ -171,14 +171,14 @@ pub fn buildFleet(
     stdout: *std.Io.Writer,
     ctx: *fucina.ExecContext,
     model: *const qwen3.Model,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     shine_path: []const u8,
     docs_dir: []const u8,
     out_dir: []const u8,
 ) !void {
     var sh = try shine.Shine.loadGguf(ctx, io, shine_path, model.config);
     defer sh.deinit();
-    var trainer = try llm.qwen3.train.Trainer(.{ .q = false, .v = false }).init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0);
+    var trainer = try models.qwen3.train.Trainer(.{ .q = false, .v = false }).init(ctx, model, .{ .rank = 1, .alpha = 1 }, 0);
     defer trainer.deinit();
     try std.Io.Dir.cwd().createDirPath(io, out_dir);
 
@@ -206,9 +206,9 @@ pub fn buildFleet(
     }.lessThan);
 
     const embed_chunk: usize = 256;
-    var index = llm.cartridge_fleet.EmbedIndex.init(allocator, model.config.hidden_size);
+    var index = models.text.cartridge_fleet.EmbedIndex.init(allocator, model.config.hidden_size);
     defer index.deinit();
-    const suffix_ids32 = try tokenizer.encode(allocator, llm.cartridge_fleet.embed_suffix);
+    const suffix_ids32 = try tokenizer.encode(allocator, models.text.cartridge_fleet.embed_suffix);
     defer allocator.free(suffix_ids32);
     const vec = try allocator.alloc(f32, model.config.hidden_size);
     defer allocator.free(vec);
@@ -310,7 +310,7 @@ fn answer(
     ctx: *fucina.ExecContext,
     model: *const qwen3.Model,
     adapter: *const shine.LoraSet,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     history: *std.ArrayList(u8),
     question: []const u8,
     stop: u32,

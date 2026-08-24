@@ -1,10 +1,10 @@
 //! OpenAI-compatible chat backend for the voice agent.
 //!
-//! The in-process path binds one architecture at compile time (`llm.qwen3`),
+//! The in-process path binds one architecture at compile time (`models.qwen3`),
 //! which is why a Gemma GGUF cannot be handed to `--chat` even though fucina
 //! can run it. Rather than grow a second architecture dispatch here, this
 //! speaks `/v1/chat/completions` to something that already has one:
-//! `llm.serving.open` picks the backend from the GGUF's
+//! `models.text.serving.open` picks the backend from the GGUF's
 //! `general.architecture` (qwen3, qwen3moe, gemma4), and any other
 //! OpenAI-compatible server (`fucina-lmserve`, llama.cpp, vLLM, a hosted
 //! provider) works the same way through `--chat-url`.
@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const serving = @import("fucina_llm").serving;
+const serving = @import("fucina_models").text.serving;
 
 pub const Role = enum { system, user, assistant };
 
@@ -275,11 +275,11 @@ pub const Client = struct {
     }
 };
 
-/// The `llm.serving` chat server, hosted INSIDE this process on a thread.
+/// The `models.text.serving` chat server, hosted INSIDE this process on a thread.
 ///
 /// Not a child process: one binary, one process, no external executable to
 /// find, and nothing to leave orphaned if the agent dies. What it buys over
-/// an in-process `llm.chat.Conversation` is the architecture dispatch
+/// an in-process `models.text.chat.Conversation` is the architecture dispatch
 /// (`serving.open` picks the backend from the GGUF's
 /// `general.architecture`: qwen3, qwen3moe, gemma4) and a generation that
 /// can be abandoned mid-flight, which is what speculative turns are built

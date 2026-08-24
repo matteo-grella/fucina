@@ -2,7 +2,7 @@
 //! (counting sort), the gather → gate/up → act → down phase-chain machinery,
 //! the phase chunking constants/helpers, and the profile timer pair. Consumed
 //! by the qwen-style MoE op (`exec/moe.zig`) and — through the
-//! `ExecContext.moe_chain` re-export — by the gemma MoE engines at the llm
+//! `ExecContext.moe_chain` re-export — by the gemma MoE engines at the models
 //! layer, so scheduler fixes and chunk retunes land once for every family.
 const std = @import("std");
 const thread = @import("../thread.zig");

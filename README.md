@@ -37,7 +37,7 @@ different type from `Tensor(.{ .in, .batch })`, contraction is by axis
 *name*, the result's tag set is computed at compile time, and a misaligned
 contraction is a compile error — not a runtime shape crash three layers
 deep. The pattern, condensed (see `examples/spirals/main.zig` and the production
-trainer in `src/llm/qwen3/train.zig`):
+trainer in `src/models/qwen3/train.zig`):
 
 ```zig
 const Model = struct {
@@ -91,7 +91,7 @@ zig fetch --save git+https://github.com/matteo-grella/fucina#v0.3.0
 // build.zig
 const fucina_dep = b.dependency("fucina", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
-exe.root_module.addImport("fucina_llm", fucina_dep.module("fucina_llm")); // LLM stack; optional
+exe.root_module.addImport("fucina_models", fucina_dep.module("fucina_models")); // LLM stack; optional
 ```
 
 The fetched package is the library surface only (`src/`, the vendored
@@ -170,7 +170,7 @@ kernels.
 With the tensor core in place, Fucina grows and gets tested through real
 applications, so the runtime and the things built on it develop side by
 side. Every family below is ordinary consumer code of the same public
-`fucina`/`fucina_llm` surface wired in Getting started, so `examples/`
+`fucina`/`fucina_models` surface wired in Getting started, so `examples/`
 doubles as a corpus of real usage: open any `main.zig` and read how the
 library is actually driven. And every family is validated against its
 reference implementation, a discipline that is the core of the project:

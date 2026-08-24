@@ -17,8 +17,8 @@ dtypes, `f16`/`bf16`/`f32`/`f64`, and the GGML block-quantized formats (see
 exposed from `src/fucina.zig`. Model families (Qwen3 dense + MoE, Qwen3.5,
 Gemma 4, DiffusionGemma, DeepSeek V2 + V4 Flash, GLM-4.5, Inkling, Parakeet
 ASR, plus the OmniVoice TTS, LocateAnything VLM, and NAM ports in
-`examples/`) run from GGUF weights through the sibling `fucina_llm` module
-(`src/llm.zig`) and the example runners. Execution is CPU-first with optional
+`examples/`) run from GGUF weights through the sibling `fucina_models` module
+(`src/models.zig`) and the example runners. Execution is CPU-first with optional
 Metal/CUDA callable-accelerator offload (`-Dgpu=metal|cuda`,
 `src/backend/{metal,cuda}.zig`).
 
@@ -36,7 +36,7 @@ Top-down; a band may depend only on bands at or below it:
 | Band | Contents |
 | --- | --- |
 | apps | `examples/**`, `tools/**`, `bench/**`, `src/bench_raw.zig`, `src/x86dot_check.zig` |
-| llm | `src/llm.zig`, `src/llm/**` (the `fucina_llm` module) |
+| models | `src/models.zig`, `src/models/**` (the `fucina_models` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/ptqtp.zig`, `src/gguf.zig`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
@@ -76,7 +76,7 @@ internals. A comptime guard in `src/fucina.zig` makes re-exporting `RawTensor`
 at the public root a compile error; in-tree code that genuinely needs the raw
 type names it through the `fucina.internal` escape hatch
 (`internal.RawTensor`, plus `internal.backend_mod`/`tensor_mod`/`thread_mod`
-for exact type identity in the `fucina_llm` module, and `internal.gpu` for the
+for exact type identity in the `fucina_models` module, and `internal.gpu` for the
 Metal residency/tracing hooks). Microbenchmarks use the separate `bench_raw`
 module (`src/bench_raw.zig`).
 
@@ -165,7 +165,7 @@ Execution runtime:
 - `src/exec/moe_gu.zig`: fused gate|up MoE expert kernels over raw GGUF
   stack layouts (packed Q6_Kx4/Q8_0x4 arms, raw Q6_K/Q4_K blocks, GPU
   batch path), reached through the `moeGu*` facade methods; the gemma
-  family's tagged wrappers live in `llm/gemma/moe.zig`.
+  family's tagged wrappers live in `models/gemma/moe.zig`.
 - `src/exec/moe_chain.zig`: shared batched-MoE scheduling scaffolding
   (expert-grouped route plan, gather → gate/up → act → down phase-chain
   machinery, chunking helpers, profile timers). Consumed by `exec/moe.zig`
@@ -249,7 +249,7 @@ Training and persistence (see *Training And Persistence*): `src/optim.zig`,
 `src/safetensors.zig`, `src/training_checkpoint.zig`, `src/lora.zig`,
 `src/gguf.zig`.
 
-LLM stack (see *LLM Stack*): `src/llm.zig` + `src/llm/`.
+LLM stack (see *LLM Stack*): `src/models.zig` + `src/models/`.
 
 Apps: `examples/` (one directory per example rooted at `main.zig`: `smoke/`, `qwen3/`,
 `qwen35/`, `gemma4/`, `diffusion_gemma/`, `parakeet/`, `spirals/`, `finetune/`,
@@ -311,9 +311,9 @@ tensor.zig -> storage.zig, dtype.zig
 storage.zig -> accelerator.zig, dtype.zig
 ```
 
-The `fucina_llm` module (`src/llm.zig` + `src/llm/`) sits above the facade:
+The `fucina_models` module (`src/models.zig` + `src/models/`) sits above the facade:
 its files import the `fucina` module (public surface plus `fucina.internal`),
-never individual `src/*.zig` files. `build.zig` wires the llm module against
+never individual `src/*.zig` files. `build.zig` wires the models module against
 the `fucina` module root only (the `bench_raw`/`raw_backend` microbench
 modules are separate, apps-band roots).
 
@@ -662,7 +662,7 @@ validate both built-in VJPs and custom ops.
 
 ## LLM Stack
 
-`src/llm.zig` is the root of the separate `fucina_llm` module (wired in
+`src/models.zig` is the root of the separate `fucina_models` module (wired in
 `build.zig`; it consumes only the `fucina` module).
 
 ### Where shared model code lives
@@ -673,9 +673,9 @@ decides which. The rule is stated at the top of `src/weights.zig`; in short:
 | Home | Band | Subject |
 | --- | --- | --- |
 | `fucina.weights` | core | a weight CONTAINER: building one from GGUF bytes, and multiplying by it (`LinearWeight`, `MoeRhs`, `linearSeq*`, `moe*FfnSeq`) |
-| `llm/model_common.zig` | llm | a GGUF FILE's layout: which tensor names a family's layer trio has, how an embed/head/norm set is read |
-| `llm/host_ops.zig` | llm | raw f32 HOST SLICES, for the host-reference ports that run below the Tensor facade |
-| `llm/lora_trainer.zig` | llm | a LoRA TARGET SELECTION: the per-layer adapter set, its A/B tuple, and the dropout seed stream |
+| `models/model_common.zig` | models | a GGUF FILE's layout: which tensor names a family's layer trio has, how an embed/head/norm set is read |
+| `models/host_ops.zig` | models | raw f32 HOST SLICES, for the host-reference ports that run below the Tensor facade |
+| `models/train/lora_trainer.zig` | models | a LoRA TARGET SELECTION: the per-layer adapter set, its A/B tuple, and the dropout seed stream |
 
 `linearSeq*` is forward compute inside the model-I/O module on purpose:
 `LinearWeight.linearSeq` is a union dispatch into the per-format arms and
@@ -686,10 +686,10 @@ a new home with a stated subject, not a fifth un-ruled one.
 ### The decoder contract and the architecture registry
 
 Every autoregressive text family speaks one comptime-checked surface,
-declared in `llm/decoder.zig` and asserted by `assertDecoder(Model)` at the
+declared in `models/decoder.zig` and asserted by `assertDecoder(Model)` at the
 top of the generic layers (`chat.Conversation`,
 `speculative.SpeculativeDecoder`, `serving.gguf_chat.GgufChatBackend`,
-`llm.generate`): a `Cache` type (`len()`/`reset()`/`deinit()`, plus
+`models.text.generate`): a `Cache` type (`len()`/`reset()`/`deinit()`, plus
 `truncate` iff `caps.rewind`), a `caps: decoder.Caps` value (`rewind`,
 `batch`), `initCache(self, ctx, capacity)`, and
 `forwardStep(self, ctx, cache, tokens, pos0)` returning the LAST row's
@@ -699,50 +699,50 @@ in lockstep iff `caps.batch`). Conforming: qwen3/qwen3moe, gemma4, SHINE's
 `AdaptedModel`, qwen35, deepseek2, deepseek4, glm4moe, inkling; kimi3
 (research tier, cache-less whole-sequence forward) stays outside.
 
-`llm/registry.zig` is the architecture registry: one comptime table from a
+`models/registry.zig` is the architecture registry: one comptime table from a
 GGUF's `general.architecture` string to the family module (`Family` decls
 in each family's `model.zig`: `Model`, the tokenizer module, `load`,
 `tokenizer`, `template_fallback`). `serving.open` dispatches over it with
 one `inline for`; `registry.familyFor` is the comptime lookup.
-`llm/generate.zig` is the reference generation loop over the contract
+`models/text/generate.zig` is the reference generation loop over the contract
 (prefill, sample, emit through a `TokenSink` until a stop id, the budget,
 or capacity); the qwen35 and inkling chat engines and
 `gemma.Model.generate` call it.
 
 Model families live in subdirectories and are exposed as namespaces:
 
-- `llm.qwen3.{model,train}` — Qwen3 dense/MoE inference + LoRA fine-tuning;
+- `models.qwen3.{model,train}` — Qwen3 dense/MoE inference + LoRA fine-tuning;
   `forwardStepBatch` is the batch-N lockstep decode entry (one m=N weight
   pass over N per-stream KV caches).
-- `llm.qwen35.{model,chat,serving}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid
+- `models.qwen35.{model,chat,serving}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid
   plus its ChatML chat/generation engine and serving adapter.
-- `llm.gemma.{model,train,moe}` — Gemma 4 text + MoE; the MoE kernels
+- `models.gemma.{model,train,moe}` — Gemma 4 text + MoE; the MoE kernels
   live in the exec band (`exec/moe_gu.zig`), `gemma.moe` is the tagged
   family surface over them.
-- `llm.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
-- `llm.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
-- `llm.deepseek4.{model,serving}` — DeepSeek V4 Flash (CSA/HCA attention +
+- `models.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
+- `models.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
+- `models.deepseek4.{model,serving}` — DeepSeek V4 Flash (CSA/HCA attention +
   streamed experts via `expert_store`) and its serving adapter.
-- `llm.glm4moe.model` — GLM-4.5 family, with native multi-token-prediction
+- `models.glm4moe.model` — GLM-4.5 family, with native multi-token-prediction
   speculative decode.
-- `llm.inkling.{model,mmproj,chat,serving}` — Inkling hybrid SWA/global
+- `models.inkling.{model,mmproj,chat,serving}` — Inkling hybrid SWA/global
   decoder with banded relative-position bias, plus the image/audio mmproj
   towers, chat glue, and serving adapter.
-- `llm.parakeet.*` — NeMo FastConformer ASR (frontend → subsampling →
+- `models.parakeet.*` — NeMo FastConformer ASR (frontend → subsampling →
   encoder → CTC/TDT decoder → transcription/streaming).
-- `llm.speculative.{core,mtp,sam_index,recycling,cascade,constrained}` —
+- `models.text.speculative.{core,mtp,sam_index,recycling,cascade,constrained}` —
   lossless draft-model-free speculative decoding (see `SPECULATIVE.md`),
   including grammar-constrained drafting and native-MTP drafting behind
   the `DraftSource` vtable (`mtp.MtpDraftSource`, glm4moe).
-- `llm.research.*` — the research tier, one namespace so the facade states
+- `models.research.*` — the research tier, one namespace so the facade states
   it: `subq` (decode-path attention evaluator, installed through the
   runner's `AttentionOverride` seam; `SUBQUADRATIC-ATTENTION.md`), `engram`
   (conditional n-gram memory, grafted through the qwen3 trainer's
   `residual_hook` seam; `ENGRAM.md`), `shine`/`shine_train` (context-to-LoRA
-  adapters, served by `llm.qwen3.shine_serving`), and `kimi3.model` (the
+  adapters, served by `models.qwen3.shine_serving`), and `kimi3.model` (the
   Kimi-K3 port).
 
-Generic helpers stay flat in `src/llm/`:
+Generic helpers stay flat in `src/models/`:
 
 - `weights.zig`: GGUF weight binding — `LinearWeight` over resident
   f32/f16/bf16 and quantized forms; `LoadOptions{ .gpu_resident }` with
@@ -767,7 +767,7 @@ Generic helpers stay flat in `src/llm/`:
   per-document cartridge fleets (`CARTRIDGES.md`).
 - `engram.zig`: conditional n-gram memory — hashed suffix n-gram tables gated
   into the residual stream of a frozen backbone (`ENGRAM.md`); exposed as
-  `llm.research.engram`.
+  `models.research.engram`.
 - `logit_processor.zig` + `llguidance.zig`: the in-place logit-processing seam
   and the vendored llguidance grammar/JSON-schema engine behind it
   (`CONSTRAINED-DECODING.md`).
@@ -824,15 +824,15 @@ Generic helpers stay flat in `src/llm/`:
 - `src/param_registry.zig`: borrows named f32/f16/bf16 tensors for
   checkpointing and optimizer registration; a registered name is an on-disk
   schema path (renames go through `state_dict.LoadOptions.aliases`, never by
-  loosening strictness). The trainers (`llm/qwen3/train.zig`,
-  `llm/gemma/train.zig`) delegate their parameter plumbing here.
+  loosening strictness). The trainers (`models/qwen3/train.zig`,
+  `models/gemma/train.zig`) delegate their parameter plumbing here.
 - `src/state_dict.zig` + `src/safetensors.zig`: the named checkpoint stream
   and its safetensors container.
 - `src/training_checkpoint.zig`: canonical checkpoint directory
   (`model.safetensors`/`adapters.safetensors`, native `optimizer.fucina`,
   JSON `trainer_state.json` commit sentinel); the state codec is generic
   over the caller's struct, and the LLM trainers' concrete state is
-  `fucina_llm.trainer_state.TrainerState`.
+  `fucina_models.train.trainer_state.TrainerState`.
 - `src/lora.zig`: `Adapter(in_tag, out_tag)` over frozen weights; named
   persistence; f32/f16 merge (the fine-tune → merge → quantize → serve loop
   is documented in `TRAINING.md`).
@@ -845,7 +845,7 @@ Generic helpers stay flat in `src/llm/`:
 ## Build And Verification
 
 `build.zig` wires two library modules (`fucina` from `src/fucina.zig`,
-`fucina_llm` from `src/llm.zig`) plus the `bench_raw` (`src/bench_raw.zig`)
+`fucina_models` from `src/models.zig`) plus the `bench_raw` (`src/bench_raw.zig`)
 and `raw_backend` (rooted at `src/backend.zig`) microbench modules.
 `build.zig.zon` names the package `.fucina`, so both library modules are
 consumable from another project via `zig fetch` + `b.dependency`
@@ -853,7 +853,7 @@ consumable from another project via `zig fetch` + `b.dependency`
 the verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
-  drives nine test roots — `src/fucina.zig`, `src/llm.zig`, and the
+  drives nine test roots — `src/fucina.zig`, `src/models.zig`, and the
   `examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,nanochat}/main.zig`
   roots (`zig build test-fucina` runs the fucina root alone, the routine
   `-Dbackend=scalar` leg). Parity suites needing local model/reference assets
@@ -918,7 +918,7 @@ behavioral tests, and `arch-check` ignores the imports inside them.
   rules); don't add one without a concrete design.
 - Quantized encoder coverage stops at K-quants + legacy formats; the cold
   formats (Q2_K/Q3_K/IQ*/TQ*/FP4) are decode/matmul-only.
-- The descriptor runner (`llm.runner`, docs/RUNNER.md) unifies the qwen3
+- The descriptor runner (`models.qwen3.runner`, docs/RUNNER.md) unifies the qwen3
   family and the glm4moe trunk, and `serving.open` is the load-and-serve
   entry for the Conversation families; the OTHER families still wire their
   own config/loader/decoder (the shared seams are `weights.zig`,

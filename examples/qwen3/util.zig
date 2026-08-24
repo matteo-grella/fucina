@@ -1,7 +1,7 @@
 //! Shared plumbing for the Qwen3 runner modules: clocks, small file I/O,
 //! tokenizer round-trips, and the KV-cache banner.
 const std = @import("std");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 pub fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.awake.now(io).nanoseconds;
@@ -19,7 +19,7 @@ pub fn millisI128(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
 }
 
-pub fn printCacheInfo(stdout: anytype, cache: *const llm.kv_cache.KvCache) !void {
+pub fn printCacheInfo(stdout: anytype, cache: *const models.text.kv_cache.KvCache) !void {
     const bytes = cache.byteSize();
     const per_token = @as(f64, @floatFromInt(bytes)) / @as(f64, @floatFromInt(cache.capacity));
     try stdout.print("kv cache: {s}, capacity {d} tok, {d:.1} MiB ({d:.1} KiB/token, {d:.1} MiB per 1k tok)\n", .{
@@ -83,7 +83,7 @@ pub fn readTextFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) 
 
 /// Read a UTF-8 text file and tokenize it (no BOS/EOS policy) for use as a
 /// speculation reference document or the `--tokenize` parity harness.
-pub fn tokenizeFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, path: []const u8) ![]usize {
+pub fn tokenizeFile(io: std.Io, allocator: std.mem.Allocator, tok: *const models.text.tokenizer.Tokenizer, path: []const u8) ![]usize {
     const bytes = try readTextFile(io, allocator, path);
     defer allocator.free(bytes);
     const ids32 = try tok.encodeRaw(allocator, bytes);
@@ -94,7 +94,7 @@ pub fn tokenizeFile(io: std.Io, allocator: std.mem.Allocator, tok: *const llm.to
     return ids;
 }
 
-pub fn decodeIds(allocator: std.mem.Allocator, tok: *const llm.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
+pub fn decodeIds(allocator: std.mem.Allocator, tok: *const models.text.tokenizer.Tokenizer, ids: []const usize) ![]u8 {
     const ids32 = try allocator.alloc(u32, ids.len);
     defer allocator.free(ids32);
     for (ids32, ids) |*d, s| d.* = @intCast(s);

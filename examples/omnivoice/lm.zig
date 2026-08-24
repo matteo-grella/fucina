@@ -11,7 +11,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

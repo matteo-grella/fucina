@@ -4,7 +4,7 @@
 `zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) exposes the
 in-tree language models behind the two OpenAI wire dialects plus the
 Anthropic Messages API. The server itself is library surface: the transport
-and the generic engine live in `llm.serving` (`src/llm/serving/`,
+and the generic engine live in `models.text.serving` (`src/models/text/serving/`,
 REFERENCE.md §13.13), a model family integrates through one small
 `Backend` vtable, and this example is the CLI front end plus the adapters
 for the families the generic engine cannot host.
@@ -67,7 +67,7 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   token shadow — and each request adopts the slot with the longest common
   token prefix (above a llama.cpp-style 0.1 similarity gate; LRU otherwise),
   prefilling only the rest (`Conversation.initWarm`/`takeCache`/
-  `sendTokensReuse` in `src/llm/serving/gguf_chat.zig`). Follow-up turns of a
+  `sendTokensReuse` in `src/models/text/serving/gguf_chat.zig`). Follow-up turns of a
   chat re-prefill only the last reply + new message. Whole-slot adoption is
   reserved for CONTINUATIONS; a request that merely SHARES a prefix with a
   resident slot — same system prompt, different dialogue — **copies** the
@@ -79,7 +79,7 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   matching nothing costs one full prefill, exactly as before. Extra slots keep interleaved
   conversations warm at a full `--ctx` cache each (~112 KiB/position for a
   28-layer/8-kv-head/128-dim f16 geometry). A startup **KV RAM guard**
-  (`kvRamGuardSlots` in `src/llm/serving/gguf_chat.zig`) sizes one probe
+  (`kvRamGuardSlots` in `src/models/text/serving/gguf_chat.zig`) sizes one probe
   cache, compares `--kv-slots x per-slot` against available memory, and
   prints the arithmetic when it matters: slot pages commit lazily, so an
   overcommit does not fail at startup — it surfaces mid-serving as the OS
@@ -92,7 +92,7 @@ conn threads (≤ --conns, socket deadlines)          ONE inference worker
   to clamp on. With
   `--kv-cache-dir D`, a slot
   about to be destroyed by an unrelated request (keeping < half of it, not
-  already stored) spills to an `llm.kv_persist` sidecar under `D` (at most
+  already stored) spills to an `models.text.kv_persist` sidecar under `D` (at most
   `--kv-disk-slots` files, LRU-reused, containment-deduped) and is restored
   — zero re-prefill — when a later request matches it better than every
   resident slot. The reuse is reported as `cached_tokens` in usage
@@ -201,7 +201,7 @@ accounting. Extension fields (llama.cpp precedent): `top_k`, `min_p`,
 **Function calling** works on backends whose family has a tool convention
 (`types.ToolStyle`; qwen3/qwen3moe/qwen35 speak the hermes shape):
 declarations and tool history fold into the prompt text
-(`src/llm/serving/toolcall.zig` reproduces Qwen3's own template
+(`src/models/text/serving/toolcall.zig` reproduces Qwen3's own template
 rendering — `<tools>` system section, `<tool_call>` assistant sections,
 `<tool_response>` user sections), the emitter scans replies for
 `<tool_call>` regions, and completed calls come back as chat `tool_calls`
@@ -243,7 +243,7 @@ HTTP status codes (the SDKs dispatch on status). Mid-stream failures arrive
 in-band: chat as a `data:` frame with a top-level `error` key, responses as
 an `error` event followed by `response.failed`.
 
-**Anthropic Messages** (`/v1/messages`, `src/llm/serving/anthropic.zig`) is
+**Anthropic Messages** (`/v1/messages`, `src/models/text/serving/anthropic.zig`) is
 a translation layer over the same normalized request — honored: `system`
 (string or text blocks), `messages` with text blocks (prior-turn
 `thinking`/`redacted_thinking` blocks are dropped like the responses
@@ -315,7 +315,7 @@ either way.
 ## Constrained output
 
 `json_schema` (both dialects' shapes), `json_object`, and the `regex`/`lark`
-extensions compile to a `llm.llguidance.Constraint` (needs a
+extensions compile to a `models.text.llguidance.Constraint` (needs a
 `-Dllguidance=true` build; otherwise 501). Base constraints are LRU-cached
 per grammar source — `Constraint.init` walks the full vocab to build the
 token trie; `clone()` per request shares it (the cache may only be touched
@@ -329,7 +329,7 @@ argmax inside an unbounded grammar field can loop (docs, §7 caveat).
 ## Per-model backends
 
 The GGUF-served set comes from the architecture registry
-(`llm.registry`): `serving.openFromFile` dispatches on
+(`models.registry`): `serving.openFromFile` dispatches on
 `general.architecture` and builds the family backend inside the library.
 The CLI keeps only the two non-registry backends (diffusion-gemma,
 nanochat).
@@ -339,9 +339,9 @@ nanochat).
 | qwen3 / qwen3moe | generic `Conversation` adapter (`serving.gguf_chat`, via `serving.open`) | ✓ | ✓ (`<think>` routing) | ✓ | per token |
 | gemma4 | same adapter (SPM tokenizer, `<turn|>` + extra stop ids, GGUF `general.sampling.*` defaults) | ✓ | — | ✓ | per token |
 | diffusion-gemma | `backend_diffusion.zig` over `dg.generate` | — | — | — (EOG-trimmed blocks) | per committed block |
-| inkling | `llm.inkling.serving` over `llm.inkling.chat.Engine` (wire-format renderer, sampler; via `serving.open`) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
-| qwen35 / qwen35moe (Qwen3.5 / Qwen3.6 / Ternary-Bonsai) | `llm.qwen35.serving` over `llm.qwen35.chat.Engine` (ChatML + Qwen3.6 think prefill, sampler; via `serving.open`) | ✓ | ✓ (`<think>` routing; the prompt-prefilled opener is injected into the stream) | — | per token (no cross-request KV reuse) |
-| deepseek4 (DeepSeek V4 Flash) | `llm.deepseek4.serving` (token-level chat renderer, chunked session prefill + step decode; via `serving.open`) | ✓ | — | ✓ | per token (no cross-request KV reuse) |
+| inkling | `models.inkling.serving` over `models.inkling.chat.Engine` (wire-format renderer, sampler; via `serving.open`) | ✓ | ✓ (`<\|content_thinking\|>` → `<\|content_text\|>` routing) | — | per token (no cross-request KV reuse) |
+| qwen35 / qwen35moe (Qwen3.5 / Qwen3.6 / Ternary-Bonsai) | `models.qwen35.serving` over `models.qwen35.chat.Engine` (ChatML + Qwen3.6 think prefill, sampler; via `serving.open`) | ✓ | ✓ (`<think>` routing; the prompt-prefilled opener is injected into the stream) | — | per token (no cross-request KV reuse) |
+| deepseek4 (DeepSeek V4 Flash) | `models.deepseek4.serving` (token-level chat renderer, chunked session prefill + step decode; via `serving.open`) | ✓ | — | ✓ | per token (no cross-request KV reuse) |
 | nanochat | `backend_nanochat.zig` over its own Engine (`--nanochat` dir) | — | — | — | per token (no system role: 400) |
 
 Absent sampling fields default to the model's recommended settings (qwen3
@@ -353,12 +353,12 @@ to a token prefix, so the KV-slot reuse tiers (and `--kv-cache-dir`) do
 not apply — every request prefills from scratch on a fresh cache.
 
 Adding a family = implementing the two-function `Backend` vtable
-(`llm.serving`, `src/llm/serving/contract.zig` — the model-agnostic serving
+(`models.text.serving`, `src/models/text/serving/contract.zig` — the model-agnostic serving
 contract, so an out-of-tree server consumes it without vendoring
 lmserve): `validate` (cheap, connection-thread: message
 shape + prompt length) and `generate` (worker-thread: stream reply bytes
 into the sink, return token counts + finish reason). Families served by
-`llm.chat.Conversation` get this for free from the generic adapter.
+`models.text.chat.Conversation` get this for free from the generic adapter.
 
 Verification status: qwen3 proven end-to-end (openai-python SDK suite,
 constrained decoding, concurrency, cancellation, shutdown — 2026-07-12,

@@ -1,5 +1,5 @@
 //! LocateAnything tokenizer: the shared Qwen2 byte-level BPE from
-//! `fucina_llm.tokenizer` plus the reference's special-token handling.
+//! `fucina_models.text.tokenizer` plus the reference's special-token handling.
 //!
 //! The reference (refs/locate-anything.cpp/src/tokenizer.cpp `encode`,
 //! L259-299) treats every `token_type == 4` vocab entry (the HF
@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const config_mod = @import("config.zig");
 
 const Allocator = std.mem.Allocator;
@@ -22,7 +22,7 @@ pub const arch = config_mod.arch;
 
 pub const Tokenizer = struct {
     allocator: Allocator,
-    base: llm.tokenizer.Tokenizer,
+    base: models.text.tokenizer.Tokenizer,
     /// Special (atomic) token bytes -> id; slices into `special_blob`.
     special_ids: std.StringHashMap(u32),
     special_blob: []u8,
@@ -56,7 +56,7 @@ pub const Tokenizer = struct {
         merge_strings: []const []const u8,
         types: []const i32,
     ) !Tokenizer {
-        var base = try llm.tokenizer.Tokenizer.initFromParts(allocator, token_strings, merge_strings, .{});
+        var base = try models.text.tokenizer.Tokenizer.initFromParts(allocator, token_strings, merge_strings, .{});
         errdefer base.deinit();
 
         // Collect the atomic specials (token_type == 4, HF "control").

@@ -5,7 +5,7 @@
 //! trainer-state sentinel written last. The trainer-state codec is generic
 //! over the caller's state struct (a version/step/seed header plus optional
 //! `?u64`/`?f64` fields); the LLM trainers' concrete struct is
-//! `fucina_llm.trainer_state.TrainerState`.
+//! `fucina_models.train.trainer_state.TrainerState`.
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;

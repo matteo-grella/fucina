@@ -6,7 +6,7 @@
 //! model/tokenizer lifetime and the dispatch.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 const options_mod = @import("options.zig");
 const util = @import("util.zig");
 const bench = @import("bench.zig");
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     // --tokenize FILE: encode a text file and print one token id per line
     // (the llama-tokenize parity harness); no model weights needed.
     if (opts.tokenize_file) |path| {
-        var t = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+        var t = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
         defer t.deinit();
         file.deinit();
         const ids = try util.tokenizeFile(init.io, allocator, &t, path);
@@ -55,21 +55,21 @@ pub fn main(init: std.process.Init) !void {
         m.pin_bytes = if (opts.moe_pin_mb) |mb| mb << 20 else null;
         m.pilot = opts.moe_pilot;
     }
-    const load_options: llm.qwen3.model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
-    var model_config = try llm.qwen3.model.Config.fromGguf(&file);
+    const load_options: models.qwen3.model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
+    var model_config = try models.qwen3.model.Config.fromGguf(&file);
     if (opts.moe_expert_top_p) |p| model_config.moe_expert_top_p = p;
-    var model = try llm.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, model_config, load_options);
+    var model = try models.qwen3.model.Model.loadGgufFromFileOptions(&ctx, &file, model_config, load_options);
     defer model.deinit();
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.moe_stream_cli.reportAndSaveMoeStream(store, !opts.moe_no_learn, stdout);
+    defer if (model.expert_store) |store| models.moe_stream_cli.reportAndSaveMoeStream(store, !opts.moe_no_learn, stdout);
     // Build a tokenizer from the same file's metadata; tolerate models without it.
-    var tokenizer: ?llm.tokenizer.Tokenizer = llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
+    var tokenizer: ?models.text.tokenizer.Tokenizer = models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{}) catch null;
     defer if (tokenizer) |*t| t.deinit();
-    const tok_ptr: ?*const llm.tokenizer.Tokenizer = if (tokenizer) |*t| t else null;
-    const chat_tmpl = llm.chat.Template.detect(file.getString("tokenizer.chat_template"));
+    const tok_ptr: ?*const models.text.tokenizer.Tokenizer = if (tokenizer) |*t| t else null;
+    const chat_tmpl = models.text.chat.Template.detect(file.getString("tokenizer.chat_template"));
 
     if (opts.info_flag) {
         try printInfo(stdout, &file, tok_ptr);
@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Chat samples with Qwen3's recommended settings; the benchmark and
     // raw-completion paths default to greedy (deterministic). Flags override.
-    const sampler_cfg: llm.sampler.Config = if (is_chat) .{
+    const sampler_cfg: models.text.sampler.Config = if (is_chat) .{
         .temperature = opts.temp_arg orelse (if (opts.no_think) @as(f32, 0.7) else 0.6),
         .top_k = opts.topk_arg orelse 20,
         .top_p = opts.topp_arg orelse (if (opts.no_think) @as(f32, 0.8) else 0.95),
@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
     // stop handling ends generation.
     var grammar_text: ?[]u8 = null; // @FILE payloads (grammar borrows it through init only)
     defer if (grammar_text) |g| allocator.free(g);
-    var constraint: ?llm.llguidance.Constraint = null;
+    var constraint: ?models.text.llguidance.Constraint = null;
     defer if (constraint) |*con| con.deinit();
     const grammar_flags = @as(usize, @intFromBool(opts.json_schema_arg != null)) +
         @intFromBool(opts.lark_arg != null) + @intFromBool(opts.regex_arg != null);
@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (grammar_flags == 1) {
         const t = tok_ptr orelse return error.TokenizerUnavailable;
-        const grammar: llm.llguidance.Grammar = if (opts.json_schema_arg) |v|
+        const grammar: models.text.llguidance.Grammar = if (opts.json_schema_arg) |v|
             .{ .json_schema = try util.grammarValue(init.io, allocator, v, &grammar_text) }
         else if (opts.lark_arg) |v|
             .{ .lark = try util.grammarValue(init.io, allocator, v, &grammar_text) }
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
             break :blk t.tokenId(tmpl.stopMarker()) orelse t.eosId();
         } else if (opts.stop_token) |s| @intCast(s) else t.eosId();
         if (!is_chat and opts.stop_token == null) opts.stop_token = if (eos) |e| @as(usize, e) else null;
-        constraint = llm.llguidance.Constraint.init(allocator, t, grammar, .{
+        constraint = models.text.llguidance.Constraint.init(allocator, t, grammar, .{
             .eos_token = eos,
             .n_vocab = model.config.vocab_size,
         }) catch |err| switch (err) {
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     }
-    const processor: ?llm.sampler.LogitProcessor = if (constraint) |*con| con.processor() else null;
+    const processor: ?models.text.sampler.LogitProcessor = if (constraint) |*con| con.processor() else null;
 
     // --shine-fleet-build: batch-compile a docs directory into a served
     // adapter fleet (adapters + retrieval index + manifest).
@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
 
     var logits: ?fucina.Tensor(.{ .seq, .vocab }) = null;
     defer if (logits) |*value| value.deinit();
-    var profile: llm.qwen3.model.ForwardProfile = .{};
+    var profile: models.qwen3.model.ForwardProfile = .{};
 
     const forward_start = util.nowNs(init.io);
     for (0..opts.repeat) |_| {
@@ -276,7 +276,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn printInfo(stdout: anytype, file: *const fucina.gguf.File, tok: ?*const llm.tokenizer.Tokenizer) !void {
+fn printInfo(stdout: anytype, file: *const fucina.gguf.File, tok: ?*const models.text.tokenizer.Tokenizer) !void {
     if (tok) |t| {
         try stdout.print("vocab: {d}  bos: {?d}  eos: {?d}\n", .{ t.vocabSize(), t.bosId(), t.eosId() });
         for ([_][]const u8{ "<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>" }) |s| {

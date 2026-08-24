@@ -9,7 +9,7 @@ fraction of the context per step and self-calibrates its own thresholds
 during the first decode steps.
 
 Status: experimental, opt-in. Wired to the Qwen3 family over the f16 KV
-cache: `llm.research.subq` installs on the descriptor runner's
+cache: `models.research.subq` installs on the descriptor runner's
 `Model.attention_override` seam and the stock `forwardStep` decodes
 through it. Research tools:
 `tools/bench_subq_decode.zig`, `tools/eval_subq_freerun.zig`,
@@ -98,10 +98,10 @@ is the long-context mode; the flat mode is the default at native contexts.
 ## 3. Usage
 
 ```zig
-const llm = @import("fucina_llm");
-var sq = try llm.research.subq.State.init(allocator, num_layers, q_heads, kv_heads, head_dim, .{});
+const models = @import("fucina_models");
+var sq = try models.research.subq.State.init(allocator, num_layers, q_heads, kv_heads, head_dim, .{});
 defer sq.deinit();
-model.attention_override = llm.research.subq.attentionOverride(&sq);
+model.attention_override = models.research.subq.attentionOverride(&sq);
 defer model.attention_override = null;
 try sq.startCalibration(0.025);         // first N decode steps run exact
 // ... N steps of model.forwardStep(&ctx, &kv, &one_token, pos)

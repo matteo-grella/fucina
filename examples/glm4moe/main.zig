@@ -6,7 +6,7 @@
 //!     [--mtp[=depth]] [--moe-stream --moe-cache-mb=N]
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 32;
-    var moe_cli: llm.moe_stream_cli.MoeStreamCli = .{};
+    var moe_cli: models.moe_stream_cli.MoeStreamCli = .{};
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
             // at seq >= 48) that bound losslessness.
             mtp_depth = @min(try std.fmt.parseInt(usize, arg["--mtp=".len..], 10), 8);
         } else if (try moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
+            // Shared streamed-experts flags (models.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-cache-route")) {
             // Cache-aware near-tie routing (QUALITY-AFFECTING, opt-in):
             // prefer already-resident experts among the top-M ranks.
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
 
     const load_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var file = try fucina.gguf.File.loadMmapAuto(allocator, init.io, args[1]);
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
 
     const capacity: usize = 2048;
@@ -89,14 +89,14 @@ pub fn main(init: std.process.Init) !void {
         m.route_sacred = moe_route_j;
         m.route_window = moe_route_m;
     }
-    const load_options: llm.glm4moe.model.Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
-    var model = try llm.glm4moe.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);
+    const load_options: models.glm4moe.model.Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
+    var model = try models.glm4moe.model.Model.loadGgufFromFileOptions(&ctx, &file, capacity, load_options);
     defer model.deinit();
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.moe_stream_cli.reportAndSaveMoeStream(store, true, stdout);
+    defer if (model.expert_store) |store| models.moe_stream_cli.reportAndSaveMoeStream(store, true, stdout);
     const bos: ?u32 = tokenizer.bosId();
     const eos = tokenizer.eosId();
     file.deinit();
@@ -119,18 +119,18 @@ pub fn main(init: std.process.Init) !void {
     var cache = try model.initCache(&ctx, capacity);
     defer cache.deinit();
 
-    const Model = llm.glm4moe.model.Model;
+    const Model = models.glm4moe.model.Model;
     const vocab = model.config.vocab_size;
     // MTP self-speculation rides the shared verify loop: the family's
     // nextn head drafts through `MtpDraftSource` and
     // `SpeculativeDecoder` verifies/commits/rewinds.
-    var draft_src: ?llm.speculative.mtp.MtpDraftSource(Model) = null;
+    var draft_src: ?models.text.speculative.mtp.MtpDraftSource(Model) = null;
     defer if (draft_src) |*d| d.deinit();
-    var spec: ?llm.speculative.core.SpeculativeDecoder(Model) = null;
+    var spec: ?models.text.speculative.core.SpeculativeDecoder(Model) = null;
     defer if (spec) |*d| d.deinit();
     if (mtp_depth > 0) {
-        draft_src = try llm.speculative.mtp.MtpDraftSource(Model).init(&ctx, &model, capacity, mtp_depth);
-        spec = try llm.speculative.core.SpeculativeDecoder(Model).init(allocator, draft_src.?.source(), .{
+        draft_src = try models.text.speculative.mtp.MtpDraftSource(Model).init(&ctx, &model, capacity, mtp_depth);
+        spec = try models.text.speculative.core.SpeculativeDecoder(Model).init(allocator, draft_src.?.source(), .{
             .max_draft = mtp_depth,
             .min_draft = 1,
             .stop_token = if (eos) |e| @as(usize, e) else null,
@@ -181,9 +181,9 @@ pub fn main(init: std.process.Init) !void {
             try tokens.append(allocator, next_token);
             produced += 1;
         }
-        var sampler = llm.sampler.Sampler.init(.{}); // greedy
+        var sampler = models.text.sampler.Sampler.init(.{}); // greedy
         var emit = ReplyEmit{ .allocator = allocator, .tokenizer = &tokenizer, .reply = &reply, .eos = eos };
-        const sink = llm.speculative.core.TokenSink{ .ptr = &emit, .func = ReplyEmit.emit };
+        const sink = models.text.speculative.core.TokenSink{ .ptr = &emit, .func = ReplyEmit.emit };
         while (!stopped and produced < gen_count) {
             // Never draft past the remaining budget (the committed count
             // per step is at most max_draft + 1; a zero budget falls back
@@ -214,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
 /// buffer; a committed stop token is recorded, not decoded.
 const ReplyEmit = struct {
     allocator: std.mem.Allocator,
-    tokenizer: *const llm.tokenizer.Tokenizer,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
     reply: *std.ArrayList(u8),
     eos: ?u32,
     saw_eos: bool = false,

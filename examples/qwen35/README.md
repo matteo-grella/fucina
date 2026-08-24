@@ -6,7 +6,7 @@ multi-section RoPE), feeding either a dense FFN (`qwen35`) or a routed MoE
 block (`qwen35moe`: softmax top-k expert mixture + sigmoid-gated shared
 expert). The CLI is minimal by design — it loads a GGUF, prints the derived
 config and per-kind block counts, and runs the hybrid forward pass with a
-top-5 logit readout. Streaming decode is in the `llm.qwen35` module; chat
+top-5 logit readout. Streaming decode is in the `models.qwen35` module; chat
 serving goes through [lmserve](../lmserve/README.md).
 
 ## Getting the models

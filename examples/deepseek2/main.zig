@@ -4,7 +4,7 @@
 //!     --prompt "..." --gen 64
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -21,12 +21,12 @@ pub fn main(init: std.process.Init) !void {
 
     var prompt_text: []const u8 = "The capital of France is";
     var gen_count: usize = 32;
-    var moe_cli: llm.moe_stream_cli.MoeStreamCli = .{};
+    var moe_cli: models.moe_stream_cli.MoeStreamCli = .{};
     var moe_pilot = false;
     var moe_cache_route = false;
     var moe_route_j: usize = 2;
     var moe_route_m: usize = 12;
-    var mla_mode: llm.deepseek2.model.Cache.Mode = .latent;
+    var mla_mode: models.deepseek2.model.Cache.Mode = .latent;
     var dsa_flag = false;
     var index_probe = false;
     var index_share: usize = 0;
@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.startsWith(u8, arg, "--gen=")) {
             gen_count = try std.fmt.parseInt(usize, arg["--gen=".len..], 10);
         } else if (try moe_cli.tryParse(arg)) {
-            // Shared streamed-experts flags (llm.moe_stream_cli.MoeStreamCli).
+            // Shared streamed-experts flags (models.moe_stream_cli.MoeStreamCli).
         } else if (std.mem.eql(u8, arg, "--moe-pilot")) {
             moe_cli.armed = true;
             moe_pilot = true;
@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
 
     const load_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     var file = try fucina.gguf.File.loadMmapAuto(allocator, init.io, args[1]);
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
 
     if (index_probe and index_share >= 2) {
@@ -137,15 +137,15 @@ pub fn main(init: std.process.Init) !void {
         m.route_sacred = moe_route_j;
         m.route_window = moe_route_m;
     }
-    var load_options: llm.deepseek2.model.Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
+    var load_options: models.deepseek2.model.Model.LoadOptions = if (moe_stream) |m| .{ .moe_stream = m } else .{};
     load_options.dsa = dsa_flag;
-    var model = try llm.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, load_options);
+    var model = try models.deepseek2.model.Model.loadGgufFromFileOptions(&ctx, &file, load_options);
     defer model.deinit();
     // The stats go through the SAME buffered stdout writer as everything
     // else: stdout's positional writes and stderr's offset-advancing writes
     // cannot safely share one redirected file (`cmd > f 2>&1` interleaves
     // destructively), so a std.debug stats line would get overwritten.
-    defer if (model.expert_store) |store| llm.moe_stream_cli.reportAndSaveMoeStream(store, true, stdout);
+    defer if (model.expert_store) |store| models.moe_stream_cli.reportAndSaveMoeStream(store, true, stdout);
     const bos: ?u32 = tokenizer.bosId();
     file.deinit();
     try stdout.print("load: {d:.3} s\n", .{@as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).nanoseconds - load_start)) / 1e9});

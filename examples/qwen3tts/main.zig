@@ -1,5 +1,5 @@
 //! Qwen3-TTS from GGUF: text (stdin) → 24 kHz mono WAV, CustomVoice speakers.
-//! The Zig port of qwentts.cpp's `qwen-tts` tool over `fucina.llm.qwen3tts`
+//! The Zig port of qwentts.cpp's `qwen-tts` tool over `fucina.models.qwen3tts`
 //! (talker + code predictor at oracle token parity, codec at stage parity).
 //!
 //!   zig build qwen3tts -- --model models/qwen3-tts/qwen-talker-0.6b-customvoice-F32.gguf \
@@ -13,8 +13,8 @@
 const std = @import("std");
 const fucina = @import("fucina");
 
-const llm = @import("fucina_llm");
-const qtts = llm.qwen3tts;
+const models = @import("fucina_models");
+const qtts = models.qwen3tts;
 const ExecContext = fucina.ExecContext;
 
 const usage =
@@ -114,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     defer model.deinit();
     var dec = try qtts.codec.load(&ctx, &codec_file);
     defer dec.deinit();
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &talker_file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &talker_file, .{});
     defer tok.deinit();
     try stderr.print("[load] {d:.2} s\n", .{@as(f64, @floatFromInt(nowNs(io) - t_load0)) / 1e9});
 

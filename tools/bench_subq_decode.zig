@@ -9,9 +9,9 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
-const QModel = llm.qwen3.model;
+const QModel = models.qwen3.model;
 
 pub fn main(init: std.process.Init) !void {
     // smp_allocator, not the process arena: the arena never frees, and the
@@ -148,13 +148,13 @@ pub fn main(init: std.process.Init) !void {
     for (mode_start..2) |mode| {
         var kv = try model.initCache(&ctx, prefill + decode + 8);
         defer kv.deinit();
-        var sq = try llm.research.subq.State.init(
+        var sq = try models.research.subq.State.init(
             allocator,
             config.num_layers,
             config.num_attention_heads,
             config.num_key_value_heads,
             config.head_dim,
-            .{ .tau_default = tau_default, .rebuild_interval = rebuild, .cluster_size = cluster, .rank = rank, .packed_format = if (packed_q8) .q8_0 else if (packed_f16) .f16 else (llm.research.subq.Config{}).packed_format, .hierarchical = hier },
+            .{ .tau_default = tau_default, .rebuild_interval = rebuild, .cluster_size = cluster, .rank = rank, .packed_format = if (packed_q8) .q8_0 else if (packed_f16) .f16 else (models.research.subq.Config{}).packed_format, .hierarchical = hier },
         );
         defer sq.deinit();
         sq.serial = serial;
@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         // Installed AFTER the dense prefill (both arms prefill identically):
         // the subq arm decodes through the research seam, the dense arm
         // runs the stock kernels with the seam cleared.
-        model.attention_override = if (mode == 1) llm.research.subq.attentionOverride(&sq) else null;
+        model.attention_override = if (mode == 1) models.research.subq.attentionOverride(&sq) else null;
         defer model.attention_override = null;
         var pos: usize = prefill;
         if (mode == 1 and calibrate_n > 0) try sq.startCalibration(calib_tol);

@@ -17,15 +17,15 @@
 //! `--cartridge` like any distilled cartridge.
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const optim = fucina.optim;
-const shine = llm.research.shine;
-const shine_train = llm.research.shine_train;
+const shine = models.research.shine;
+const shine_train = models.research.shine_train;
 
 const Triple = struct {
     evidence: []const usize,
-    sample: llm.data.Sample,
+    sample: models.text.data.Sample,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -117,11 +117,11 @@ pub fn main(init: std.process.Init) !void {
     defer ctx.deinit();
 
     var file = try fucina.gguf.File.loadMmap(allocator, io, model_file);
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
-    const template = llm.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse llm.chat.Template{ .format = .chatml };
+    const template = models.text.chat.Template.detect(file.getString("tokenizer.chat_template")) orelse models.text.chat.Template{ .format = .chatml };
     file.deinit();
 
     // The budget identity picks M (Config.validate re-checks it).
@@ -241,7 +241,7 @@ fn parseStr(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) 
     return null;
 }
 
-fn trainableParamCount(base: llm.qwen3.model.Config, config: shine.Config) usize {
+fn trainableParamCount(base: models.qwen3.model.Config, config: shine.Config) usize {
     var count: usize = 0;
     inline for (shine.modules) |module| {
         const dims = shine.moduleDims(base, module);
@@ -321,14 +321,14 @@ fn runEvalMatrix(
         defer cart.deinit();
         trainer.freeTransient();
 
-        var distilled: ?llm.cartridge.Cartridge = null;
+        var distilled: ?models.text.cartridge.Cartridge = null;
         defer if (distilled) |*d| d.deinit();
         if (distilled_dir) |dir| {
             const path = try std.fmt.allocPrint(allocator, "{s}/ctx-{d}.safetensors", .{ dir, context_i });
             defer allocator.free(path);
             if (std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1 << 30))) |bytes| {
                 defer allocator.free(bytes);
-                distilled = try llm.cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
+                distilled = try models.text.cartridge.Cartridge.initFromStateDict(ctx, allocator, bytes);
             } else |_| {}
         }
 
@@ -348,7 +348,7 @@ fn runEvalMatrix(
                 defer allocator.free(labels);
                 @memcpy(inputs[0..triple.evidence.len], triple.evidence);
                 @memcpy(inputs[triple.evidence.len..], triple.sample.inputs);
-                @memset(labels[0..triple.evidence.len], llm.qwen3.train.ignore_index);
+                @memset(labels[0..triple.evidence.len], models.qwen3.train.ignore_index);
                 @memcpy(labels[triple.evidence.len..], triple.sample.labels);
                 sums[2] += try evalLossPlain(ctx, conv, inputs, labels);
                 counts[2] += 1;
@@ -396,8 +396,8 @@ fn evalLossPlain(ctx: *fucina.ExecContext, conv: anytype, inputs: []const usize,
 fn loadTriples(
     allocator: std.mem.Allocator,
     io: std.Io,
-    tokenizer: *const llm.tokenizer.Tokenizer,
-    template: llm.chat.Template,
+    tokenizer: *const models.text.tokenizer.Tokenizer,
+    template: models.text.chat.Template,
     path: []const u8,
     evidence_max: usize,
     seq_max: usize,
@@ -426,7 +426,7 @@ fn loadTriples(
         errdefer allocator.free(evidence);
         for (evidence, evidence32[0..evidence_len]) |*dst, src| dst.* = src;
 
-        const sample = llm.data.encodePair(allocator, tokenizer, template, .{
+        const sample = models.text.data.encodePair(allocator, tokenizer, template, .{
             .instruction = parsed.value.instruction,
             .response = parsed.value.response,
         }, .{ .seq_max = seq_max }) catch {

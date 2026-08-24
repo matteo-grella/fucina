@@ -127,7 +127,7 @@ their own terms — see [`docs/THIRD-PARTY-NOTICES.md`](../../docs/THIRD-PARTY-N
 | flag | effect |
 |---|---|
 | `--asr <gguf>` | Parakeet streaming STT with learned `<EOU>` endpointing (required) |
-| `--chat <gguf>` | chat model, served in-process by the `llm.serving` engine (qwen3/qwen3moe/gemma4 GGUFs) |
+| `--chat <gguf>` | chat model, served in-process by the `models.text.serving` engine (qwen3/qwen3moe/gemma4 GGUFs) |
 | `--chat-url URL` | speak `/v1/chat/completions` to an existing server instead of spawning one |
 | `--endpoint-ms N` | quiet + transcript-stable window that closes a turn (default 800; 0 = wait for `<EOU>` only) |
 | `--speculate-ms N` | quiet before generation starts speculatively, through that window (default 240; 0 = off) |
@@ -174,14 +174,14 @@ or one you point it at: lmserve, llama.cpp, vLLM, a hosted provider:
 --chat-url http://127.0.0.1:8080/v1 --chat-model my-model
 ```
 
-The first form is **not a child process**: the `llm.serving` engine
+The first form is **not a child process**: the `models.text.serving` engine
 (`serving.open` plus the band's HTTP server and scheduler) runs on a thread
 inside this binary. One process, one executable, nothing to find on `$PATH`
 and nothing orphaned if the agent dies. The port is picked by probing for the first free one in 8137-8168 —
 the registered band, deliberately not the ephemeral range (49152+) the OS hands
 to outbound connections.
 
-What that buys over calling `llm.chat.Conversation` directly is the two things
+What that buys over calling `models.text.chat.Conversation` directly is the two things
 it cannot do. It dispatches on the GGUF's `general.architecture` (qwen3,
 qwen3moe, gemma4), where a `Conversation` is bound to one model type at
 compile time; families outside that set are served externally through

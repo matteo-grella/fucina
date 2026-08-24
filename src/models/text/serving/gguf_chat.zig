@@ -1,0 +1,1405 @@
+//! The generic GGUF chat backend (qwen3, gemma4 — any family the shared
+//! `models.text.chat.Conversation` hosts) behind the serving `Backend` vtable, plus
+//! the grammar constraint cache, the KV reuse slot pool with its
+//! evict-to-disk tier, and the KV RAM guard. Family-specific adapters that
+//! cannot ride `Conversation` live with the CLI front end
+//! (`examples/lmserve/backend_*.zig`).
+
+const std = @import("std");
+const builtin = @import("builtin");
+const fucina = @import("fucina");
+const types = @import("contract.zig");
+const decoder = @import("../../decoder.zig");
+const chat = @import("../chat.zig");
+const sampler = @import("../sampler.zig");
+const llguidance = @import("../llguidance.zig");
+const kv_persist = @import("../kv_persist.zig");
+const cartridge_mod = @import("../cartridge.zig");
+const cartridge_fleet = @import("../cartridge_fleet.zig");
+
+const Allocator = std.mem.Allocator;
+
+/// LRU cache of base llguidance constraints keyed by grammar kind + source.
+/// `Constraint.init` walks the full model vocab to build the token trie —
+/// too expensive per request — while `clone()` shares the trie and is cheap,
+/// so the server inits once per distinct grammar and clones per request.
+///
+/// WORKER THREAD ONLY, and eviction relies on it: a clone borrows its base's
+/// bridge, so a base may only be destroyed when no clone is alive. The
+/// single-threaded worker guarantees that — the only live clone belongs to
+/// the CURRENT request, whose base entry was just touched and is never the
+/// eviction victim.
+pub const ConstraintCache = struct {
+    const Entry = struct {
+        key: []u8,
+        constraint: llguidance.Constraint,
+    };
+
+    allocator: Allocator,
+    /// MRU ordering: entries[len-1] is the most recently used.
+    entries: std.ArrayList(Entry) = .empty,
+    capacity: usize,
+
+    pub fn init(allocator: Allocator, capacity: usize) ConstraintCache {
+        return .{ .allocator = allocator, .capacity = @max(capacity, 1) };
+    }
+
+    pub fn deinit(self: *ConstraintCache) void {
+        for (self.entries.items) |*e| {
+            e.constraint.deinit();
+            self.allocator.free(e.key);
+        }
+        self.entries.deinit(self.allocator);
+    }
+
+    /// The base constraint for `spec`, compiling and caching it on first
+    /// use. The returned pointer is valid until the next `acquire` — clone
+    /// it before any other cache call.
+    pub fn acquire(
+        self: *ConstraintCache,
+        tokenizer: anytype,
+        spec: types.ConstraintSpec,
+        options: llguidance.Options,
+    ) !*llguidance.Constraint {
+        const a = self.allocator;
+        for (self.entries.items, 0..) |e, i| {
+            if (e.key.len == spec.source().len + 1 and
+                e.key[0] == spec.kindByte() and
+                std.mem.eql(u8, e.key[1..], spec.source()))
+            {
+                // Move to MRU position.
+                const hit = self.entries.orderedRemove(i);
+                self.entries.appendAssumeCapacity(hit);
+                return &self.entries.items[self.entries.items.len - 1].constraint;
+            }
+        }
+
+        const grammar: llguidance.Grammar = switch (spec) {
+            .json_schema => |s| .{ .json_schema = s },
+            .regex => |s| .{ .regex = s },
+            .lark => |s| .{ .lark = s },
+        };
+        var constraint = try llguidance.Constraint.init(a, tokenizer, grammar, options);
+        errdefer constraint.deinit();
+
+        const key = try a.alloc(u8, spec.source().len + 1);
+        errdefer a.free(key);
+        key[0] = spec.kindByte();
+        @memcpy(key[1..], spec.source());
+
+        if (self.entries.items.len >= self.capacity) {
+            var evicted = self.entries.orderedRemove(0);
+            evicted.constraint.deinit();
+            a.free(evicted.key);
+        }
+        try self.entries.ensureUnusedCapacity(a, 1);
+        self.entries.appendAssumeCapacity(.{ .key = key, .constraint = constraint });
+        return &self.entries.items[self.entries.items.len - 1].constraint;
+    }
+};
+
+/// The evict-to-disk tier for cross-request KV reuse (llama.cpp's
+/// host-memory prompt cache, on disk): slot states about to be destroyed by
+/// an unrelated request are saved as `models.text.kv_persist` sidecars and restored
+/// when a later request's prefix matches them better than any resident slot.
+pub const KvDiskOptions = struct {
+    io: std.Io,
+    /// Directory for the sidecar files (created at startup). Borrowed.
+    dir: []const u8,
+    /// Bound on live sidecar files; beyond it the least-recently-used entry
+    /// is overwritten.
+    max_files: usize = 8,
+};
+
+pub const GgufChatOptions = struct {
+    model_id: []const u8,
+    /// KV capacity per request (prompt + reply must fit).
+    context_len: usize = 4096,
+    /// Turn-end ids beyond the template stop marker (gemma4: GGUF eos +
+    /// stray SPM <eos>). Borrowed.
+    extra_stop_ids: []const u32 = &.{},
+    /// The reply's reasoning-block delimiters, when the family has a
+    /// text-delimited reasoning channel the server can toggle (qwen3).
+    think_markers: ?types.ThinkMarkers = null,
+    supports_think: bool = false,
+    /// The family's tool-calling convention (qwen3: `.hermes`).
+    tool_style: types.ToolStyle = .none,
+    default_sampling: sampler.Config = .{},
+    /// Speculative decoding for solo generations (lmserve --spec): the
+    /// self-draft cascade (grammar-wrapped when a constraint is active)
+    /// rides the reuse reconcile via the index rebuild; text stop
+    /// sequences are scanned by the TurnGate. Every --batch group of two
+    /// or more decodes plain (lockstep cannot host ragged verifies).
+    speculation: bool = false,
+    constraint_cache_len: usize = 8,
+    /// Resident cross-request KV reuse slots. Each is a FULL `context_len`
+    /// KV cache — budget accordingly (a 28-layer/8-kv-head/128-dim f16
+    /// cache is ~112 KiB per position). 1 keeps the server memory-neutral
+    /// with pre-reuse behavior; more slots stop interleaved conversations
+    /// from evicting each other.
+    kv_slots: usize = 1,
+    /// Evict-to-disk tier (null = off).
+    kv_disk: ?KvDiskOptions = null,
+    /// Trained KV-prefix "prior knowledge" (docs/CARTRIDGES.md): every
+    /// conversation's cache is preloaded with these rows before any
+    /// prefill, and the reuse reconcile operates past them. Borrowed —
+    /// must outlive the backend. Composes with `kv_disk`: sidecars record
+    /// the prefix shape and rows (FUXKV002), so restores are
+    /// self-describing even across a cartridge swap.
+    cartridge: ?*const cartridge_mod.Cartridge = null,
+    /// Cartridge FLEET serving (Cartridges at Scale, docs/CARTRIDGES.md):
+    /// per request, the last user message embeds through `embedFn`, the
+    /// cosine index picks documents, and the selected cartridges COMPOSE as
+    /// the conversation's prefix. Mutually exclusive with `cartridge` and
+    /// with `kv_disk` (sidecars do not record selections, so a restore
+    /// could resurrect rows behind the wrong prefix) — the caller enforces
+    /// both. Slot reuse stays on, keyed by selection: only a slot whose
+    /// cartridge selection matches the request's is adoptable.
+    fleet: ?FleetOptions = null,
+    /// SHINE adapter fleet serving (arXiv 2602.06358, REFERENCE §13.12):
+    /// the same contextual query embeds through `embedFn`, the cosine
+    /// index picks ONE document, and the apply hook swaps that document's
+    /// saved adapter into the served AdaptedModel box before decode
+    /// (adapters do not compose, unlike cartridge prefixes — selection is
+    /// always a single doc). The slot machinery is shared with fleet mode:
+    /// slots stay keyed by selection, so only same-adapter KV is ever
+    /// adopted or prefix-shared. Mutually exclusive with `fleet`,
+    /// `cartridge`, `kv_disk`, and `--batch` (the caller enforces all).
+    shine_fleet: ?ShineFleetOptions = null,
+};
+
+pub const ShineFleetOptions = struct {
+    /// Retrieval index over the fleet's documents (the cartridge fleets'
+    /// EmbedIndex, content-agnostic; borrowed — must outlive the backend).
+    index: *const cartridge_fleet.EmbedIndex,
+    /// Query embedder — the `cartridge_fleet.embed_suffix` contract the
+    /// index was built with. Worker thread only, like generation itself.
+    embed_ctx: *anyopaque,
+    embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+    /// Loads (LRU) the doc's adapter artifact and points the served
+    /// AdaptedModel box at it (`null` = plain base). Worker thread only —
+    /// the box is process state shared by every request.
+    apply_ctx: *anyopaque,
+    applyFn: *const fn (ctx: *anyopaque, doc: ?usize) anyerror!void,
+    /// Cosine top-N chunks scanned per selection (docs per request is
+    /// always 1).
+    rag_chunks: usize = 8,
+};
+
+pub const FleetOptions = struct {
+    io: std.Io,
+    /// Fleet directory and its parsed manifest/index (borrowed — must
+    /// outlive the backend).
+    dir: []const u8,
+    manifest: *const cartridge_fleet.Manifest,
+    index: *const cartridge_fleet.EmbedIndex,
+    /// Query embedder (the family trainer behind a type-erased pointer;
+    /// MUST implement the `cartridge_fleet.embed_suffix` contract the index
+    /// was built with). Worker thread only, like generation itself.
+    embed_ctx: *anyopaque,
+    embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+    /// Selection sizes (documents composed per request; chunk scan width).
+    rag_docs: usize = 2,
+    rag_chunks: usize = 8,
+    /// Adaptive re-selection for CONTINUING conversations (default off =
+    /// fully sticky): every follow-up re-embeds the contextual query (all
+    /// user messages) and the conversation SWITCHES knowledge base only on
+    /// decisive evidence — a document outside its current selection must
+    /// beat every current document's best chunk by `switch_margin`.
+    /// Absolute score floors do not work on this substrate (measured: a
+    /// phatic "Thanks, that makes sense." scores HIGHER against an
+    /// unrelated doc than a genuine topical pivot does); the relative
+    /// margin over a context-anchored query absorbs both phatic turns and
+    /// runner-up cosine flaps. A switch rebuilds the prefix and re-prefills
+    /// the history (cached_tokens = 0 for that turn).
+    adaptive: bool = false,
+    switch_margin: f32 = 0.05,
+    /// Loaded-cartridge LRU capacity (prefix rows are COPIED into each
+    /// conversation's cache, so this only bounds re-parse/mmap cost;
+    /// effective capacity is max(cache_len, rag_docs)).
+    cache_len: usize = 4,
+};
+
+/// Longest common prefix between a slot's token shadow and a request's ids
+/// — the sole matching primitive of the reuse tiers (token-level LCP, the
+/// llama.cpp `cache_prompt` rule).
+fn commonPrefix(tokens: []const usize, ids: []const u32) usize {
+    var n: usize = 0;
+    const cap = @min(tokens.len, ids.len);
+    while (n < cap and tokens[n] == ids[n]) : (n += 1) {}
+    return n;
+}
+
+/// The slot-similarity gate (llama.cpp `--slot-prompt-similarity`, default
+/// 0.1): adopting a cache pays only when the common prefix covers a
+/// meaningful share of the NEW prompt — otherwise a long-lived cache would
+/// be destroyed to save a handful of tokens.
+fn similarEnough(lcp: usize, ids_len: usize) bool {
+    return lcp * 10 > ids_len;
+}
+
+/// Adaptive fleet serving's switch rule: leave a conversation's knowledge
+/// base only on DECISIVE evidence — the best document OUTSIDE the current
+/// selection must beat every current document's best chunk by `margin`
+/// under the context-anchored query. Relative, never absolute: measured on
+/// a live fleet, a phatic "Thanks, that makes sense." scores HIGHER in raw
+/// cosine against an unrelated document than a genuine topical pivot does,
+/// so score floors misfire in both directions; the margin over a query
+/// anchored by the whole user side absorbs phatic turns and runner-up
+/// cosine flaps alike.
+fn shouldSwitchSelection(cur_best: f32, outside_best: ?f32, margin: f32) bool {
+    return (outside_best orelse return false) >= cur_best + margin;
+}
+
+/// The `Backend` adapter for any model family served through
+/// `models.text.chat.Conversation` — one comptime instantiation per (model,
+/// tokenizer-module) pair, ~all behavior shared. The API stays stateless
+/// (every request carries its full history), but the KV cache is not: a
+/// pool of resident slots (`kv_slots`) keeps previous requests' caches +
+/// token shadows, and each request adopts the slot sharing the longest
+/// common token prefix with its own render — llama.cpp's `cache_prompt` +
+/// slot selection. Follow-up turns of a chat prefill only the last reply +
+/// new message instead of the whole history; a non-matching request costs
+/// one full prefill, exactly as before. With `kv_disk` set, slot states
+/// about to be destroyed by an unrelated request spill to `models.text.kv_persist`
+/// sidecars and are restored when a later request matches them best.
+pub fn GgufChatBackend(comptime ModelT: type, comptime TokMod: type) type {
+    decoder.assertDecoder(ModelT);
+    return struct {
+        const Self = @This();
+        const Conversation = chat.Conversation(ModelT, TokMod);
+        const KvCache = ModelT.Cache;
+
+        /// One resident reuse slot: a KV cache plus the token shadow
+        /// describing exactly the positions it holds (WORKER THREAD ONLY,
+        /// like `constraints`). In fleet mode `selection` records the doc
+        /// ids whose composed cartridges sit ahead of the shadow — a slot
+        /// is only adoptable by a request with the SAME selection (empty
+        /// for non-fleet backends, where every slot shares the one
+        /// configured prefix) — and `opener` records the conversation's
+        /// FIRST user message, the sticky-adoption identity (token-LCP
+        /// alone is too weak: the constant template preamble of two
+        /// UNRELATED short prompts passes the similarity gate, which must
+        /// never move a conversation onto another's knowledge base).
+        const Slot = struct {
+            cache: KvCache,
+            tokens: std.ArrayList(usize),
+            selection: []usize,
+            opener: []u8,
+            prefix_rows: usize,
+            last_used: u64,
+        };
+
+        /// One loaded fleet cartridge (heap-pinned: LRU reordering must not
+        /// move the Cartridge — conversations borrow it only within one
+        /// request, but pointer stability keeps the compose loop simple).
+        const CartEntry = struct {
+            doc: usize,
+            cart: *cartridge_mod.Cartridge,
+        };
+
+        /// One disk-tier sidecar: its path, an in-memory copy of its token
+        /// history (for LCP scoring without touching the file), and its
+        /// recency for the bounded-file LRU.
+        const DiskEntry = struct {
+            path: []u8,
+            tokens: []usize,
+            last_used: u64,
+        };
+
+        allocator: Allocator,
+        ctx: *fucina.ExecContext,
+        model: *const ModelT,
+        tokenizer: *const TokMod.Tokenizer,
+        template: chat.Template,
+        opts: GgufChatOptions,
+        constraints: ConstraintCache,
+        slots: std.ArrayList(Slot) = .empty,
+        disk: std.ArrayList(DiskEntry) = .empty,
+        /// Fleet-mode loaded-cartridge LRU (MRU last; worker thread only).
+        carts: std.ArrayList(CartEntry) = .empty,
+        /// Monotonic request counter: the recency stamp for slot and
+        /// disk-entry LRU.
+        clock: u64 = 0,
+        /// Fresh-name counter for sidecar files (paths are never recycled
+        /// across registry removals, so a live entry's file cannot be
+        /// clobbered by a name collision).
+        disk_seq: u64 = 0,
+
+        pub fn init(
+            allocator: Allocator,
+            ctx: *fucina.ExecContext,
+            model: *const ModelT,
+            tokenizer: *const TokMod.Tokenizer,
+            template: chat.Template,
+            opts: GgufChatOptions,
+        ) Self {
+            return .{
+                .allocator = allocator,
+                .ctx = ctx,
+                .model = model,
+                .tokenizer = tokenizer,
+                .template = template,
+                .opts = opts,
+                .constraints = ConstraintCache.init(allocator, opts.constraint_cache_len),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            const a = self.allocator;
+            self.constraints.deinit();
+            for (self.slots.items) |*slot| {
+                slot.cache.deinit();
+                slot.tokens.deinit(a);
+                a.free(slot.selection);
+                a.free(slot.opener);
+            }
+            self.slots.deinit(a);
+            for (self.disk.items) |*e| {
+                a.free(e.path);
+                a.free(e.tokens);
+            }
+            self.disk.deinit(a);
+            for (self.carts.items) |*e| {
+                e.cart.deinit();
+                a.destroy(e.cart);
+            }
+            self.carts.deinit(a);
+        }
+
+        /// The pool size floor: a zero config still reuses one slot.
+        fn kvSlots(self: *const Self) usize {
+            return @max(self.opts.kv_slots, 1);
+        }
+
+        /// The parsed cartridge for fleet doc `doc`, mmap-loading it into
+        /// the MRU-ordered LRU on a miss. The returned pointer is
+        /// heap-stable; entries live until evicted (rows are COPIED into
+        /// conversation caches, so eviction never invalidates a served
+        /// prefix). Worker thread only.
+        fn fleetCartridge(self: *Self, doc: usize) !*const cartridge_mod.Cartridge {
+            const fl = self.opts.fleet.?;
+            const a = self.allocator;
+            for (self.carts.items, 0..) |e, i| {
+                if (e.doc == doc) {
+                    const hit = self.carts.orderedRemove(i);
+                    self.carts.appendAssumeCapacity(hit);
+                    return hit.cart;
+                }
+            }
+            const state = &fl.manifest.docs.items[doc];
+            const path = try std.fs.path.join(a, &.{ fl.dir, state.cart_file });
+            defer a.free(path);
+            var mapped = try cartridge_fleet.mmapFile(fl.io, path);
+            defer mapped.deinit();
+            const cart = try a.create(cartridge_mod.Cartridge);
+            errdefer a.destroy(cart);
+            cart.* = try cartridge_mod.Cartridge.initFromStateDict(self.ctx, a, mapped.bytes);
+            errdefer cart.deinit();
+            // Effective capacity never below the selection width, so the
+            // acquire-then-compose loop of writeSelectionPrefix cannot
+            // evict a cartridge it is about to serve.
+            const cap = @max(fl.cache_len, fl.rag_docs);
+            if (self.carts.items.len >= cap) {
+                var evicted = self.carts.orderedRemove(0);
+                evicted.cart.deinit();
+                a.destroy(evicted.cart);
+            }
+            try self.carts.ensureUnusedCapacity(a, 1);
+            self.carts.appendAssumeCapacity(.{ .doc = doc, .cart = cart });
+            return cart;
+        }
+
+        const Adopted = struct {
+            convo: Conversation,
+            /// The slot's selection, transferred to the caller (owned).
+            selection: []usize,
+        };
+
+        /// Fleet stickiness: find the slot whose conversation this request
+        /// CONTINUES — identity is the first user message (`opener`), not
+        /// token-LCP (the constant template preamble of two unrelated short
+        /// prompts passes the LCP similarity gate, and adopting across
+        /// conversations would move a request onto the wrong knowledge
+        /// base). Among several same-opener slots the best token-LCP wins.
+        /// Null when no slot matches — the caller then runs retrieval.
+        fn findStickySlot(self: *Self, ids: []const u32, opener: []const u8) ?usize {
+            if (opener.len == 0) return null;
+            var best_i: ?usize = null;
+            var best_lcp: usize = 0;
+            for (self.slots.items, 0..) |*slot, i| {
+                if (!std.mem.eql(u8, slot.opener, opener)) continue;
+                const lcp = commonPrefix(slot.tokens.items, ids);
+                if (best_i == null or lcp > best_lcp) {
+                    best_i = i;
+                    best_lcp = lcp;
+                }
+            }
+            return best_i;
+        }
+
+        /// Adopt slot `i` as this request's warm conversation. A
+        /// continuation keeps the selection its conversation started with
+        /// (per-turn re-retrieval measurably flaps the runner-up document
+        /// and forfeits all KV reuse); `--rag-adaptive` layers the decisive
+        /// switch rule on top of this in `vtGenerate`.
+        fn adoptSlotAt(self: *Self, i: usize, convo_opts: chat.Options) !Adopted {
+            var slot = self.slots.swapRemove(i);
+            defer slot.tokens.deinit(self.allocator);
+            self.allocator.free(slot.opener);
+            errdefer self.allocator.free(slot.selection);
+            const convo = try Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = slot.cache,
+                .tokens = slot.tokens.items,
+                .prefix_rows = slot.prefix_rows,
+            });
+            return .{ .convo = convo, .selection = slot.selection };
+        }
+
+        /// Drop slot `i` entirely (an adaptive SWITCH supersedes the
+        /// conversation's old state — its cache holds rows behind a prefix
+        /// the conversation is leaving).
+        fn destroySlot(self: *Self, i: usize) void {
+            var slot = self.slots.swapRemove(i);
+            slot.cache.deinit();
+            slot.tokens.deinit(self.allocator);
+            self.allocator.free(slot.selection);
+            self.allocator.free(slot.opener);
+        }
+
+        /// Embed the contextual retrieval query — every user message,
+        /// concatenated (the full render as fallback) — into `vec`.
+        /// The retrieval surface shared by cartridge fleets and SHINE
+        /// adapter fleets: index + embedder + selection widths. Adapter
+        /// fleets select exactly one document (adapters do not compose).
+        const Retrieval = struct {
+            index: *const cartridge_fleet.EmbedIndex,
+            embed_ctx: *anyopaque,
+            embedFn: *const fn (ctx: *anyopaque, text: []const u8, out: []f32) anyerror!void,
+            rag_chunks: usize,
+            rag_docs: usize,
+        };
+
+        fn retrieval(self: *const Self) ?Retrieval {
+            if (self.opts.fleet) |fl| return .{
+                .index = fl.index,
+                .embed_ctx = fl.embed_ctx,
+                .embedFn = fl.embedFn,
+                .rag_chunks = fl.rag_chunks,
+                .rag_docs = fl.rag_docs,
+            };
+            if (self.opts.shine_fleet) |sf| return .{
+                .index = sf.index,
+                .embed_ctx = sf.embed_ctx,
+                .embedFn = sf.embedFn,
+                .rag_chunks = sf.rag_chunks,
+                .rag_docs = 1,
+            };
+            return null;
+        }
+
+        fn embedFleetQuery(self: *Self, rv: Retrieval, req: *const types.GenerateRequest, rendered: []const u8, vec: []f32) !void {
+            const a = self.allocator;
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(a);
+            for (req.messages) |msg| {
+                if (msg.role != .user) continue;
+                if (buf.items.len > 0) try buf.append(a, '\n');
+                try buf.appendSlice(a, msg.content);
+            }
+            const query: []const u8 = if (buf.items.len > 0) buf.items else rendered;
+            try rv.embedFn(rv.embed_ctx, query, vec);
+        }
+
+        /// Compose the selection's cartridges, in order, into an EMPTY
+        /// cache (`writeComposedToCache` semantics via the LRU).
+        fn writeSelectionPrefix(self: *Self, selection: []const usize, cache: *KvCache) !void {
+            // Make everything resident first: with the capacity floor above,
+            // the compose loop's acquires are then all hits (no eviction
+            // between appends).
+            for (selection) |doc| _ = try self.fleetCartridge(doc);
+            for (selection) |doc| {
+                const cart = try self.fleetCartridge(doc);
+                try cart.appendToCache(self.ctx, cache);
+            }
+        }
+
+        /// Cross-slot prefix share floor: copying fewer rows than this is
+        /// not worth the bookkeeping (the memcpy itself is nearly free).
+        const min_share_lcp = 16;
+
+        /// Cross-slot KV prefix share (colibri's KV_SHARE): when no slot is
+        /// adoptable WHOLE, the best-LCP same-prefix slot still holds this
+        /// request's prompt opening — copy those rows into `cache` (which
+        /// must hold exactly its `prefix_rows` preloaded rows) so the
+        /// reconcile reuses them instead of re-prefilling. The donor stays
+        /// in the pool untouched. Returns the shared token count.
+        fn sharePrefixFrom(self: *Self, cache: *KvCache, ids: []const u32, selection: []const usize, prefix_rows: usize) usize {
+            var donor_i: ?usize = null;
+            var donor_lcp: usize = 0;
+            for (self.slots.items, 0..) |*slot, i| {
+                if (!std.mem.eql(usize, slot.selection, selection)) continue;
+                if (slot.prefix_rows != prefix_rows) continue;
+                const lcp = commonPrefix(slot.tokens.items, ids);
+                if (lcp > donor_lcp) {
+                    donor_lcp = lcp;
+                    donor_i = i;
+                }
+            }
+            if (donor_lcp < min_share_lcp) return 0;
+            const donor = &self.slots.items[donor_i.?];
+            const shared = @min(donor_lcp, donor.cache.len() - donor.prefix_rows);
+            if (shared < min_share_lcp) return 0;
+            cache.copyRows(&donor.cache, prefix_rows, prefix_rows + shared) catch return 0;
+            return shared;
+        }
+
+        /// `initWarm` over a cache seeded by `sharePrefixFrom`: the token
+        /// shadow is the shared ids prefix. Owns `cache` on EVERY failure
+        /// path (`initWarm`'s own contract) — callers must not hold an
+        /// errdefer across this call, or the cache double-frees.
+        fn warmFromShare(self: *Self, cache: KvCache, ids: []const u32, shared: usize, prefix_rows: usize, convo_opts: chat.Options) !Conversation {
+            const a = self.allocator;
+            var owned = cache;
+            const toks = blk: {
+                // Disarmed once the allocation lands: from there `initWarm`
+                // owns the cache, failure paths included.
+                errdefer owned.deinit();
+                break :blk try a.alloc(usize, shared);
+            };
+            defer a.free(toks);
+            for (toks, ids[0..shared]) |*dst, src| dst.* = src;
+            return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = owned,
+                .tokens = toks,
+                .prefix_rows = prefix_rows,
+            });
+        }
+
+        /// Pick this request's warm state and build the Conversation on it:
+        /// the resident slot with the best token-LCP when it passes the
+        /// similarity gate; a disk-tier restore when a sidecar strictly
+        /// beats every resident slot; otherwise the LRU slot as a
+        /// reconcile-overwrite host when the pool is full (spilling its
+        /// state to the disk tier first when worth keeping), or a cold
+        /// start while the pool still has room. `selection`/`selection_p`
+        /// describe the request's composed fleet prefix (empty outside
+        /// fleet mode): only same-selection slots are adoptable, and a
+        /// foreign-prefix host is reset and rebuilt behind this request's
+        /// cartridges.
+        fn acquireConversation(self: *Self, ids: []const u32, convo_opts: chat.Options, selection: []const usize, selection_p: usize) !Conversation {
+            self.clock += 1;
+
+            var best_i: ?usize = null;
+            var best_lcp: usize = 0;
+            var lru_i: ?usize = null;
+            for (self.slots.items, 0..) |*slot, i| {
+                if (std.mem.eql(usize, slot.selection, selection)) {
+                    const lcp = commonPrefix(slot.tokens.items, ids);
+                    if (best_i == null or lcp > best_lcp) {
+                        best_i = i;
+                        best_lcp = lcp;
+                    }
+                }
+                if (lru_i == null or slot.last_used < self.slots.items[lru_i.?].last_used) lru_i = i;
+            }
+
+            // The disk tier competes only when it strictly beats the pool
+            // (never armed in fleet mode — sidecars carry no selection).
+            var disk_i: ?usize = null;
+            if (self.opts.kv_disk != null) {
+                var disk_lcp: usize = 0;
+                for (self.disk.items, 0..) |*e, i| {
+                    const lcp = commonPrefix(e.tokens, ids);
+                    if (lcp > disk_lcp) {
+                        disk_lcp = lcp;
+                        disk_i = i;
+                    }
+                }
+                if (disk_lcp <= best_lcp or !similarEnough(disk_lcp, ids.len)) disk_i = null;
+            }
+
+            // Whole-slot adoption is for CONTINUATIONS (the request extends
+            // exactly what the slot holds). A conversation that merely
+            // SHARES a prefix — same system prompt, different dialogue —
+            // goes down the prefix-share path instead: it copies the common
+            // rows and leaves the donor intact for its own continuation
+            // (pre-share behavior destroyed the donor's tail for no extra
+            // reuse).
+            const continues_best = best_i != null and
+                best_lcp == self.slots.items[best_i.?].tokens.items.len;
+            if (disk_i == null and continues_best and similarEnough(best_lcp, ids.len)) {
+                var slot = self.slots.swapRemove(best_i.?);
+                defer slot.tokens.deinit(self.allocator);
+                self.allocator.free(slot.selection);
+                self.allocator.free(slot.opener);
+                return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                    .cache = slot.cache,
+                    .tokens = slot.tokens.items,
+                    .prefix_rows = slot.prefix_rows,
+                });
+            }
+
+            // Host cache for a restore or a reconcile-overwrite: the LRU
+            // slot when the pool is full, a fresh cold cache otherwise.
+            var host: ?Slot = null;
+            if (self.slots.items.len >= self.kvSlots()) {
+                var victim = self.slots.swapRemove(lru_i.?);
+                self.maybeSaveToDisk(&victim, ids);
+                host = victim;
+            }
+
+            if (disk_i) |di| {
+                const kd = self.opts.kv_disk.?;
+                var cache: KvCache = undefined;
+                if (host) |*h| {
+                    h.tokens.deinit(self.allocator);
+                    self.allocator.free(h.selection);
+                    self.allocator.free(h.opener);
+                    cache = h.cache;
+                    // kv_persist.load requires an empty cache.
+                    cache.truncate(0);
+                } else {
+                    cache = try self.model.initCache(self.ctx, self.opts.context_len);
+                }
+                self.disk.items[di].last_used = self.clock;
+                const path = self.disk.items[di].path;
+                const loaded = kv_persist.load(kd.io, self.allocator, path, &cache) catch null;
+                if (loaded) |resumed| {
+                    defer self.allocator.free(resumed.tokens);
+                    // The sidecar carries its own prefix rows: the restored
+                    // conversation keeps the exact prefix it was born with.
+                    return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                        .cache = cache,
+                        .tokens = resumed.tokens,
+                        .prefix_rows = resumed.prefix_rows,
+                    });
+                }
+                // Unreadable or foreign sidecar (deleted or clobbered
+                // externally): drop the entry; the request starts cold on
+                // this cache (behind the current cartridge when one is
+                // configured).
+                self.removeDiskEntry(di);
+                var convo = try Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                    .cache = cache,
+                    .tokens = &.{},
+                });
+                if (self.opts.cartridge) |cart| {
+                    errdefer convo.deinit();
+                    try cart.writeToCache(self.ctx, &convo.cache);
+                    try convo.notePrefixRows(cart.p);
+                }
+                return convo;
+            }
+
+            if (host) |*h| {
+                const a = self.allocator;
+                if (std.mem.eql(usize, h.selection, selection)) {
+                    defer h.tokens.deinit(a);
+                    a.free(h.selection);
+                    a.free(h.opener);
+                    // A remaining slot may share MORE of this prompt than
+                    // the evicted victim does — prefix-share from it over
+                    // the victim's cleared rows instead.
+                    const victim_lcp = commonPrefix(h.tokens.items, ids);
+                    var cache = h.cache;
+                    cache.truncate(h.prefix_rows);
+                    const shared = self.sharePrefixFrom(&cache, ids, selection, h.prefix_rows);
+                    if (shared > victim_lcp) {
+                        // warmFromShare owns the cache on every failure path.
+                        return self.warmFromShare(cache, ids, shared, h.prefix_rows, convo_opts);
+                    }
+                    // Same prefix: reconcile-overwrite on the victim's rows.
+                    cache.count = h.cache.count;
+                    return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                        .cache = cache,
+                        .tokens = h.tokens.items,
+                        .prefix_rows = h.prefix_rows,
+                    });
+                }
+                // Foreign prefix (fleet mode): nothing behind it is
+                // reusable — reset the cache and rebuild this request's
+                // composed prefix. The errdefer ends BEFORE the initWarm
+                // call: initWarm owns the cache on its own failure paths,
+                // so a caller errdefer held across it would double-free.
+                h.tokens.deinit(a);
+                a.free(h.selection);
+                a.free(h.opener);
+                var cache = h.cache;
+                {
+                    errdefer cache.deinit();
+                    cache.truncate(0);
+                    // Adapter fleets carry no prefix rows — the selection's
+                    // knowledge is in the applied adapter, not the cache.
+                    if (self.opts.fleet != null) try self.writeSelectionPrefix(selection, &cache);
+                }
+                return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                    .cache = cache,
+                    .tokens = &.{},
+                    .prefix_rows = selection_p,
+                });
+            }
+
+            // Cold start: preload the configured prefix (cartridge, or the
+            // fleet selection), then prefix-share from the best-LCP slot
+            // when one holds this request's opening. The errdefer ends
+            // BEFORE the ownership-transfer calls (initWarm/warmFromShare
+            // own the cache on their own failure paths).
+            var cache = try self.model.initCache(self.ctx, self.opts.context_len);
+            var prefix_rows: usize = 0;
+            var shared: usize = 0;
+            {
+                errdefer cache.deinit();
+                if (self.opts.cartridge) |cart| {
+                    try cart.writeToCache(self.ctx, &cache);
+                    prefix_rows = cart.p;
+                } else if (self.opts.fleet != null and selection.len > 0) {
+                    try self.writeSelectionPrefix(selection, &cache);
+                    prefix_rows = selection_p;
+                }
+                shared = self.sharePrefixFrom(&cache, ids, selection, prefix_rows);
+            }
+            if (shared > 0) return self.warmFromShare(cache, ids, shared, prefix_rows, convo_opts);
+            return Conversation.initWarm(self.ctx, self.model, self.tokenizer, self.template, convo_opts, .{
+                .cache = cache,
+                .tokens = &.{},
+                .prefix_rows = prefix_rows,
+            });
+        }
+
+        /// The generation epilogue (success and error paths alike): move
+        /// the conversation's cache and its committed-token shadow back
+        /// into the pool. History can sit one un-forwarded token past the
+        /// cache after an aborted turn, so the shadow is trimmed to
+        /// `cache.len()` — a slot always describes exactly the positions its
+        /// cache holds. `acquireConversation` removed at most one slot, so
+        /// the append keeps the pool within `kv_slots`.
+        fn reclaimSlot(self: *Self, convo: *Conversation, selection: []const usize, opener: []const u8) void {
+            const a = self.allocator;
+            // Pool cap: a BATCH of conversations can outnumber the slots its
+            // acquires removed (later acquires start cold while the pool has
+            // room), so reclaims evict the LRU — spilling it to the disk
+            // tier when configured — before appending. Single-request
+            // serving never trips this (one acquire, one reclaim).
+            while (self.slots.items.len >= self.kvSlots()) {
+                var lru_i: usize = 0;
+                for (self.slots.items, 0..) |*slot, i| {
+                    if (slot.last_used < self.slots.items[lru_i].last_used) lru_i = i;
+                }
+                var victim = self.slots.swapRemove(lru_i);
+                self.maybeSaveToDisk(&victim, &.{});
+                victim.cache.deinit();
+                victim.tokens.deinit(a);
+                a.free(victim.selection);
+                a.free(victim.opener);
+            }
+            var tokens: std.ArrayList(usize) = .empty;
+            var sel: []usize = &.{};
+            var op: []u8 = &.{};
+            const ok = blk: {
+                // The shadow describes only token-backed rows: cache rows
+                // [0, kv_prefix_rows) are the preloaded prefix (shared
+                // cartridge, or this request's fleet selection).
+                tokens.appendSlice(a, convo.history.items[0 .. convo.cache.len() - convo.kv_prefix_rows]) catch break :blk false;
+                sel = a.dupe(usize, selection) catch break :blk false;
+                op = a.dupe(u8, opener) catch break :blk false;
+                self.slots.ensureUnusedCapacity(a, 1) catch break :blk false;
+                break :blk true;
+            };
+            if (!ok) {
+                // Without the shadow the cache can never match: drop both
+                // and let a later request start cold.
+                tokens.deinit(a);
+                a.free(sel);
+                a.free(op);
+                var cache = convo.takeCache();
+                cache.deinit();
+                return;
+            }
+            self.slots.appendAssumeCapacity(.{
+                .cache = convo.takeCache(),
+                .tokens = tokens,
+                .selection = sel,
+                .opener = op,
+                .prefix_rows = convo.kv_prefix_rows,
+                .last_used = self.clock,
+            });
+        }
+
+        /// Save-on-evict (llama.cpp's prompt-cache trigger): spill the
+        /// victim's state to the disk tier when the incoming request would
+        /// keep less than half of it AND no stored entry already contains
+        /// it. An entry the victim extends is overwritten in place
+        /// (supersede); otherwise a fresh file is created up to
+        /// `max_files`, then the LRU entry's file is reused. Save failures
+        /// only cost the spill — the eviction proceeds regardless.
+        fn maybeSaveToDisk(self: *Self, victim: *const Slot, ids: []const u32) void {
+            const kd = self.opts.kv_disk orelse return;
+            const a = self.allocator;
+            const vtokens = victim.tokens.items;
+            if (vtokens.len == 0) return;
+            if (commonPrefix(vtokens, ids) * 2 >= vtokens.len) return;
+            var target: ?usize = null;
+            for (self.disk.items, 0..) |*e, i| {
+                if (e.tokens.len >= vtokens.len) {
+                    // Containment: a stored entry already covers this state.
+                    if (std.mem.eql(usize, e.tokens[0..vtokens.len], vtokens)) return;
+                } else if (target == null and std.mem.eql(usize, e.tokens, vtokens[0..e.tokens.len])) {
+                    // Supersede: the victim extends this entry.
+                    target = i;
+                }
+            }
+            if (target == null and self.disk.items.len >= kd.max_files) {
+                for (self.disk.items, 0..) |*e, i| {
+                    if (target == null or e.last_used < self.disk.items[target.?].last_used) target = i;
+                }
+            }
+
+            const snapshot = a.dupe(usize, vtokens) catch return;
+            if (target == null) {
+                // Fresh entry: name, registry room, then the file.
+                const path = std.fmt.allocPrint(a, "{s}/kv-slot-{d}.fuxkv", .{ kd.dir, self.disk_seq }) catch {
+                    a.free(snapshot);
+                    return;
+                };
+                self.disk.ensureUnusedCapacity(a, 1) catch {
+                    a.free(snapshot);
+                    a.free(path);
+                    return;
+                };
+                if (!self.writeSidecar(kd.io, a, path, &victim.cache, vtokens)) {
+                    a.free(snapshot);
+                    a.free(path);
+                    return;
+                }
+                self.disk_seq += 1;
+                self.disk.appendAssumeCapacity(.{ .path = path, .tokens = snapshot, .last_used = self.clock });
+                return;
+            }
+            const entry = &self.disk.items[target.?];
+            if (!self.writeSidecar(kd.io, a, entry.path, &victim.cache, vtokens)) {
+                // The old file content is gone (reset header): the entry no
+                // longer describes anything restorable.
+                a.free(snapshot);
+                self.removeDiskEntry(target.?);
+                return;
+            }
+            a.free(entry.tokens);
+            entry.tokens = snapshot;
+            entry.last_used = self.clock;
+        }
+
+        /// Reset + append-all: a sidecar file whose whole record range is
+        /// this cache's positions. Returns false on any write error.
+        fn writeSidecar(self: *const Self, io: std.Io, a: Allocator, path: []const u8, cache: *const KvCache, tokens: []const usize) bool {
+            // Cartridge mode: the sidecar records the prefix shape and the
+            // prefix rows themselves (FUXKV002) — a restore is
+            // self-describing even across a cartridge swap.
+            const prefix_rows: usize = if (self.opts.cartridge) |cart| cart.p else 0;
+            kv_persist.reset(io, a, path, cache, prefix_rows) catch return false;
+            kv_persist.appendRange(io, a, path, cache, tokens, prefix_rows) catch return false;
+            return true;
+        }
+
+        /// Drop a disk-registry entry and best-effort delete its file.
+        fn removeDiskEntry(self: *Self, i: usize) void {
+            const kd = self.opts.kv_disk.?;
+            const e = self.disk.swapRemove(i);
+            std.Io.Dir.cwd().deleteFile(kd.io, e.path) catch {};
+            self.allocator.free(e.path);
+            self.allocator.free(e.tokens);
+        }
+
+        /// Batched decode needs the family's batch forward; families without
+        /// it (a null entry) are served strictly sequentially.
+        const vtable: types.Backend.VTable = .{
+            .validate = vtValidate,
+            .generate = vtGenerate,
+            .generate_batch = if (ModelT.caps.batch) vtGenerateBatch else null,
+        };
+
+        pub fn backend(self: *Self) types.Backend {
+            return .{
+                .ptr = self,
+                .vtable = &vtable,
+                .info = .{
+                    .model_id = self.opts.model_id,
+                    .context_len = self.opts.context_len,
+                    .caps = .{
+                        .grammar = llguidance.enabled,
+                        .think = self.opts.supports_think,
+                    },
+                    .think_markers = self.opts.think_markers,
+                    .tool_style = self.opts.tool_style,
+                    .default_sampling = self.opts.default_sampling,
+                },
+            };
+        }
+
+        /// Render the request's message history; caller owns the buffer.
+        fn render(self: *const Self, allocator: Allocator, req: *const types.GenerateRequest) ![]u8 {
+            var buf: std.ArrayList(u8) = .empty;
+            errdefer buf.deinit(allocator);
+            try self.template.renderMessages(allocator, &buf, req.messages, !req.think);
+            return buf.toOwnedSlice(allocator);
+        }
+
+        fn vtValidate(ptr: *anyopaque, req: *const types.GenerateRequest) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const a = self.allocator;
+            const rendered = try self.render(a, req);
+            defer a.free(rendered);
+            // Pure read-only tokenizer use: safe off the worker thread.
+            const ids = try self.tokenizer.encodeRaw(a, rendered);
+            defer a.free(ids);
+            if (ids.len >= self.opts.context_len) return error.PromptTooLong;
+        }
+
+        fn vtGenerate(ptr: *anyopaque, req: *const types.GenerateRequest, sink: *std.Io.Writer) anyerror!types.GenerateResult {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const a = self.allocator;
+
+            const rendered = try self.render(a, req);
+            defer a.free(rendered);
+
+            // Grammar: clone the cached base per request (the base must
+            // outlive the clone; the cache guarantees it — see above). The
+            // mask forces the turn-end marker when the grammar completes, so
+            // normal stop handling ends the reply.
+            var clone: ?llguidance.Constraint = null;
+            defer if (clone) |*c| c.deinit();
+            var processor: ?sampler.LogitProcessor = null;
+            if (req.constraint) |spec| {
+                const turn_stop: ?u32 = self.tokenizer.tokenId(self.template.stopMarker()) orelse self.tokenizer.eosId();
+                const base = try self.constraints.acquire(self.tokenizer, spec, .{
+                    .eos_token = turn_stop,
+                    .extra_eos = self.opts.extra_stop_ids,
+                    .n_vocab = self.model.config.vocab_size,
+                });
+                clone = try base.clone();
+                processor = clone.?.processor();
+            }
+
+            const convo_opts: chat.Options = .{
+                .capacity = self.opts.context_len,
+                .max_response_tokens = req.max_tokens,
+                .think_off = !req.think,
+                .sampler = req.sampling,
+                .extra_stop_ids = self.opts.extra_stop_ids,
+                .stop_sequences = req.stop,
+                .logit_processor = processor,
+                .speculation = self.opts.speculation,
+            };
+            // One tokenization serves both slot selection and the send.
+            const ids = try self.tokenizer.encodeRaw(a, rendered);
+            defer a.free(ids);
+
+            // Fleet mode: sticky adoption first (a warm conversation keeps
+            // the cartridges it started with; --rag-adaptive layers the
+            // decisive switch rule on top), then — for conversations no
+            // slot remembers, or that decisively changed topic — cosine
+            // selection over the request's USER messages, concatenated
+            // (the whole user side, not just the last message: "and how
+            // are they packed?" carries no topic alone; the full render is
+            // the fallback when no user turn exists).
+            var selection: []usize = &.{};
+            defer a.free(selection);
+            var maybe_convo: ?Conversation = null;
+            // The conversation's identity for sticky adoption: its FIRST
+            // user message (empty outside fleet mode — non-fleet slots
+            // match by token-LCP alone, as before).
+            var opener: []const u8 = &.{};
+            if (self.retrieval() != null) {
+                for (req.messages) |msg| {
+                    if (msg.role == .user) {
+                        opener = msg.content;
+                        break;
+                    }
+                }
+            }
+            if (self.retrieval()) |rv| {
+                self.clock += 1;
+                var sticky_i = self.findStickySlot(ids, opener);
+
+                if (sticky_i != null and self.opts.fleet != null and self.opts.fleet.?.adaptive) {
+                    const fl = self.opts.fleet.?;
+                    // Adaptive: re-embed the contextual query and leave the
+                    // conversation's knowledge base only on decisive
+                    // evidence (see shouldSwitchSelection).
+                    const vec = try a.alloc(f32, fl.index.dim);
+                    defer a.free(vec);
+                    try self.embedFleetQuery(rv, req, rendered, vec);
+                    const hits = try fl.index.topDocs(a, vec, fl.rag_chunks, fl.rag_docs);
+                    defer a.free(hits);
+                    const cur = self.slots.items[sticky_i.?].selection;
+                    const cur_scores = try a.alloc(f32, cur.len);
+                    defer a.free(cur_scores);
+                    try fl.index.docScores(a, vec, cur, cur_scores);
+                    var cur_best: f32 = -1;
+                    for (cur_scores) |s| cur_best = @max(cur_best, s);
+                    var outside_best: ?f32 = null;
+                    for (hits) |hit| {
+                        const inside = for (cur) |doc| {
+                            if (doc == hit.doc) break true;
+                        } else false;
+                        if (!inside and (outside_best == null or hit.score > outside_best.?)) outside_best = hit.score;
+                    }
+                    if (shouldSwitchSelection(cur_best, outside_best, fl.switch_margin) and hits.len > 0) {
+                        // Topic moved: the old slot's rows sit behind a
+                        // prefix this conversation is leaving.
+                        self.destroySlot(sticky_i.?);
+                        sticky_i = null;
+                        selection = try a.alloc(usize, hits.len);
+                        for (selection, hits) |*doc, hit| doc.* = hit.doc;
+                    }
+                }
+
+                if (sticky_i) |si| {
+                    const adopted = try self.adoptSlotAt(si, convo_opts);
+                    maybe_convo = adopted.convo;
+                    selection = adopted.selection;
+                } else if (selection.len == 0) {
+                    // Fresh conversation: contextual retrieval.
+                    const vec = try a.alloc(f32, rv.index.dim);
+                    defer a.free(vec);
+                    try self.embedFleetQuery(rv, req, rendered, vec);
+                    const hits = try rv.index.topDocs(a, vec, rv.rag_chunks, rv.rag_docs);
+                    defer a.free(hits);
+                    if (hits.len == 0) return error.EmptySelection;
+                    selection = try a.alloc(usize, hits.len);
+                    for (selection, hits) |*doc, hit| doc.* = hit.doc;
+                }
+            }
+
+            // SHINE fleet: point the served box at this request's adapter
+            // BEFORE any forward — the box is process state, and the
+            // previous request may have left another document's adapter in
+            // it (adopted conversations re-apply for the same reason).
+            if (self.opts.shine_fleet) |sf| try sf.applyFn(sf.apply_ctx, if (selection.len > 0) selection[0] else null);
+
+            var convo = maybe_convo orelse blk: {
+                // Cartridge fleets prefix the cache with the composed
+                // selection; adapter fleets carry no prefix rows.
+                var selection_p: usize = 0;
+                if (self.opts.fleet != null) {
+                    for (selection) |doc| selection_p += (try self.fleetCartridge(doc)).p;
+                }
+                break :blk try self.acquireConversation(ids, convo_opts, selection, selection_p);
+            };
+            defer convo.deinit();
+            // LIFO: reclaim runs before the deinit above, on every path out.
+            defer self.reclaimSlot(&convo, selection, opener);
+
+            const produced = try convo.sendTokensReuse(ids, sink);
+            const finish: types.FinishReason = if (produced >= req.max_tokens or convo.cache.len() >= convo.cache.capacity)
+                .length
+            else
+                .stop;
+            return .{
+                .prompt_tokens = convo.history.items.len - produced,
+                .completion_tokens = produced,
+                .cached_tokens = convo.reused_prefix,
+                .stop_sequence = convo.fired_stop,
+                .finish = finish,
+            };
+        }
+
+        /// `types.Backend.generate_batch`: N requests decoded in lockstep
+        /// through `Conversation.sendBatchTokensReuse`. Setup (render,
+        /// encode, constraint clone, slot acquisition) runs per request
+        /// with failures isolated to `errs[i]`; the batch then runs over
+        /// the surviving subset. Fleet mode is excluded (per-request
+        /// retrieval + sticky adoption are single-stream logic; main.zig
+        /// refuses the flag combination). The constraint cache must hold
+        /// at least as many bases as the batch width — every clone's base
+        /// has to survive until the batch ends (`serving.open` sizes it).
+        fn vtGenerateBatch(
+            ptr: *anyopaque,
+            reqs: []const *const types.GenerateRequest,
+            sinks: []const *std.Io.Writer,
+            results: []types.GenerateResult,
+            errs: []?anyerror,
+        ) anyerror!void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            if (self.opts.fleet != null) return error.BatchDecodeUnsupported;
+            const a = self.allocator;
+            const n = reqs.len;
+            std.debug.assert(sinks.len == n and results.len == n and errs.len == n);
+            for (errs) |*e| e.* = null;
+
+            const ids_arr = try a.alloc(?[]u32, n);
+            defer {
+                for (ids_arr) |maybe| if (maybe) |ids| a.free(ids);
+                a.free(ids_arr);
+            }
+            for (ids_arr) |*p| p.* = null;
+            const clones = try a.alloc(?llguidance.Constraint, n);
+            defer {
+                for (clones) |*maybe| if (maybe.*) |*c| c.deinit();
+                a.free(clones);
+            }
+            for (clones) |*p| p.* = null;
+            const convos = try a.alloc(?Conversation, n);
+            // Epilogue on every path out: each built conversation's cache
+            // returns to the slot pool before the conversation dies.
+            defer {
+                for (convos) |*maybe| {
+                    if (maybe.*) |*convo| {
+                        self.reclaimSlot(convo, &.{}, &.{});
+                        convo.deinit();
+                    }
+                }
+                a.free(convos);
+            }
+            for (convos) |*p| p.* = null;
+
+            // Per-request setup, isolated. Clones land in `clones[i]` BEFORE
+            // their processor pointer is taken (the processor captures the
+            // constraint's address, which must stay stable for the whole
+            // batch).
+            for (reqs, 0..) |req, i| {
+                const rendered = self.render(a, req) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+                defer a.free(rendered);
+                const ids = self.tokenizer.encodeRaw(a, rendered) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+                ids_arr[i] = ids;
+                if (req.constraint) |spec| {
+                    const turn_stop: ?u32 = self.tokenizer.tokenId(self.template.stopMarker()) orelse self.tokenizer.eosId();
+                    const ok = blk: {
+                        const base = self.constraints.acquire(self.tokenizer, spec, .{
+                            .eos_token = turn_stop,
+                            .extra_eos = self.opts.extra_stop_ids,
+                            .n_vocab = self.model.config.vocab_size,
+                        }) catch |err| {
+                            errs[i] = err;
+                            break :blk false;
+                        };
+                        clones[i] = base.clone() catch |err| {
+                            errs[i] = err;
+                            break :blk false;
+                        };
+                        break :blk true;
+                    };
+                    if (!ok) continue;
+                }
+                const processor: ?sampler.LogitProcessor = if (clones[i]) |*c| c.processor() else null;
+                const convo_opts: chat.Options = .{
+                    .capacity = self.opts.context_len,
+                    .max_response_tokens = req.max_tokens,
+                    .think_off = !req.think,
+                    .sampler = req.sampling,
+                    .extra_stop_ids = self.opts.extra_stop_ids,
+                    .stop_sequences = req.stop,
+                    .logit_processor = processor,
+                };
+                convos[i] = self.acquireConversation(ids, convo_opts, &.{}, 0) catch |err| {
+                    errs[i] = err;
+                    continue;
+                };
+            }
+
+            // Compact the survivors and run the lockstep batch.
+            const convo_ptrs = try a.alloc(*Conversation, n);
+            defer a.free(convo_ptrs);
+            const ids_list = try a.alloc([]const u32, n);
+            defer a.free(ids_list);
+            const sink_ptrs = try a.alloc(*std.Io.Writer, n);
+            defer a.free(sink_ptrs);
+            const produced = try a.alloc(usize, n);
+            defer a.free(produced);
+            const sub_errs = try a.alloc(?anyerror, n);
+            defer a.free(sub_errs);
+            const origin = try a.alloc(usize, n);
+            defer a.free(origin);
+
+            var m: usize = 0;
+            for (convos, 0..) |*maybe, i| {
+                if (maybe.* == null) continue;
+                convo_ptrs[m] = &maybe.*.?;
+                ids_list[m] = ids_arr[i].?;
+                sink_ptrs[m] = sinks[i];
+                origin[m] = i;
+                m += 1;
+            }
+            if (m == 0) return;
+
+            try Conversation.sendBatchTokensReuse(
+                convo_ptrs[0..m],
+                ids_list[0..m],
+                sink_ptrs[0..m],
+                produced[0..m],
+                sub_errs[0..m],
+            );
+
+            for (origin[0..m], 0..) |i, j| {
+                if (sub_errs[j]) |err| {
+                    errs[i] = err;
+                    continue;
+                }
+                const convo = &convos[i].?;
+                const req = reqs[i];
+                const finish: types.FinishReason = if (produced[j] >= req.max_tokens or convo.cache.len() >= convo.cache.capacity)
+                    .length
+                else
+                    .stop;
+                results[i] = .{
+                    .prompt_tokens = convo.history.items.len - produced[j],
+                    .completion_tokens = produced[j],
+                    .cached_tokens = convo.reused_prefix,
+                    .stop_sequence = convo.fired_stop,
+                    .finish = finish,
+                };
+            }
+        }
+    };
+}
+
+/// KV RAM guard verdict (pure rule; unit-tested below). Thresholds:
+/// slots x per-slot beyond AVAILABLE memory is an overcommit — clamped to
+/// fit HALF the available bytes where clamping is allowed (the other half
+/// is page-cache headroom for the mmap'd weights), warned otherwise; beyond
+/// half of available it is a pressure warning on every platform. Unknown
+/// availability stays silent: no number, no policy.
+pub const KvRamAction = enum { ok, warn_pressure, warn_overcommit, clamp };
+
+pub fn kvRamVerdict(requested_slots: usize, per_slot_bytes: usize, available: ?u64, can_clamp: bool) struct { slots: usize, action: KvRamAction } {
+    const slots = @max(requested_slots, 1);
+    const avail = available orelse return .{ .slots = slots, .action = .ok };
+    if (per_slot_bytes == 0) return .{ .slots = slots, .action = .ok };
+    const total = @as(u64, slots) * per_slot_bytes;
+    if (total > avail) {
+        if (can_clamp) {
+            const fit: usize = @intCast(@max((avail / 2) / per_slot_bytes, 1));
+            return .{ .slots = @min(slots, fit), .action = .clamp };
+        }
+        return .{ .slots = slots, .action = .warn_overcommit };
+    }
+    if (total > avail / 2) return .{ .slots = slots, .action = .warn_pressure };
+    return .{ .slots = slots, .action = .ok };
+}
+
+/// The lmserve KV RAM guard. Sizes ONE probe cache to measure the true
+/// per-slot commitment (exact for the model's layer/head geometry and KV
+/// dtype), compares `--kv-slots x per-slot` against currently-available
+/// memory, and prints the arithmetic when it matters. Returns the slot
+/// count the server should actually use.
+///
+/// Why this exists: slot caches commit lazily (uninitialized allocations
+/// touch no pages — MEMORY-MODEL.md), so an overcommitted `--kv-slots`
+/// does NOT fail at startup. It surfaces mid-serving, as the kernel evicts
+/// the mmap'd weights' page cache to make room for filling KV pages — a
+/// throughput collapse with no error anywhere. The guard front-loads that
+/// failure into startup arithmetic. Linux clamps on overcommit
+/// (`--kv-slots-force` keeps the request); macOS only warns — its
+/// free-page probe understates reclaimable memory
+/// (`fucina.expert_store.memAvailableBytes`), too weak a number to clamp on.
+pub fn kvRamGuardSlots(
+    comptime ModelT: type,
+    ctx: *fucina.ExecContext,
+    model: *const ModelT,
+    context_len: usize,
+    requested_slots: usize,
+    force: bool,
+    out: anytype,
+) !usize {
+    var probe = try model.initCache(ctx, context_len);
+    const per_slot = probe.byteSize();
+    probe.deinit();
+
+    const can_clamp = builtin.os.tag == .linux and !force;
+    const available = fucina.expert_store.memAvailableBytes();
+    const v = kvRamVerdict(requested_slots, per_slot, available, can_clamp);
+    const gib = struct {
+        fn of(bytes: u64) f64 {
+            return @as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0);
+        }
+    }.of;
+    const slots = @max(requested_slots, 1);
+    switch (v.action) {
+        .ok => {},
+        .warn_pressure => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — over half; leave page-cache headroom for the weights (reduce --kv-slots or --ctx, or add --kv-cache-dir)\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?) },
+        ),
+        .warn_overcommit => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — OVERCOMMITTED; as slots fill, the OS will evict the model's page cache and throughput collapses. Reduce --kv-slots or --ctx, or add --kv-cache-dir\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?) },
+        ),
+        .clamp => try out.print(
+            "kv guard: {d} slot(s) x {d:.2} GiB = {d:.2} GiB KV vs ~{d:.2} GiB available — OVERCOMMITTED; clamping --kv-slots {d} -> {d} (override with --kv-slots-force)\n",
+            .{ slots, gib(per_slot), gib(@as(u64, slots) * per_slot), gib(available.?), slots, v.slots },
+        ),
+    }
+    if (v.action != .ok) try out.flush();
+    return v.slots;
+}
+
+test "kv ram guard verdict: thresholds, clamp arithmetic, unknowns" {
+    const expectEqual = std.testing.expectEqual;
+    const gib: u64 = 1024 * 1024 * 1024;
+
+    // Comfortable fit: silent.
+    try expectEqual(.ok, kvRamVerdict(4, gib, 16 * gib, true).action);
+    // Over half of available: pressure warning, slots untouched.
+    try expectEqual(.warn_pressure, kvRamVerdict(4, 3 * gib, 16 * gib, true).action);
+    try expectEqual(@as(usize, 4), kvRamVerdict(4, 3 * gib, 16 * gib, true).slots);
+    // Overcommit, clamping allowed: fit half the available bytes, floor 1.
+    {
+        const v = kvRamVerdict(16, 4 * gib, 16 * gib, true);
+        try expectEqual(.clamp, v.action);
+        try expectEqual(@as(usize, 2), v.slots); // (16/2)/4
+    }
+    {
+        const v = kvRamVerdict(4, 10 * gib, 8 * gib, true);
+        try expectEqual(.clamp, v.action);
+        try expectEqual(@as(usize, 1), v.slots); // floor
+    }
+    // Overcommit, clamping forbidden (macOS / --kv-slots-force): warn only.
+    {
+        const v = kvRamVerdict(16, 4 * gib, 16 * gib, false);
+        try expectEqual(.warn_overcommit, v.action);
+        try expectEqual(@as(usize, 16), v.slots);
+    }
+    // Unknown availability or zero-sized probe: silent, slots untouched.
+    try expectEqual(.ok, kvRamVerdict(64, 4 * gib, null, true).action);
+    try expectEqual(.ok, kvRamVerdict(64, 0, 16 * gib, true).action);
+    // Slot floor mirrors kvSlots().
+    try expectEqual(@as(usize, 1), kvRamVerdict(0, gib, 16 * gib, true).slots);
+}
+
+test "adaptive fleet switch rule: decisive-margin only" {
+    // No document outside the current selection: never switch.
+    try std.testing.expect(!shouldSwitchSelection(0.4, null, 0.05));
+    // Outside doc must beat the current best by the margin (values off the
+    // exact f32 boundary: 0.40 + 0.05 rounds above 0.45).
+    try std.testing.expect(!shouldSwitchSelection(0.40, 0.42, 0.05));
+    try std.testing.expect(shouldSwitchSelection(0.40, 0.46, 0.05));
+    try std.testing.expect(shouldSwitchSelection(0.40, 0.60, 0.05));
+    // The measured runner-up flap (gap ~0.002) stays put.
+    try std.testing.expect(!shouldSwitchSelection(0.2780, 0.2755, 0.05));
+    // A selection whose docs all score -1 (no chunks) yields to anything
+    // clearing the margin from below.
+    try std.testing.expect(shouldSwitchSelection(-1, 0.1, 0.05));
+}
+
+test "kv reuse policy: commonPrefix and the similarity gate" {
+    const tokens = [_]usize{ 5, 6, 7, 8, 9 };
+    try std.testing.expectEqual(@as(usize, 3), commonPrefix(&tokens, &.{ 5, 6, 7, 99 }));
+    try std.testing.expectEqual(@as(usize, 5), commonPrefix(&tokens, &.{ 5, 6, 7, 8, 9, 10 }));
+    try std.testing.expectEqual(@as(usize, 2), commonPrefix(&tokens, &.{ 5, 6 }));
+    try std.testing.expectEqual(@as(usize, 0), commonPrefix(&tokens, &.{ 9, 5 }));
+    try std.testing.expectEqual(@as(usize, 0), commonPrefix(&.{}, &.{ 1, 2 }));
+
+    // Gate: strictly more than 10% of the NEW prompt must match.
+    try std.testing.expect(!similarEnough(0, 10));
+    try std.testing.expect(!similarEnough(1, 10));
+    try std.testing.expect(similarEnough(2, 10));
+    try std.testing.expect(similarEnough(1, 9));
+    try std.testing.expect(!similarEnough(10, 100));
+    try std.testing.expect(similarEnough(11, 100));
+}

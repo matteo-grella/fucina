@@ -1,7 +1,7 @@
 <!-- docs-nav: group="Memory & compute" title="Engram" weight=43 -->
 # Engram: conditional n-gram memory
 
-Design record for `src/llm/engram.zig` (public as `llm.research.engram`) —
+Design record for `src/models/research/engram.zig` (public as `models.research.engram`) —
 Fucina's port of DeepSeek's Engram
 (arXiv 2601.07372; semantics reference `deepseek-ai/Engram`
 `engram_demo_v1.py`, pinned in `tools/fetch_refs.sh`). API surface:
@@ -84,7 +84,7 @@ attention needs the KV — Engram needs only the tokens.
   (scalar + SIMD forward and both backwards, streaming-state validation
   at `dilation·(taps−1)` rows). Dilated depthwise is pinned by hand
   values and by a grouped-conv equivalence test including gradients.
-- **`src/llm/engram.zig`**: `HashPlan` (geometry + hash, tensor-op and
+- **`src/models/research/engram.zig`**: `HashPlan` (geometry + hash, tensor-op and
   host paths), `Layer` (parameters + forward + `forwardResidual` +
   ShortConv streaming state), `Engram` (whole-model wrapper, registry,
   state dict). ~40 lines of integration surface for a model family:
@@ -97,7 +97,7 @@ attention needs the KV — Engram needs only the tokens.
   soon as `value_w` moves). This is the cheap-experiment mode: frozen
   base + LoRA + Engram tables, no pretraining required.
 - **Parity**: `tools/gen_engram_goldens.py` (independent PyTorch/numpy
-  implementation, torch 2.12) emits `src/llm/engram_golden_tests.zig`.
+  implementation, torch 2.12) emits `src/models/research/engram_golden_tests.zig`.
   The integer geometry — reference-drawn multipliers, the prime chain,
   compression, and every hash row — compares EXACTLY; forward output,
   loss, and the gradients of the hidden states and every parameter

@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const dump = @import("dump.zig");
 const lm = @import("lm.zig");
@@ -133,7 +133,7 @@ test "OMNIVOICE_PARITY: prompt ids match the tts-design goldens exactly" {
     defer file.deinit();
 
     const config = try lm.Config.fromGguf(&file);
-    var tok = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tok = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tok.deinit();
 
     // The voice-design reference run: instruct resolved through

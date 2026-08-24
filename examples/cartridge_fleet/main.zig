@@ -44,18 +44,18 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const llm = @import("fucina_llm");
+const models = @import("fucina_models");
 
 const optim = fucina.optim;
-const cartridge = llm.cartridge;
-const fleet_mod = llm.cartridge_fleet;
+const cartridge = models.text.cartridge;
+const fleet_mod = models.text.cartridge_fleet;
 
 const default_model = "models/Qwen3-0.6B-f16.gguf";
 
 /// No LoRA targets: the base model stays fully frozen; cartridge rows are
 /// the only parameters.
-const Trainer = llm.qwen3.train.Trainer(.{ .q = false, .v = false });
-const GemmaTrainer = llm.gemma.train.Trainer(.{ .q = false, .v = false });
+const Trainer = models.qwen3.train.Trainer(.{ .q = false, .v = false });
+const GemmaTrainer = models.gemma.train.Trainer(.{ .q = false, .v = false });
 
 /// Chat-template strings the prompt builders splice (runtime values so one
 /// engine serves both architectures — the base cartridge CLI's Tpl).
@@ -88,13 +88,13 @@ const gemma4_tpl = Tpl{
 
 /// Duck-typed per-model KV-cache construction: uniform-geometry models
 /// (qwen3) size from config, per-layer-geometry models (gemma4) from geom.
-fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !llm.kv_cache.KvCache {
+fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !models.text.kv_cache.KvCache {
     const M = @TypeOf(model.*);
     if (comptime @hasField(M, "geom")) {
-        return llm.kv_cache.KvCache.initPerLayer(ctx, model.geom.kv_heads, model.geom.head_dim, capacity);
+        return models.text.kv_cache.KvCache.initPerLayer(ctx, model.geom.kv_heads, model.geom.head_dim, capacity);
     }
     const cfg = model.config;
-    return llm.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
+    return models.text.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
 }
 
 /// Reference synthesizers/self_study.py SYSTEM_PROMPT_TEMPLATE.
@@ -294,14 +294,14 @@ pub fn main(init: std.process.Init) !void {
     var file = try fucina.gguf.File.loadMmap(allocator, io, opts.model_path);
     const arch = file.getString("general.architecture") orelse "";
     if (std.mem.startsWith(u8, arch, "gemma")) {
-        var config = try llm.gemma.model.Config.fromGguf(&file);
+        var config = try models.gemma.model.Config.fromGguf(&file);
         // Zero-copy expert borrow: the trainer's MoE arm (self-study
         // backward AND the query-embedding forward) consumes raw expert
         // blocks (RawMoeWeightsRequired otherwise).
         config.borrow_experts = true;
-        var model = try llm.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
+        var model = try models.gemma.model.Model.loadGgufFromFile(&ctx, &file, config);
         defer model.deinit();
-        var tokenizer = try llm.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+        var tokenizer = try models.text.spm_tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
         defer tokenizer.deinit();
         file.deinit();
         try stdout.print("model: {s} (gemma4, {d} layers, hidden {d})\n", .{ opts.model_path, config.num_layers, config.hidden_size });
@@ -315,14 +315,14 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!std.mem.startsWith(u8, arch, "qwen3")) {
         try stdout.print(
-            "fleet training/serving supports qwen3 and gemma4 (got architecture '{s}'); composed serving for other families goes through llm.cartridge.writeComposedToCache\n",
+            "fleet training/serving supports qwen3 and gemma4 (got architecture '{s}'); composed serving for other families goes through models.text.cartridge.writeComposedToCache\n",
             .{arch},
         );
         return error.UnsupportedArchitecture;
     }
-    var model = try llm.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try llm.qwen3.model.Config.fromGguf(&file));
+    var model = try models.qwen3.model.Model.loadGgufFromFile(&ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
     defer model.deinit();
-    var tokenizer = try llm.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
+    var tokenizer = try models.text.tokenizer.Tokenizer.initFromGguf(allocator, &file, .{});
     defer tokenizer.deinit();
     file.deinit();
     try stdout.print("model: {s} ({d} layers, hidden {d}, kv_heads {d}, head_dim {d})\n", .{
@@ -550,7 +550,7 @@ fn runFleetTrain(
 
     // Generation caches for the accumulation group.
     const capacity = opts.chunk_max + opts.max_q + opts.max_a + 256;
-    const caches = try allocator.alloc(llm.kv_cache.KvCache, opts.accum);
+    const caches = try allocator.alloc(models.text.kv_cache.KvCache, opts.accum);
     defer allocator.free(caches);
     var caches_inited: usize = 0;
     defer for (caches[0..caches_inited]) |*c| c.deinit();
@@ -1113,7 +1113,7 @@ fn synthesizeGroup(
     trainer: anytype,
     tpl: Tpl,
     comptime supports_packing: bool,
-    caches: []llm.kv_cache.KvCache,
+    caches: []models.text.kv_cache.KvCache,
     doc: *const Doc,
     rand: std.Random,
     opts: Options,
@@ -1130,7 +1130,7 @@ fn synthesizeGroup(
     // with the reference-style provenance line).
     const sys_texts = try arena.alloc([]u8, n);
     const a_prompts = try arena.alloc([]const usize, n);
-    const a_cfgs = try arena.alloc(llm.sampler.Config, n);
+    const a_cfgs = try arena.alloc(models.text.sampler.Config, n);
     for (0..n) |i| {
         const chunk_max = @min(opts.chunk_max, doc.ids.len);
         const chunk_len = rand.intRangeAtMost(usize, @min(opts.chunk_min, chunk_max), chunk_max);
@@ -1152,7 +1152,7 @@ fn synthesizeGroup(
 
     // Bot B: greedy answers WITH each chunk in context.
     const b_prompts = try arena.alloc([]const usize, n);
-    const b_cfgs = try arena.alloc(llm.sampler.Config, n);
+    const b_cfgs = try arena.alloc(models.text.sampler.Config, n);
     const convo_prefix_ids = try arena.alloc([]usize, n);
     const questions = try arena.alloc([]const u8, n);
     for (0..n) |i| {
@@ -1298,11 +1298,11 @@ fn generateIdsBatch(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
     model: anytype,
-    caches: []llm.kv_cache.KvCache,
+    caches: []models.text.kv_cache.KvCache,
     prompts: []const []const usize,
     max_new: usize,
     stop_id: ?usize,
-    cfgs: []const llm.sampler.Config,
+    cfgs: []const models.text.sampler.Config,
 ) ![][]usize {
     const n = prompts.len;
     std.debug.assert(n > 0 and caches.len >= n and cfgs.len == n and max_new > 0);
@@ -1316,13 +1316,13 @@ fn generateIdsBatch(
         built += 1;
     }
 
-    const samplers = try allocator.alloc(llm.sampler.Sampler, n);
+    const samplers = try allocator.alloc(models.text.sampler.Sampler, n);
     defer allocator.free(samplers);
     const lens = try allocator.alloc(usize, n);
     defer allocator.free(lens);
     const active = try allocator.alloc(usize, n);
     defer allocator.free(active);
-    const batch_caches = try allocator.alloc(*llm.kv_cache.KvCache, n);
+    const batch_caches = try allocator.alloc(*models.text.kv_cache.KvCache, n);
     defer allocator.free(batch_caches);
     const batch_tokens = try allocator.alloc(usize, n);
     defer allocator.free(batch_tokens);
@@ -1331,7 +1331,7 @@ fn generateIdsBatch(
     for (0..n) |i| {
         if (prompts[i].len + max_new > caches[i].capacity) return error.PromptTooLong;
         caches[i].reset();
-        samplers[i] = llm.sampler.Sampler.init(cfgs[i]);
+        samplers[i] = models.text.sampler.Sampler.init(cfgs[i]);
         lens[i] = 0;
         var logits = try model.forwardStep(ctx, &caches[i], prompts[i], 0);
         defer logits.deinit();
@@ -1382,13 +1382,13 @@ fn generateIds(
     ctx: *fucina.ExecContext,
     allocator: std.mem.Allocator,
     model: anytype,
-    cache: *llm.kv_cache.KvCache,
+    cache: *models.text.kv_cache.KvCache,
     prompt_ids: []const usize,
     max_new: usize,
     stop_id: ?usize,
 ) ![]usize {
     if (cache.len() + prompt_ids.len + max_new > cache.capacity) return error.PromptTooLong;
-    var sampler = llm.sampler.Sampler.init(.{});
+    var sampler = models.text.sampler.Sampler.init(.{});
 
     const out = try allocator.alloc(usize, max_new);
     errdefer allocator.free(out);

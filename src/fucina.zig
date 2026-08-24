@@ -13,7 +13,7 @@
 //!   5. a scalar converter bridging storage formats (`bf16ToF32`).
 //!
 //! Everything else earns a namespace, not a root name. `internal` is the
-//! sibling-module seam (exact core type identity for `fucina_llm`), not
+//! sibling-module seam (exact core type identity for `fucina_models`), not
 //! public API; the raw tensor type is deliberately unexported (see the
 //! comptime guard below). Layer stack and band map: docs/ARCHITECTURE.md.
 
@@ -262,7 +262,7 @@ pub const simd = struct {
 /// Hadamard rotation, f16 round trip) over host slices (§10.10).
 pub const fakequant = exec.fakequant;
 
-/// Internal surface for sibling modules such as `fucina_llm` that need exact
+/// Internal surface for sibling modules such as `fucina_models` that need exact
 /// core type identity without importing a second copy of backend/exec files.
 pub const internal = struct {
     pub const backend_mod = backend;
