@@ -1,3 +1,9 @@
+//! Pointwise ops: arithmetic and comparisons, activations and their fused
+//! gated forms, masks/select, integer and logical families, the in-place
+//! (`*InPlace`) and ownership-transfer (`take*`) variants, dropout, and
+//! the per-channel affine/PReLU passes. Domain module: every op receives
+//! an explicit `*ExecContext`; `exec.zig`'s struct body carries the
+//! public aliases.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const kernels = backend_mod.kernels;

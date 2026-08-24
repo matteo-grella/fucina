@@ -28,32 +28,7 @@ pub const GradState = ag_core.GradState;
 const parallel_map_min_len: usize = 1 << 17;
 
 pub fn parallelMap(ctx: *ExecContext, n: usize, context: anytype, comptime runRange: fn (@TypeOf(context), usize, usize) void) void {
-    if (n >= parallel_map_min_len) {
-        if (ctx.workPool()) |pool| {
-            const Ctx = @TypeOf(context);
-            const Task = struct {
-                context: Ctx,
-                start: usize,
-                end: usize,
-                fn run(task: *const @This()) void {
-                    runRange(task.context, task.start, task.end);
-                }
-            };
-            const task_count = @min(
-                parallel.cpuThreadCount(parallel.vector_max_threads),
-                1 + n / parallel_map_min_len,
-            );
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]Task = undefined;
-                for (0..task_count) |i| {
-                    tasks[i] = .{ .context = context, .start = i * n / task_count, .end = (i + 1) * n / task_count };
-                }
-                pool.parallelChunks(Task, tasks[0..task_count], Task.run);
-                return;
-            }
-        }
-    }
-    runRange(context, 0, n);
+    ctx.parallelMap(n, parallel_map_min_len, context, runRange);
 }
 
 /// Fixed chunk length of the deterministic norm reductions (`sumSquares`):

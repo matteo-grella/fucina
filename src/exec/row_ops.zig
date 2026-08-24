@@ -1,3 +1,11 @@
+//! Row-kernel task bodies: the worker-thread forms of the fused row passes
+//! (softmax/log-softmax/logsumexp rows, layer/RMS-norm rows and their
+//! backward stats, cross-entropy rows, dropout, scatter-add, gated
+//! activations, and the fused activation+re-quantize passes the quantized
+//! matmuls chain onto). The `Task` structs here are dispatched by the
+//! domain modules that own the ops (`softmax.zig`, `norm.zig`, `loss.zig`,
+//! `quant_matmul.zig`, ...); this file owns the per-row loop bodies they
+//! share, not the ops themselves.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");

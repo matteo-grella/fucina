@@ -247,6 +247,35 @@ pub fn dispatchRangeCapped(
     return true;
 }
 
+/// Chunked parallel map with a serial fallback: split `[0, n)` across the
+/// worker team (at most one task per `min_len` items) and run
+/// `runRange(context, start, end)` on each chunk; run the whole range
+/// serially when the team is absent or the split is not worth it. The
+/// chunk grid depends only on `(n, task count)`; whether that makes the
+/// results bitwise thread-count-invariant is the kernel's property to
+/// state (the optimizer and ES elementwise kernels do).
+pub fn parallelMap(
+    self: *ExecContext,
+    n: usize,
+    min_len: usize,
+    context: anytype,
+    comptime runRange: fn (@TypeOf(context), usize, usize) void,
+) void {
+    if (n >= min_len) {
+        const Task = struct {
+            context: @TypeOf(context),
+            start: usize = 0,
+            end: usize = 0,
+            fn run(task: *const @This()) void {
+                runRange(task.context, task.start, task.end);
+            }
+        };
+        const base = Task{ .context = context };
+        if (self.dispatchRangeCapped(Task, "start", "end", base, n, 1 + n / min_len, Task.run)) return;
+    }
+    runRange(context, 0, n);
+}
+
 fn tryDotBackwardWorker(self: *ExecContext) !*thread.OneShotWorker {
     self.dot_backward_worker_mutex.lock();
     defer self.dot_backward_worker_mutex.unlock();

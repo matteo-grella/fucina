@@ -1,3 +1,7 @@
+//! Dense contractions: `dot`/`matmul` and the transpose variants, batched
+//! (`bmm*`), the packed dense-RHS arms, the f16/bf16 TransB streams, and
+//! the eager GPU GEMM dispatch with its accelerator-fence bookkeeping.
+//! Domain module: every op receives an explicit `*ExecContext`.
 const std = @import("std");
 const build_options = @import("build_options");
 const accelerator = @import("../accelerator.zig");

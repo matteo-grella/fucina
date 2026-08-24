@@ -1,3 +1,8 @@
+//! Fused attention: grouped causal forward (f32/f16/q8_0 KV arms, head- and
+//! query-tile task shapes), the tiled backward, its BLAS-strip variant
+//! (behind `backend.blas.available` and the `attn_bwd_blas` gate), and the
+//! GPU-offload dispatch. Domain module: every op receives an explicit
+//! `*ExecContext`; `exec.zig`'s struct body carries the public aliases.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");

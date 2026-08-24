@@ -211,6 +211,7 @@ pub const ExecContext = struct {
     pub const dotBackwardWorker = exec_runtime.dotBackwardWorker;
     pub const dispatchRange = exec_runtime.dispatchRange;
     pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;
+    pub const parallelMap = exec_runtime.parallelMap;
 
     pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass {
         if (x.isScalar()) return .scalar;
@@ -238,7 +239,7 @@ pub const ExecContext = struct {
     pub const enableNativeMatmulPoolForWork = exec_runtime.enableNativeMatmulPoolForWork;
 
     // ----------------------------------------------------------------------
-    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)
+    // elementwise: pointwise arithmetic, activations, masks (exec/elementwise.zig)
     // ----------------------------------------------------------------------
     pub const elementwise = exec_elementwise.elementwise;
     pub const add = exec_elementwise.add;
@@ -257,11 +258,6 @@ pub const ExecContext = struct {
     pub const swiglu = exec_elementwise.swiglu;
     pub const geglu = exec_elementwise.geglu;
     pub const splitSwiGlu = exec_elementwise.splitSwiGlu;
-    pub const relposShift = exec_gather_scatter.relposShift;
-
-    // ----------------------------------------------------------------------
-    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
-    // ----------------------------------------------------------------------
     pub const splitGlu = exec_elementwise.splitGlu;
     pub const splitSwiGluBackward = exec_elementwise.splitSwiGluBackward;
     pub const splitGluBackward = exec_elementwise.splitGluBackward;
@@ -290,73 +286,10 @@ pub const ExecContext = struct {
     pub const addAxisVectorUnaryInPlace = exec_elementwise.addAxisVectorUnaryInPlace;
     pub const dropoutForward = exec_elementwise.dropoutForward;
     pub const dropoutBackward = exec_elementwise.dropoutBackward;
-
-    // ----------------------------------------------------------------------
-    // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
-    // ----------------------------------------------------------------------
-    pub const cast = exec_convert.cast;
-    pub const castF32RowsToF16Into = exec_convert.castF32RowsToF16Into;
-    pub const quantizeF32RowsToQ8_0Into = exec_convert.quantizeF32RowsToQ8_0Into;
-    pub const dequantizeQ8_0RowsInto = exec_convert.dequantizeQ8_0RowsInto;
-
-    // ----------------------------------------------------------------------
-    // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)
-    // ----------------------------------------------------------------------
-    pub const causalDepthwiseConv1d = exec_conv.causalDepthwiseConv1d;
-    pub const causalDepthwiseConv1dBackwardInput = exec_conv.causalDepthwiseConv1dBackwardInput;
-    pub const causalDepthwiseConv1dBackwardKernel = exec_conv.causalDepthwiseConv1dBackwardKernel;
-    pub const causalConv1d = exec_conv.causalConv1d;
-    pub const conv2d = exec_conv.conv2d;
-    pub const conv2dRelu = exec_conv.conv2dRelu;
-
-    /// Load-time prepared Winograd conv weight planes; `.empty` is valid and
-    /// inert on every conv route. See `exec/conv.zig PreparedConvWeights`.
-    pub const PreparedConvWeights = exec_conv.PreparedConvWeights;
-
-    pub const prepareConv2dWeights = exec_conv.prepareConv2dWeights;
-    pub const conv2dPrepared = exec_conv.conv2dPrepared;
-    pub const conv2dPreparedRelu = exec_conv.conv2dPreparedRelu;
-    pub const conv2dBackwardInput = exec_conv.conv2dBackwardInput;
-    pub const conv2dBackwardWeight = exec_conv.conv2dBackwardWeight;
-    pub const unfold = exec_conv.unfold;
-    pub const fold = exec_conv.fold;
-
-    // ----------------------------------------------------------------------
-    // pool: 2-D pooling and upsampling (exec/pool.zig)
-    // ----------------------------------------------------------------------
-    pub const maxPool2d = exec_pool.maxPool2d;
-    pub const avgPool2d = exec_pool.avgPool2d;
-    pub const maxPool2dBackward = exec_pool.maxPool2dBackward;
-    pub const avgPool2dBackward = exec_pool.avgPool2dBackward;
-    pub const upsample2xNearest = exec_pool.upsample2xNearest;
-    pub const upsample2xNearestBackward = exec_pool.upsample2xNearestBackward;
-
-    // ----------------------------------------------------------------------
-    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
-    // ----------------------------------------------------------------------
     pub const preluChannels = exec_elementwise.preluChannels;
     pub const preluChannelsBackwardInput = exec_elementwise.preluChannelsBackwardInput;
     pub const preluChannelsBackwardAlpha = exec_elementwise.preluChannelsBackwardAlpha;
     pub const channelAffine = exec_elementwise.channelAffine;
-
-    // ----------------------------------------------------------------------
-    // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)  [continued]
-    // ----------------------------------------------------------------------
-    pub const causalConv1dBackwardInput = exec_conv.causalConv1dBackwardInput;
-    pub const causalConv1dBackwardWeight = exec_conv.causalConv1dBackwardWeight;
-    pub const groupedCausalConv1d = exec_conv.groupedCausalConv1d;
-    pub const groupedCausalConv1dBackwardInput = exec_conv.groupedCausalConv1dBackwardInput;
-    pub const groupedCausalConv1dBackwardWeight = exec_conv.groupedCausalConv1dBackwardWeight;
-    pub const conv1d = exec_conv.conv1d;
-    pub const conv1dBackwardInput = exec_conv.conv1dBackwardInput;
-    pub const conv1dBackwardWeight = exec_conv.conv1dBackwardWeight;
-    pub const col2im1d = exec_conv.col2im1d;
-    pub const col2im1dBackward = exec_conv.col2im1dBackward;
-    pub const convTranspose1d = exec_conv.convTranspose1d;
-
-    // ----------------------------------------------------------------------
-    // elementwise: pointwise arithmetic, activations, masks, casts (exec/elementwise.zig)  [continued]
-    // ----------------------------------------------------------------------
     pub const unary = exec_elementwise.unary;
     pub const snakeRows = exec_elementwise.snakeRows;
     pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
@@ -377,9 +310,59 @@ pub const ExecContext = struct {
     pub const gelu = exec_elementwise.gelu;
     pub const quickGelu = exec_elementwise.quickGelu;
     pub const clamp = exec_elementwise.clamp;
+    pub const reduceBroadcast = exec_elementwise.reduceBroadcast;
 
     // ----------------------------------------------------------------------
-    // reduce: sums, products, means, argmin/argmax, scans (exec/reduce.zig)
+    // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
+    // ----------------------------------------------------------------------
+    pub const cast = exec_convert.cast;
+    pub const castF32RowsToF16Into = exec_convert.castF32RowsToF16Into;
+    pub const quantizeF32RowsToQ8_0Into = exec_convert.quantizeF32RowsToQ8_0Into;
+    pub const dequantizeQ8_0RowsInto = exec_convert.dequantizeQ8_0RowsInto;
+
+    // ----------------------------------------------------------------------
+    // conv: 1-D/2-D convolutions, im2col/col2im, Winograd (exec/conv.zig)
+    // ----------------------------------------------------------------------
+    pub const causalDepthwiseConv1d = exec_conv.causalDepthwiseConv1d;
+    pub const causalDepthwiseConv1dBackwardInput = exec_conv.causalDepthwiseConv1dBackwardInput;
+    pub const causalDepthwiseConv1dBackwardKernel = exec_conv.causalDepthwiseConv1dBackwardKernel;
+    pub const causalConv1d = exec_conv.causalConv1d;
+    pub const conv2d = exec_conv.conv2d;
+    pub const conv2dRelu = exec_conv.conv2dRelu;
+    /// Load-time prepared Winograd conv weight planes; `.empty` is valid and
+    /// inert on every conv route. See `exec/conv.zig PreparedConvWeights`.
+    pub const PreparedConvWeights = exec_conv.PreparedConvWeights;
+    pub const prepareConv2dWeights = exec_conv.prepareConv2dWeights;
+    pub const conv2dPrepared = exec_conv.conv2dPrepared;
+    pub const conv2dPreparedRelu = exec_conv.conv2dPreparedRelu;
+    pub const conv2dBackwardInput = exec_conv.conv2dBackwardInput;
+    pub const conv2dBackwardWeight = exec_conv.conv2dBackwardWeight;
+    pub const unfold = exec_conv.unfold;
+    pub const fold = exec_conv.fold;
+    pub const causalConv1dBackwardInput = exec_conv.causalConv1dBackwardInput;
+    pub const causalConv1dBackwardWeight = exec_conv.causalConv1dBackwardWeight;
+    pub const groupedCausalConv1d = exec_conv.groupedCausalConv1d;
+    pub const groupedCausalConv1dBackwardInput = exec_conv.groupedCausalConv1dBackwardInput;
+    pub const groupedCausalConv1dBackwardWeight = exec_conv.groupedCausalConv1dBackwardWeight;
+    pub const conv1d = exec_conv.conv1d;
+    pub const conv1dBackwardInput = exec_conv.conv1dBackwardInput;
+    pub const conv1dBackwardWeight = exec_conv.conv1dBackwardWeight;
+    pub const col2im1d = exec_conv.col2im1d;
+    pub const col2im1dBackward = exec_conv.col2im1dBackward;
+    pub const convTranspose1d = exec_conv.convTranspose1d;
+
+    // ----------------------------------------------------------------------
+    // pool: 2-D pooling and upsampling (exec/pool.zig)
+    // ----------------------------------------------------------------------
+    pub const maxPool2d = exec_pool.maxPool2d;
+    pub const avgPool2d = exec_pool.avgPool2d;
+    pub const maxPool2dBackward = exec_pool.maxPool2dBackward;
+    pub const avgPool2dBackward = exec_pool.avgPool2dBackward;
+    pub const upsample2xNearest = exec_pool.upsample2xNearest;
+    pub const upsample2xNearestBackward = exec_pool.upsample2xNearestBackward;
+
+    // ----------------------------------------------------------------------
+    // reduce: sums, products, means, scans, recurrences (exec/reduce.zig)
     // ----------------------------------------------------------------------
     pub const sum = exec_reduce.sum;
     pub const sumAxis = exec_reduce.sumAxis;
@@ -398,6 +381,7 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)
     // ----------------------------------------------------------------------
+    pub const relposShift = exec_gather_scatter.relposShift;
     pub const narrowAxis = exec_gather_scatter.narrowAxis;
     pub const concatAxis = exec_gather_scatter.concatAxis;
     pub const concatQuantizedRows = exec_gather_scatter.concatQuantizedRows;
@@ -408,9 +392,13 @@ pub const ExecContext = struct {
     pub const zeroSlice = exec_gather_scatter.zeroSlice;
     pub const zeroRows = exec_gather_scatter.zeroRows;
     pub const sliceGradient = exec_gather_scatter.sliceGradient;
+    pub const scatterAdd = exec_gather_scatter.scatterAdd;
+    pub const takeAlong = exec_gather_scatter.takeAlong;
+    pub const scatterAddAlong = exec_gather_scatter.scatterAddAlong;
+    pub const scatterAlong = exec_gather_scatter.scatterAlong;
 
     // ----------------------------------------------------------------------
-    // stats: normalization statistics, standardize, moments (exec/stats.zig)
+    // stats: extrema, moments, standardize, top-k, sort (exec/stats.zig)
     // ----------------------------------------------------------------------
     pub const argmax = exec_stats.argmax;
     pub const maxAxis = exec_stats.maxAxis;
@@ -423,15 +411,11 @@ pub const ExecContext = struct {
     pub const standardizeBackward = exec_stats.standardizeBackward;
     pub const topK = exec_stats.topK;
     pub const sort = exec_stats.sort;
-    pub const routerTopK = exec_topk.routerTopK;
 
     // ----------------------------------------------------------------------
-    // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)  [continued]
+    // router top-k: the MoE routing selector (exec/topk.zig)
     // ----------------------------------------------------------------------
-    pub const scatterAdd = exec_gather_scatter.scatterAdd;
-    pub const takeAlong = exec_gather_scatter.takeAlong;
-    pub const scatterAddAlong = exec_gather_scatter.scatterAddAlong;
-    pub const scatterAlong = exec_gather_scatter.scatterAlong;
+    pub const routerTopK = exec_topk.routerTopK;
 
     // ----------------------------------------------------------------------
     // softmax family (exec/softmax.zig)
@@ -502,18 +486,29 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const groupedAttention = exec_attention.groupedAttention;
     pub const groupedAttentionBackward = exec_attention.groupedAttentionBackward;
-    pub const dot = exec_matmul.dot;
-    pub const matmul = exec_matmul.matmul;
-    pub const matmul2DAdd = exec_matmul.matmul2DAdd;
+
+    // ----------------------------------------------------------------------
+    // delta attention: the gated-DeltaNet recurrence (exec/delta_attention.zig)
+    // ----------------------------------------------------------------------
     pub const kdaRecurrent = delta_attention.kdaRecurrent;
 
     // ----------------------------------------------------------------------
     // matmul: dense contractions, batched and packed (exec/matmul.zig)
     // ----------------------------------------------------------------------
+    pub const dot = exec_matmul.dot;
+    pub const matmul = exec_matmul.matmul;
+    pub const matmul2DAdd = exec_matmul.matmul2DAdd;
     pub const packDenseMatmulRhs = exec_matmul.packDenseMatmulRhs;
     pub const matmul2DWithPackedDenseRhs = exec_matmul.matmul2DWithPackedDenseRhs;
     pub const matmul2DWithPackedDenseRhsInto = exec_matmul.matmul2DWithPackedDenseRhsInto;
     pub const matmul2DWithPackedRhs = exec_matmul.matmul2DWithPackedRhs;
+    pub const matmulTransA = exec_matmul.matmulTransA;
+    pub const matmulTransB = exec_matmul.matmulTransB;
+    pub const matmulTransB2DWithF16Rhs = exec_matmul.matmulTransB2DWithF16Rhs;
+    pub const matmulTransB2DWithBf16Rhs = exec_matmul.matmulTransB2DWithBf16Rhs;
+    pub const bmm = exec_matmul.bmm;
+    pub const bmmTransA = exec_matmul.bmmTransA;
+    pub const bmmTransB = exec_matmul.bmmTransB;
 
     // ----------------------------------------------------------------------
     // quantized matmul: dense, packed and fused arms (exec/quant_matmul.zig)
@@ -532,34 +527,27 @@ pub const ExecContext = struct {
     pub const foldedTernaryMatmulGpu = exec_quant_matmul.foldedTernaryMatmulGpu;
     pub const denseQuantMatmulGpuSharedInputBatch = exec_quant_matmul.denseQuantMatmulGpuSharedInputBatch;
 
+    // ----------------------------------------------------------------------
+    // MoE: routing scratch, expert chains, fused gate|up kernels (exec/moe.zig, exec/moe_chain.zig, exec/moe_gu.zig)
+    // ----------------------------------------------------------------------
     /// A Mixture-of-Experts projection: all experts of one layer's gate/up/down
     /// stacked into a single RHS buffer. The implementation lives in exec/moe.zig;
     /// this alias preserves the public ExecContext.MoeRhs surface.
     pub const MoeRhs = exec_moe.MoeRhs;
-
     /// Shared batched-MoE scheduling scaffolding (route plan, phase-chain
     /// machinery, chunk helpers, profile timers). Lives in exec/moe_chain.zig;
     /// exposed as an ExecContext decl so the gemma MoE engines at the models
     /// layer reach the exact same types through the `fucina` root.
     pub const moe_chain = exec_moe_chain;
-
     /// Fused gate|up MoE expert kernels over raw GGUF stack layouts
     /// (`exec/moe_gu.zig`): the packed Q6_Kx4/Q8_0x4 arms, the raw
     /// Q6_K/Q4_K block arm, and the GPU batch path. The gemma family's
     /// tagged wrappers live in `models/gemma/moe.zig`.
     pub const moe_gu = exec_moe_gu;
-
-    // ----------------------------------------------------------------------
-    // MoE gate/up: the fused gated-FFN expert kernels (exec/moe_gu.zig)
-    // ----------------------------------------------------------------------
     pub const moeGuDecodePacked = exec_moe_gu.decodePacked;
     pub const moeGuBatchPacked = exec_moe_gu.batchPacked;
     pub const moeGuDecodeRaw = exec_moe_gu.decodeRaw;
     pub const moeGuBatchRaw = exec_moe_gu.batchRaw;
-
-    // ----------------------------------------------------------------------
-    // MoE: expert routing and the batched expert chains (exec/moe.zig)
-    // ----------------------------------------------------------------------
     pub const lockMoeDecodeScratch = exec_moe.lockMoeDecodeScratch;
     pub const unlockMoeDecodeScratch = exec_moe.unlockMoeDecodeScratch;
     pub const MoeDecodeScratchView = exec_moe.MoeDecodeScratchView;
@@ -568,18 +556,6 @@ pub const ExecContext = struct {
     pub const carveMoeDecodeChainScratch = exec_moe.carveMoeDecodeChainScratch;
     pub const moeExpertFfn = exec_moe.moeExpertFfn;
     pub const moeExpertFfnBatch = exec_moe.moeExpertFfnBatch;
-
-    // ----------------------------------------------------------------------
-    // matmul: dense contractions, batched and packed (exec/matmul.zig)  [continued]
-    // ----------------------------------------------------------------------
-    pub const matmulTransA = exec_matmul.matmulTransA;
-    pub const matmulTransB = exec_matmul.matmulTransB;
-    pub const matmulTransB2DWithF16Rhs = exec_matmul.matmulTransB2DWithF16Rhs;
-    pub const matmulTransB2DWithBf16Rhs = exec_matmul.matmulTransB2DWithBf16Rhs;
-    pub const bmm = exec_matmul.bmm;
-    pub const bmmTransA = exec_matmul.bmmTransA;
-    pub const bmmTransB = exec_matmul.bmmTransB;
-    pub const reduceBroadcast = exec_elementwise.reduceBroadcast;
 };
 
 test {
