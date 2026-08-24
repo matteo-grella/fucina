@@ -210,9 +210,9 @@ Three rules fall out of the table:
   `f32` outright).
 - **`widened` is the class of the ops that have an f32 kernel only** (the
   unary family, `leakyRelu`, `clamp`, the scalar ops, `where`/`maskedFill`,
-  `gated`/`splitGated`, float `max`/`min`, `softmax`/`logSoftmax`/
-  `logsumexp`, the scans, `prod`/`varAxis`/`argmax`/`maxAxis`/`minAxis`,
-  `rmsNorm`/`layerNorm`). Their exec entries take the storage dtype and
+  `gated`/`splitGated`, float `max`/`min`, `compare`/`compareScalar`,
+  `softmax`/`logSoftmax`/`logsumexp`, the scans,
+  `prod`/`varAxis`/`argmax`/`maxAxis`/`minAxis`, `rmsNorm`/`layerNorm`). Their exec entries take the storage dtype and
   apply the policy themselves: `ctx.prepareAs(dtype, compute, x)` widens on
   entry, `ctx.storeAs(compute, dtype, value)` narrows once on store
   ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)); the reductions among them return the reduction output

@@ -452,7 +452,7 @@ pub fn supportsIntMath(comptime dtype: DType) bool {
     };
 }
 
-fn isScalarIntegerOrBool(comptime dtype: DType) bool {
+pub fn isScalarIntegerOrBool(comptime dtype: DType) bool {
     return dtype == .bool or supportsIntMath(dtype);
 }
 

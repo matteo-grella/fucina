@@ -947,11 +947,13 @@ pub fn compare(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(.bool) {
-    if (comptime dtype != .f32) return compareInt(ctx, dtype, op, a, b);
-    try tensor.requireSameShape(a, b);
-    var aa = try ctx.prepareContiguous(.f32, a);
+    if (comptime dtype_mod.isScalarIntegerOrBool(dtype)) return compareInt(ctx, dtype, op, a, b);
+    // Floats: the f32 comparison; 16-bit inputs widen (`.widened` policy).
+    const compute = comptime ExecContext.widenedCompute(dtype, "compare");
+    try tensor.requireSameShapeOf(dtype, a, b);
+    var aa = try ctx.prepareAs(dtype, compute, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(.f32, b);
+    var bb = try ctx.prepareAs(dtype, compute, b);
     defer bb.deinit();
     const ap = aa.tensor();
     var out = try ctx.empty(.bool, ap.shape.slice());
@@ -965,15 +967,23 @@ pub fn compare(
 /// Elementwise comparison mask vs a scalar RHS: a `.bool` tensor. Same
 /// IEEE NaN contract as `compare` (any comparison involving NaN is false
 /// except `ne`).
+/// The scalar a `compareScalar` takes: the exact element type for the
+/// integer and bool dtypes, the accumulator (f32) for the float dtypes.
+pub fn CompareScalar(comptime dtype: DType) type {
+    return if (dtype_mod.isScalarIntegerOrBool(dtype)) dtype_mod.Scalar(dtype) else dtype_mod.Accumulator(dtype);
+}
+
 pub fn compareScalar(
     ctx: *ExecContext,
     comptime dtype: DType,
     comptime op: CompareOp,
     x: *const tensor.TensorOf(dtype),
-    scalar_value: dtype_mod.Scalar(dtype),
+    scalar_value: CompareScalar(dtype),
 ) !tensor.TensorOf(.bool) {
-    if (comptime dtype != .f32) return compareIntScalar(ctx, dtype, op, x, scalar_value);
-    var xx = try ctx.prepareContiguous(.f32, x);
+    if (comptime dtype_mod.isScalarIntegerOrBool(dtype)) return compareIntScalar(ctx, dtype, op, x, scalar_value);
+    // Floats: the f32 comparison; 16-bit inputs widen (`.widened` policy).
+    const compute = comptime ExecContext.widenedCompute(dtype, "compareScalar");
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     const xp = xx.tensor();
     var out = try ctx.empty(.bool, xp.shape.slice());

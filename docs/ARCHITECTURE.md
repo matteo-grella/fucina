@@ -245,8 +245,7 @@ Autograd:
   dtype are aliased on the 16-bit branch as constants), and the
   typed-branch mixins in `src/ag/tensor/typed/` (`creation.zig`, `math.zig`
   for the typed reductions and casts, `int.zig`, and the f16/bf16
-  `widened.zig` pair `compare`/`einsum`, whose exec entries are still
-  f32-only);
+  `widened.zig` `einsum`, whose exec lowering is still f32-only);
   `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),

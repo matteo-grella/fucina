@@ -626,6 +626,14 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const clamp = elementwise_ops.clamp;
         pub const clampMin = elementwise_ops.clampMin;
         pub const clampMax = elementwise_ops.clampMax;
+        pub const compare = elementwise_ops.compare;
+        pub const logicalAnd = elementwise_ops.logicalAnd;
+        pub const logicalOr = elementwise_ops.logicalOr;
+        pub const logicalXor = elementwise_ops.logicalXor;
+        pub const logicalNot = elementwise_ops.logicalNot;
+        pub const isnan = elementwise_ops.isnan;
+        pub const isinf = elementwise_ops.isinf;
+        pub const isfinite = elementwise_ops.isfinite;
 
         // ---- softmax, scans, reductions, pad: the shared float mixins (f32 kernels through the widened policy; constants here) ----
         const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
@@ -650,9 +658,8 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
         pub const layerNorm = norm_ops.layerNorm;
 
-        // ---- widened forward math (f16/bf16 only: the ops whose exec entry is still f32-only) ----
+        // ---- widened forward math (f16/bf16 only: einsum, whose exec lowering is still f32-only) ----
         const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
-        pub const compare = widened_ops.compare;
         pub const einsum = widened_ops.einsum;
 
         comptime {
@@ -662,7 +669,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             assertAliased(Self, views, &.{});
             // The i64 seed streams and the .bool band mask are scalar-branch constructors.
             assertAliased(Self, creation_ops, &.{ "randint", "randperm", "bandMask" });
-            // Float comparison widens through f32 (widened.compare).
+            // Float comparison comes from the shared elementwise mixin (math_ops.compare is the exact integer one).
             assertAliased(Self, math_ops, &.{"compare"});
             assertAliased(Self, widened_ops, &.{});
             assertAliased(Self, softmax_ops, &.{});
@@ -676,9 +683,8 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             assertAliased(Self, shape_ops, &.{ "shiftBy", "diagonal", "trace", "diag", "bandPart", "tril", "triu", "diagEmbed", "zeroPad2d", "constantPad2d" });
             // The rest of the elementwise mixin is f32-only: in-place updates on
             // f32 storage, the graph-side cast and consuming ops, dropout, the
-            // channel ops, the elemental escape hatch and its `pow`, and the
-            // comparison family (`compare` widens through f32 here).
-            assertAliased(Self, elementwise_ops, &.{ "addAxisVectorInPlace", "addAxisVectorUnaryInPlace", "addScaledInPlace", "biasAdd", "compare", "logicalAnd", "logicalOr", "logicalXor", "logicalNot", "isnan", "isinf", "isfinite", "prelu", "channelAffine", "to", "takeAddNoGrad", "takeScaleNoGrad", "dropout", "snake", "elementalUnary", "elementalBinary", "pow" });
+            // channel ops, the elemental escape hatch and its `pow`.
+            assertAliased(Self, elementwise_ops, &.{ "addAxisVectorInPlace", "addAxisVectorUnaryInPlace", "addScaledInPlace", "biasAdd", "prelu", "channelAffine", "to", "takeAddNoGrad", "takeScaleNoGrad", "dropout", "snake", "elementalUnary", "elementalBinary", "pow" });
         }
     };
 }

@@ -163,12 +163,15 @@ pub fn Ops(comptime Self: type) type {
             const BoolT = Tensor(.{ .dtype = .bool, .tags = tags });
             const OtherT = @TypeOf(other);
             if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
-                var value = try ctx.compareScalar(.f32, op, self.asRawTensor(), other);
+                var value = try ctx.compareScalar(dtype, op, self.asRawTensor(), other);
                 errdefer value.deinit();
                 return BoolT.fromTensor(ctx, value);
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try ctx.compare(.f32, op, self.asRawTensor(), other_ptr.asRawTensor());
+            comptime {
+                if (TensorObject(@TypeOf(other)).dtype != dtype) @compileError("compare requires matching dtypes; cast explicitly");
+            }
+            var value = try ctx.compare(dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return BoolT.fromTensor(ctx, value);
         }
@@ -199,7 +202,7 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("logical ops take .bool or float operands; cast integer masks explicitly");
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try ctx.logical(op, .f32, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
+            var value = try ctx.logical(op, dtype, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }
@@ -207,7 +210,7 @@ pub fn Ops(comptime Self: type) type {
         /// Elementwise logical NOT over truthiness (see `logicalAnd`):
         /// a `.bool` tensor, true where `self` is zero.
         pub fn logicalNot(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
-            var value = try ctx.logicalNot(.f32, self.asRawTensor());
+            var value = try ctx.logicalNot(dtype, self.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
         }

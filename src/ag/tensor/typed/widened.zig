@@ -1,11 +1,11 @@
-//! The widened forward family of the 16-bit branches (f16/bf16): the two
-//! ops whose exec entry is still f32-only, `compare` and `einsum`. The input
-//! widens to f32, the f32 exec kernel runs, and the result narrows ONCE on
-//! store (einsum) or is the `.bool` mask (compare): the dtype policy in
-//! docs/reference/08, §8.3. Every other former member (the elementwise
-//! family, softmax, the scans, the reductions, pad, the norms) now takes its
-//! dtype at the exec seam and applies the same policy there, so the 16-bit
-//! branches share the f32 mixins for them. f64 is excluded at comptime (f64
+//! The widened forward family of the 16-bit branches (f16/bf16): `einsum`,
+//! the one op whose exec lowering is still f32-only. The operands widen to
+//! f32, the f32 GEMM lowering runs, and the result narrows ONCE on store:
+//! the dtype policy in docs/reference/08, §8.3. Every other former member
+//! (the elementwise and comparison families, softmax, the scans, the
+//! reductions, pad, the norms) now takes its dtype at the exec seam and
+//! applies the same policy there, so the 16-bit branches share the f32
+//! mixins for them. f64 is excluded at comptime (f64
 //! math must stay f64; rounding it through f32 would silently lose
 //! precision). Every op is a no-grad constant. A mixin over the tensor
 //! struct; aliased back onto it in ../../tensor.zig.
@@ -77,29 +77,6 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.cast(.f32, dtype, wide_value);
             errdefer value.deinit();
             return Same(result_tags).fromTensor(ctx, value);
-        }
-
-        /// Comparison through f32 (the widening seam): `.bool` result;
-        /// `other` is a same-dtype tensor or a numeric scalar.
-        pub fn compare(self: *const Self, ctx: *ExecContext, comptime op: exec_mod.CompareOp, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
-            const BoolT = Tensor(.{ .dtype = .bool, .tags = tags });
-            const OtherT = @TypeOf(other);
-            comptime requireWidened("compare");
-            var wide = try ctx.cast(dtype, .f32, self.asRawTensor());
-            defer wide.deinit();
-            if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
-                var value = try ctx.compareScalar(.f32, op, &wide, other);
-                errdefer value.deinit();
-                return BoolT.fromTensor(ctx, value);
-            }
-            const Other = TensorObject(OtherT);
-            comptime if (Other.dtype != dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
-            const other_ptr = tensorObjectPtrFrom(OtherT, &other);
-            var wide_other = try ctx.cast(dtype, .f32, other_ptr.asRawTensor());
-            defer wide_other.deinit();
-            var value = try ctx.compare(.f32, op, &wide, &wide_other);
-            errdefer value.deinit();
-            return BoolT.fromTensor(ctx, value);
         }
 
         /// Widened einsum: both operands widen to f32 and the f32 GEMM

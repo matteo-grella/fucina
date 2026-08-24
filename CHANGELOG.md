@@ -279,6 +279,13 @@ this point; earlier history is `git log`.
   branch gains `rmsNormMulAdd` and the affine `layerNorm`
   (`.{ .weight, .bias }` of its own dtype). f32 callers of the exec
   entries pass `.f32` first; results are bitwise unchanged.
+- `compare(dtype, ...)`/`compareScalar(dtype, ...)` apply the same policy
+  to 16-bit floats (were a compile error outside f32 and the integers);
+  `compareScalar` takes `exec.CompareScalar(dtype)` (the exact element
+  for integers and bool, f32 for the floats). The comparison family
+  (`compare`, `logicalAnd`/`Or`/`Xor`/`Not`, `isnan`/`isinf`/`isfinite`)
+  is served to the f16/bf16 branch by the shared elementwise mixin;
+  `typed/widened.zig` keeps `einsum` only.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
