@@ -2,12 +2,12 @@
 //! FloatTensor struct; aliased back onto it in ../../tensor.zig.
 
 const exec_mod = @import("../../../exec.zig");
-const backward = @import("../../backward.zig");
+const backward_pool = @import("../../backward/pool.zig");
 
 const ExecContext = exec_mod.ExecContext;
-const MaxPool2dBackward = backward.MaxPool2dBackward;
-const AvgPool2dBackward = backward.AvgPool2dBackward;
-const Upsample2xNearestBackward = backward.Upsample2xNearestBackward;
+const MaxPool2dBackward = backward_pool.MaxPool2dBackward;
+const AvgPool2dBackward = backward_pool.AvgPool2dBackward;
+const Upsample2xNearestBackward = backward_pool.Upsample2xNearestBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

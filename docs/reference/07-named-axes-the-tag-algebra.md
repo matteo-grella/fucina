@@ -21,7 +21,7 @@ Two internal modules implement this:
 
 Neither module is re-exported at the public root (`src/fucina.zig`): users
 consume these semantics through `Tensor` methods, and the autograd VJPs
-(`ag/backward.zig`, [§5](05-automatic-differentiation.md)) call the same library directly on raw gradients. This
+(`ag/backward/`, [§5](05-automatic-differentiation.md)) call the same library directly on raw gradients. This
 section is the semantics contract for the public surface and the reference for
 the internal library. Snippets demonstrate the semantics through the public
 facade.
@@ -692,7 +692,7 @@ from `einsumPartTags` ([§7.4](07-named-axes-the-tag-algebra.md#74-result-tag-co
 
 The batch group collapses into a single bmm batch axis before the kernel
 call, so any batch count the operands can represent is lowerable (there is
-no rank-(batch+2) cap). The facade attaches `EinsumBackward` ([§5.8](05-automatic-differentiation.md#58-vjp-coverage-inventory-srcagbackwardzig)), whose two
+no rank-(batch+2) cap). The facade attaches `EinsumBackward` ([§5.8](05-automatic-differentiation.md#58-vjp-coverage-inventory-srcagbackward)), whose two
 branches are einsums themselves — the gradient of a contraction is a
 contraction, so no pointwise fallback exists anywhere on the contraction
 backward paths (`DotBackward` and `ConstRhsDotBackward` delegate to the

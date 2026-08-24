@@ -6,7 +6,7 @@ const tensor_mod = @import("../../../tensor.zig");
 const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_elementwise = @import("../../backward/elementwise.zig");
 const elemental = @import("../../elemental.zig");
 
 const RawTensor = tensor_mod.Tensor;
@@ -17,24 +17,24 @@ const GatedOp = exec_mod.GatedOp;
 const Tag = tags_mod.Tag;
 const replaceTag = tags_mod.replaceTag;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const CastBackward = backward.CastBackward;
-const IdentityBackward = backward.IdentityBackward;
-const ReluBackward = backward.ReluBackward;
-const PreluChannelsBackward = backward.PreluChannelsBackward;
-const ChannelAffineBackward = backward.ChannelAffineBackward;
-const LeakyReluBackward = backward.LeakyReluBackward;
-const UnaryBackward = backward.UnaryBackward;
-const unaryUsesOutput = backward.unaryUsesOutput;
-const ScaleBackward = backward.ScaleBackward;
-const AddScalarBackward = backward.AddScalarBackward;
-const PowScalarBackward = backward.PowScalarBackward;
-const MaskedFillBackward = backward.MaskedFillBackward;
-const WhereBackward = backward.WhereBackward;
-const DropoutBackward = backward.DropoutBackward;
-const ClampBackward = backward.ClampBackward;
-const SplitSwiGluBackward = backward.SplitSwiGluBackward;
-const SplitGluBackward = backward.SplitGluBackward;
-const SnakeBackward = backward.SnakeBackward;
+const CastBackward = backward_elementwise.CastBackward;
+const IdentityBackward = backward_elementwise.IdentityBackward;
+const ReluBackward = backward_elementwise.ReluBackward;
+const PreluChannelsBackward = backward_elementwise.PreluChannelsBackward;
+const ChannelAffineBackward = backward_elementwise.ChannelAffineBackward;
+const LeakyReluBackward = backward_elementwise.LeakyReluBackward;
+const UnaryBackward = backward_elementwise.UnaryBackward;
+const unaryUsesOutput = backward_elementwise.unaryUsesOutput;
+const ScaleBackward = backward_elementwise.ScaleBackward;
+const AddScalarBackward = backward_elementwise.AddScalarBackward;
+const PowScalarBackward = backward_elementwise.PowScalarBackward;
+const MaskedFillBackward = backward_elementwise.MaskedFillBackward;
+const WhereBackward = backward_elementwise.WhereBackward;
+const DropoutBackward = backward_elementwise.DropoutBackward;
+const ClampBackward = backward_elementwise.ClampBackward;
+const SplitSwiGluBackward = backward_elementwise.SplitSwiGluBackward;
+const SplitGluBackward = backward_elementwise.SplitGluBackward;
+const SnakeBackward = backward_elementwise.SnakeBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {
@@ -623,7 +623,7 @@ pub fn Ops(comptime Self: type) type {
         fn unaryDifferentiable(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
             var value = try ctx.unary(op, self.asRawTensor());
             errdefer value.deinit();
-            // Output-derivative ops (see backward.unaryUsesOutput) store the
+            // Output-derivative ops (see backward_elementwise.unaryUsesOutput) store the
             // OUTPUT view: their VJP is transcendental-free in t (tanh' = 1-t²)
             // and exact for the value the SIMD forward actually produced.
             const saved: *const RawTensor = if (comptime unaryUsesOutput(op)) &value else &self.value;

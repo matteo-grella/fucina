@@ -4,13 +4,13 @@
 const std = @import("std");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_rope = @import("../../backward/rope.zig");
 
 const ExecContext = exec_mod.ExecContext;
 const RopeMode = exec_mod.RopeMode;
 const Tag = tags_mod.Tag;
-const RopeBackward = backward.RopeBackward;
-const RopeTableBackward = backward.RopeTableBackward;
+const RopeBackward = backward_rope.RopeBackward;
+const RopeTableBackward = backward_rope.RopeTableBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

@@ -246,9 +246,10 @@ Autograd:
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),
   keeping the import graph acyclic.
-- `src/ag/backward.zig`: re-export facade over the per-domain VJP modules
-  in `src/ag/backward/` (mirroring `src/exec/`'s taxonomy, over a shared
-  `common.zig`); `src/ag/core.zig`:
+- `src/ag/backward/`: the per-domain VJP modules (mirroring `src/exec/`'s
+  taxonomy, over a shared `common.zig`); each facade mixin imports its
+  own domain file directly, and `src/ag/backward.zig` is the test-forwarding
+  root only; `src/ag/core.zig`:
   backward-only gradient state and scheduling engine; `src/ag/checkpoint.zig`:
   activation checkpointing (recompute-in-backward); `src/ag/control.zig`:
   no-grad scopes; `src/ag/custom.zig`: the `customVjp` adapter;
@@ -295,8 +296,9 @@ ag/tensor/*.zig, ag/tensor/float/*.zig
      exec.zig, backend.zig, tensor.zig, dtype.zig, rng.zig
      (never ag/tensor.zig — the facade arrives as a comptime parameter)
 
-ag/backward.zig
-  -> ag/backward/ (per-domain VJP modules + common.zig)
+ag/tensor/**, ag/elemental.zig
+  -> ag/backward/<domain>.zig (per-domain VJP modules + common.zig; the
+     ag/backward.zig root only forwards their tests)
 
 ag/backward/*.zig
   -> ag/core.zig, tags.zig, tag_ops.zig, exec.zig, backend.zig (ops),

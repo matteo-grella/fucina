@@ -47,14 +47,14 @@ const vector_common = @import("../backend.zig").simd;
 
 const Vec = vector_common.Vf32;
 const vec_len = vector_common.vector_len;
-const backward_mod = @import("backward.zig");
+const backward_common = @import("backward/common.zig");
 
 const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 const rawRank = tags_mod.rawRank;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const contiguousForRead = backward_mod.contiguousForRead;
-const reduceGradientToTags = backward_mod.reduceGradientToTags;
+const contiguousForRead = backward_common.contiguousForRead;
+const reduceGradientToTags = backward_common.reduceGradientToTags;
 
 /// `elementalUnary` entry: `TensorT` is the caller's f32 facade tensor type
 /// (input and output). Delegates to `customVjp` with a generated Spec.

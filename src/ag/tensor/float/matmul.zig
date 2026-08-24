@@ -11,7 +11,7 @@ const tag_ops = @import("../../../tag_ops.zig");
 const control = @import("../../control.zig");
 const core = @import("../../core.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_matmul = @import("../../backward/matmul.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
@@ -30,14 +30,14 @@ const alignTensorTo = tag_ops.alignTensorTo;
 const contiguousForReshape = tag_ops.contiguousForReshape;
 const dotResultShape = tag_ops.dotResultShape;
 const productRange = tag_ops.productRange;
-const Matmul2DBackward = backward.Matmul2DBackward;
-const BmmBackward = backward.BmmBackward;
-const DotBackward = backward.DotBackward;
-const AddDotBackward = backward.AddDotBackward;
-const EinsumBackward = backward.EinsumBackward;
-const ConstRhsDotBackward = backward.ConstRhsDotBackward;
-const ConstRhsEinsumBackward = backward.ConstRhsEinsumBackward;
-const TernarySteDotBackward = backward.TernarySteDotBackward;
+const Matmul2DBackward = backward_matmul.Matmul2DBackward;
+const BmmBackward = backward_matmul.BmmBackward;
+const DotBackward = backward_matmul.DotBackward;
+const AddDotBackward = backward_matmul.AddDotBackward;
+const EinsumBackward = backward_matmul.EinsumBackward;
+const ConstRhsDotBackward = backward_matmul.ConstRhsDotBackward;
+const ConstRhsEinsumBackward = backward_matmul.ConstRhsEinsumBackward;
+const TernarySteDotBackward = backward_matmul.TernarySteDotBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

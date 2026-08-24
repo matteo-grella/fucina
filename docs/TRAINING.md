@@ -59,7 +59,7 @@ ownership models:
 - its **GradState** — the autograd graph node. It is **single-owner, not
   refcounted**: the tensor owns it, `tensor.deinit()` destroys it
   unconditionally, and the consumers' backward functions hold **raw
-  `*GradState` pointers** to it (see `src/ag/backward.zig`; the scheduler in
+  `*GradState` pointers** to it (see `src/ag/backward/`; the scheduler in
   `src/ag/core.zig` walks those pointers).
 
 So "why are those freed?" — `deinit` always frees the node, by design: no

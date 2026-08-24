@@ -5,7 +5,7 @@ const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_stats = @import("../../backward/stats.zig");
 const rng = @import("../../../rng.zig");
 
 const RawTensor = tensor_mod.Tensor;
@@ -14,9 +14,9 @@ const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
 const replaceTag = tags_mod.replaceTag;
-const VarBackward = backward.VarBackward;
-const StandardizeBackward = backward.StandardizeBackward;
-const MinMaxBackward = backward.MinMaxBackward;
+const VarBackward = backward_stats.VarBackward;
+const StandardizeBackward = backward_stats.StandardizeBackward;
+const MinMaxBackward = backward_stats.MinMaxBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {
@@ -32,7 +32,7 @@ pub fn Ops(comptime Self: type) type {
         const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
         const validateMaskType = plumbing.validateMaskType;
         const maskedReduceEmpty = plumbing.maskedReduceEmpty;
-        const MaskedMinMaxBackward = backward.MaskedMinMaxBackward;
+        const MaskedMinMaxBackward = backward_stats.MaskedMinMaxBackward;
 
         /// Variance over `tag` (the tag is removed like sum/mean): ddof 0 =
         /// biased estimator (the LayerNorm convention), ddof 1 = unbiased

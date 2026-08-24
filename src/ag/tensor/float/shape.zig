@@ -8,7 +8,7 @@ const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_shape = @import("../../backward/shape.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
@@ -19,8 +19,8 @@ const removeTag = tags_mod.removeTag;
 const replaceTag = tags_mod.replaceTag;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
 const insertTagAt = tags_mod.insertTagAt;
-const PadBackward = backward.PadBackward;
-const StridedViewBackward = backward.StridedViewBackward;
+const PadBackward = backward_shape.PadBackward;
+const StridedViewBackward = backward_shape.StridedViewBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

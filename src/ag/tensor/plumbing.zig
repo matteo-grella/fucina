@@ -10,7 +10,8 @@ const tag_ops = @import("../../tag_ops.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
-const backward = @import("../backward.zig");
+const backward_common = @import("../backward/common.zig");
+const backward_elementwise = @import("../backward/elementwise.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const DType = tensor_mod.DType;
@@ -38,9 +39,9 @@ const dotResultShape = tag_ops.dotResultShape;
 const pointwiseShape = tag_ops.pointwiseShape;
 const productRange = tag_ops.productRange;
 const validateTensorRank = tag_ops.validateTensorRank;
-const PointwiseOp = backward.PointwiseOp;
-const PointwiseBackward = backward.PointwiseBackward;
-const GatedBackward = backward.GatedBackward;
+const PointwiseOp = backward_common.PointwiseOp;
+const PointwiseBackward = backward_elementwise.PointwiseBackward;
+const GatedBackward = backward_elementwise.GatedBackward;
 
 pub fn Mod(comptime ag_tensor: type) type {
     return struct {

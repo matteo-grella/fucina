@@ -7,7 +7,8 @@ const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const core = @import("../../core.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_reduce = @import("../../backward/reduce.zig");
+const backward_stats = @import("../../backward/stats.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const TensorError = tensor_mod.TensorError;
@@ -20,16 +21,16 @@ const removeTag = tags_mod.removeTag;
 const removeTags = tags_mod.removeTags;
 const tagsEqual = tags_mod.tagsEqual;
 const broadcastTensorTo = tag_ops.broadcastTensorTo;
-const SumBackward = backward.SumBackward;
-const MeanBackward = backward.MeanBackward;
-const MaskedSumBackward = backward.MaskedSumBackward;
-const MaskedMeanBackward = backward.MaskedMeanBackward;
-const MaskedMinMaxBackward = backward.MaskedMinMaxBackward;
-const CumsumBackward = backward.CumsumBackward;
-const SegmentSumBackward = backward.SegmentSumBackward;
-const LinearRecurrenceBackward = backward.LinearRecurrenceBackward;
-const ProdBackward = backward.ProdBackward;
-const CumprodBackward = backward.CumprodBackward;
+const SumBackward = backward_reduce.SumBackward;
+const MeanBackward = backward_reduce.MeanBackward;
+const MaskedSumBackward = backward_reduce.MaskedSumBackward;
+const MaskedMeanBackward = backward_reduce.MaskedMeanBackward;
+const MaskedMinMaxBackward = backward_stats.MaskedMinMaxBackward;
+const CumsumBackward = backward_reduce.CumsumBackward;
+const SegmentSumBackward = backward_reduce.SegmentSumBackward;
+const LinearRecurrenceBackward = backward_reduce.LinearRecurrenceBackward;
+const ProdBackward = backward_reduce.ProdBackward;
+const CumprodBackward = backward_reduce.CumprodBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

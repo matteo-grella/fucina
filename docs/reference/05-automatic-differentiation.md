@@ -56,7 +56,7 @@ Every differentiable op funnels through one private tail (`finishOp`): if no
 operand requires gradients — or a `noGrad` scope is active ([§5.4](05-automatic-differentiation.md#54-nograd-scopes-srcagcontrolzig)) — the
 result is a plain no-grad tensor and no graph state is retained; otherwise
 the eager value is wrapped together with a VJP record from
-`src/ag/backward.zig` inside a fresh `GradState`. Because forward always
+`src/ag/backward/` inside a fresh `GradState`. Because forward always
 takes the identical kernel path, training and inference produce identical
 values.
 
@@ -725,10 +725,10 @@ test "customVjp validated by gradcheck" {
 validate both built-in VJPs (conv2d, losses, norms) and custom ops; use it
 for every new `customVjp` spec.
 
-## 5.8 VJP coverage inventory (`src/ag/backward.zig`)
+## 5.8 VJP coverage inventory (`src/ag/backward/`)
 
-Every differentiable facade op attaches a concrete VJP record from
-`src/ag/backward.zig`. Coverage by family (op names as on the facade, [§4](04-tensor-operations.md)):
+Every differentiable facade op attaches a concrete VJP record from its
+domain's file in `src/ag/backward/`. Coverage by family (op names as on the facade, [§4](04-tensor-operations.md)):
 
 | Family | Differentiable ops | Notes |
 |---|---|---|

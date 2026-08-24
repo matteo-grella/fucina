@@ -184,7 +184,11 @@ this point; earlier history is `git log`.
   requires gradients now returns `error.MutableDataRequiresNoGrad`, the
   f32 rule. The dispatcher normalizes the spec before instantiating a
   branch, so every spelling of the same (dtype, tags) is the same type by
-  construction.
+  construction. A comptime check in `src/ag/tensor.zig` asserts that every
+  `pub` entry of every mixin is aliased by the branches that use it (the
+  exception lists there are the complete statement of where the branches
+  differ), and the facade mixins import their VJP domain files directly
+  (`src/ag/backward.zig` no longer carries the 94-line alias table).
 - `ExecContext` cross-entropy: the eight entries collapse into two.
   `crossEntropyLoss(ctx, rank, logits, axis, labels, options)` takes the
   options directly (`.{}` for the defaults); `CrossEntropyOptions` gains

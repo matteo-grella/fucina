@@ -6,7 +6,7 @@ const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_softmax = @import("../../backward/softmax.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -14,10 +14,10 @@ const SoftmaxExtOptions = exec_mod.SoftmaxExtOptions;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
 const broadcastTensorTo = tag_ops.broadcastTensorTo;
-const LogsumexpBackward = backward.LogsumexpBackward;
-const LogSoftmaxBackward = backward.LogSoftmaxBackward;
-const SoftmaxBackward = backward.SoftmaxBackward;
-const SoftmaxExtBackward = backward.SoftmaxExtBackward;
+const LogsumexpBackward = backward_softmax.LogsumexpBackward;
+const LogSoftmaxBackward = backward_softmax.LogSoftmaxBackward;
+const SoftmaxBackward = backward_softmax.SoftmaxBackward;
+const SoftmaxExtBackward = backward_softmax.SoftmaxExtBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

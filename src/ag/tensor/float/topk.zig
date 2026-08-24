@@ -4,13 +4,13 @@
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_topk = @import("../../backward/topk.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const replaceTag = tags_mod.replaceTag;
-const TopKBackward = backward.TopKBackward;
+const TopKBackward = backward_topk.TopKBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

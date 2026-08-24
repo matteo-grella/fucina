@@ -5,21 +5,21 @@ const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const core = @import("../../core.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_conv = @import("../../backward/conv.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
 const Tag = tags_mod.Tag;
 const normalizeTags = tags_mod.normalizeTags;
-const Conv2dBackward = backward.Conv2dBackward;
-const UnfoldBackward = backward.UnfoldBackward;
-const FoldBackward = backward.FoldBackward;
-const CausalDepthwiseConv1dBackward = backward.CausalDepthwiseConv1dBackward;
-const CausalConv1dBackward = backward.CausalConv1dBackward;
-const GroupedCausalConv1dBackward = backward.GroupedCausalConv1dBackward;
-const Conv1dBackward = backward.Conv1dBackward;
-const ConvTranspose1dBackward = backward.ConvTranspose1dBackward;
+const Conv2dBackward = backward_conv.Conv2dBackward;
+const UnfoldBackward = backward_conv.UnfoldBackward;
+const FoldBackward = backward_conv.FoldBackward;
+const CausalDepthwiseConv1dBackward = backward_conv.CausalDepthwiseConv1dBackward;
+const CausalConv1dBackward = backward_conv.CausalConv1dBackward;
+const GroupedCausalConv1dBackward = backward_conv.GroupedCausalConv1dBackward;
+const Conv1dBackward = backward_conv.Conv1dBackward;
+const ConvTranspose1dBackward = backward_conv.ConvTranspose1dBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

@@ -6,20 +6,20 @@ const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const core = @import("../../core.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_norm = @import("../../backward/norm.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
-const RmsNormBackward = backward.RmsNormBackward;
-const RmsNormMulBackward = backward.RmsNormMulBackward;
-const RmsNormMulAddBackward = backward.RmsNormMulAddBackward;
-const RmsNormMulRopeBackward = backward.RmsNormMulRopeBackward;
-const LayerNormBackward = backward.LayerNormBackward;
-const LayerNormAffineBackward = backward.LayerNormAffineBackward;
-const GroupNormBackward = backward.GroupNormBackward;
+const RmsNormBackward = backward_norm.RmsNormBackward;
+const RmsNormMulBackward = backward_norm.RmsNormMulBackward;
+const RmsNormMulAddBackward = backward_norm.RmsNormMulAddBackward;
+const RmsNormMulRopeBackward = backward_norm.RmsNormMulRopeBackward;
+const LayerNormBackward = backward_norm.LayerNormBackward;
+const LayerNormAffineBackward = backward_norm.LayerNormAffineBackward;
+const GroupNormBackward = backward_norm.GroupNormBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

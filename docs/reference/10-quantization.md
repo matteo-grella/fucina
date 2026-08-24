@@ -243,7 +243,7 @@ kernel, and reshapes back. Gradients: the quantized weight is a constant
 (it never receives grad); the LHS gradient is supported and flows through
 the **dequantized** weight — the backward node holds a view of the block
 data and dequantizes it transiently (`ConstRhsDotBackward`,
-`src/ag/backward.zig`). On GPU builds the forward may offload to the
+`src/ag/backward/matmul.zig`). On GPU builds the forward may offload to the
 dense-quant GEMM provider (q4_k/q6_k/q8_0 on Metal, plus q5_k on CUDA, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md))
 with or without gradients: the LHS gradient never reads the forward
 kernel's internals (it flows through the dequantized weight), so the GPU

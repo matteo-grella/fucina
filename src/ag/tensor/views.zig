@@ -18,7 +18,9 @@ const tag_ops = @import("../../tag_ops.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
-const backward = @import("../backward.zig");
+const backward_elementwise = @import("../backward/elementwise.zig");
+const backward_gather_scatter = @import("../backward/gather_scatter.zig");
+const backward_shape = @import("../backward/shape.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
@@ -38,16 +40,16 @@ const replaceTag = tags_mod.replaceTag;
 const insertTagAt = tags_mod.insertTagAt;
 const splitTags = tags_mod.splitTags;
 const mergeTags = tags_mod.mergeTags;
-const IdentityBackward = backward.IdentityBackward;
-const BroadcastBackward = backward.BroadcastBackward;
-const NarrowBackward = backward.NarrowBackward;
-const ConcatBackward = backward.ConcatBackward;
-const ReshapeBackward = backward.ReshapeBackward;
-const AxisViewBackward = backward.AxisViewBackward;
-const StridedViewBackward = backward.StridedViewBackward;
-const GatherBackward = backward.GatherBackward;
-const SetSliceBackward = backward.SetSliceBackward;
-const SetRowsBackward = backward.SetRowsBackward;
+const IdentityBackward = backward_elementwise.IdentityBackward;
+const BroadcastBackward = backward_shape.BroadcastBackward;
+const NarrowBackward = backward_shape.NarrowBackward;
+const ConcatBackward = backward_shape.ConcatBackward;
+const ReshapeBackward = backward_shape.ReshapeBackward;
+const AxisViewBackward = backward_shape.AxisViewBackward;
+const StridedViewBackward = backward_shape.StridedViewBackward;
+const GatherBackward = backward_gather_scatter.GatherBackward;
+const SetSliceBackward = backward_gather_scatter.SetSliceBackward;
+const SetRowsBackward = backward_gather_scatter.SetRowsBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

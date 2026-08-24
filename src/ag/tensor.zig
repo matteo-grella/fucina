@@ -97,6 +97,25 @@ fn validateSpecTags(comptime tags: anytype) void {
     if (tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
 }
 
+/// Every `pub` decl of `Mixin` is aliased on `Self`, except the named
+/// ones: an entry added to a mixin without its alias line is a compile
+/// error here, not a silently thinner branch. The `except` lists below
+/// are the complete statement of where the branches differ.
+fn assertAliased(comptime Self: type, comptime Mixin: type, comptime except: []const []const u8) void {
+    comptime {
+        @setEvalBranchQuota(20_000);
+        for (@typeInfo(Mixin).@"struct".decls) |decl| {
+            var skip = false;
+            for (except) |name| {
+                if (std.mem.eql(u8, name, decl.name)) skip = true;
+            }
+            if (!skip and !@hasDecl(Self, decl.name)) {
+                @compileError(@typeName(Self) ++ " does not alias " ++ @typeName(Mixin) ++ "." ++ decl.name);
+            }
+        }
+    }
+}
+
 /// The differentiable f32 branch.
 fn FloatTensor(comptime tags: anytype) type {
     comptime validateSpecTags(tags);
@@ -412,6 +431,27 @@ fn FloatTensor(comptime tags: anytype) type {
         // ---- attention: fused grouped causal attention ----
         const attention_ops = @import("tensor/float/attention.zig").Ops(Self);
         pub const groupedAttention = attention_ops.groupedAttention;
+
+        comptime {
+            assertAliased(Self, common, &.{});
+            assertAliased(Self, autograd_ops, &.{});
+            assertAliased(Self, views, &.{});
+            assertAliased(Self, creation_ops, &.{});
+            assertAliased(Self, matmul_ops, &.{});
+            assertAliased(Self, elementwise_ops, &.{});
+            assertAliased(Self, conv_ops, &.{});
+            assertAliased(Self, pool_ops, &.{});
+            assertAliased(Self, gather_scatter_ops, &.{});
+            assertAliased(Self, reduce_ops, &.{});
+            assertAliased(Self, stats_ops, &.{});
+            assertAliased(Self, topk_ops, &.{});
+            assertAliased(Self, shape_ops, &.{});
+            assertAliased(Self, softmax_ops, &.{});
+            assertAliased(Self, norm_ops, &.{});
+            assertAliased(Self, loss_ops, &.{});
+            assertAliased(Self, rope_ops, &.{});
+            assertAliased(Self, attention_ops, &.{});
+        }
     };
 }
 
@@ -589,6 +629,18 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const prod = widened_ops.prod;
         pub const variance = widened_ops.variance;
         pub const logsumexp = widened_ops.logsumexp;
+
+        comptime {
+            assertAliased(Self, common, &.{});
+            // A 16-bit tensor is never a loss: no backward entry points.
+            assertAliased(Self, autograd_ops, &.{ "backward", "backwardWithGrad" });
+            assertAliased(Self, views, &.{});
+            // The i64 seed streams and the .bool band mask are scalar-branch constructors.
+            assertAliased(Self, creation_ops, &.{ "randint", "randperm", "bandMask" });
+            // Float comparison widens through f32 (widened.compare).
+            assertAliased(Self, math_ops, &.{"compare"});
+            assertAliased(Self, widened_ops, &.{});
+        }
     };
 }
 
@@ -700,6 +752,16 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const logicalOr = int_ops.logicalOr;
         pub const logicalXor = int_ops.logicalXor;
         pub const logicalNot = int_ops.logicalNot;
+
+        comptime {
+            assertAliased(Self, common, &.{});
+            assertAliased(Self, views, &.{});
+            assertAliased(Self, creation_ops, &.{});
+            // Integer division is explicit (divTrunc/divFloor); mean, dot, and
+            // scaling are float ops.
+            assertAliased(Self, math_ops, &.{ "div", "mean", "dot", "scale", "divScalar" });
+            assertAliased(Self, int_ops, &.{});
+        }
     };
 }
 
@@ -846,6 +908,11 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             var value = try ctx.getRowsQuantized(tensor_dtype, self.asRawTensor(), indices);
             errdefer value.deinit();
             return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+        }
+
+        comptime {
+            // Block dtypes have no scalar element to read out.
+            assertAliased(Self, common, &.{"item"});
         }
     };
 }

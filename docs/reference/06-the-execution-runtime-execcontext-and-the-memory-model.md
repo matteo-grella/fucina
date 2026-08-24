@@ -460,7 +460,7 @@ comptime `DType` first (`add(.f32, rank, a, b)`, `cast(.f32, .f16, x)`,
 `sumAxis(.f32, rank, x, axis)`); ops whose kernels monomorphize on rank or
 axis keep those comptime parameters (`softmax(rank, x, axis)`,
 `conv1d(rank, ...)`). The surviving suffixes each mark a real contract
-difference: `*Backward*` entries are the VJP kernels `src/ag/backward.zig`
+difference: `*Backward*` entries are the VJP kernels `src/ag/backward/`
 dispatches to (`conv2dBackwardInput`, `dropoutBackward`,
 `splitSwiGluBackward`); `*InPlace` mutates its target; `*Masked` computes
 different (mask-selected) math; `*Prepared` consumes precomputed weights;

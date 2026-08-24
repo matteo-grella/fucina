@@ -8,18 +8,18 @@ const tensor_mod = @import("../../../tensor.zig");
 const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_gather_scatter = @import("../../backward/gather_scatter.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const replaceTag = tags_mod.replaceTag;
-const RelposShiftBackward = backward.RelposShiftBackward;
-const IndexAddBackward = backward.IndexAddBackward;
-const TakeAlongBackward = backward.TakeAlongBackward;
-const ScatterAlongBackward = backward.ScatterAlongBackward;
-const ZeroSliceBackward = backward.ZeroSliceBackward;
-const ZeroRowsBackward = backward.ZeroRowsBackward;
+const RelposShiftBackward = backward_gather_scatter.RelposShiftBackward;
+const IndexAddBackward = backward_gather_scatter.IndexAddBackward;
+const TakeAlongBackward = backward_gather_scatter.TakeAlongBackward;
+const ScatterAlongBackward = backward_gather_scatter.ScatterAlongBackward;
+const ZeroSliceBackward = backward_gather_scatter.ZeroSliceBackward;
+const ZeroRowsBackward = backward_gather_scatter.ZeroRowsBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

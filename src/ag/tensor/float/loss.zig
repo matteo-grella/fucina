@@ -4,19 +4,19 @@
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_loss = @import("../../backward/loss.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
-const CrossEntropyExtBackward = backward.CrossEntropyExtBackward;
-const LinearCrossEntropyBackward = backward.LinearCrossEntropyBackward;
-const LinearDistillBackward = backward.LinearDistillBackward;
-const MseLossBackward = backward.MseLossBackward;
-const HuberLossBackward = backward.HuberLossBackward;
-const BceLossBackward = backward.BceLossBackward;
-const KlDivLossBackward = backward.KlDivLossBackward;
+const CrossEntropyExtBackward = backward_loss.CrossEntropyExtBackward;
+const LinearCrossEntropyBackward = backward_loss.LinearCrossEntropyBackward;
+const LinearDistillBackward = backward_loss.LinearDistillBackward;
+const MseLossBackward = backward_loss.MseLossBackward;
+const HuberLossBackward = backward_loss.HuberLossBackward;
+const BceLossBackward = backward_loss.BceLossBackward;
+const KlDivLossBackward = backward_loss.KlDivLossBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

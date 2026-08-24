@@ -10,7 +10,7 @@ const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_common = @import("../../backward/common.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -20,7 +20,7 @@ const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
 const normalizeTags = tags_mod.normalizeTags;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const PointwiseOp = backward.PointwiseOp;
+const PointwiseOp = backward_common.PointwiseOp;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

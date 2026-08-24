@@ -6,14 +6,14 @@ const tensor_mod = @import("../../../tensor.zig");
 const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_attention = @import("../../backward/attention.zig");
 
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const tagsEqual = tags_mod.tagsEqual;
-const GroupedCausalAttentionBackward = backward.GroupedCausalAttentionBackward;
+const GroupedCausalAttentionBackward = backward_attention.GroupedCausalAttentionBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {

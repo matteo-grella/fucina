@@ -12,15 +12,16 @@ const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
-const backward = @import("../../backward.zig");
+const backward_common = @import("../../backward/common.zig");
+const backward_elementwise = @import("../../backward/elementwise.zig");
 
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
 const dotResultTags = tags_mod.dotResultTags;
-const PointwiseOp = backward.PointwiseOp;
-const CastBackward = backward.CastBackward;
+const PointwiseOp = backward_common.PointwiseOp;
+const CastBackward = backward_elementwise.CastBackward;
 
 pub fn Ops(comptime Self: type) type {
     return struct {
