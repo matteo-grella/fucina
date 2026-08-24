@@ -747,44 +747,46 @@ Model families live in subdirectories and are exposed as namespaces:
   adapters, served by `models.qwen3.shine_serving`), and `kimi3.model` (the
   Kimi-K3 port).
 
-Generic helpers stay flat in `src/models/`:
+Shared model machinery and its actual homes (the model-I/O trio lives at
+the `src/` root in the `fucina` module; the text runtime lives under
+`src/models/text/`):
 
-- `weights.zig`: GGUF weight binding — `LinearWeight` over resident
+- `src/weights.zig` + `src/weights/`: GGUF weight binding — `LinearWeight` over resident
   f32/f16/bf16 and quantized forms; `LoadOptions{ .gpu_resident }` with
   `loadWithOptions`/`loadForFusion` so pre-fusion parts skip transient device
   residency; device-resident quant weights are owned via storage release
   hooks that free device bytes and evict the Metal wrap-cache slot.
-- `ptqtp_gguf.zig`: PTQTP GGUF persistence (docs/PTQTP.md) — decorated
+- `src/ptqtp_gguf.zig`: PTQTP GGUF persistence (docs/PTQTP.md) — decorated
   models save as one standalone TQ2_0 tensor per trit-plane
   (`<name>.ptqtp0/1/2` replaces `<name>`, everything else byte-verbatim)
   behind a `fucina.ptqtp.version` metadata gate; loader pair-detection
   (wired in the qwen3 loaders) rebuilds `.ptqtp` arms bitwise, with fused
   weights row-sliced to source names on save and re-fused through
   `fuseLinear`'s ptqtp arm on load.
-- `gguf_meta.zig`: flat loader glue — `metaInt`/`metaFloat`(+`Opt`) readers
+- `src/gguf_meta.zig`: flat loader glue — `metaInt`/`metaFloat`(+`Opt`) readers
   with an explicit `ZeroPolicy` (families disagree on zero-valued keys on
   purpose), plus the comptime-generic `parallelLoadLayers`.
-- `kv_cache.zig`: f16-default KV cache (opt-in q8_0 as a capacity option);
+- `models/text/kv_cache.zig`: f16-default KV cache (opt-in q8_0 as a capacity option);
   `truncate` is the speculative rewind. `kv_persist.zig`: crash-safe
   append-only KV-cache sidecar, so conversations reopen warm across process
   restarts.
-- `cartridge.zig` / `cartridge_fleet.zig`: trainable KV-prefix cartridges and
+- `models/text/cartridge.zig` / `cartridge_fleet.zig`: trainable KV-prefix cartridges and
   per-document cartridge fleets (`CARTRIDGES.md`).
-- `engram.zig`: conditional n-gram memory — hashed suffix n-gram tables gated
+- `models/research/engram.zig`: conditional n-gram memory — hashed suffix n-gram tables gated
   into the residual stream of a frozen backbone (`ENGRAM.md`); exposed as
   `models.research.engram`.
-- `logit_processor.zig` + `llguidance.zig`: the in-place logit-processing seam
+- `models/text/logit_processor.zig` + `llguidance.zig`: the in-place logit-processing seam
   and the vendored llguidance grammar/JSON-schema engine behind it
   (`CONSTRAINED-DECODING.md`).
-- `tokenizer.zig` (byte-level BPE; token-ID-exact pretokenizer chunkers:
+- `models/text/tokenizer.zig` (byte-level BPE; token-ID-exact pretokenizer chunkers:
   qwen2, qwen35, glm4, joyai), `spm_tokenizer.zig` (Gemma SPM),
   `unicode_categories.zig` (generated tables), `sampler.zig`.
-- `data.zig`: SFT dataset/dataloader — `SftText` JSONL/static pairs,
+- `models/text/data.zig`: SFT dataset/dataloader — `SftText` JSONL/static pairs,
   `encodePair` (template + tokenize + shift + mask), and a deterministic
   `Loader` whose `(seed, epoch) → permutation` mapping is a golden-pinned
   checkpoint contract; the tokenizer parameter is duck-typed so BPE and SPM
   both fit.
-- `chat.zig`: `Conversation(comptime Model, comptime Tok)` — genuinely
+- `models/text/chat.zig`: `Conversation(comptime Model, comptime Tok)` — genuinely
   generic multi-turn chat over any decoder-contract family with
   `caps.rewind` over the shared `KvCache`, paired with a tokenizer module; `Template` renders ChatML/Llama 3/Gemma 1-3/Gemma 4;
   `Options` includes `extra_stop_ids`, `stop_sequences`, and `speculation`
@@ -795,7 +797,7 @@ Generic helpers stay flat in `src/models/`:
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
   (speculation excluded; ownership contract in
   [§13.8](reference/13-the-model-stack-fucina_models.md#138-chat-srcmodelstextchatzig)).
-- `serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
+- `models/text/serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
   the model-agnostic contract (`GenerateRequest`/`GenerateResult`, `Caps`,
   the per-family `Backend` vtable); `serving/http.zig` (accept loop, SSE
   stream pipe, Host guard; needs libc on Linux for the `std.c.recv`
