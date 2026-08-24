@@ -53,6 +53,12 @@ pub const families = [_]Entry{
     .{ .arch = "qwen35moe", .Family = qwen35_model.Family, .Serving = qwen35_serving },
     .{ .arch = "inkling", .Family = inkling_model.Family, .Serving = inkling_serving },
     .{ .arch = "deepseek2", .Family = deepseek2_model.Family },
+    // The deepseek2 family's Config dispatches metadata prefixes for all
+    // three archs (deepseek2/model.zig), so the GLM-DSA and DeepSeek-3.2
+    // variants are registry-reachable (fucina-run completion/NLL/parity),
+    // serving excluded like the base arch.
+    .{ .arch = "glm-dsa", .Family = deepseek2_model.Family },
+    .{ .arch = "deepseek32", .Family = deepseek2_model.Family },
     .{ .arch = "deepseek4", .Family = deepseek4_model.Family, .Serving = deepseek4_serving },
     .{ .arch = "glm4moe", .Family = glm4moe_model.Family },
 };

@@ -522,11 +522,11 @@ fn saveGraft(graft: *engram.Engram, writer: *std.Io.Writer) anyerror!void {
     try graft.saveStateDict(writer);
 }
 
-fn nowNs(io: std.Io) i128 {
+fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.real.now(io).nanoseconds;
 }
 
-fn seconds(ns: i128) f64 {
+fn seconds(ns: i96) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e9;
 }
 
