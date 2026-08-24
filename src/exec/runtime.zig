@@ -564,6 +564,15 @@ pub fn prepareAs(
     return .{ .owned = try self.cast(dtype, compute, x) };
 }
 
+/// The compute dtype of a `.widened` op (f32), or a compile error naming
+/// the op when no kernel exists for the storage dtype (f64 and the
+/// non-float dtypes).
+pub fn widenedCompute(comptime dtype: DType, comptime what: []const u8) DType {
+    const compute = dtype_mod.computeDType(.widened, dtype);
+    if (compute != .f32) @compileError(what ++ ": no " ++ @tagName(dtype) ++ " kernel (f32, f16 and bf16 are supported)");
+    return compute;
+}
+
 /// A compute-dtype result stored as `out`: the value itself when the
 /// dtypes agree, else one narrowing cast (the compute-dtype value is
 /// released). The store side of the `.widened` policy: f32 accumulation,

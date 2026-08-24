@@ -60,6 +60,25 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// The dtype-generic tail of a binary op: f32 builds the VJP
         /// record; a typed result is a caller-owned constant and a
         /// grad-requiring operand is rejected.
+        /// The tail of a dtype-generic op: on the differentiable (f32) branch
+        /// the VJP record is built; elsewhere the result is a caller-owned
+        /// constant and a grad-requiring operand is rejected. Consumes `value`
+        /// on success; on error it stays with the caller.
+        pub fn finishOrConstant(
+            comptime differentiable: bool,
+            comptime out_dtype: DType,
+            comptime result_tags: anytype,
+            ctx: *ExecContext,
+            value: tensor_mod.TensorOf(out_dtype),
+            wants_grad: bool,
+            comptime Backward: type,
+            create_args: anytype,
+        ) !Tensor(.{ .dtype = out_dtype, .tags = result_tags }) {
+            if (comptime differentiable) return finishOp(result_tags, ctx, value, wants_grad, Backward, create_args);
+            if (wants_grad) return error.UnsupportedGradient;
+            return Tensor(.{ .dtype = out_dtype, .tags = result_tags }).fromTensor(ctx, value);
+        }
+
         /// The operand's gradient state, null on the branches without one.
         fn gradStateOf(t: anytype) ?*GradState {
             if (comptime @hasField(@TypeOf(t.*), "grad_state")) return t.grad_state;

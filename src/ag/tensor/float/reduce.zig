@@ -4,6 +4,7 @@
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
+const dtype_mod = @import("../../../dtype.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const core = @import("../../core.zig");
 const tags_mod = @import("../../../tags.zig");
@@ -42,6 +43,12 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
         const validateMaskType = plumbing.validateMaskType;
@@ -173,9 +180,9 @@ pub fn Ops(comptime Self: type) type {
         /// deterministic for any thread count.
         pub fn cumsum(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.cumsum(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.cumsum(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
         }
 
         /// Segmented sum along `tag`: contiguous index ranges
@@ -275,12 +282,12 @@ pub fn Ops(comptime Self: type) type {
         /// Differentiable with torch's zero-handling: zero-free rows get
         /// `g·(Π x)/x_i`; exactly one zero routes the whole gradient to the
         /// zero slot; two or more zeros kill the row's gradient.
-        pub fn prod(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        pub fn prod(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.prod(tag_rank, self.asRawTensor(), reduce_axis);
+            var value = try ctx.prod(dtype, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), ProdBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
+            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), ProdBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
         }
 
         /// Inclusive running product along `tag` (torch.cumprod),
@@ -290,9 +297,9 @@ pub fn Ops(comptime Self: type) type {
         /// the exact division-free O(n²) expansion (torch semantics).
         pub fn cumprod(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.cumprod(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.cumprod(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), CumprodBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), CumprodBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
 
         pub fn sumAll(self: *const Self, ctx: *ExecContext) !Tensor(.{}) {

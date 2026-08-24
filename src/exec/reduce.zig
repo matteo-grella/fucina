@@ -261,26 +261,37 @@ fn sumAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 /// is one serial prefix sum in axis order — bitwise deterministic for any
 /// thread count (cold op; no parallel dispatch). With `-Dvector-scan` the
 /// scan kernels vectorize (see `scanAxisRankDirected`).
-pub fn cumsum(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(ctx, rank, x, axis, .sum, false);
+pub fn cumsum(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype) {
+    return scanWidened(ctx, dtype, rank, x, axis, .sum, false, "cumsum");
 }
 
 /// Reversed cumulative (suffix) sum along `axis`:
 /// `out[..., i, ...] = Σ_{j >= i} x[..., j, ...]` — the `cumsum` VJP
 /// (a dedicated reverse pass, same determinism contract and the same
 /// `-Dvector-scan` gating).
-pub fn cumsumReverse(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(ctx, rank, x, axis, .sum, true);
+pub fn cumsumReverse(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype) {
+    return scanWidened(ctx, dtype, rank, x, axis, .sum, true, "cumsumReverse");
 }
 
 /// Cumulative product along `axis` (torch.cumprod), preserving the input
 /// shape: `out[..., i, ...] = Π_{j <= i} x[..., j, ...]`. Same contract and
 /// `-Dvector-scan` gating as `cumsum`.
-pub fn cumprod(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return scanAxisRankDirected(ctx, rank, x, axis, .prod, false);
+pub fn cumprod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype) {
+    return scanWidened(ctx, dtype, rank, x, axis, .prod, false, "cumprod");
 }
 
 const ScanOp = enum { sum, prod };
+
+/// The scans share one f32 kernel; 16-bit inputs follow the `.widened`
+/// policy.
+fn scanWidened(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, comptime op: ScanOp, comptime reverse: bool, comptime what: []const u8) !tensor.TensorOf(dtype) {
+    const compute = comptime ExecContext.widenedCompute(dtype, what);
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try scanAxisRankDirected(ctx, rank, xx.tensor(), axis, op, reverse);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
+}
 
 inline fn scanIdentity(comptime op: ScanOp) f32 {
     return if (op == .sum) 0 else 1;
@@ -716,7 +727,18 @@ fn strideOffset(comptime rank: usize, comptime from: usize, comptime to: usize, 
 /// `prodSlice` per row, and the general axis falls back to the same
 /// delinearized scalar accumulation `sum` uses. Like `sum`, the SIMD
 /// lane order fixes the float multiplication order per backend.
-pub fn prod(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+/// Product over `axis`. One f32 kernel; 16-bit inputs follow the
+/// `.widened` policy and return f32 (the reduction output dtype).
+pub fn prod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "prod");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try prodF32(ctx, rank, xx.tensor(), axis);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, comptime dtype_mod.outputDType(.reduction, dtype), out);
+}
+
+fn prodF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 

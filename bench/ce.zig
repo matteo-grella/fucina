@@ -45,12 +45,12 @@ fn benchSoftmaxForward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.softmax(2, &x, 1);
+        var y = try ctx.softmax(.f32, 2, &x, 1);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.softmax(2, &x, 1);
+        var y = try ctx.softmax(.f32, 2, &x, 1);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -64,12 +64,12 @@ fn benchSoftmaxForwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Al
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.softmax(2, &x, 0);
+        var y = try ctx.softmax(.f32, 2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.softmax(2, &x, 0);
+        var y = try ctx.softmax(.f32, 2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -81,12 +81,12 @@ fn benchLogSoftmaxAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Alloca
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.logSoftmax(2, &x, 0);
+        var y = try ctx.logSoftmax(.f32, 2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.logSoftmax(2, &x, 0);
+        var y = try ctx.logSoftmax(.f32, 2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -98,12 +98,12 @@ fn benchLogsumexpAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
     defer x.deinit();
 
     for (0..2) |_| {
-        var y = try ctx.logsumexp(2, &x, 0);
+        var y = try ctx.logsumexp(.f32, 2, &x, 0);
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.logsumexp(2, &x, 0);
+        var y = try ctx.logsumexp(.f32, 2, &x, 0);
         y.deinit();
     }
     const ns = timer.read() / iters;
@@ -113,7 +113,7 @@ fn benchLogsumexpAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocat
 fn benchSoftmaxBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xa3c0 + rows);
     defer x.deinit();
-    var y = try ctx.softmax(2, &x, 0);
+    var y = try ctx.softmax(.f32, 2, &x, 0);
     defer y.deinit();
     var gy = try randomLogits(ctx, allocator, rows, cols, 0xa4c0 + rows);
     defer gy.deinit();
@@ -156,7 +156,7 @@ fn benchLayerNormBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem
 fn benchSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
     var x = try randomLogits(ctx, allocator, rows, cols, 0xbcd0 + rows);
     defer x.deinit();
-    var y = try ctx.softmax(2, &x, 1);
+    var y = try ctx.softmax(.f32, 2, &x, 1);
     defer y.deinit();
     var gy = try randomLogits(ctx, allocator, rows, cols, 0xcde0 + rows);
     defer gy.deinit();
@@ -326,12 +326,12 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     const eps: f32 = 1e-5;
 
     for (0..2) |_| {
-        var y = try ctx.layerNorm(2, &x, 1, eps, .{ .weight = &w, .bias = &b });
+        var y = try ctx.layerNorm(.f32, 2, &x, 1, eps, .{ .weight = &w, .bias = &b });
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.layerNorm(2, &x, 1, eps, .{ .weight = &w, .bias = &b });
+        var y = try ctx.layerNorm(.f32, 2, &x, 1, eps, .{ .weight = &w, .bias = &b });
         y.deinit();
     }
     const fwd_ns = timer.read() / iters;
@@ -352,12 +352,12 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     // rmsNormMul at the same shape: the sanity baseline (layerNorm should sit
     // within ~1.5-2x given the extra mean pass).
     for (0..2) |_| {
-        var y = try ctx.rmsNorm(2, &x, 1, eps, .{ .weight = &w });
+        var y = try ctx.rmsNorm(.f32, 2, &x, 1, eps, .{ .weight = &w });
         y.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var y = try ctx.rmsNorm(2, &x, 1, eps, .{ .weight = &w });
+        var y = try ctx.rmsNorm(.f32, 2, &x, 1, eps, .{ .weight = &w });
         y.deinit();
     }
     const rms_fwd_ns = timer.read() / iters;

@@ -239,12 +239,14 @@ Autograd:
   dtype; differentiable on f32), `elementwise.zig` (the dtype-generic
   pointwise family: f32 differentiable, f16/bf16 constants through the
   `widened` policy, the integer arithmetic subset), `autograd.zig`
-  (leaves, gradients, backward; f32 and the 16-bit leaves), the f32-only
-  per-domain mixins in `src/ag/tensor/float/` (matmul, reduce, shape,
-  norm, ...), and the typed-branch mixins in `src/ag/tensor/typed/`
-  (`creation.zig`, `math.zig` for the typed reductions and casts,
-  `int.zig`, and the f16/bf16 `widened.zig` family for the ops whose exec
-  entry is still f32-only);
+  (leaves, gradients, backward; f32 and the 16-bit leaves), the per-domain
+  mixins in `src/ag/tensor/float/` (matmul, reduce, softmax, stats, shape,
+  norm, ...; f32 differentiable, and the ops whose exec entry takes a
+  dtype are aliased on the 16-bit branch as constants), and the
+  typed-branch mixins in `src/ag/tensor/typed/` (`creation.zig`, `math.zig`
+  for the typed reductions and casts, `int.zig`, and the f16/bf16
+  `widened.zig` pair `compare`/`einsum`, whose exec entries are still
+  f32-only);
   `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),

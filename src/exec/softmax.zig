@@ -7,12 +7,14 @@
 const std = @import("std");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
+const dtype_mod = @import("../dtype.zig");
 
 const exec_row_ops = @import("row_ops.zig");
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
+const DType = dtype_mod.DType;
 
 const productAfterAxis = exec_shape.productAfterAxis;
 const productBeforeAxis = exec_shape.productBeforeAxis;
@@ -80,7 +82,17 @@ pub const SoftmaxExtOptions = struct {
 /// last-axis path runs the fused SIMD row kernel (`logsumexpRows`,
 /// task-parallel over rows like `softmax`); other axes run the streaming
 /// inner-lane kernel (`logsumexpInner`) with identical semantics.
-pub fn logsumexp(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+/// One f32 kernel; 16-bit inputs follow the `.widened` policy.
+pub fn logsumexp(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "logsumexp");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try logsumexpF32(ctx, rank, xx.tensor(), axis);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, comptime dtype_mod.outputDType(.reduction, dtype), out);
+}
+
+fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -135,7 +147,17 @@ pub fn logsumexp(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comp
 /// `logsumexp`. Last-axis path is the fused SIMD row kernel
 /// (`logSoftmaxRows`, task-parallel over rows); other axes run the
 /// streaming inner-lane kernel (`logSoftmaxInner`).
-pub fn logSoftmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+/// One f32 kernel; 16-bit inputs follow the `.widened` policy.
+pub fn logSoftmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "logSoftmax");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try logSoftmaxF32(ctx, rank, xx.tensor(), axis);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
+}
+
+fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -183,7 +205,17 @@ pub fn logSoftmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
     return out;
 }
 
-pub fn softmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+/// One f32 kernel; 16-bit inputs follow the `.widened` policy.
+pub fn softmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(dtype) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "softmax");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try softmaxF32(ctx, rank, xx.tensor(), axis);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
+}
+
+fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 

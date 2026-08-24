@@ -552,7 +552,7 @@ pub fn gated(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "gated");
+    const compute = comptime ExecContext.widenedCompute(dtype, "gated");
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);
     var aa = try ctx.prepareAs(dtype, compute, a);
     defer aa.deinit();
@@ -581,20 +581,12 @@ pub fn splitGated(
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "splitGated");
+    const compute = comptime ExecContext.widenedCompute(dtype, "splitGated");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     var out = try splitGatedF32(ctx, op, rank, xx.tensor(), axis);
     errdefer out.deinit();
     return ctx.storeAs(compute, dtype, out);
-}
-
-/// The compute dtype of a `.widened` op, or a compile error naming the op
-/// when no kernel exists for it (f64 and the non-float dtypes).
-fn widenedCompute(comptime dtype: DType, comptime what: []const u8) DType {
-    const compute = dtype_mod.computeDType(.widened, dtype);
-    if (compute != .f32) @compileError(what ++ ": no " ++ @tagName(dtype) ++ " kernel (f32, f16 and bf16 are supported)");
-    return compute;
 }
 
 fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
@@ -871,7 +863,7 @@ pub fn scale(
 }
 
 pub fn addScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), scalar_value: f32) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "addScalar");
+    const compute = comptime ExecContext.widenedCompute(dtype, "addScalar");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     const xp = xx.tensor();
@@ -882,7 +874,7 @@ pub fn addScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tens
 }
 
 pub fn powScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), exponent: f32) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "powScalar");
+    const compute = comptime ExecContext.widenedCompute(dtype, "powScalar");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     const xp = xx.tensor();
@@ -902,7 +894,7 @@ pub fn where(
     cond: *const tensor.TensorOf(cond_dtype),
     y: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "where");
+    const compute = comptime ExecContext.widenedCompute(dtype, "where");
     if (!std.mem.eql(usize, x.shape.slice(), cond.shape.slice())) return tensor.TensorError.ShapeMismatch;
     try tensor.requireSameShapeOf(dtype, x, y);
     var xx = try ctx.prepareAs(dtype, compute, x);
@@ -929,7 +921,7 @@ pub fn maskedFill(
     mask: *const tensor.TensorOf(mask_dtype),
     value: f32,
 ) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "maskedFill");
+    const compute = comptime ExecContext.widenedCompute(dtype, "maskedFill");
     if (!std.mem.eql(usize, x.shape.slice(), mask.shape.slice())) return tensor.TensorError.ShapeMismatch;
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
@@ -1262,7 +1254,7 @@ fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor 
 /// Elementwise `op(x)`. One f32 kernel; 16-bit inputs follow the
 /// `.widened` policy.
 pub fn unary(ctx: *ExecContext, comptime dtype: DType, comptime op: UnaryOp, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "unary");
+    const compute = comptime ExecContext.widenedCompute(dtype, "unary");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
 
@@ -1275,7 +1267,7 @@ pub fn unary(ctx: *ExecContext, comptime dtype: DType, comptime op: UnaryOp, x: 
 }
 
 pub fn leakyRelu(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), negative_slope: f32) !tensor.TensorOf(dtype) {
-    const compute = comptime widenedCompute(dtype, "leakyRelu");
+    const compute = comptime ExecContext.widenedCompute(dtype, "leakyRelu");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
 
@@ -1390,7 +1382,7 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
 
 pub fn clamp(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), min_value: f32, max_value: f32) !tensor.TensorOf(dtype) {
     if (min_value > max_value) return tensor.TensorError.InvalidShape;
-    const compute = comptime widenedCompute(dtype, "clamp");
+    const compute = comptime ExecContext.widenedCompute(dtype, "clamp");
 
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
@@ -1572,7 +1564,7 @@ fn elementwiseRankTyped(
     comptime ensureForwardFloatMath(dtype);
     if (comptime (op == .max or op == .min)) {
         // No typed max/min kernel: the `.widened` policy.
-        const compute = comptime widenedCompute(dtype, "max/min");
+        const compute = comptime ExecContext.widenedCompute(dtype, "max/min");
         var aa = try ctx.prepareAs(dtype, compute, a);
         defer aa.deinit();
         var bb = try ctx.prepareAs(dtype, compute, b);

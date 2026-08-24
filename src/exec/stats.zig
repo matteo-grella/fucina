@@ -64,7 +64,15 @@ pub const StandardizeOptions = struct {
 /// (the winner is the max over the non-NaN elements; an all-NaN row falls
 /// back to index 0). Shared with maxAxis/minAxis; DIVERGES from
 /// torch.argmax, which propagates NaN as the winner.
-pub fn argmax(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
+/// One f32 kernel; 16-bit inputs widen (`.widened` policy). Indices are i64.
+pub fn argmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !tensor.TensorOf(.i64) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "argmax");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    return argmaxF32(ctx, rank, xx.tensor(), axis);
+}
+
+fn argmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -130,13 +138,22 @@ const ExtremumOp = enum { max, min };
 ///
 /// Indices are i64 (the repo-wide index convention, shared with
 /// argmax/topK/sort): exact for any axis length.
-pub fn maxAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-    return extremumAxis(ctx, rank, x, axis, .max);
+pub fn maxAxis(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !TopKResult {
+    return extremumWidened(ctx, dtype, rank, x, axis, .max);
 }
 
 /// Min over `axis`; see maxAxis (strict `<`, first occurrence wins).
-pub fn minAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !TopKResult {
-    return extremumAxis(ctx, rank, x, axis, .min);
+pub fn minAxis(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize) !TopKResult {
+    return extremumWidened(ctx, dtype, rank, x, axis, .min);
+}
+
+/// One f32 kernel; 16-bit inputs widen and the values stay f32 (the
+/// reduction output dtype).
+fn extremumWidened(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, comptime op: ExtremumOp) !TopKResult {
+    const compute = comptime ExecContext.widenedCompute(dtype, "maxAxis/minAxis");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    return extremumAxis(ctx, rank, xx.tensor(), axis, op);
 }
 
 fn extremumAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ExtremumOp) !TopKResult {
@@ -376,7 +393,18 @@ fn extremumMasked(
 /// two-pass like layerNorm; N == ddof yields 0/0 → NaN, matching
 /// torch.var on a single element. Rows stay serial like
 /// sumAxis/meanAxis; inner == 1 rows take a SIMD body.
-pub fn varAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
+/// Variance over `axis`. One f32 kernel; 16-bit inputs widen and return
+/// f32 (the reduction output dtype).
+pub fn varAxis(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, ddof: u1) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "varAxis");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try varAxisF32(ctx, rank, xx.tensor(), axis, ddof);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, comptime dtype_mod.outputDType(.reduction, dtype), out);
+}
+
+fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 

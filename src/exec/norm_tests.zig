@@ -167,7 +167,7 @@ test "exec context layer norm matches a naive f64 reference" {
                 for ([_]f32{ 1e-5, 1e-6 }) |eps| {
                     const ref_plain = try testNaiveLayerNorm(allocator, data, outer, axis_dim, inner, null, null, eps);
                     defer allocator.free(ref_plain);
-                    var y_plain = try ctx.layerNorm(rank, &x, 1, eps, .{});
+                    var y_plain = try ctx.layerNorm(.f32, rank, &x, 1, eps, .{});
                     defer y_plain.deinit();
                     for (y_plain.dataConst(), ref_plain) |got, want| {
                         try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -175,7 +175,7 @@ test "exec context layer norm matches a naive f64 reference" {
 
                     const ref_affine = try testNaiveLayerNorm(allocator, data, outer, axis_dim, inner, weights, biases, eps);
                     defer allocator.free(ref_affine);
-                    var y_affine = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &b });
+                    var y_affine = try ctx.layerNorm(.f32, rank, &x, 1, eps, .{ .weight = &w, .bias = &b });
                     defer y_affine.deinit();
                     for (y_affine.dataConst(), ref_affine) |got, want| {
                         try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -285,9 +285,9 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             try std.testing.expectEqualSlices(f32, full.bias.?.dataConst(), again.bias.?.dataConst());
 
             // Forward determinism on the same shapes.
-            var y_one = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
+            var y_one = try ctx.layerNorm(.f32, rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
             defer y_one.deinit();
-            var y_two = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
+            var y_two = try ctx.layerNorm(.f32, rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
             defer y_two.deinit();
             try std.testing.expectEqualSlices(f32, y_one.dataConst(), y_two.dataConst());
         }

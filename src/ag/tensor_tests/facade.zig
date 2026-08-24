@@ -308,7 +308,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer bln.deinit();
     var lno = try ln.layerNorm(&ctx, .c, 1e-5, .{ .weight = wln, .bias = bln });
     defer lno.deinit();
-    var lno_want = try ctx.layerNorm(2, ln.asRawTensor(), 1, 1e-5, .{ .weight = wln.asRawTensor(), .bias = bln.asRawTensor() });
+    var lno_want = try ctx.layerNorm(.f32, 2, ln.asRawTensor(), 1, 1e-5, .{ .weight = wln.asRawTensor(), .bias = bln.asRawTensor() });
     defer lno_want.deinit();
     try std.testing.expectEqualSlices(f32, lno_want.dataConst(), lno.asRawTensor().dataConst());
 

@@ -58,9 +58,9 @@ test "exec context max min var match naive references" {
             var x = try ctx.fromSlice(.f32, shape, data);
             defer x.deinit();
 
-            var max_result = try ctx.maxAxis(rank, &x, 1);
+            var max_result = try ctx.maxAxis(.f32, rank, &x, 1);
             defer max_result.deinit();
-            var min_result = try ctx.minAxis(rank, &x, 1);
+            var min_result = try ctx.minAxis(.f32, rank, &x, 1);
             defer min_result.deinit();
 
             for (0..outer) |outer_i| {
@@ -90,7 +90,7 @@ test "exec context max min var match naive references" {
             }
 
             for ([_]u1{ 0, 1 }) |ddof| {
-                var v = try ctx.varAxis(rank, &x, 1, ddof);
+                var v = try ctx.varAxis(.f32, rank, &x, 1, ddof);
                 defer v.deinit();
                 const n = @as(f64, @floatFromInt(axis_dim));
                 for (0..outer) |outer_i| {
@@ -123,13 +123,13 @@ test "exec context max min var match naive references" {
         5, -1, 5, 4,
     });
     defer ties.deinit();
-    var tie_max = try ctx.maxAxis(2, &ties, 1);
+    var tie_max = try ctx.maxAxis(.f32, 2, &ties, 1);
     defer tie_max.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 5 }, tie_max.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{ 1, 0 }, tie_max.indices.dataConst());
     var tie_min = try ctx.fromSlice(.f32, .{ 1, 5 }, &.{ 4, -2, 7, -2, 0 });
     defer tie_min.deinit();
-    var tie_min_result = try ctx.minAxis(2, &tie_min, 1);
+    var tie_min_result = try ctx.minAxis(.f32, 2, &tie_min, 1);
     defer tie_min_result.deinit();
     try std.testing.expectEqualSlices(f32, &.{-2}, tie_min_result.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{1}, tie_min_result.indices.dataConst());
@@ -141,7 +141,7 @@ test "exec context max min var match naive references" {
         0, 5,
     });
     defer ties_inner.deinit();
-    var tie_axis0 = try ctx.maxAxis(2, &ties_inner, 0);
+    var tie_axis0 = try ctx.maxAxis(.f32, 2, &ties_inner, 0);
     defer tie_axis0.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 5 }, tie_axis0.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{ 0, 1 }, tie_axis0.indices.dataConst());
@@ -170,11 +170,11 @@ test "max/min over an axis: NaN drops and all-NaN rows degrade identically on bo
     @memcpy(rows[22..33], &row_nan);
     var x = try ctx.fromSlice(.f32, .{ 3, 11 }, &rows);
     defer x.deinit();
-    var mx = try ctx.maxAxis(2, &x, 1);
+    var mx = try ctx.maxAxis(.f32, 2, &x, 1);
     defer mx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 7, 9, -inf }, mx.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0 }, mx.indices.dataConst());
-    var mn = try ctx.minAxis(2, &x, 1);
+    var mn = try ctx.minAxis(.f32, 2, &x, 1);
     defer mn.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -5, -8, inf }, mn.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{ 7, 7, 0 }, mn.indices.dataConst());
@@ -190,11 +190,11 @@ test "max/min over an axis: NaN drops and all-NaN rows degrade identically on bo
     }
     var xt = try ctx.fromSlice(.f32, .{ 11, 3 }, &cols);
     defer xt.deinit();
-    var mxt = try ctx.maxAxis(2, &xt, 0);
+    var mxt = try ctx.maxAxis(.f32, 2, &xt, 0);
     defer mxt.deinit();
     try std.testing.expectEqualSlices(f32, mx.values.dataConst(), mxt.values.dataConst());
     try std.testing.expectEqualSlices(i64, mx.indices.dataConst(), mxt.indices.dataConst());
-    var mnt = try ctx.minAxis(2, &xt, 0);
+    var mnt = try ctx.minAxis(.f32, 2, &xt, 0);
     defer mnt.deinit();
     try std.testing.expectEqualSlices(f32, mn.values.dataConst(), mnt.values.dataConst());
     try std.testing.expectEqualSlices(i64, mn.indices.dataConst(), mnt.indices.dataConst());
@@ -223,7 +223,7 @@ test "argmax/topK over an axis: NaN never places, matching the max contract" {
     var x = try ctx.fromSlice(.f32, .{ 3, 11 }, &rows);
     defer x.deinit();
 
-    var arg = try ctx.argmax(2, &x, 1);
+    var arg = try ctx.argmax(.f32, 2, &x, 1);
     defer arg.deinit();
     try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0 }, arg.dataConst());
 
@@ -243,7 +243,7 @@ test "argmax/topK over an axis: NaN never places, matching the max contract" {
     var xt = try ctx.fromSlice(.f32, .{ 11, 3 }, &cols);
     defer xt.deinit();
 
-    var argt = try ctx.argmax(2, &xt, 0);
+    var argt = try ctx.argmax(.f32, 2, &xt, 0);
     defer argt.deinit();
     try std.testing.expectEqualSlices(i64, &.{ 3, 4, 0 }, argt.dataConst());
 

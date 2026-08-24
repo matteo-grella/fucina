@@ -116,20 +116,20 @@ test "exec cumsum forward and reverse match torch.cumsum along both axes" {
     defer x.deinit();
 
     // torch.cumsum(x, dim=1): rows {1,3,6} and {4,9,15}.
-    var last = try ctx.cumsum(2, &x, 1);
+    var last = try ctx.cumsum(.f32, 2, &x, 1);
     defer last.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 3, 6, 4, 9, 15 }, last.dataConst());
 
     // torch.cumsum(x, dim=0): {1,2,3} then {5,7,9} (inner > 1 layout).
-    var first = try ctx.cumsum(2, &x, 0);
+    var first = try ctx.cumsum(.f32, 2, &x, 0);
     defer first.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 5, 7, 9 }, first.dataConst());
 
     // Reverse (suffix) sums — the cumsum VJP: torch.cumsum(x.flip(1), 1).flip(1).
-    var rev = try ctx.cumsumReverse(2, &x, 1);
+    var rev = try ctx.cumsumReverse(.f32, 2, &x, 1);
     defer rev.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 6, 5, 3, 15, 11, 6 }, rev.dataConst());
-    var rev0 = try ctx.cumsumReverse(2, &x, 0);
+    var rev0 = try ctx.cumsumReverse(.f32, 2, &x, 0);
     defer rev0.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9, 4, 5, 6 }, rev0.dataConst());
 }

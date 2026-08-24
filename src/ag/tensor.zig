@@ -627,26 +627,33 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const clampMin = elementwise_ops.clampMin;
         pub const clampMax = elementwise_ops.clampMax;
 
-        // ---- widened forward math (f16/bf16 only: f32 compute, one final round) ----
-        const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
-        pub const softmax = widened_ops.softmax;
-        pub const logSoftmax = widened_ops.logSoftmax;
-        pub const rmsNorm = widened_ops.rmsNorm;
-        pub const rmsNormMul = widened_ops.rmsNormMul;
-        pub const layerNorm = widened_ops.layerNorm;
-        pub const cumsum = widened_ops.cumsum;
-        pub const cumprod = widened_ops.cumprod;
-        pub const compare = widened_ops.compare;
-        pub const pad = widened_ops.pad;
-        pub const einsum = widened_ops.einsum;
+        // ---- softmax, scans, reductions, pad: the shared float mixins (f32 kernels through the widened policy; constants here) ----
+        const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
+        pub const softmax = softmax_ops.softmax;
+        pub const logSoftmax = softmax_ops.logSoftmax;
+        pub const logsumexp = softmax_ops.logsumexp;
+        const reduce_ops = @import("tensor/float/reduce.zig").Ops(Self);
+        pub const cumsum = reduce_ops.cumsum;
+        pub const cumprod = reduce_ops.cumprod;
+        pub const prod = reduce_ops.prod;
+        const stats_ops = @import("tensor/float/stats.zig").Ops(Self);
+        pub const variance = stats_ops.variance;
+        pub const argmax = stats_ops.argmax;
+        pub const max = stats_ops.max;
+        pub const min = stats_ops.min;
+        const shape_ops = @import("tensor/float/shape.zig").Ops(Self);
+        pub const pad = shape_ops.pad;
 
-        // ---- widened reductions (f16/bf16 only; f32 result per the dtype policy) ----
-        pub const max = widened_ops.max;
-        pub const min = widened_ops.min;
-        pub const argmax = widened_ops.argmax;
-        pub const prod = widened_ops.prod;
-        pub const variance = widened_ops.variance;
-        pub const logsumexp = widened_ops.logsumexp;
+        const norm_ops = @import("tensor/float/norm.zig").Ops(Self);
+        pub const rmsNorm = norm_ops.rmsNorm;
+        pub const rmsNormMul = norm_ops.rmsNormMul;
+        pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
+        pub const layerNorm = norm_ops.layerNorm;
+
+        // ---- widened forward math (f16/bf16 only: the ops whose exec entry is still f32-only) ----
+        const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
+        pub const compare = widened_ops.compare;
+        pub const einsum = widened_ops.einsum;
 
         comptime {
             assertAliased(Self, common, &.{});
@@ -658,6 +665,15 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             // Float comparison widens through f32 (widened.compare).
             assertAliased(Self, math_ops, &.{"compare"});
             assertAliased(Self, widened_ops, &.{});
+            assertAliased(Self, softmax_ops, &.{});
+            // groupNorm, the fused rms-norm+rope kernel and the vector norms stay f32-only.
+            assertAliased(Self, norm_ops, &.{ "groupNorm", "rmsNormMulRopeHalfPrepared", "l2Normalize", "norm", "normAll", "cosineSimilarity" });
+            // The typed reductions (`sum`, `mean`, `sumAll`) come from math_ops; the
+            // masked, segmented and recurrence arms are f32-only.
+            assertAliased(Self, reduce_ops, &.{ "any", "all", "anyAll", "allAll", "sum", "mean", "segmentSum", "linearRecurrence", "sumAll", "sumMany" });
+            assertAliased(Self, stats_ops, &.{ "standardizeAxis", "multinomial" });
+            // The diagonal/band family and the 2-d pads stay f32-only.
+            assertAliased(Self, shape_ops, &.{ "shiftBy", "diagonal", "trace", "diag", "bandPart", "tril", "triu", "diagEmbed", "zeroPad2d", "constantPad2d" });
             // The rest of the elementwise mixin is f32-only: in-place updates on
             // f32 storage, the graph-side cast and consuming ops, dropout, the
             // channel ops, the elemental escape hatch and its `pow`, and the

@@ -2071,14 +2071,16 @@ that tier live at generation boundaries.
   alias listed in [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)), `leakyRelu`, `clamp`/`clampMin`/`clampMax`,
   `addScalar`, `subScalar`, `powScalar`, `log1p`, `maximum`, `minimum`,
   `gated`/`glu`/`swiglu`/`geglu`/`situ`, `splitGated`, `where`/`maskedFill`
-  (`.bool` or float masks). The remaining widened ops still widen at the
-  facade (`src/ag/tensor/typed/widened.zig`): `softmax` and `layerNorm`
-  (plain `.{}` options only — cast to f32 for the ext/affine paths),
-  `logSoftmax`, `rmsNorm`, `rmsNormMul` (same-dtype weight), `cumsum`,
-  `cumprod`, `compare` (`.bool` result), `pad`, and `einsum` (same-dtype
-  operands, f32 GEMM lowering — the typed `dot` contract). The widened
-  reductions `max`, `min`, `prod`, `variance`, `logsumexp` return **f32**
-  like the native typed `sum`/`mean` ([§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)); `argmax` returns i64 ([§4.16](04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig)).
+  (`.bool` or float masks). The same holds for the shared softmax, scan,
+  reduction, shape and norm mixins: `softmax` (plain `.{}` options; the ext
+  options are the f32 kernel's), `logSoftmax`, `cumsum`, `cumprod`, `pad`,
+  `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd` (same-dtype weight and
+  residual), `layerNorm` (plain, or `.weight`+`.bias` of the same dtype).
+  Two ops still widen at the facade (`src/ag/tensor/typed/widened.zig`):
+  `compare` (`.bool` result) and `einsum` (same-dtype operands, f32 GEMM
+  lowering — the typed `dot` contract). The reductions `max`, `min`,
+  `prod`, `variance`, `logsumexp` return **f32** like the native typed
+  `sum`/`mean` ([§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)); `argmax` returns i64 ([§4.16](04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig)).
 - **Block-quantized** (q8_0, q4_k, ...): no arithmetic — `to(.f32)`
   (dequantize), `getRows` ([§4.17](04-tensor-operations.md#417-indexing-assembly-and-functional-updates-srcagtensorzig)), row-axis `concat`, `packRhs` /
   `packRhsAs` ([§4.9](04-tensor-operations.md#49-explicit-matmul-ternary-ste-and-packed-rhs-gemms-srcagtensorzig)), and constructors/views ([§3](03-tensors-types-construction-and-data-access.md), [§10](10-quantization.md)). Their main math
@@ -2112,9 +2114,9 @@ world are `to` ([§3.8](03-tensors-types-construction-and-data-access.md#38-cast
 `to(.f32)` for everything else in a trained path.
 
 Because the widened ops run the identical f32 kernels and round once on
-store (in the exec entry for the elementwise family, at the facade for the
-rest), their results are bit-identical to "cast up, run the f32 op, cast
-down" — pinned by parity tests in `src/ag/tensor_tests/`:
+store (in the exec entry; at the facade for `compare` and `einsum`), their
+results are bit-identical to "cast up, run the f32 op, cast down" — pinned
+by parity tests in `src/ag/tensor_tests/`:
 
 ```zig
 test "bf16 forward ops compute through f32 and narrow once" {

@@ -210,11 +210,15 @@ Three rules fall out of the table:
   `f32` outright).
 - **`widened` is the class of the ops that have an f32 kernel only** (the
   unary family, `leakyRelu`, `clamp`, the scalar ops, `where`/`maskedFill`,
-  `gated`/`splitGated`, and float `max`/`min`). Their exec entries take the
-  storage dtype and apply the policy themselves: `ctx.prepareAs(dtype,
-  compute, x)` widens on entry, `ctx.storeAs(compute, dtype, value)` narrows
-  once on store ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)). f32 inputs pay nothing (both are the contiguous
-  borrow and the value itself).
+  `gated`/`splitGated`, float `max`/`min`, `softmax`/`logSoftmax`/
+  `logsumexp`, the scans, `prod`/`varAxis`/`argmax`/`maxAxis`/`minAxis`,
+  `rmsNorm`/`layerNorm`). Their exec entries take the storage dtype and
+  apply the policy themselves: `ctx.prepareAs(dtype, compute, x)` widens on
+  entry, `ctx.storeAs(compute, dtype, value)` narrows once on store
+  ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)); the reductions among them return the reduction output
+  dtype (f32 for 16-bit inputs). f32 inputs pay nothing (both are the
+  contiguous borrow and the value itself). `pad` is pure data movement and
+  runs on the storage dtype directly.
 - **Reductions on 16-bit floats return f32.** Summing `f16`/`bf16` into a
   16-bit result would lose the accumulator's precision, so the widened
   result dtype is kept.

@@ -4,6 +4,7 @@
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
+const dtype_mod = @import("../../../dtype.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_softmax = @import("../../backward/softmax.zig");
@@ -29,6 +30,12 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
@@ -48,12 +55,12 @@ pub fn Ops(comptime Self: type) type {
         /// yields -inf and a row containing +inf yields +inf (the torch
         /// convention) rather than NaN. Differentiable: the backward is
         /// the saved-output identity `exp(x − lse)·g` (the row softmax).
-        pub fn logsumexp(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
+        pub fn logsumexp(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.logsumexp(tag_rank, self.asRawTensor(), reduce_axis);
+            var value = try ctx.logsumexp(dtype, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), LogsumexpBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
+            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), LogsumexpBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
         }
 
         /// Log-softmax over `tag` (torch.log_softmax): `x − logsumexp(x)`
@@ -65,9 +72,9 @@ pub fn Ops(comptime Self: type) type {
         /// backward is the saved-output identity `g − exp(y)·Σg`.
         pub fn logSoftmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const scan_axis = comptime axis(tag);
-            var value = try ctx.logSoftmax(tag_rank, self.asRawTensor(), scan_axis);
+            var value = try ctx.logSoftmax(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), LogSoftmaxBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &value });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), LogSoftmaxBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &value });
         }
 
         pub fn softmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag, options: anytype) !Self {
@@ -85,10 +92,11 @@ pub fn Ops(comptime Self: type) type {
             }
             const softmax_axis = comptime axis(tag);
             if (comptime @typeInfo(Options).@"struct".fields.len == 0) {
-                var value = try ctx.softmax(tag_rank, self.asRawTensor(), softmax_axis);
+                var value = try ctx.softmax(dtype, tag_rank, self.asRawTensor(), softmax_axis);
                 errdefer value.deinit();
-                return finishOp(tags, ctx, value, self.requiresGrad(), SoftmaxBackward(tags, softmax_axis), .{ ctx.allocator, self.grad_state, &value });
+                return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), SoftmaxBackward(tags, softmax_axis), .{ ctx.allocator, self.grad_state, &value });
             }
+            if (comptime !differentiable) @compileError("softmax options (scale, mask, sinks, causal, ...) are the f32 ext kernel's; cast to f32 first");
             const scale_value: f32 = if (comptime @hasField(Options, "scale")) options.scale else 1;
             const max_bias: f32 = if (comptime @hasField(Options, "max_bias")) options.max_bias else 0;
             const sinks: ?[]const f32 = if (comptime @hasField(Options, "sinks")) options.sinks else null;

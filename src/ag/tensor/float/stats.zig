@@ -4,6 +4,7 @@
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
+const dtype_mod = @import("../../../dtype.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_stats = @import("../../backward/stats.zig");
 const rng = @import("../../../rng.zig");
@@ -28,6 +29,12 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
         const validateMaskType = plumbing.validateMaskType;
@@ -37,12 +44,12 @@ pub fn Ops(comptime Self: type) type {
         /// Variance over `tag` (the tag is removed like sum/mean): ddof 0 =
         /// biased estimator (the LayerNorm convention), ddof 1 = unbiased
         /// (the torch.var default).
-        pub fn variance(self: *const Self, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(removeTag(tags, tag)) {
+        pub fn variance(self: *const Self, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
-            var value = try ctx.varAxis(tag_rank, self.asRawTensor(), reduce_axis, ddof);
+            var value = try ctx.varAxis(dtype, tag_rank, self.asRawTensor(), reduce_axis, ddof);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), VarBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, ddof });
+            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), VarBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, ddof });
         }
 
         /// Standardize over `tag` while preserving shape:
@@ -82,7 +89,7 @@ pub fn Ops(comptime Self: type) type {
         /// exec scope (the typed-constant ownership rule).
         pub fn argmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .i64, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
-            var value = try ctx.argmax(tag_rank, self.asRawTensor(), axis(tag));
+            var value = try ctx.argmax(dtype, tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
             return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
         }
@@ -202,24 +209,24 @@ pub fn Ops(comptime Self: type) type {
         /// returns the indices). The gradient flows only to the FIRST
         /// occurrence of the extremum along the axis (strict-comparison
         /// tie-break, like PyTorch's torch.max over a dim).
-        pub fn max(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+        pub fn max(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             return extremum(self, ctx, tag, .max, opts);
         }
 
         /// Min values over `tag`; see `max` for gradient/tie-break and mask
         /// semantics (an empty masked lane yields `empty orelse +inf`).
-        pub fn min(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(removeTag(tags, tag)) {
+        pub fn min(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             return extremum(self, ctx, tag, .min, opts);
         }
 
-        fn extremum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }, opts: anytype) !Tensor(removeTag(tags, tag)) {
+        fn extremum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime op: enum { max, min }, opts: anytype) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             comptime validateMaskedReduceOptions(@TypeOf(opts));
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
             if (comptime !@hasField(@TypeOf(opts), "mask")) {
                 var raw = switch (op) {
-                    .max => try ctx.maxAxis(tag_rank, self.asRawTensor(), reduce_axis),
-                    .min => try ctx.minAxis(tag_rank, self.asRawTensor(), reduce_axis),
+                    .max => try ctx.maxAxis(dtype, tag_rank, self.asRawTensor(), reduce_axis),
+                    .min => try ctx.minAxis(dtype, tag_rank, self.asRawTensor(), reduce_axis),
                 };
                 // The first-extremum indices go into the backward node
                 // (computed in the forward, not recomputed); the caller only
@@ -227,10 +234,11 @@ pub fn Ops(comptime Self: type) type {
                 var raw_values: ?RawTensor = raw.values;
                 errdefer if (raw_values) |*value| value.deinit();
                 defer raw.indices.deinit();
-                const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+                const out = try finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, raw_values.?, self.requiresGrad(), MinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
                 raw_values = null;
                 return out;
             }
+            if (comptime !differentiable) @compileError("masked max/min are f32-only; cast to f32 first");
 
             // Masked arm — `maxval(a, dim, mask)`: `opts` and the mask
             // contract are `sum`'s; tie-break and NaN semantics are the plain

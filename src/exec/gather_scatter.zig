@@ -191,30 +191,35 @@ pub fn concatQuantizedRows(
 /// dim): the output grows by `before + after` on that axis, the body is
 /// copied at offset `before`, and the pad positions hold `fill`. The VJP is
 /// a narrow of the upstream gradient at offset `before` (`PadBackward`).
+/// Constant-pad `axis` by `before`/`after` positions of `fill`. Pure data
+/// movement over the storage dtype (any float dtype; `fill` is rounded to
+/// it once).
 pub fn pad(
     ctx: *ExecContext,
+    comptime dtype: DType,
     comptime rank: usize,
-    x: *const Tensor,
+    x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
     before: usize,
     after: usize,
     fill: f32,
-) !Tensor {
+) !tensor.TensorOf(dtype) {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
+    if (comptime !dtype_mod.supportsForwardFloatMath(dtype)) @compileError("pad: float dtypes only");
 
     const source = try x.rankView(rank);
     var out_shape = source.shape;
     out_shape[axis] = try std.math.add(usize, source.shape[axis], try std.math.add(usize, before, after));
 
-    var xx = try ctx.prepareContiguous(.f32, x);
+    var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.empty(.f32, out_shape);
+    var out = try ctx.empty(dtype, out_shape);
     errdefer out.deinit();
     const output = out.data();
-    @memset(output, fill);
+    @memset(output, dtype_mod.castFloat(.f32, dtype, fill));
 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);

@@ -59,7 +59,7 @@ test "exec context softmax fast path matches generic layout and naive reference"
 
         var x = try ctx.fromSlice(.f32, .{ rows, cols }, data);
         defer x.deinit();
-        var y = try ctx.softmax(2, &x, 1);
+        var y = try ctx.softmax(.f32, 2, &x, 1);
         defer y.deinit();
         const yd = y.dataConst();
 
@@ -80,7 +80,7 @@ test "exec context softmax fast path matches generic layout and naive reference"
         }
         var xt = try ctx.fromSlice(.f32, .{ cols, rows }, transposed);
         defer xt.deinit();
-        var yt = try ctx.softmax(2, &xt, 0);
+        var yt = try ctx.softmax(.f32, 2, &xt, 0);
         defer yt.deinit();
         const ytd = yt.dataConst();
         for (0..rows) |row| {
@@ -106,7 +106,7 @@ test "softmax NaN logits poison the row on both SIMD and scalar paths" {
     // Last-axis softmax: contiguous rows, the SIMD vexpf path.
     var x = try ctx.fromSlice(.f32, .{ 2, cols }, &data);
     defer x.deinit();
-    var y = try ctx.softmax(2, &x, 1);
+    var y = try ctx.softmax(.f32, 2, &x, 1);
     defer y.deinit();
     const yd = y.dataConst();
 
@@ -118,7 +118,7 @@ test "softmax NaN logits poison the row on both SIMD and scalar paths" {
     }
     var xt = try ctx.fromSlice(.f32, .{ cols, 2 }, &transposed);
     defer xt.deinit();
-    var yt = try ctx.softmax(2, &xt, 0);
+    var yt = try ctx.softmax(.f32, 2, &xt, 0);
     defer yt.deinit();
     const ytd = yt.dataConst();
 
@@ -230,9 +230,9 @@ test "softmax family strided inner kernels match last-axis rows across the paral
     var gyt = try ctx.fromSlice(.f32, .{ cols, rows }, gyt_data);
     defer gyt.deinit();
 
-    var y = try ctx.softmax(2, &x, 1);
+    var y = try ctx.softmax(.f32, 2, &x, 1);
     defer y.deinit();
-    var yt = try ctx.softmax(2, &xt, 0);
+    var yt = try ctx.softmax(.f32, 2, &xt, 0);
     defer yt.deinit();
     for (0..rows) |row| {
         for (0..cols) |col| {
@@ -243,9 +243,9 @@ test "softmax family strided inner kernels match last-axis rows across the paral
     // Log-space outputs compare across two different exp-sum accumulation
     // orders (vector-tree rows kernel vs sequential per-lane inner kernel),
     // so the band is wider than the probability-space checks above.
-    var ls = try ctx.logSoftmax(2, &x, 1);
+    var ls = try ctx.logSoftmax(.f32, 2, &x, 1);
     defer ls.deinit();
-    var lst = try ctx.logSoftmax(2, &xt, 0);
+    var lst = try ctx.logSoftmax(.f32, 2, &xt, 0);
     defer lst.deinit();
     for (0..rows) |row| {
         for (0..cols) |col| {
@@ -253,9 +253,9 @@ test "softmax family strided inner kernels match last-axis rows across the paral
         }
     }
 
-    var lse = try ctx.logsumexp(2, &x, 1);
+    var lse = try ctx.logsumexp(.f32, 2, &x, 1);
     defer lse.deinit();
-    var lset = try ctx.logsumexp(2, &xt, 0);
+    var lset = try ctx.logsumexp(.f32, 2, &xt, 0);
     defer lset.deinit();
     for (0..rows) |row| {
         try expectCloseToF64(lset.dataConst()[row], lse.dataConst()[row], 5e-5, 1e-5);

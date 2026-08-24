@@ -265,6 +265,20 @@ this point; earlier history is `git log`.
   `situ`, `splitGated`), the integer branch takes `add`/`sub`/`mul`/
   `maximum`/`minimum` from it. Results are bitwise what the widened facade
   computed.
+- Dtype policy at the exec seam, the rest of the widened family. The same
+  contract for `softmax(dtype, rank, x, axis)`, `logSoftmax`, `logsumexp`,
+  `cumsum`/`cumsumReverse`/`cumprod`, `prod`, `varAxis`, `argmax`,
+  `maxAxis`/`minAxis`, `pad` (data movement on the storage dtype) and the
+  norms: `rmsNorm(dtype, rank, x, axis, eps, options)` with
+  `exec.RmsNormOptions(dtype)` (weight and residual of the storage dtype),
+  `layerNorm(dtype, rank, x, axis, eps, options)` with
+  `exec.AffineOptions(dtype)`; `groupNorm` keeps `AffineOptions(.f32)`,
+  the backward entries stay f32. On the facade the softmax, reduce, stats,
+  shape and norm mixins serve the f16/bf16 branch for these ops
+  (`typed/widened.zig` keeps `compare` and `einsum` only); the 16-bit
+  branch gains `rmsNormMulAdd` and the affine `layerNorm`
+  (`.{ .weight, .bias }` of its own dtype). f32 callers of the exec
+  entries pass `.f32` first; results are bitwise unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

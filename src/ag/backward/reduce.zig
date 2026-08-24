@@ -195,7 +195,7 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.cumsumReverse(rawRank(source_tags.len), gy, axis);
+            out[0] = try ctx.cumsumReverse(.f32, rawRank(source_tags.len), gy, axis);
         }
 
         pub const vtable = core.recordVTable(Self);

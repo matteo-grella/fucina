@@ -303,19 +303,19 @@ test "exec pad places the body at offset before and fills the rest" {
     defer x.deinit();
 
     // torch F.pad(x, (1, 2), value=9): last axis grows 2 -> 5.
-    var last = try ctx.pad(2, &x, 1, 1, 2, 9);
+    var last = try ctx.pad(.f32, 2, &x, 1, 1, 2, 9);
     defer last.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, last.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 9, 1, 2, 9, 9, 9, 3, 4, 9, 9 }, last.dataConst());
 
     // torch F.pad(x, (0, 0, 2, 1), value=0): first axis 2 -> 5.
-    var first = try ctx.pad(2, &x, 0, 2, 1, 0);
+    var first = try ctx.pad(.f32, 2, &x, 0, 2, 1, 0);
     defer first.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 5, 2 }, first.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 1, 2, 3, 4, 0, 0 }, first.dataConst());
 
     // before == after == 0 is an identity copy.
-    var same = try ctx.pad(2, &x, 1, 0, 0, 7);
+    var same = try ctx.pad(.f32, 2, &x, 1, 0, 0, 7);
     defer same.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, same.dataConst());
 }

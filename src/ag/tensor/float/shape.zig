@@ -7,6 +7,7 @@
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
+const dtype_mod = @import("../../../dtype.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_shape = @import("../../backward/shape.zig");
 
@@ -33,6 +34,12 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const padding2dValues = plumbing.padding2dValues;
 
@@ -231,9 +238,9 @@ pub fn Ops(comptime Self: type) type {
         /// positions are constants and drop their gradient).
         pub fn pad(self: *const Self, ctx: *ExecContext, comptime tag: Tag, before: usize, after: usize, fill: f32) !Self {
             const pad_axis = comptime axis(tag);
-            var value = try ctx.pad(tag_rank, self.asRawTensor(), pad_axis, before, after, fill);
+            var value = try ctx.pad(dtype, tag_rank, self.asRawTensor(), pad_axis, before, after, fill);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), PadBackward(tags, pad_axis), .{ ctx.allocator, self.grad_state, &self.value, before });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), PadBackward(tags, pad_axis), .{ ctx.allocator, self.grad_state, &self.value, before });
         }
 
         /// Zero-pad the two named axes: `constantPad2d` with fill 0.

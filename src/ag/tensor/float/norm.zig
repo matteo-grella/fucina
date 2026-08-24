@@ -32,6 +32,15 @@ pub fn Ops(comptime Self: type) type {
         const normParamTagCheck = ag_tensor.normParamTagCheck;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        /// A rank-1 parameter of the normalized axis, in this branch's dtype.
+        fn Param(comptime tag: Tag) type {
+            return Tensor(.{ .dtype = dtype, .tags = .{tag} });
+        }
         const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
@@ -79,23 +88,23 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn rmsNorm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNorm(tag_rank, self.asRawTensor(), norm_axis, eps, .{});
+            var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{});
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), RmsNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), RmsNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
         }
 
-        pub fn rmsNormMul(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Tensor(.{tag}), eps: f32) !Self {
+        pub fn rmsNormMul(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Param(tag), eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNorm(tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor() });
+            var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor() });
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or weight.requiresGrad(), RmsNormMulBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad() or weight.requiresGrad(), RmsNormMulBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
         }
 
-        pub fn rmsNormMulAdd(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Tensor(.{tag}), residual: *const Self, eps: f32) !Self {
+        pub fn rmsNormMulAdd(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Param(tag), residual: *const Self, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
-            var value = try ctx.rmsNorm(tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor(), .residual = residual.asRawTensor() });
+            var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor(), .residual = residual.asRawTensor() });
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad(), RmsNormMulAddBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, residual.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad(), RmsNormMulAddBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, residual.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
         }
 
         pub fn rmsNormMulRopeHalfPrepared(
@@ -151,9 +160,15 @@ pub fn Ops(comptime Self: type) type {
                 }
                 const weight_ptr = tensorObjectPtrFrom(@TypeOf(options.weight), &options.weight);
                 const bias_ptr = tensorObjectPtrFrom(@TypeOf(options.bias), &options.bias);
-                var value = try ctx.layerNorm(tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight_ptr.asRawTensor(), .bias = bias_ptr.asRawTensor() });
+                comptime {
+                    if (TensorObject(@TypeOf(options.weight)).dtype != dtype or TensorObject(@TypeOf(options.bias)).dtype != dtype)
+                        @compileError("layerNorm: weight and bias must have the tensor's dtype; cast explicitly");
+                }
+                var value = try ctx.layerNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight_ptr.asRawTensor(), .bias = bias_ptr.asRawTensor() });
                 errdefer value.deinit();
-                return finishOp(
+                return finishOrConstant(
+                    differentiable,
+                    dtype,
                     tags,
                     ctx,
                     value,
@@ -162,9 +177,9 @@ pub fn Ops(comptime Self: type) type {
                     .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, bias_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), eps },
                 );
             }
-            var value = try ctx.layerNorm(tag_rank, self.asRawTensor(), norm_axis, eps, .{});
+            var value = try ctx.layerNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{});
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), LayerNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
+            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), LayerNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
         }
 
         /// L2-normalize along `tag`: y = x · rsqrt(Σ x² + eps). NOTE the eps

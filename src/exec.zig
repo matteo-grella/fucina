@@ -252,6 +252,7 @@ pub const ExecContext = struct {
     pub const clone = exec_runtime.clone;
     pub const prepareContiguous = exec_runtime.prepareContiguous;
     pub const prepareAs = exec_runtime.prepareAs;
+    pub const widenedCompute = exec_runtime.widenedCompute;
     pub const storeAs = exec_runtime.storeAs;
     pub const enableNativeVectorPoolForWork = exec_runtime.enableNativeVectorPoolForWork;
     pub const enableNativeMatmulPoolForWork = exec_runtime.enableNativeMatmulPoolForWork;

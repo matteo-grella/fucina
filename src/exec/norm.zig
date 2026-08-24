@@ -20,6 +20,7 @@ const exec_rope = @import("rope.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
+const DType = tensor.DType;
 const RopeTable = exec_rope.RopeTable;
 const RopeMode = exec_rope.RopeMode;
 
@@ -56,12 +57,15 @@ const layerNormRowStats = exec_row_ops.layerNormRowStats;
 const layerNormParamGradColumns = exec_row_ops.layerNormParamGradColumns;
 
 /// Optional per-feature affine terms of layerNorm and groupNorm: `weight`
-/// scales the normalized row, `bias` adds to it (each rank-1 `[axis_dim]`,
-/// each independently optional). Applied in the same row pass.
-pub const AffineOptions = struct {
-    weight: ?*const Tensor = null,
-    bias: ?*const Tensor = null,
-};
+/// scales the normalized row, `bias` adds to it (each rank-1 `[axis_dim]`
+/// of the op's storage dtype, each independently optional). Applied in the
+/// same row pass.
+pub fn AffineOptions(comptime dtype: DType) type {
+    return struct {
+        weight: ?*const tensor.TensorOf(dtype) = null,
+        bias: ?*const tensor.TensorOf(dtype) = null,
+    };
+}
 
 /// The same terms as `[]const f32` slices, for the slice-level entries.
 pub const AffineSlices = struct {
@@ -93,11 +97,34 @@ pub const AffineBackwardResult = struct {
 
 /// Optional terms of rmsNorm: `weight` (rank-1 `[axis_dim]`) scales the
 /// normalized row, `residual` (same shape as `x`) is added after it, both in
-/// the same row pass.
-pub const RmsNormOptions = struct {
-    weight: ?*const Tensor = null,
-    residual: ?*const Tensor = null,
-};
+/// the same row pass; both of the op's storage dtype.
+pub fn RmsNormOptions(comptime dtype: DType) type {
+    return struct {
+        weight: ?*const tensor.TensorOf(dtype) = null,
+        residual: ?*const tensor.TensorOf(dtype) = null,
+    };
+}
+
+/// An optional operand widened to the compute dtype (a borrow, a copy, or
+/// one cast); `null` stays `null`.
+fn OptionalPrepared(comptime compute: DType) type {
+    return struct {
+        prepared: ?ExecContext.PreparedTensorOf(compute) = null,
+
+        fn tensorPtr(self: *@This()) ?*const tensor.TensorOf(compute) {
+            return if (self.prepared) |*p| p.tensor() else null;
+        }
+
+        fn deinit(self: *@This()) void {
+            if (self.prepared) |*p| p.deinit();
+        }
+    };
+}
+
+fn prepareOptionalAs(ctx: *ExecContext, comptime dtype: DType, comptime compute: DType, x: ?*const tensor.TensorOf(dtype)) !OptionalPrepared(compute) {
+    const t = x orelse return .{};
+    return .{ .prepared = try ctx.prepareAs(dtype, compute, t) };
+}
 
 /// Which gradients rmsNormBackward computes. `weight` must be the forward's
 /// weight when it had one (it feeds dx) and null otherwise; the weight
@@ -123,8 +150,22 @@ pub const RmsNormBackwardResult = struct {
 /// `+ residual` when given. The weighted rows go through the row kernels
 /// (`inner == 1`, large inputs); every other combination through the scalar
 /// loop. Each combination computes the same expression in the same order,
-/// so an option is never a different numeric result.
-pub fn rmsNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormOptions) !Tensor {
+/// so an option is never a different numeric result. One f32 kernel set;
+/// 16-bit inputs (and their weight/residual) follow the `.widened` policy.
+pub fn rmsNorm(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, eps: f32, options: RmsNormOptions(dtype)) !tensor.TensorOf(dtype) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "rmsNorm");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var ww = try prepareOptionalAs(ctx, dtype, compute, options.weight);
+    defer ww.deinit();
+    var rr = try prepareOptionalAs(ctx, dtype, compute, options.residual);
+    defer rr.deinit();
+    var out = try rmsNormF32(ctx, rank, xx.tensor(), axis, eps, .{ .weight = ww.tensorPtr(), .residual = rr.tensorPtr() });
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
+}
+
+fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormOptions(.f32)) !Tensor {
     if (options.weight) |weight| {
         if (options.residual) |residual| return rmsNormMulAdd(ctx, rank, x, weight, residual, axis, eps);
         return rmsNormMul(ctx, rank, x, weight, axis, eps);
@@ -760,8 +801,22 @@ pub fn layerNormRows(
 }
 
 /// LayerNorm over `axis` with the optional affine terms of `options` applied
-/// in the same row pass (`* weight`, then `+ bias`).
-pub fn layerNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: AffineOptions) !Tensor {
+/// in the same row pass (`* weight`, then `+ bias`). One f32 kernel set;
+/// 16-bit inputs (and their affine terms) follow the `.widened` policy.
+pub fn layerNorm(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, eps: f32, options: AffineOptions(dtype)) !tensor.TensorOf(dtype) {
+    const compute = comptime ExecContext.widenedCompute(dtype, "layerNorm");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var ww = try prepareOptionalAs(ctx, dtype, compute, options.weight);
+    defer ww.deinit();
+    var bb = try prepareOptionalAs(ctx, dtype, compute, options.bias);
+    defer bb.deinit();
+    var out = try layerNormF32(ctx, rank, xx.tensor(), axis, eps, .{ .weight = ww.tensorPtr(), .bias = bb.tensorPtr() });
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
+}
+
+fn layerNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: AffineOptions(.f32)) !Tensor {
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
     var ww = try prepareAffineTerm(ctx, options.weight, axis_dim);
@@ -871,7 +926,7 @@ fn layerNormDispatchAxisRank(
 /// applied in f32 (eps INSIDE the sqrt; the 1/sqrt scale is computed in f32,
 /// matching ggml). Optional per-channel affine `y = y*weight[c] + bias[c]`
 /// (`[C]` each) is applied AFTER normalization.
-pub fn groupNorm(ctx: *ExecContext, x: *const Tensor, groups: usize, eps: f32, options: AffineOptions) !Tensor {
+pub fn groupNorm(ctx: *ExecContext, x: *const Tensor, groups: usize, eps: f32, options: AffineOptions(.f32)) !Tensor {
     const source = try x.rankView(2);
     const rows = source.shape[0];
     const cols = source.shape[1];
