@@ -109,6 +109,7 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/optim.zig", .band = .ag },
     .{ .path = "src/optim/", .band = .ag },
     .{ .path = "src/es.zig", .band = .ag },
+    .{ .path = "src/es/", .band = .ag },
     .{ .path = "src/ptqtp.zig", .band = .ag },
     .{ .path = "src/gguf.zig", .band = .ag },
     .{ .path = "src/gguf_meta.zig", .band = .ag },
