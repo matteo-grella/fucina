@@ -25,7 +25,7 @@ zig build x86dot-check         # cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot parity check
 zig build bench-check          # compile every bench executable and the subq research tools without running them
 zig build cuda-check           # compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina/models roots + NVRTC PTX generator, not run): CUDA-provider bit-rot gate for GPU-less machines
 zig build smoke                # smoke example (examples/smoke/main.zig)
-zig build run -- <gguf> [args]   # fucina-run, the registry runner: any registered GGUF arch (qwen3/qwen3moe/gemma4/qwen35/qwen35moe/inkling/deepseek2/deepseek4/glm4moe): completion/chat/REPL, sampling, NLL, parity dumps, --moe-* streaming, glm4moe --mtp, inkling multimodal (apps/run/main.zig)
+zig build run -- <gguf> [args]   # fucina-run, the registry runner: any registered GGUF arch (qwen3/qwen3moe/gemma4/qwen35/qwen35moe/inkling/deepseek2/deepseek4/glm4moe): completion/chat/REPL, sampling, NLL, parity dumps, --moe-* streaming, --spec draft-free speculative decode (rewind families), glm4moe --mtp, inkling multimodal (apps/run/main.zig)
 zig build qwen3 -- <args>      # Qwen3 GGUF inference (apps/qwen3/main.zig; --spec/--spec-ref = lossless speculative decode, --tokenize = tokenizer-parity oracle)
 zig build gemma4 -- <args>     # Gemma 4 GGUF inference / logit-parity harness; --chat/--repl/--spec (examples/gemma4/main.zig)
 zig build qwen35 -- <args>     # Qwen3.5 (qwen35 hybrid Gated-DeltaNet) GGUF — loader/parity harness (examples/qwen35/main.zig; see examples/qwen35/README.md)

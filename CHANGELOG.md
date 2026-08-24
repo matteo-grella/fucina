@@ -24,6 +24,23 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `fucina-run --spec`: draft-model-free speculative decode for every
+  rewind-capable registered family (the cascade SAM + token-recycling
+  draft source over the shared `SpeculativeDecoder`; greedy-only, same
+  contract as the qwen3 app's `--spec`). Families without KV rewind
+  (deepseek2, deepseek4) are rejected with a message.
+- `tuning.wasSet(path)`: true when a table leaf carries an explicit value
+  (environment variable or programmatic pin) rather than its measured
+  default; the loader now keeps the env-supplied leaves as a separate
+  shadow. `tuning.gpuQ6Seeding` states the dense-Q6/packed-Q6/qmoe seeding
+  rule once for both GPU providers, and programmatic pins now count as
+  explicit for it (previously only the raw environment variables did).
+- `tuning.Table.pool_profile` (`FUCINA_POOL_PROFILE`): the worker-team
+  profiling switch rides the table instead of a direct env read.
+- `ExecContext.parallelMap`: the chunked parallel map with a serial
+  fallback that `optim` and `es` each carried privately, now one context
+  method over `dispatchRangeCapped`.
+
 - `apps/`: the example tree splits into two homes. `examples/<name>/` is
   teaching code (one `main.zig`, no test files, no C shims, no vendored
   assets); `apps/<name>/` is everything with product or port shape
