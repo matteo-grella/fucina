@@ -31,13 +31,16 @@
 //! in no band is an error too: a new `src/` root cannot silently inherit
 //! whatever band its neighbours happen to have.
 //!
-//! Third invariant — test-file forwarding: every `*_tests.zig` /
-//! `*_test.zig` file must have an incoming `@import` from some non-test src
-//! file (the `test { _ = @import("x_tests.zig"); }` forwarding stanza).
-//! Zig's lazy analysis means an unforwarded test file is silently absent
-//! from `zig build test` — it neither runs nor even compiles. This scan
-//! covers ALL tokens of every production file (test decls included, since
-//! that is exactly where the stanzas live).
+//! Third invariant — test-file forwarding: every test file (`*_tests.zig` /
+//! `*_test.zig`, and every file under a `<name>_tests/` directory suite)
+//! must be reachable from a production forwarding stanza
+//! (`test { _ = @import("x_tests.zig"); }`), directly or through other test
+//! files (a directory suite's shared helper is imported by its siblings,
+//! not by production code). Zig's lazy analysis means an unforwarded test
+//! file is silently absent from `zig build test` — it neither runs nor even
+//! compiles. The scan covers ALL tokens of every production file (test
+//! decls included, since that is exactly where the stanzas live), then
+//! propagates through test-to-test imports.
 
 const std = @import("std");
 
@@ -299,6 +302,7 @@ pub fn main(init: std.process.Init) !void {
 
     try collectFiles(allocator, io, &graph, &test_files);
     try collectEdges(allocator, io, &graph, &test_files);
+    try propagateTestForwarding(allocator, io, &test_files);
 
     var tarjan = try Tarjan.init(allocator, &graph);
     defer tarjan.deinit();
@@ -526,6 +530,60 @@ fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
     }
 }
 
+/// Test-to-test forwarding propagation: a test file counts as forwarded when
+/// it is reachable from a production forwarding stanza THROUGH other test
+/// files. This is the directory-suite shape: `src/ag/tensor.zig` forwards
+/// `tensor_tests/<domain>.zig`, and those files file-scope-import the shared
+/// `tensor_tests/util.zig` helper, which no production file names directly.
+fn propagateTestForwarding(allocator: Allocator, io: std.Io, test_files: *TestFiles) !void {
+    const TestEdge = struct { from: []const u8, to: []const u8 };
+    var edges: std.ArrayListUnmanaged(TestEdge) = .empty;
+    defer {
+        for (edges.items) |edge| allocator.free(edge.to);
+        edges.deinit(allocator);
+    }
+
+    var key_it = test_files.forwarded_by_path.keyIterator();
+    while (key_it.next()) |key| {
+        const contents = readFileSentinel(allocator, io, key.*) catch continue;
+        defer allocator.free(contents);
+        var ast = try std.zig.Ast.parse(allocator, contents, .zig);
+        defer ast.deinit(allocator);
+        if (ast.tokens.len < 3) continue;
+        var tok: std.zig.Ast.TokenIndex = 0;
+        const last_start: std.zig.Ast.TokenIndex = @intCast(ast.tokens.len - 2);
+        while (tok < last_start) : (tok += 1) {
+            if (ast.tokenTag(tok) != .builtin) continue;
+            if (!std.mem.eql(u8, ast.tokenSlice(tok), "@import")) continue;
+            if (ast.tokenTag(tok + 1) != .l_paren) continue;
+            if (ast.tokenTag(tok + 2) != .string_literal) continue;
+
+            const raw = ast.tokenSlice(tok + 2);
+            const imported = std.zig.string_literal.parseAlloc(allocator, raw) catch continue;
+            defer allocator.free(imported);
+            const resolved = try resolveLocalImport(allocator, key.*, imported) orelse continue;
+            if (test_files.forwarded_by_path.contains(resolved)) {
+                try edges.append(allocator, .{ .from = key.*, .to = resolved });
+            } else {
+                allocator.free(resolved);
+            }
+        }
+    }
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (edges.items) |edge| {
+            if (!(test_files.forwarded_by_path.get(edge.from) orelse false)) continue;
+            const to_forwarded = test_files.forwarded_by_path.getPtr(edge.to) orelse continue;
+            if (!to_forwarded.*) {
+                to_forwarded.* = true;
+                changed = true;
+            }
+        }
+    }
+}
+
 const TokenSpan = struct {
     start: std.zig.Ast.TokenIndex,
     end: std.zig.Ast.TokenIndex, // inclusive
@@ -654,8 +712,15 @@ fn addEdge(allocator: Allocator, file: *FileInfo, target_index: usize) !void {
 }
 
 fn isTestPath(path: []const u8) bool {
+    // Sibling suites (`x_tests.zig` / `x_test.zig`) and directory suites:
+    // every file under a `<name>_tests/` directory is a test file, shared
+    // helpers included (src/ag/tensor_tests/). Without the directory rule
+    // those files would be classified as production, so the forwarding
+    // invariant would not protect them and their imports would count as
+    // production edges.
     return std.mem.endsWith(u8, path, "_tests.zig") or
-        std.mem.endsWith(u8, path, "_test.zig");
+        std.mem.endsWith(u8, path, "_test.zig") or
+        std.mem.indexOf(u8, path, "_tests/") != null;
 }
 
 /// A file whose NAME looks like a sibling test suite but which is actually
