@@ -4,7 +4,7 @@
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xf1039dfe7c588a04,
     .dependencies = .{},
-    // What `zig fetch` consumers receive: the two library modules and what
+    // What `zig fetch` consumers receive: the library modules and what
     // their build needs (the Metal shim, CUDA PTX, and the vendored
     // llguidance staticlib source live under src/ and vendor/). Examples,
     // apps, docs, goldens, and tools are in-tree development surface —

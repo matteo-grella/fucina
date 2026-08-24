@@ -16,20 +16,24 @@ snippet written as a named `test` block and runs it against the real
 modules; snippets that need model assets are non-test fragments the
 harness ignores and are marked `// requires model assets to run`.
 
-## 1.1 The two modules
+## 1.1 The library modules
 
-The build exposes two library modules ([§2](02-toolchain-build-and-project-wiring.md)):
+The build exposes three library modules ([§2](02-toolchain-build-and-project-wiring.md)):
 
 - **`fucina`** (`src/fucina.zig`) — the tensor library: the public `Tensor`
   facade, the `ExecContext` runtime, autograd, quantized formats, training
   (optimizers, ES, LoRA), and persistence (GGUF, safetensors, checkpoints).
 - **`fucina_models`** (`src/models.zig`) — the model stack built on top: GGUF
   weight binding, KV caches, tokenizers, samplers, chat sessions,
-  speculative decoding, and the model families (Qwen3, Qwen3.5, Gemma 4,
-  DiffusionGemma, DeepSeek V2/V3, GLM-4.5, DeepSeek V4 Flash, Kimi-K3,
-  Inkling, Parakeet ASR).
+  speculative decoding, the serving contract and engine, and the model
+  families (Qwen3, Qwen3.5, Gemma 4, DiffusionGemma, DeepSeek V2/V3,
+  GLM-4.5, DeepSeek V4 Flash, Kimi-K3, Inkling, Parakeet ASR).
+- **`fucina_serving`** (`src/serving.zig`) — the model-free HTTP serving
+  transport over the `fucina_models` serving contract: HTTP server,
+  scheduler, SSE emitter, OpenAI/Anthropic wire dialects, hermes tool
+  calling ([§13.13](13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving)).
 
-Applications (`examples/`, `apps/`, `tools/`, `bench/`) sit above both.
+Applications (`examples/`, `apps/`, `tools/`, `bench/`) sit above all three.
 
 ## 1.2 Mental model
 

@@ -11,9 +11,10 @@
 //! inkling / deepseek4); nanochat checkpoints load via `--nanochat <dir>`.
 //! Run with `zig build lmserve -- <model.gguf> [flags]`.
 //!
-//! Thin front end: the transport (HTTP server, scheduler, wire dialects),
-//! the generic engine (`GgufChatBackend`), and every GGUF family adapter
-//! live in `models.text.serving` behind `serving.openFromFile` (dispatched through
+//! Thin front end: the transport (HTTP server, scheduler, wire dialects)
+//! lives in the `fucina_serving` module; the generic engine
+//! (`GgufChatBackend`) and every GGUF family adapter live in
+//! `models.text.serving` behind `serving.openFromFile` (dispatched through
 //! the architecture registry); this main parses flags and keeps only the
 //! two non-registry backends — diffusion-gemma (not an autoregressive
 //! decoder) and nanochat (a checkpoint format, not GGUF).
@@ -23,10 +24,11 @@ const fucina = @import("fucina");
 const models = @import("fucina_models");
 
 const types = @import("fucina_models").text.serving;
+const serving = @import("fucina_serving");
 const backend_nanochat = @import("backend_nanochat.zig");
 const backend_diffusion = @import("backend_diffusion.zig");
-const scheduler_mod = types.scheduler;
-const http_mod = types.http;
+const scheduler_mod = serving.scheduler;
+const http_mod = serving.http;
 
 const usage_text =
     \\fucina lmserve — OpenAI- and Anthropic-compatible LM server
@@ -525,7 +527,8 @@ fn shutdownKicker(io: std.Io, port: u16) void {
 // Every sibling .zig file in this directory is listed: a file referenced
 // only from main()'s serve paths contributes ZERO tests to the test binary
 // (Zig's lazy analysis — silently green), so presence in the directory must
-// imply presence here. The models.text.serving band's tests live in the models root
+// imply presence here. The transport band's tests live in the serving root
+// (`zig build test-serving`) and the engine's in the models root
 // (`zig build test-models`): Zig collects tests from the root MODULE only, so
 // a reference from this root cannot run them.
 test {

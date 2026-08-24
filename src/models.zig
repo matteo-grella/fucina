@@ -154,11 +154,12 @@ pub const text = struct {
         pub const cascade = @import("models/text/speculative/cascade.zig");
         pub const constrained = @import("models/text/speculative/constrained.zig");
     };
-    /// The serving band: the contract (`GenerateRequest`/`GenerateResult`,
-    /// capability flags, the per-model-family `Backend` vtable) plus the
-    /// transport (HTTP server, scheduler, OpenAI/Anthropic dialects), the
-    /// generic GGUF chat engine, and the `text.serving.open` load-and-serve
-    /// entry (`apps/lmserve` is the CLI front end built on it). Files in
+    /// The model-shaped half of serving: the contract
+    /// (`GenerateRequest`/`GenerateResult`, capability flags, the
+    /// per-model-family `Backend` vtable), the generic GGUF chat engine, and
+    /// the `text.serving.open` load-and-serve entry. The model-free
+    /// transport (HTTP server, scheduler, wire dialects) is the
+    /// `fucina_serving` module (`src/serving.zig`). Files in
     /// `models/text/serving/`.
     pub const serving = @import("models/text/serving.zig");
 };
@@ -225,7 +226,6 @@ test {
     // Serving-band internals (not on the band index): compile their tests.
     _ = @import("models/text/serving/adapter_common.zig");
     _ = @import("models/text/serving/fleet_serve.zig");
-    _ = @import("models/text/serving/wire_json.zig");
     _ = gemma.model;
     _ = gemma.train;
     _ = gemma.moe;
@@ -272,12 +272,6 @@ test {
     _ = text.llguidance;
     _ = text.chat;
     _ = text.serving.gguf_chat;
-    _ = text.serving.scheduler;
-    _ = text.serving.openai;
-    _ = text.serving.anthropic;
-    _ = text.serving.emitter;
-    _ = text.serving.http;
-    _ = text.serving.toolcall;
     _ = text.data;
     _ = research.subq;
 }

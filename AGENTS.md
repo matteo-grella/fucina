@@ -10,12 +10,12 @@ guide for contributors and coding agents: toolchain, commands, repo map, house r
 
 ## Toolchain
 
-- Pinned to **Zig 0.16.0** (`zig version` → `0.16.0`). `build.zig.zon` is the package manifest (`.version`, `.paths` = the shipped surface; `zig build doc-check` asserts README's fetch pin matches its version); modules are wired in `build.zig` and exported as `fucina` / `fucina_models`.
+- Pinned to **Zig 0.16.0** (`zig version` → `0.16.0`). `build.zig.zon` is the package manifest (`.version`, `.paths` = the shipped surface; `zig build doc-check` asserts README's fetch pin matches its version); modules are wired in `build.zig` and exported as `fucina` / `fucina_models` / `fucina_serving`.
 
 ## Build, test, run, bench
 
 ```sh
-zig build test                 # unit tests, every test root: src/fucina.zig, src/models.zig, and the test-carrying apps; each root also has a solo step (test-fucina, test-models, test-<app>)
+zig build test                 # unit tests, every test root: src/fucina.zig, src/models.zig, src/serving.zig, and the test-carrying apps; each root also has a solo step (test-fucina, test-models, test-serving, test-<app>)
 zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full test matrix is a native gate
 zig build test -Dblas=none        # native backend via pure Zig vector kernels (no CBLAS)
 zig build arch-check           # production-only import graph over src/ + examples/ + apps/ + bench/ + tools/ (AST-based, test-aware): 0 forbidden SCCs (the root-anchored exec.zig <-> exec/*.zig SCC is permitted and counted), 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded

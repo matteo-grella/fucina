@@ -59,6 +59,7 @@ const Error = error{
 /// do not reorder without changing the documented stack.
 const Band = enum {
     apps,
+    serving,
     models,
     facade,
     ag, // ag + training/serialization + model I/O
@@ -74,6 +75,7 @@ const Band = enum {
     fn label(self: Band) []const u8 {
         return switch (self) {
             .apps => "apps",
+            .serving => "serving",
             .models => "models",
             .facade => "facade",
             .ag => "ag + training/serialization",
@@ -101,6 +103,9 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "apps/", .band = .apps },
     .{ .path = "bench/", .band = .apps },
     .{ .path = "tools/", .band = .apps },
+
+    .{ .path = "src/serving.zig", .band = .serving },
+    .{ .path = "src/serving/", .band = .serving },
 
     .{ .path = "src/models.zig", .band = .models },
     .{ .path = "src/models/", .band = .models },

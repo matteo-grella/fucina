@@ -2431,11 +2431,13 @@ LoRA mode's exact-identity start.
 
 ## 13.13 Serving (`src/models/text/serving/`)
 
-`models.text.serving` is the complete serving stack: the model-agnostic contract,
-the HTTP transport, the generic GGUF chat engine, and a load-and-serve
-entry. `src/models/text/serving.zig` is the band index (contract names re-exported
+`models.text.serving` is the model-shaped half of the serving stack: the
+model-agnostic contract, the generic GGUF chat engine, and a load-and-serve
+entry; the model-free HTTP transport is the `fucina_serving` module
+(`src/serving.zig` + `src/serving/`), written against the contract.
+`src/models/text/serving.zig` is the band index (contract names re-exported
 flat, sub-modules namespaced); `apps/lmserve` ([§14.8](14-model-families-and-example-applications.md#148-example-applications)) is the CLI front
-end built on it, and the voice agent hosts the same engine in-process.
+end built on both, and the voice agent hosts the same engine in-process.
 
 **Contract** (`serving/contract.zig`, re-exported flat). `GenerateRequest`
 carries the normalized message history (`models.text.chat.Message`), the fully
@@ -2453,22 +2455,24 @@ connection thread), `generate` (worker thread, streams reply bytes to a
 `*std.Io.Writer` sink), and optional `generate_batch` (lockstep decode;
 null when the family has no batch forward).
 
-**Transport.** `serving.http.Server` is the front end: accept loop,
+**Transport** (the `fucina_serving` module, `src/serving/`).
+`fucina_serving.http.Server` is the front end: accept loop,
 per-connection threads (capped), socket deadlines, routing
 (`POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`,
 `GET /v1/models`, `GET /health`), SSE plumbing through the cross-thread
 `StreamPipe` (a stalled client stalls only its own connection thread,
 never generation), the Host-header DNS-rebinding guard, and opt-in CORS.
-It reads its work from `serving.scheduler.Scheduler`: a bounded FIFO in
-front of one sequential inference worker (the engine's intended shape:
-one `ExecContext`, single-threaded by contract), with lockstep batch
-grouping when the scheduler is built with a batch width above 1.
-`serving.emitter` frames deltas per wire dialect and routes
-reasoning-block text away from the content channel; `serving.openai` and
-`serving.anthropic` parse the three dialects into one normalized shape;
-`serving.toolcall` renders hermes `<tool_call>` prompts and scans replies
-for calls. On Linux, a binary that references `serving.http` links libc
-(the `std.c.recv` client-hang-up probe); macOS links it implicitly.
+It reads its work from `fucina_serving.scheduler.Scheduler`: a bounded
+FIFO in front of one sequential inference worker (the engine's intended
+shape: one `ExecContext`, single-threaded by contract), with lockstep
+batch grouping when the scheduler is built with a batch width above 1.
+`fucina_serving.emitter` frames deltas per wire dialect and routes
+reasoning-block text away from the content channel; `fucina_serving.openai`
+and `fucina_serving.anthropic` parse the three dialects into one
+normalized shape; `fucina_serving.toolcall` renders hermes `<tool_call>`
+prompts and scans replies for calls. On Linux, a binary that references
+`fucina_serving.http` links libc (the `std.c.recv` client-hang-up probe);
+macOS links it implicitly.
 
 **Engine** (`serving.gguf_chat`). `GgufChatBackend(Model, TokMod)` adapts
 any family served through `models.text.chat.Conversation` (one comptime

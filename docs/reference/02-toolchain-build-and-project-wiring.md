@@ -39,7 +39,7 @@ kernel arms are not in the binary.
 | `-Dmax-threads` | `usize` | `8` | Comptime worker-team ceiling **and** runtime default thread count (`src/parallel.zig`). Sized for M1 Max P-cores; many-core servers must raise it at build time (`FUCINA_MAX_THREADS` only lowers it at runtime). | Outside 1–64 **panics the build**. |
 | `-Dgpu` | `none` \| `metal` \| `cuda` | `none` | GPU GEMM offload provider ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)). `metal`: big f32/f16/bf16 GEMMs, dense quantized prefill linears, and the MoE expert FFN on macOS. `cuda`: the same surface plus streaming attention forward and opt-in decode GEMV on Linux/NVIDIA, no SDK at build time. Decode below the work gates and training stay on CPU. | `metal` on a non-macOS target **panics**; `cuda` on a non-Linux target **panics** (cross-compiling from macOS with `-Dtarget=x86_64-linux-gnu` is the supported path). |
 | `-Dparakeet-mic` | `bool` | `false` | Links the vendored miniaudio capture stack into the `parakeet` example so `--mic` (live microphone) works; default off keeps the parakeet build fast. | Only affects the parakeet executable/tests. |
-| `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4/lmserve examples and the models, lmserve, and snippet-check test roots, enabling `models.text.llguidance` grammar/JSON-schema token masking ([§13.6](13-the-model-stack-fucina_models.md#136-sampling-srcmodelstextsamplerzig)). Off (the default) the build stays pure Zig and `models.text.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
+| `-Dllguidance` | `bool` | `false` | Builds the vendored [llguidance](../../vendor/llguidance/README.md) constrained-decoding engine (`cargo build` in `vendor/llguidance`) and links its staticlib into the qwen3/gemma4/lmserve examples and the models, serving, lmserve, and snippet-check test roots, enabling `models.text.llguidance` grammar/JSON-schema token masking ([§13.6](13-the-model-stack-fucina_models.md#136-sampling-srcmodelstextsamplerzig)). Off (the default) the build stays pure Zig and `models.text.llguidance.Constraint.init` returns `error.LlguidanceNotEnabled`; the `LogitProcessor` seam itself is always available. | Requires a Rust toolchain >= 1.87 on PATH when enabled. |
 | `-Dvector-scan` | `bool` | `false` | Vectorizes the scan kernels (`cumsum`/`cumprod` and cumsum's reverse VJP pass). Off = the documented serial-per-row scans. On: non-last-axis scans vectorize across independent columns (bitwise identical to serial); last-axis scans use an in-register prefix scan — still bitwise deterministic for any thread count, but the accumulation order differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer-valued data). Measured M1 ReleaseFast 256×8192: cumsum 3.3×, cumprod 5.2× (last axis), 4.3× (non-last, bit-identical). |
 | `-Doptimize` | `Debug` \| `ReleaseSafe` \| `ReleaseFast` \| `ReleaseSmall` | `Debug` | Standard Zig optimize mode. Build with `ReleaseFast` whenever speed matters (Debug is 10–50× slower); validate in Debug/ReleaseSafe, bench in ReleaseFast. | `x86dot-check` is always built ReleaseSafe regardless. |
 | `-Dtarget`, `-Dcpu` | standard queries | host, native CPU | Cross-compilation target and CPU model. | See below — a bare `-Dtarget` silently loses the fast kernels. |
@@ -114,7 +114,7 @@ step. Arguments after `--` are forwarded to the launched program, and
 
 One home per command set:
 
-- **Verification gates** (`test`, `test-fucina`, `test-models`,
+- **Verification gates** (`test`, `test-fucina`, `test-models`, `test-serving`,
   `arch-check`, `doc-check`, `snippet-check`, `x86dot-check`, `cuda-check`,
   `bench-check`, `bench-gate`): the gate matrix in
   [DEVELOPMENT.md §4.2](../DEVELOPMENT.md#42-run-the-gates-that-your-change-can-affect),
@@ -131,13 +131,13 @@ One home per command set:
 
 ## 2.4 Module graph and options wiring (`build.zig`)
 
-`build.zig` registers two library modules and two internal microbench roots
+`build.zig` registers three library modules and two internal microbench roots
 with `b.addModule`; executables get private root modules via
 `b.createModule` and pull the libraries in with `addImport`.
 
 - **`fucina`** — root `src/fucina.zig`. The public facade: tensors, autograd,
   `ExecContext`, optimizers, ES, LoRA, GGUF/safetensors I/O ([§3](03-tensors-types-construction-and-data-access.md)–[§12](12-model-io-gguf-and-safetensors.md)). It is
-  the only one of the two *library* modules that receives the option set:
+  the only one of the *library* modules that receives the option set:
   `module.addOptions("build_options", options)` (the microbench roots below
   and the test-root module instances receive the same `options` object).
 - **`fucina_models`** — root `src/models.zig`. The LLM/ASR stack ([§13](13-the-model-stack-fucina_models.md)). It does
@@ -146,6 +146,10 @@ with `b.addModule`; executables get private root modules via
   by `src/models/text/llguidance.zig`). It reaches the configured core exclusively
   through `models_module.addImport("fucina", module)` and the `fucina.internal`
   seam, so there is exactly one copy of the backend/exec types.
+- **`fucina_serving`** — root `src/serving.zig`. The model-free HTTP serving
+  transport ([§13.13](13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving)): no options module of its own; it imports `fucina`
+  and `fucina_models` (the serving contract and chat types) and nothing
+  else.
 - **`bench_raw`** — root `src/bench_raw.zig`, same options. Internal raw
   tensor surface (`RawTensor`, `ExecContext`, `optim`) for
   `bench/{mlp,optim,ce,conv,scatter,backward_diamond,attention_backward,train_step,facade,einsum}.zig`.
@@ -216,7 +220,7 @@ itself is centralized in six helpers applied per executable:
 ## 2.5 Consuming Fucina from another project
 
 Fucina is an ordinary Zig package: `build.zig.zon` names it `.fucina`, the
-repository is tagged (`v0.3.0`), and both library modules are exported by
+repository is tagged (`v0.3.0`), and the three library modules are exported by
 `build.zig` (`b.addModule`), so the standard path is the package manager.
 From the consumer project:
 
@@ -234,11 +238,13 @@ const fucina_dep = b.dependency("fucina", .{
 });
 exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
 exe.root_module.addImport("fucina_models", fucina_dep.module("fucina_models")); // optional
+exe.root_module.addImport("fucina_serving", fucina_dep.module("fucina_serving")); // optional
 ```
 
-`@import("fucina")` / `@import("fucina_models")` then work exactly as in
-every snippet of this reference; omit the `fucina_models` import for
-tensor/training-only consumers. In dependency builds the exported modules
+`@import("fucina")` / `@import("fucina_models")` / `@import("fucina_serving")`
+then work exactly as in every snippet of this reference; omit the
+`fucina_models` and `fucina_serving` imports for tensor/training-only
+consumers. In dependency builds the exported modules
 carry their own BLAS/GPU link inputs (link inputs propagate through module
 imports), so the default macOS configuration links Accelerate with no
 extra consumer steps and `-Dgpu=metal` brings its shim along — no

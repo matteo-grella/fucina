@@ -92,6 +92,7 @@ zig fetch --save git+https://github.com/matteo-grella/fucina#v0.3.0
 const fucina_dep = b.dependency("fucina", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("fucina", fucina_dep.module("fucina"));
 exe.root_module.addImport("fucina_models", fucina_dep.module("fucina_models")); // LLM stack; optional
+exe.root_module.addImport("fucina_serving", fucina_dep.module("fucina_serving")); // HTTP serving transport; optional
 ```
 
 The fetched package is the library surface only (`src/`, the vendored

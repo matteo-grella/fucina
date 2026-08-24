@@ -6,8 +6,8 @@
 //! wire (roles, content blocks, the field surfaces).
 
 const std = @import("std");
-const chat = @import("../chat.zig");
-const types = @import("contract.zig");
+const chat = @import("fucina_models").text.chat;
+const types = @import("fucina_models").text.serving;
 const toolcall = @import("toolcall.zig");
 
 const Allocator = std.mem.Allocator;
