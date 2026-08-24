@@ -183,6 +183,27 @@ pub const quant = struct {
     pub const BlockMXFP4 = dtype.BlockMXFP4;
     pub const BlockNVFP4 = dtype.BlockNVFP4;
 };
+comptime {
+    // Completeness guard for the mirror above: every `dtype.block_formats`
+    // row's block struct must be re-exported by `quant`. A format added to
+    // the registry (itself completeness-checked in dtype.zig) without a
+    // `quant` line is a compile error here, not a silently thinner public
+    // vocabulary. Fires on any build that analyzes the module root.
+    @setEvalBranchQuota(20_000);
+    for (dtype.block_formats) |row| {
+        var exported = false;
+        for (@typeInfo(quant).@"struct".decls) |decl| {
+            const value = @field(quant, decl.name);
+            if (@TypeOf(value) == type and value == row.Block) {
+                exported = true;
+                break;
+            }
+        }
+        if (!exported) @compileError(
+            "fucina.quant must re-export the block struct for dtype ." ++ @tagName(row.dtype),
+        );
+    }
+}
 
 /// Pre-packed dense matmul RHS (weights repacked once at load for the packed GEMM arms).
 pub const PackedRhs = ag.PackedRhs;

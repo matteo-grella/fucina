@@ -268,6 +268,11 @@ pub const BlockFormat = struct {
     Block: type,
     /// Logical elements per block (`blockSize`).
     elems: usize,
+    /// Whether the format is a valid stored-RHS side of the quantized
+    /// matmul boundary (`supportsQuantizedMatmulRhs` derives from this).
+    /// False for the accumulator/LHS-side formats (q8_1, q8_k). No default
+    /// on purpose: a new row must claim its capability explicitly.
+    matmul_rhs: bool,
 };
 
 /// The block-format registry: the single source every per-format
@@ -278,33 +283,33 @@ pub const BlockFormat = struct {
 /// neither this table nor `scalar_dtypes` (or by both) a compile error, so
 /// a forgotten row can never fall through a switch as a scalar.
 pub const block_formats = [_]BlockFormat{
-    .{ .dtype = .q1_0, .Block = BlockQ1_0, .elems = q1_0_block_size },
-    .{ .dtype = .q2_0, .Block = BlockQ2_0, .elems = q2_0_block_size },
-    .{ .dtype = .q4_0, .Block = BlockQ4_0, .elems = q4_0_block_size },
-    .{ .dtype = .q4_1, .Block = BlockQ4_1, .elems = q4_1_block_size },
-    .{ .dtype = .q5_0, .Block = BlockQ5_0, .elems = q5_0_block_size },
-    .{ .dtype = .q5_1, .Block = BlockQ5_1, .elems = q5_1_block_size },
-    .{ .dtype = .q8_0, .Block = BlockQ8_0, .elems = q8_0_block_size },
-    .{ .dtype = .q8_1, .Block = BlockQ8_1, .elems = q8_1_block_size },
-    .{ .dtype = .q2_k, .Block = BlockQ2_K, .elems = qk_k_block_size },
-    .{ .dtype = .q3_k, .Block = BlockQ3_K, .elems = qk_k_block_size },
-    .{ .dtype = .q4_k, .Block = BlockQ4_K, .elems = qk_k_block_size },
-    .{ .dtype = .q5_k, .Block = BlockQ5_K, .elems = qk_k_block_size },
-    .{ .dtype = .q6_k, .Block = BlockQ6_K, .elems = qk_k_block_size },
-    .{ .dtype = .q8_k, .Block = BlockQ8_K, .elems = qk_k_block_size },
-    .{ .dtype = .iq1_s, .Block = BlockIQ1_S, .elems = qk_k_block_size },
-    .{ .dtype = .iq1_m, .Block = BlockIQ1_M, .elems = qk_k_block_size },
-    .{ .dtype = .iq2_xxs, .Block = BlockIQ2_XXS, .elems = qk_k_block_size },
-    .{ .dtype = .iq2_xs, .Block = BlockIQ2_XS, .elems = qk_k_block_size },
-    .{ .dtype = .iq2_s, .Block = BlockIQ2_S, .elems = qk_k_block_size },
-    .{ .dtype = .iq3_xxs, .Block = BlockIQ3_XXS, .elems = qk_k_block_size },
-    .{ .dtype = .iq3_s, .Block = BlockIQ3_S, .elems = qk_k_block_size },
-    .{ .dtype = .iq4_nl, .Block = BlockIQ4_NL, .elems = iq4_nl_block_size },
-    .{ .dtype = .iq4_xs, .Block = BlockIQ4_XS, .elems = qk_k_block_size },
-    .{ .dtype = .tq1_0, .Block = BlockTQ1_0, .elems = qk_k_block_size },
-    .{ .dtype = .tq2_0, .Block = BlockTQ2_0, .elems = qk_k_block_size },
-    .{ .dtype = .mxfp4, .Block = BlockMXFP4, .elems = mxfp4_block_size },
-    .{ .dtype = .nvfp4, .Block = BlockNVFP4, .elems = nvfp4_block_size },
+    .{ .dtype = .q1_0, .Block = BlockQ1_0, .elems = q1_0_block_size, .matmul_rhs = true },
+    .{ .dtype = .q2_0, .Block = BlockQ2_0, .elems = q2_0_block_size, .matmul_rhs = true },
+    .{ .dtype = .q4_0, .Block = BlockQ4_0, .elems = q4_0_block_size, .matmul_rhs = true },
+    .{ .dtype = .q4_1, .Block = BlockQ4_1, .elems = q4_1_block_size, .matmul_rhs = true },
+    .{ .dtype = .q5_0, .Block = BlockQ5_0, .elems = q5_0_block_size, .matmul_rhs = true },
+    .{ .dtype = .q5_1, .Block = BlockQ5_1, .elems = q5_1_block_size, .matmul_rhs = true },
+    .{ .dtype = .q8_0, .Block = BlockQ8_0, .elems = q8_0_block_size, .matmul_rhs = true },
+    .{ .dtype = .q8_1, .Block = BlockQ8_1, .elems = q8_1_block_size, .matmul_rhs = false },
+    .{ .dtype = .q2_k, .Block = BlockQ2_K, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .q3_k, .Block = BlockQ3_K, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .q4_k, .Block = BlockQ4_K, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .q5_k, .Block = BlockQ5_K, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .q6_k, .Block = BlockQ6_K, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .q8_k, .Block = BlockQ8_K, .elems = qk_k_block_size, .matmul_rhs = false },
+    .{ .dtype = .iq1_s, .Block = BlockIQ1_S, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq1_m, .Block = BlockIQ1_M, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq2_xxs, .Block = BlockIQ2_XXS, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq2_xs, .Block = BlockIQ2_XS, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq2_s, .Block = BlockIQ2_S, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq3_xxs, .Block = BlockIQ3_XXS, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq3_s, .Block = BlockIQ3_S, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq4_nl, .Block = BlockIQ4_NL, .elems = iq4_nl_block_size, .matmul_rhs = true },
+    .{ .dtype = .iq4_xs, .Block = BlockIQ4_XS, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .tq1_0, .Block = BlockTQ1_0, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .tq2_0, .Block = BlockTQ2_0, .elems = qk_k_block_size, .matmul_rhs = true },
+    .{ .dtype = .mxfp4, .Block = BlockMXFP4, .elems = mxfp4_block_size, .matmul_rhs = true },
+    .{ .dtype = .nvfp4, .Block = BlockNVFP4, .elems = nvfp4_block_size, .matmul_rhs = true },
 };
 
 /// The registry's complement: every non-block dtype, listed once.
@@ -458,34 +463,13 @@ pub fn supportsToFloat(comptime dtype: DType) bool {
 }
 
 pub fn supportsQuantizedMatmulRhs(comptime dtype: DType) bool {
-    return switch (dtype) {
-        .q1_0,
-        .q2_0,
-        .q4_0,
-        .q4_1,
-        .q5_0,
-        .q5_1,
-        .q8_0,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_nl,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        .mxfp4,
-        .nvfp4,
-        => true,
-        else => false,
+    // Derived from the registry so the capability can never silently lag a
+    // new format: every `block_formats` row claims `matmul_rhs` explicitly.
+    return comptime blk: {
+        for (block_formats) |row| {
+            if (row.dtype == dtype) break :blk row.matmul_rhs;
+        }
+        break :blk false;
     };
 }
 
