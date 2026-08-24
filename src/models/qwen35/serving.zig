@@ -27,6 +27,10 @@ const qwen35_chat = @import("chat.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Engine-hosted (no `Conversation`): `serving.openFromFile` rejects the
+/// cartridge/fleet/KV-tier options for this family.
+pub const conversation_hosted = false;
+
 pub const Backend = struct {
     allocator: Allocator,
     ctx: *fucina.ExecContext,

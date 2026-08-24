@@ -33,6 +33,10 @@ const ds4 = @import("model.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Engine-hosted (no `Conversation`): `serving.openFromFile` rejects the
+/// cartridge/fleet/KV-tier options for this family.
+pub const conversation_hosted = false;
+
 /// Prefill chunk size (the runner's default): batches expert fetches per
 /// layer without letting per-chunk scratch grow unbounded.
 const prefill_chunk: usize = 128;

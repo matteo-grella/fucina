@@ -16,6 +16,9 @@ pub const qwen3 = struct {
     /// Recorded-logits gates in `models/qwen3/runner_tests.zig` pin its
     /// numerics.
     pub const runner = @import("models/qwen3/runner.zig");
+    /// The family's serving wiring (`registry.Entry.Serving`;
+    /// `text.serving.open` dispatches here).
+    pub const serving = @import("models/qwen3/serving.zig");
     /// SHINE adapter-fleet serving (`text.serving.open`'s counterpart for
     /// the research adapters in `research.shine`).
     pub const shine_serving = @import("models/qwen3/shine_serving.zig");
@@ -33,6 +36,9 @@ pub const gemma = struct {
     pub const model = @import("models/gemma/model.zig");
     pub const train = @import("models/gemma/train.zig");
     pub const moe = @import("models/gemma/moe.zig");
+    /// The family's serving wiring (`registry.Entry.Serving`;
+    /// `text.serving.open` dispatches here).
+    pub const serving = @import("models/gemma/serving.zig");
 };
 /// DiffusionGemma block text-diffusion (gemma4 backbone). Files in
 /// `models/diffusion_gemma/`.
@@ -209,11 +215,16 @@ test {
     _ = qwen3.shine_serving;
     _ = research.shine;
     _ = research.shine_train;
+    _ = qwen3.serving;
+    _ = gemma.serving;
     _ = qwen35.model;
     _ = qwen35.chat;
     _ = qwen35.serving;
     _ = inkling.serving;
     _ = deepseek4.serving;
+    // Serving-band internals (not on the band index): compile their tests.
+    _ = @import("models/text/serving/adapter_common.zig");
+    _ = @import("models/text/serving/fleet_serve.zig");
     _ = gemma.model;
     _ = gemma.train;
     _ = gemma.moe;
