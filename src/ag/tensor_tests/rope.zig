@@ -69,7 +69,7 @@ test "tagged autograd partial rope passes tail dims and inverts rotated gradient
 
     var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var table = try ctx.prepareRopeTable(&.{ 0, 1 }, 4, 10000, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &.{ 0, 1 } }, .feature_dim = 4, .freqs = .{ .theta = .{ .base = 10000 } } });
     defer table.deinit();
 
     var y = try x.rope(&ctx, .seq, .d, &table, .half);
@@ -135,7 +135,7 @@ test "tagged partial rope interleaved_tail rotates the trailing span only" {
 
     var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ 2, 6 }, &.{ 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
-    var table = try ctx.prepareRopeTable(&.{ 0, 1 }, 4, 10000, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &.{ 0, 1 } }, .feature_dim = 4, .freqs = .{ .theta = .{ .base = 10000 } } });
     defer table.deinit();
 
     var y = try x.rope(&ctx, .seq, .d, &table, .interleaved_tail);
@@ -232,7 +232,7 @@ test "tagged rmsNormMulRopeHalfPrepared matches materialized non-contiguous inpu
     var weight = try Tensor(.{.d}).fromSlice(&ctx, .{4}, &.{ 0.5, 1.5, -2.0, 0.75 });
     defer weight.deinit();
     const positions = [_]i32{ 0, 1 };
-    var table = try ctx.prepareRopeTable(&positions, 4, 10_000, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = 4, .freqs = .{ .theta = .{ .base = 10_000 } } });
     defer table.deinit();
 
     var got = try strided.rmsNormMulRopeHalfPrepared(&ctx, .seq, .d, &weight, 1e-6, &table);
@@ -258,7 +258,7 @@ test "tagged autograd fused rmsNormMulRope matches unfused composition" {
     const w_values = [_]f32{ 0.5, -1.5, 2, 0.75 };
     const positions = [_]i32{ 0, 3 };
 
-    var table = try ctx.prepareRopeTable(&positions, 4, 10000.0, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = 4, .freqs = .{ .theta = .{ .base = 10000.0 } } });
     defer table.deinit();
 
     var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ 2, 4 }, &x_values);
@@ -310,7 +310,7 @@ test "tagged autograd prepared rope backward honors freq factors" {
     const positions = [_]i32{ 1, 2 };
     const freq_factors = [_]f32{ 0.5, 2.0 };
 
-    var table = try ctx.prepareRopeTableFactors(&positions, 4, 100.0, false, &freq_factors);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = 4, .freqs = .{ .theta = .{ .base = 100.0, .factors = &freq_factors } } });
     defer table.deinit();
 
     var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ 2, 4 }, &x_values);

@@ -720,9 +720,9 @@ pub const Model = struct {
             }
         }
         const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
-        var swa_table = try ctx.prepareRopeTable(positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        var swa_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = cfg.head_dim_swa, .freqs = .{ .theta = .{ .base = cfg.rope_theta_swa } } });
         defer swa_table.deinit();
-        var global_table = try ctx.prepareRopeTableFactors(positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        var global_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = cfg.head_dim_global, .freqs = .{ .theta = .{ .base = cfg.rope_theta, .factors = factors } } });
         defer global_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -779,9 +779,9 @@ pub const Model = struct {
         const rope_positions: fucina.AxisRange = .{ .origin = @intCast(pos0), .len = token_ids.len };
 
         const factors: ?[]const f32 = if (self.rope_freqs) |*t| try t.dataConst() else null;
-        var swa_table = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false);
+        var swa_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = rope_positions }, .feature_dim = cfg.head_dim_swa, .freqs = .{ .theta = .{ .base = cfg.rope_theta_swa } } });
         defer swa_table.deinit();
-        var global_table = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors);
+        var global_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = rope_positions }, .feature_dim = cfg.head_dim_global, .freqs = .{ .theta = .{ .base = cfg.rope_theta, .factors = factors } } });
         defer global_table.deinit();
 
         const embed_start = profileStart(profile, io);

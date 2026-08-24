@@ -187,6 +187,25 @@ this point; earlier history is `git log`.
   raw kernel set (`bench/`, `fucina.internal.backend_mod`) rewrite to the
   request form; the public `ExecContext` and `Tensor` surfaces are
   unchanged.
+- Rope seam, `ExecContext`: the five table constructors
+  (`prepareRopeTable`, `prepareRopeTableFactors`, `prepareRopeTableRange`,
+  `prepareRopeTableFactorsRange`, `prepareRopeTableInvFreqsF64`) are one
+  `prepareRopeTable(spec)` over an `exec.RopeTableSpec`: `positions`
+  (`.explicit = []const i32` or `.range = AxisRange`), `feature_dim`,
+  `freqs` (`.theta = .{ .base, .factors = null }` in f32, or
+  `.inv_freq_f64 = []const f64` accumulated in f64) and `inverse`
+  (default false). Rewrites: `prepareRopeTableRange(r, d, t, false)` is
+  `prepareRopeTable(.{ .positions = .{ .range = r }, .feature_dim = d,
+  .freqs = .{ .theta = .{ .base = t } } })`;
+  `prepareRopeTableInvFreqsF64(pos0, n, f, inv)` is
+  `prepareRopeTable(.{ .positions = .{ .range = .{ .origin = pos0, .len =
+  n } }, .feature_dim = 2 * f.len, .freqs = .{ .inv_freq_f64 = f },
+  .inverse = inv })`. Tables are bitwise what the old entries built.
+  `ropeWithTable` now covers every rotary span (`ropePartialWithTable` and
+  `ropePartial` are gone: the table's `feature_dim` was already the span);
+  `rope` takes its on-the-fly source as one `exec.RopeTheta`. `RopeTable`
+  drops the unused `theta_base` field. The `Tensor.rope` facade is
+  unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

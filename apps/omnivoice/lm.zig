@@ -407,7 +407,7 @@ pub const Model = struct {
         // Positions 0..S-1, identical for cond and uncond rows (reference
         // pipeline-tts.cpp:477-480); NEOX half-rotation RoPE over all
         // head_dim dims, theta 1e6, no freq factors.
-        var rope_table = try ctx.prepareRopeTableRange(.{ .len = seq_len }, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = seq_len } }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
         defer rope_table.deinit();
 
         var final = blk: {

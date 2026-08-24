@@ -266,6 +266,9 @@ pub const RopeMode = exec.RopeMode;
 pub const RopeTable = exec.RopeTable;
 /// Rope base frequency parameter type for the table builders.
 pub const RopeTheta = exec.RopeTheta;
+pub const RopeTableSpec = exec.RopeTableSpec;
+pub const RopePositions = exec.RopePositions;
+pub const RopeFreqs = exec.RopeFreqs;
 
 /// SIMD vocabulary for user-defined elemental ops (`elementalUnary` /
 /// `elementalBinary` vector bodies): the machine vector type, its width,

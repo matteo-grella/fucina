@@ -582,7 +582,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
 
             if (cache.len + t > cache.cap) return error.CacheFull;
 
-            var table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = t }, hd, rope_theta, true);
+            var table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = t } }, .feature_dim = hd, .freqs = .{ .theta = .{ .base = rope_theta } }, .inverse = true });
             defer table.deinit();
 
             var x_norm = try (try self.wte.gather(ctx, .vocab, token_ids, .seq)).rmsNorm(ctx, .d, rms_eps);
@@ -766,7 +766,7 @@ fn toLabels(targets: []const isize, labels: []usize) void {
 /// Rotary table for positions 0..seq_len-1 (rope_theta base, inverse=true so
 /// the stock .half kernel reproduces nanochat's rotation — gpt.py:57-65).
 fn buildRopeTable(ctx: *ExecContext, seq_len: usize, head_dim: usize) !RopeTable {
-    return ctx.prepareRopeTableRange(.{ .len = seq_len }, head_dim, rope_theta, true);
+    return ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = seq_len } }, .feature_dim = head_dim, .freqs = .{ .theta = .{ .base = rope_theta } }, .inverse = true });
 }
 
 fn lname(buf: []u8, layer: usize, comptime suffix: []const u8) ![]const u8 {

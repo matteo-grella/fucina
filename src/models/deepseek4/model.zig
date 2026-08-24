@@ -213,7 +213,7 @@ const Rope = struct {
     /// `.interleaved_tail`, it rotates the tail of each head.
     fn table(self: *const Rope, ctx: *ExecContext, pos0: usize, count: usize, compressed: bool, inverse: bool) !fucina.RopeTable {
         const freq = if (compressed) self.comp_freq else self.raw_freq;
-        return ctx.prepareRopeTableInvFreqsF64(pos0, count, freq, inverse);
+        return ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = count } }, .feature_dim = 2 * freq.len, .freqs = .{ .inv_freq_f64 = freq }, .inverse = inverse });
     }
 };
 

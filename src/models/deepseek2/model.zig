@@ -172,7 +172,7 @@ const YarnRope = struct {
     /// Hand-fill the rotation table for `count` positions starting at
     /// `pos0` (spans `qk_rope_dim` features — partial-tail on the q heads).
     fn table(self: *const YarnRope, ctx: *ExecContext, pos0: usize, count: usize) !fucina.RopeTable {
-        return ctx.prepareRopeTableInvFreqsF64(pos0, count, self.inv_freq, false);
+        return ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = count } }, .feature_dim = 2 * self.inv_freq.len, .freqs = .{ .inv_freq_f64 = self.inv_freq } });
     }
 };
 

@@ -582,7 +582,7 @@ pub fn encodeMemoryStates(
     const hidden = base.hidden_size;
     const total_len = token_ids.len + mem;
 
-    var rope_table = try ctx.prepareRopeTableRange(.{ .len = total_len }, base.head_dim, base.rope_theta, false);
+    var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = total_len } }, .feature_dim = base.head_dim, .freqs = .{ .theta = .{ .base = base.rope_theta } } });
     defer rope_table.deinit();
 
     var embedded = try model.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -901,7 +901,7 @@ fn forwardStepImpl(
     if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
     const base = model.config;
 
-    var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, base.head_dim, base.rope_theta, false);
+    var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = token_ids.len } }, .feature_dim = base.head_dim, .freqs = .{ .theta = .{ .base = base.rope_theta } } });
     defer rope_table.deinit();
 
     var x = try model.token_embedding.getRowsAs(ctx, token_ids, .embed);

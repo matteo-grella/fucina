@@ -762,8 +762,8 @@ pub fn Trainer(comptime targets: Targets) type {
             errdefer self.allocator.destroy(fresh);
             const factors: ?[]const f32 = if (self.model.rope_freqs) |*t| try t.dataConst() else null;
             fresh.* = .{
-                .swa = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim_swa, cfg.rope_theta_swa, false),
-                .global = try ctx.prepareRopeTableFactorsRange(rope_positions, cfg.head_dim_global, cfg.rope_theta, false, factors),
+                .swa = try ctx.prepareRopeTable(.{ .positions = .{ .range = rope_positions }, .feature_dim = cfg.head_dim_swa, .freqs = .{ .theta = .{ .base = cfg.rope_theta_swa } } }),
+                .global = try ctx.prepareRopeTable(.{ .positions = .{ .range = rope_positions }, .feature_dim = cfg.head_dim_global, .freqs = .{ .theta = .{ .base = cfg.rope_theta, .factors = factors } } }),
             };
             errdefer fresh.deinit();
 

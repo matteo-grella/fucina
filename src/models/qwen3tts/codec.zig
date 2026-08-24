@@ -573,7 +573,7 @@ fn transformerForward(ctx: *ExecContext, dec: *const Decoder, x: *const Act) !Ac
     try cur.addAxisVectorInPlace(ctx, dec.in_proj_b, .d);
 
     const t = cur.dim(.seq);
-    var rope_table = try ctx.prepareRopeTableRange(.{ .len = t }, cfg.head_dim, cfg.rope_theta, false);
+    var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = t } }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
     defer rope_table.deinit();
 
     for (dec.layers) |*l| {
@@ -775,7 +775,6 @@ pub fn decodeChunked(ctx: *ExecContext, dec: *const Decoder, codes: []const i32,
     }
 }
 
-
 // --- exact streaming decode --------------------------------------------------
 //
 // Every decoder op is causal and time-invariant, so streaming needs no new
@@ -955,7 +954,7 @@ pub const Streaming = struct {
         }
 
         const abs0 = self.pos_base + self.kv_len;
-        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(abs0), .len = t }, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(abs0), .len = t } }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
         defer rope_table.deinit();
 
         for (dec.layers, 0..) |*l, li| {

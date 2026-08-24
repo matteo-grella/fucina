@@ -191,7 +191,6 @@ pub fn cloneInverseRopeTable(allocator: std.mem.Allocator, table: *const exec_mo
     return .{
         .allocator = allocator,
         .positions = positions,
-        .theta_base = table.theta_base,
         .feature_dim = table.feature_dim,
         .pair_count = table.pair_count,
         .values = values,

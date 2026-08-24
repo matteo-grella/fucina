@@ -60,6 +60,9 @@ pub const CompareOp = backend_ops.CompareOp;
 /// re-exported here for the autograd VJP params (`ag/*` name `exec.RopeTable`).
 pub const RopeMode = exec_rope.RopeMode;
 pub const RopeTable = exec_rope.RopeTable;
+pub const RopeTableSpec = exec_rope.RopeTableSpec;
+pub const RopePositions = exec_rope.RopePositions;
+pub const RopeFreqs = exec_rope.RopeFreqs;
 pub const RopeTheta = exec_rope.RopeTheta;
 
 pub const SoftmaxExtOptions = exec_softmax.SoftmaxExtOptions;
@@ -474,14 +477,8 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const rope = exec_rope.rope;
     pub const prepareRopeTable = exec_rope.prepareRopeTable;
-    pub const prepareRopeTableFactors = exec_rope.prepareRopeTableFactors;
-    pub const prepareRopeTableRange = exec_rope.prepareRopeTableRange;
-    pub const prepareRopeTableFactorsRange = exec_rope.prepareRopeTableFactorsRange;
-    pub const prepareRopeTableInvFreqsF64 = exec_rope.prepareRopeTableInvFreqsF64;
     pub const yarnBlendInvFreqsF64 = exec_rope.yarnBlendInvFreqsF64;
     pub const ropeWithTable = exec_rope.ropeWithTable;
-    pub const ropePartial = exec_rope.ropePartial;
-    pub const ropePartialWithTable = exec_rope.ropePartialWithTable;
 
     // ----------------------------------------------------------------------
     // attention: the fused forward/backward kernels (exec/attention.zig)

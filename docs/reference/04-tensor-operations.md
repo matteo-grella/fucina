@@ -1274,18 +1274,28 @@ when the table spans the whole axis). `source` selects the factor source
 at comptime (a closed set; anything else is a compile error):
 
 - `*const exec.RopeTable` — prepared factors, the production path. Build
-  with `ctx.prepareRopeTable(positions, feature_dim, theta_base, inverse)`
-  or `ctx.prepareRopeTableFactors(..., freq_factors)` — the latter is ggml's
-  `rope_ext` frequency scaling (Llama-3 long-context, Gemma global layers).
-  For custom frequency schedules the core cannot rebuild, hand-fill via
-  `ctx.prepareRopeTableInvFreqsF64(pos0, count, inv_freq, inverse)` —
-  per-pair f64 inverse frequencies, angles accumulated in f64 before the
-  f32 cast (the `prepareRopeTable*` pair compute f32 angles) —
-  and `ctx.yarnBlendInvFreqsF64(dim, base, factor, orig_ctx)` builds the
-  DeepSeek-family YaRN blend (beta 32/1 correction ramp; `factor <= 1`
-  returns the plain pow schedule). The table's `feature_dim` is the
-  **authoritative rotary span**: equal to `dim(feature_tag)` rotates fully;
-  smaller rotates the leading `feature_dim` features (`.half`,
+  with `ctx.prepareRopeTable(spec)`, where `exec.RopeTableSpec` names the
+  positions, the rotary span, the angle schedule and the sign:
+
+  ```zig
+  pub const RopeTableSpec = struct {
+      positions: RopePositions,   // .explicit = []const i32 | .range = AxisRange
+      feature_dim: usize,         // the table's rotary span
+      freqs: RopeFreqs,           // .theta = .{ .base, .factors = null } | .inv_freq_f64 = []const f64
+      inverse: bool = false,      // negate sin: the un-rotation table
+  };
+  ```
+
+  `.theta` computes `pos / base^(2i/d)` in f32; `factors` (length
+  `feature_dim/2`) divides each pair's frequency — ggml's `rope_ext`
+  `freq_factors` (Llama-3 long-context, Gemma global layers); `null` is
+  plain RoPE. `.inv_freq_f64` takes per-pair inverse frequencies the core
+  cannot rebuild and accumulates each angle in f64 before the f32 cast;
+  `ctx.yarnBlendInvFreqsF64(dim, base, factor, orig_ctx)` builds the
+  DeepSeek-family YaRN blend for it (beta 32/1 correction ramp;
+  `factor <= 1` returns the plain pow schedule). The table's `feature_dim`
+  is the **authoritative rotary span**: equal to `dim(feature_tag)` rotates
+  fully; smaller rotates the leading `feature_dim` features (`.half`,
   `.interleaved`) or the trailing ones (`.interleaved_tail`) and passes the
   rest through unchanged (partial RoPE). `RopeTable` owns its buffers;
   `table.deinit()` releases them.
@@ -1319,19 +1329,18 @@ pub const AxisRange = struct {
 };
 ```
 
-The rope-table constructors take one directly:
+The rope-table spec takes one as its positions source:
 
 ```zig
-pub fn prepareRopeTableRange(range: AxisRange, feature_dim, theta_base, inverse) !RopeTable
-pub fn prepareRopeTableFactorsRange(range: AxisRange, feature_dim, theta_base, inverse, freq_factors) !RopeTable
+ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = n } }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000 } } })
 ```
 
 `.{ .len = n }` is a prefill over `0..n`; `.{ .origin = pos0, .len = n }` is a
-decode step. Both share one arithmetic body with the array form, so a run
+decode step. Both position sources feed one arithmetic body, so a run
 expressed as a range and the same run expressed as an array produce
 **bitwise identical** tables (pinned in `src/exec/rope_tests.zig` across several
-origins, both `inverse` arms, and the `freq_factors` arm). The explicit
-`positions: []const i32` form stays for the genuinely ragged case — a
+origins, both `inverse` arms, and the `factors` arm). The
+`.explicit = []const i32` source stays for the genuinely ragged case — a
 multi-stream batch whose positions are several runs, not one.
 
 **Band masks already carry an origin.** An offset causal mask needs no new

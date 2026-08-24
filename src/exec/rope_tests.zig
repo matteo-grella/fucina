@@ -1,6 +1,6 @@
-//! RoPE table construction: AxisRange against the array form, Fortran-style
-//! origins, and prepareRopeTableFactors frequency scaling. Force-imported by
-//! `exec.zig`.
+//! RoPE table construction: the `.range` positions source against the
+//! `.explicit` form, Fortran-style origins, and `.theta` frequency factors.
+//! Force-imported by `exec.zig`.
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
@@ -41,16 +41,15 @@ test "a rope table built from an AxisRange is bitwise equal to the array form" {
         for (positions, 0..) |*p, i| p.* = @intCast(origin + @as(i64, @intCast(i)));
 
         for ([_]bool{ false, true }) |inverse| {
-            var from_array = try ctx.prepareRopeTable(positions, feature_dim, theta, inverse);
+            var from_array = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta } }, .inverse = inverse });
             defer from_array.deinit();
-            var from_range = try ctx.prepareRopeTableRange(.{ .origin = origin, .len = count }, feature_dim, theta, inverse);
+            var from_range = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = origin, .len = count } }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta } }, .inverse = inverse });
             defer from_range.deinit();
 
             try std.testing.expectEqualSlices(f32, from_array.sinValues(), from_range.sinValues());
             try std.testing.expectEqualSlices(f32, from_array.cosValues(), from_range.cosValues());
             try std.testing.expectEqual(from_array.feature_dim, from_range.feature_dim);
             try std.testing.expectEqual(from_array.pair_count, from_range.pair_count);
-            try std.testing.expectEqual(from_array.theta_base, from_range.theta_base);
         }
 
         // Same equality with per-pair frequency factors (the Llama-3 /
@@ -59,9 +58,9 @@ test "a rope table built from an AxisRange is bitwise equal to the array form" {
         defer allocator.free(factors);
         for (factors, 0..) |*f, i| f.* = 1.0 + @as(f32, @floatFromInt(i)) * 0.03;
 
-        var array_factors = try ctx.prepareRopeTableFactors(positions, feature_dim, theta, false, factors);
+        var array_factors = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta, .factors = factors } } });
         defer array_factors.deinit();
-        var range_factors = try ctx.prepareRopeTableFactorsRange(.{ .origin = origin, .len = count }, feature_dim, theta, false, factors);
+        var range_factors = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = origin, .len = count } }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta, .factors = factors } } });
         defer range_factors.deinit();
         try std.testing.expectEqualSlices(f32, array_factors.sinValues(), range_factors.sinValues());
         try std.testing.expectEqualSlices(f32, array_factors.cosValues(), range_factors.cosValues());
@@ -104,7 +103,7 @@ test "AxisRange carries an origin the way a Fortran lower bound does" {
     try std.testing.expectError(error.InvalidDataLength, decode.writeInto(&wrong));
 }
 
-test "prepareRopeTableFactors scales frequencies; null reproduces plain RoPE" {
+test "theta factors scale frequencies; null reproduces plain RoPE" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -115,13 +114,13 @@ test "prepareRopeTableFactors scales frequencies; null reproduces plain RoPE" {
     const theta_base: f32 = 10000;
     const ff = [_]f32{ 1.0, 2.0, 4.0, 8.0 };
 
-    var plain = try ctx.prepareRopeTable(&positions, feature_dim, theta_base, false);
+    var plain = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta_base } } });
     defer plain.deinit();
-    var plain_null = try ctx.prepareRopeTableFactors(&positions, feature_dim, theta_base, false, null);
+    var plain_null = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta_base } } });
     defer plain_null.deinit();
     try std.testing.expectEqualSlices(f32, plain.values, plain_null.values);
 
-    var scaled = try ctx.prepareRopeTableFactors(&positions, feature_dim, theta_base, false, &ff);
+    var scaled = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = theta_base, .factors = &ff } } });
     defer scaled.deinit();
     const pair = scaled.pair_count;
     const angle_count = positions.len * pair;

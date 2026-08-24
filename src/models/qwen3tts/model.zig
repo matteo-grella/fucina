@@ -120,7 +120,6 @@ fn f32Data(t: *const gguf.TensorInfo) ![]const f32 {
     return @as([*]const f32, @ptrCast(@alignCast(t.data.ptr)))[0 .. t.data.len / 4];
 }
 
-
 fn fmtName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
 }
@@ -276,7 +275,7 @@ pub const Stack = struct {
         if (kv.len + t > kv.capacity) return Error.KvOverflow;
         const n_past = kv.len;
 
-        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(n_past), .len = t }, cfg.head_dim, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(n_past), .len = t } }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
         defer rope_table.deinit();
 
         var x = try rows.withTags(ctx, .{ .seq, .embed });

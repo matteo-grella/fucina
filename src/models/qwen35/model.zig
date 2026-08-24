@@ -783,7 +783,7 @@ pub const Model = struct {
         // For text input, multi-section / IMROPE reduces to standard NEOX RoPE
         // (all position components equal), so a plain table over the rotary dims
         // (`rope_n_rot`) suffices.
-        var rope_table = try ctx.prepareRopeTableRange(.{ .len = token_ids.len }, cfg.rope_n_rot, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = token_ids.len } }, .feature_dim = cfg.rope_n_rot, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -887,7 +887,7 @@ pub const Model = struct {
         const cfg = self.config;
 
         const prep_start = profileStart(profile, io);
-        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, cfg.rope_n_rot, cfg.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = token_ids.len } }, .feature_dim = cfg.rope_n_rot, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
         defer rope_table.deinit();
         profileAdd(profile, io, prep_start, .prep);
 
@@ -2253,7 +2253,7 @@ test "partialRope rotates first n_rot dims and passes the rest through" {
     defer x.deinit();
 
     var positions = [_]i32{ 0, 1 };
-    var table = try ctx.prepareRopeTable(&positions, n_rot, 10000.0, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = n_rot, .freqs = .{ .theta = .{ .base = 10000.0 } } });
     defer table.deinit();
 
     var out = try partialRope(&ctx, &x, n_rot, &table);

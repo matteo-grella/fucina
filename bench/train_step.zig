@@ -283,7 +283,7 @@ pub fn main(init: std.process.Init) !void {
         const positions = try allocator.alloc(i32, seq_len);
         defer allocator.free(positions);
         for (positions, 0..) |*p, i| p.* = @intCast(i);
-        model.rope_table = try ctx.prepareRopeTable(positions, head_dim, rope_theta, false);
+        model.rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = head_dim, .freqs = .{ .theta = .{ .base = rope_theta } } });
     }
     defer model.rope_table.deinit();
     try dumper.writeTensor("rope_sin", model.rope_table.sinValues(), &.{ seq_len, head_dim / 2 });

@@ -400,7 +400,7 @@ pub const Model = struct {
         if (self.host != null) return Error.WrongBlockStyle;
         if (token_ids.len == 0) return Error.InvalidSequenceLength;
 
-        var rope_table = try ctx.prepareRopeTableRange(.{ .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .len = token_ids.len } }, .feature_dim = self.config.head_dim, .freqs = .{ .theta = .{ .base = self.config.rope_theta } } });
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -501,7 +501,7 @@ pub const Model = struct {
         if (kv.len() != pos0) return Error.InvalidSequenceLength;
         if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
-        var rope_table = try ctx.prepareRopeTableRange(.{ .origin = @intCast(pos0), .len = token_ids.len }, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = @intCast(pos0), .len = token_ids.len } }, .feature_dim = self.config.head_dim, .freqs = .{ .theta = .{ .base = self.config.rope_theta } } });
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);
@@ -579,7 +579,7 @@ pub const Model = struct {
         defer a.free(positions);
         for (positions, caches) |*position, kv| position.* = @intCast(kv.len());
 
-        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = self.config.head_dim, .freqs = .{ .theta = .{ .base = self.config.rope_theta } } });
         defer rope_table.deinit();
 
         // Per-stream attention spans, refilled per layer; the lens are
@@ -658,7 +658,7 @@ pub const Model = struct {
                 }
             }
         }
-        var rope_table = try ctx.prepareRopeTable(positions, self.config.head_dim, self.config.rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = self.config.head_dim, .freqs = .{ .theta = .{ .base = self.config.rope_theta } } });
         defer rope_table.deinit();
 
         var x = try self.token_embedding.getRowsAs(ctx, token_ids, .embed);

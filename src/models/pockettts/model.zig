@@ -616,7 +616,7 @@ fn transformerForward(
     const positions = try allocator.alloc(i32, s);
     defer allocator.free(positions);
     for (positions, 0..) |*pp, i| pp.* = @intCast(kv.offset + i);
-    var rope_table = try ctx.prepareRopeTable(positions, hd, 10000.0, false);
+    var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = hd, .freqs = .{ .theta = .{ .base = 10000.0 } } });
     defer rope_table.deinit();
 
     var x = try Rows.fromBorrowedConstSlice(ctx, .{ s, d }, rows);

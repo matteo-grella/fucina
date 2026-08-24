@@ -1147,7 +1147,7 @@ pub fn Trainer(comptime targets: Targets) type {
 
             const fresh = try self.allocator.create(fucina.RopeTable);
             errdefer self.allocator.destroy(fresh);
-            fresh.* = try ctx.prepareRopeTable(positions, cfg.head_dim, cfg.rope_theta, false);
+            fresh.* = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
             errdefer fresh.deinit();
             try self.transient_tables.append(self.allocator, fresh);
             return fresh;
@@ -1166,7 +1166,7 @@ pub fn Trainer(comptime targets: Targets) type {
 
             const fresh = try self.allocator.create(fucina.RopeTable);
             errdefer self.allocator.destroy(fresh);
-            fresh.* = try ctx.prepareRopeTableRange(rope_positions, cfg.head_dim, cfg.rope_theta, false);
+            fresh.* = try ctx.prepareRopeTable(.{ .positions = .{ .range = rope_positions }, .feature_dim = cfg.head_dim, .freqs = .{ .theta = .{ .base = cfg.rope_theta } } });
             errdefer fresh.deinit();
 
             try self.rope_tables.put(self.allocator, key, fresh);

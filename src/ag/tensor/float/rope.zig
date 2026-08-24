@@ -52,10 +52,9 @@ pub fn Ops(comptime Self: type) type {
             const SourceT = @TypeOf(source);
             const info = @typeInfo(SourceT);
             if (comptime (info == .pointer and info.pointer.size == .one and info.pointer.child == exec_mod.RopeTable)) {
-                // The partial exec entry self-falls-back to the full kernel
-                // when table.feature_dim equals the feature axis length (one
-                // integer compare); the backward mirrors it.
-                var value = try ctx.ropePartialWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
+                // The table's feature_dim is the rotary span (full or
+                // partial); the backward mirrors it with the inverse table.
+                var value = try ctx.ropeWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), RopeTableBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, source });
             }
@@ -69,7 +68,7 @@ pub fn Ops(comptime Self: type) type {
                         @compileError("rope: an on-the-fly source needs both .positions and .theta_base");
                 }
                 const theta = exec_mod.RopeTheta{ .positions = source.positions, .theta_base = source.theta_base };
-                var value = try ctx.rope(tag_rank, self.asRawTensor(), position_axis, feature_axis, theta.positions, theta.theta_base, mode, false);
+                var value = try ctx.rope(tag_rank, self.asRawTensor(), position_axis, feature_axis, theta, mode, false);
                 errdefer value.deinit();
                 return finishOp(tags, ctx, value, self.requiresGrad(), RopeBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, theta.positions, theta.theta_base });
             }

@@ -240,7 +240,7 @@ test "fused rms-norm+rope: batch rows are bitwise equal to single-position calls
     for ([_]usize{ 1, 2, 15, 16, 17, 31, 32, 33, 40 }) |m| {
         var positions: [max_m]i32 = undefined;
         for (positions[0..m], 0..) |*p, i| p.* = @intCast(i);
-        var table = try ctx.prepareRopeTable(positions[0..m], d, 10000.0, false);
+        var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions[0..m] }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000.0 } } });
         defer table.deinit();
         var x = try ctx.fromSlice(.f32, .{ m, heads, d }, x_vals[0 .. m * heads * d]);
         defer x.deinit();
@@ -249,7 +249,7 @@ test "fused rms-norm+rope: batch rows are bitwise equal to single-position calls
 
         for (0..m) |i| {
             var row_pos = [_]i32{@intCast(i)};
-            var row_table = try ctx.prepareRopeTable(&row_pos, d, 10000.0, false);
+            var row_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &row_pos }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000.0 } } });
             defer row_table.deinit();
             var row = try ctx.fromSlice(.f32, .{ 1, heads, d }, x_vals[i * heads * d ..][0 .. heads * d]);
             defer row.deinit();

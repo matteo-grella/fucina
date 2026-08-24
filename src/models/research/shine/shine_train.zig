@@ -585,7 +585,7 @@ pub const ShineTrainer = struct {
         }
         const fresh = try self.allocator.create(fucina.RopeTable);
         errdefer self.allocator.destroy(fresh);
-        fresh.* = try ctx.prepareRopeTable(positions, base.head_dim, base.rope_theta, false);
+        fresh.* = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = base.head_dim, .freqs = .{ .theta = .{ .base = base.rope_theta } } });
         errdefer fresh.deinit();
         try self.transient_tables.append(self.allocator, fresh);
         return fresh;

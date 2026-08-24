@@ -315,7 +315,7 @@ pub const Lm = struct {
         std.debug.assert(kv_len <= write_offset + n_new);
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(config.lm_head_dim)));
 
-        var rope_table = try ctx.prepareRopeTable(positions, config.lm_head_dim, config.lm_rope_theta, false);
+        var rope_table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = config.lm_head_dim, .freqs = .{ .theta = .{ .base = config.lm_rope_theta } } });
         defer rope_table.deinit();
 
         var bias_tensor: ?fucina.Tensor(.{ .q_seq, .kv_seq }) = null;

@@ -937,11 +937,11 @@ fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, 
 
     const positions = try ropeBenchPositions(counted.allocator(), seq);
     defer counted.allocator().free(positions);
-    var table = try ctx.prepareRopeTable(positions, d, 10000, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000 } } });
     defer table.deinit();
 
     for (0..4) |_| {
-        var y = try ctx.ropePartialWithTable(3, &x, 0, 2, &table, mode);
+        var y = try ctx.ropeWithTable(3, &x, 0, 2, &table, mode);
         y.deinit();
     }
 
@@ -949,7 +949,7 @@ fn runRawRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usize, 
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.ropePartialWithTable(3, &x, 0, 2, &table, mode);
+        var y = try ctx.ropeWithTable(3, &x, 0, 2, &table, mode);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -974,7 +974,7 @@ fn runPublicRopeTable(comptime mode: bench_raw.RopeMode, seq: usize, heads: usiz
 
     const positions = try ropeBenchPositions(counted.allocator(), seq);
     defer counted.allocator().free(positions);
-    var table = try ctx.prepareRopeTable(positions, d, 10000, false);
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = positions }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000 } } });
     defer table.deinit();
 
     for (0..4) |_| {

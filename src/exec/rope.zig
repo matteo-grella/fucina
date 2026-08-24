@@ -1,8 +1,11 @@
 //! Rotary position embedding (RoPE) for the eager runtime.
 //!
-//! Home of `RopeTable`/`RopeMode` (re-exported as `exec.RopeTable`/`exec.RopeMode`
-//! for the autograd VJP params) plus the forward rope ops. `sinValues`/`cosValues`
-//! are `pub` so `norm.zig`'s fused rms-norm+rope kernel can read them cross-module.
+//! Home of `RopeTable`/`RopeMode`/`RopeTableSpec` (re-exported through
+//! `exec.zig` for the autograd VJP params and the facade) plus the two
+//! forward entries: `prepareRopeTable(spec)` builds a table over any
+//! positions source and angle schedule, `ropeWithTable` applies it over a
+//! full or partial rotary span. `sinValues`/`cosValues` are `pub` so
+//! `norm.zig`'s fused rms-norm+rope kernel can read them cross-module.
 //!
 //! Domain module: every op receives an explicit `*ExecContext`; imports the
 //! shape leaf.
@@ -29,9 +32,9 @@ pub const RopeMode = enum {
     interleaved_tail,
 };
 
-/// On-the-fly RoPE factor source for the unified facade `rope`: positions +
-/// theta base, full rotation only. Production paths prepare a `RopeTable`
-/// instead (freq_factors/NTK scaling live there).
+/// On-the-fly factor source for the facade `rope`: positions + theta base,
+/// full rotation only. Production paths prepare a `RopeTable` instead
+/// (factors / NTK scaling / f64 schedules live in `RopeTableSpec`).
 pub const RopeTheta = struct {
     positions: []const i32,
     theta_base: f32,
@@ -40,7 +43,6 @@ pub const RopeTheta = struct {
 pub const RopeTable = struct {
     allocator: Allocator,
     positions: []i32,
-    theta_base: f32,
     feature_dim: usize,
     pair_count: usize,
     values: []f32,
@@ -62,90 +64,26 @@ pub const RopeTable = struct {
     }
 };
 
-pub fn rope(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    x: *const Tensor,
-    comptime position_axis: usize,
-    comptime feature_axis: usize,
-    positions: []const i32,
-    theta_base: f32,
-    comptime mode: RopeMode,
-    comptime inverse: bool,
-) !Tensor {
-    const source = try x.rankView(rank);
-    const feature_dim = source.shape[feature_axis];
-    var table = try prepareRopeTable(ctx, positions, feature_dim, theta_base, inverse);
-    defer table.deinit();
-    return ropeWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
-}
-
-pub fn prepareRopeTable(ctx: *ExecContext, positions: []const i32, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-    return prepareRopeTableFactors(ctx, positions, feature_dim, theta_base, inverse, null);
-}
-
-/// As `prepareRopeTable`, but with optional per-pair `freq_factors` (length
-/// `feature_dim/2`) that scale each rotary frequency: the angle for pair `i`
-/// becomes `(pos / theta_base^(2i/d)) / freq_factors[i]`. This is ggml's
-/// `rope_ext` `freq_factors` (a.k.a. proportional / NTK-by-part RoPE): Llama-3
-/// long-context scaling and Gemma's global ("full attention") layers both
-/// supply it. `freq_factors == null` reproduces plain RoPE exactly.
-pub fn prepareRopeTableFactors(
-    ctx: *ExecContext,
-    positions: []const i32,
-    feature_dim: usize,
-    theta_base: f32,
-    inverse: bool,
-    freq_factors: ?[]const f32,
-) !RopeTable {
-    return prepareRopeTableCore(ctx, .{ .explicit = positions }, feature_dim, theta_base, inverse, freq_factors);
-}
-
-/// As `prepareRopeTable`, but for the positions of ONE CONTIGUOUS RUN, named
-/// by its origin instead of materialized: `range` spans
-/// `[range.origin, range.origin + range.len)`.
-///
-/// This is the overwhelmingly common case — a prefill covers `0..n`, a decode
-/// step covers `pos0..pos0+n` — and the array form made every caller allocate
-/// `n` integers, fill them with `origin + i`, and free them just to express
-/// `origin`. Same arithmetic body as the array form (they share
-/// `prepareRopeTableCore`), so the tables are BITWISE identical; only the
-/// caller-side allocation and fill disappear.
-///
-/// Ragged batches, where the positions are several runs rather than one, keep
-/// the explicit-array form.
-pub fn prepareRopeTableRange(ctx: *ExecContext, range: tensor.AxisRange, feature_dim: usize, theta_base: f32, inverse: bool) !RopeTable {
-    return prepareRopeTableFactorsRange(ctx, range, feature_dim, theta_base, inverse, null);
-}
-
-/// `prepareRopeTableFactors` over a contiguous position run; see
-/// `prepareRopeTableRange`.
-pub fn prepareRopeTableFactorsRange(
-    ctx: *ExecContext,
-    range: tensor.AxisRange,
-    feature_dim: usize,
-    theta_base: f32,
-    inverse: bool,
-    freq_factors: ?[]const f32,
-) !RopeTable {
-    return prepareRopeTableCore(ctx, .{ .range = range }, feature_dim, theta_base, inverse, freq_factors);
-}
-
-/// Where a table's positions come from. Both arms feed one arithmetic body, so
-/// a run expressed as a range and the same run expressed as an array produce
-/// bitwise identical tables.
-const PositionSource = union(enum) {
+/// Where a table's positions come from. Both arms feed one arithmetic body,
+/// so a run expressed as a range and the same run expressed as an array
+/// produce bitwise identical tables.
+pub const RopePositions = union(enum) {
+    /// One position per rotated row, any values: ragged batches (several
+    /// runs), context shifts (negative deltas).
     explicit: []const i32,
+    /// One contiguous run `[origin, origin + len)`: a prefill covers `0..n`,
+    /// a decode step `pos0..pos0+n`. Names the run by its origin instead of
+    /// materializing it.
     range: tensor.AxisRange,
 
-    fn len(self: PositionSource) usize {
+    fn len(self: RopePositions) usize {
         return switch (self) {
             .explicit => |p| p.len,
             .range => |r| r.len,
         };
     }
 
-    fn at(self: PositionSource, i: usize) i32 {
+    fn at(self: RopePositions, i: usize) i32 {
         return switch (self) {
             .explicit => |p| p[i],
             .range => |r| @intCast(r.at(i)),
@@ -153,57 +91,121 @@ const PositionSource = union(enum) {
     }
 };
 
-fn prepareRopeTableCore(
-    ctx: *ExecContext,
-    source: PositionSource,
+/// The per-pair angle schedule of a table.
+pub const RopeFreqs = union(enum) {
+    /// Pair `i` at position `p` rotates by `p / base^(2i/d)`, computed in
+    /// f32. `factors` (length `feature_dim/2`) divides each pair's
+    /// frequency: ggml's `rope_ext` `freq_factors` (proportional / NTK-by-part
+    /// RoPE; Llama-3 long-context scaling, Gemma's global layers). `null`
+    /// reproduces plain RoPE exactly.
+    theta: struct { base: f32, factors: ?[]const f32 = null },
+    /// Caller-supplied per-pair inverse frequencies (length `feature_dim/2`),
+    /// each angle accumulated in f64 before the f32 cast: for schedules the
+    /// core cannot rebuild (YaRN blends, per-family bases) whose reference
+    /// computes angles in double precision. The cos/sin magnitude
+    /// correction (mscale) is the caller's business.
+    inv_freq_f64: []const f64,
+};
+
+/// What `prepareRopeTable` builds: the positions, the rotary span, the angle
+/// schedule and the sign. `feature_dim` is the table's authoritative rotary
+/// span; a table narrower than the tensor's feature axis is a partial rotary.
+pub const RopeTableSpec = struct {
+    positions: RopePositions,
     feature_dim: usize,
-    theta_base: f32,
+    freqs: RopeFreqs,
+    /// Negate every sin: the un-rotation table.
+    inverse: bool = false,
+};
+
+/// Full-axis rotation with on-the-fly `.theta` factors over explicit
+/// positions. Production paths prepare a `RopeTable` once and apply it per
+/// layer with `ropeWithTable`.
+pub fn rope(
+    ctx: *ExecContext,
+    comptime rank: usize,
+    x: *const Tensor,
+    comptime position_axis: usize,
+    comptime feature_axis: usize,
+    theta: RopeTheta,
+    comptime mode: RopeMode,
     inverse: bool,
-    freq_factors: ?[]const f32,
-) !RopeTable {
-    if (feature_dim % 2 != 0) return tensor.TensorError.InvalidShape;
-    const pair_count = feature_dim / 2;
-    if (freq_factors) |ff| {
-        if (ff.len != pair_count) return tensor.TensorError.ShapeMismatch;
+) !Tensor {
+    const source = try x.rankView(rank);
+    var table = try prepareRopeTable(ctx, .{
+        .positions = .{ .explicit = theta.positions },
+        .feature_dim = source.shape[feature_axis],
+        .freqs = .{ .theta = .{ .base = theta.theta_base } },
+        .inverse = inverse,
+    });
+    defer table.deinit();
+    return ropeWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
+}
+
+/// Build the sin/cos table `spec` describes. Both position sources run the
+/// exact same arithmetic on the exact same i32 values, so the tables are
+/// bitwise identical; the `.theta` schedule computes f32 angles, the
+/// `.inv_freq_f64` schedule f64 angles.
+pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
+    if (spec.feature_dim % 2 != 0) return tensor.TensorError.InvalidShape;
+    const pair_count = spec.feature_dim / 2;
+    switch (spec.freqs) {
+        .theta => |t| if (t.factors) |ff| {
+            if (ff.len != pair_count) return tensor.TensorError.ShapeMismatch;
+        },
+        .inv_freq_f64 => |f| if (f.len != pair_count) return tensor.TensorError.ShapeMismatch,
     }
-    const position_count = source.len();
+    const position_count = spec.positions.len();
     const angle_count = try std.math.mul(usize, position_count, pair_count);
     const values = try ctx.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
     errdefer ctx.allocator.free(values);
     const positions_copy = try ctx.allocator.alloc(i32, position_count);
     errdefer ctx.allocator.free(positions_copy);
-    for (positions_copy, 0..) |*slot, i| slot.* = source.at(i);
+    for (positions_copy, 0..) |*slot, i| slot.* = spec.positions.at(i);
 
     const sin_values = values[0..angle_count];
     const cos_values = values[angle_count..][0..angle_count];
-    const sign: f32 = if (inverse) -1 else 1;
-    // theta_base^(2i/d) is position-invariant, so hoist the pow; the
-    // freq_factors divide must stay per-element — folding it into the cache
-    // changes f32 rounding ((pos/a)/b != pos/(a*b)).
-    const pow_cache = try ctx.allocator.alloc(f32, pair_count);
-    defer ctx.allocator.free(pow_cache);
-    for (pow_cache, 0..) |*p, pair_i| {
-        const exponent = @as(f32, @floatFromInt(2 * pair_i)) / @as(f32, @floatFromInt(feature_dim));
-        p.* = std.math.pow(f32, theta_base, exponent);
-    }
-    // Read the positions back out of the copy, so both sources run the exact
-    // same arithmetic on the exact same i32 values.
-    for (positions_copy, 0..) |position, position_i| {
-        const pos = @as(f32, @floatFromInt(position));
-        for (0..pair_count) |pair_i| {
-            const inv_freq = pos / pow_cache[pair_i];
-            const theta = if (freq_factors) |ff| inv_freq / ff[pair_i] else inv_freq;
-            const angle_i = position_i * pair_count + pair_i;
-            sin_values[angle_i] = sign * @sin(theta);
-            cos_values[angle_i] = @cos(theta);
-        }
+    switch (spec.freqs) {
+        .theta => |t| {
+            const sign: f32 = if (spec.inverse) -1 else 1;
+            // theta_base^(2i/d) is position-invariant, so hoist the pow; the
+            // factors divide must stay per-element — folding it into the
+            // cache changes f32 rounding ((pos/a)/b != pos/(a*b)).
+            const pow_cache = try ctx.allocator.alloc(f32, pair_count);
+            defer ctx.allocator.free(pow_cache);
+            for (pow_cache, 0..) |*p, pair_i| {
+                const exponent = @as(f32, @floatFromInt(2 * pair_i)) / @as(f32, @floatFromInt(spec.feature_dim));
+                p.* = std.math.pow(f32, t.base, exponent);
+            }
+            for (positions_copy, 0..) |position, position_i| {
+                const pos = @as(f32, @floatFromInt(position));
+                for (0..pair_count) |pair_i| {
+                    const inv_freq = pos / pow_cache[pair_i];
+                    const angle = if (t.factors) |ff| inv_freq / ff[pair_i] else inv_freq;
+                    const angle_i = position_i * pair_count + pair_i;
+                    sin_values[angle_i] = sign * @sin(angle);
+                    cos_values[angle_i] = @cos(angle);
+                }
+            }
+        },
+        .inv_freq_f64 => |inv_freq| {
+            for (positions_copy, 0..) |position, position_i| {
+                const pos = @as(f64, @floatFromInt(position));
+                for (0..pair_count) |pair_i| {
+                    const angle = pos * inv_freq[pair_i];
+                    const s: f32 = @floatCast(@sin(angle));
+                    const angle_i = position_i * pair_count + pair_i;
+                    sin_values[angle_i] = if (spec.inverse) -s else s;
+                    cos_values[angle_i] = @floatCast(@cos(angle));
+                }
+            }
+        },
     }
 
     return .{
         .allocator = ctx.allocator,
         .positions = positions_copy,
-        .theta_base = theta_base,
-        .feature_dim = feature_dim,
+        .feature_dim = spec.feature_dim,
         .pair_count = pair_count,
         .values = values,
     };
@@ -248,42 +250,6 @@ pub fn yarnBlendInvFreqsF64(ctx: *ExecContext, dim: usize, base: f64, factor: f6
         }
     }
     return inv_freq;
-}
-
-/// Hand-fill a rope table for `count` consecutive positions starting at
-/// `pos0` from caller-supplied per-pair inverse frequencies, accumulating
-/// each angle in f64 before the f32 cast — for models whose frequency
-/// schedule the core cannot rebuild (YaRN blends, per-family bases) and
-/// whose reference computes angles in double precision
-/// (`prepareRopeTable*` compute f32 angles). `inverse` negates sin (the
-/// un-rotation table). `table.feature_dim` spans `2 * inv_freq.len`
-/// features, so partial application follows the usual table contract.
-pub fn prepareRopeTableInvFreqsF64(ctx: *ExecContext, pos0: usize, count: usize, inv_freq: []const f64, inverse: bool) !RopeTable {
-    const pairs = inv_freq.len;
-    const angle_count = try std.math.mul(usize, count, pairs);
-    const values = try ctx.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
-    errdefer ctx.allocator.free(values);
-    const positions = try ctx.allocator.alloc(i32, count);
-    errdefer ctx.allocator.free(positions);
-    const sin_values = values[0..angle_count];
-    const cos_values = values[angle_count..];
-    for (0..count) |i| {
-        positions[i] = @intCast(pos0 + i);
-        for (0..pairs) |p| {
-            const angle = @as(f64, @floatFromInt(pos0 + i)) * inv_freq[p];
-            const s: f32 = @floatCast(@sin(angle));
-            sin_values[i * pairs + p] = if (inverse) -s else s;
-            cos_values[i * pairs + p] = @floatCast(@cos(angle));
-        }
-    }
-    return .{
-        .allocator = ctx.allocator,
-        .positions = positions,
-        .theta_base = 0, // hand-filled: never rebuilt from a base
-        .feature_dim = 2 * pairs,
-        .pair_count = pairs,
-        .values = values,
-    };
 }
 
 // ---------------- Vector pair rotation (feature_stride == 1) ----------------
@@ -343,108 +309,12 @@ fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_ro
     }
 }
 
+/// Apply `table` over (`position_axis`, `feature_axis`). The table's
+/// `feature_dim` is the rotary span: equal to the feature axis rotates every
+/// pair; smaller rotates the leading `feature_dim` features (`.half`,
+/// `.interleaved`) or the trailing ones (`.interleaved_tail`) and passes the
+/// rest through unchanged.
 pub fn ropeWithTable(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    x: *const Tensor,
-    comptime position_axis: usize,
-    comptime feature_axis: usize,
-    table: *const RopeTable,
-    comptime mode: RopeMode,
-) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
-    if (position_axis >= rank or feature_axis >= rank) @compileError("axis out of bounds");
-    if (position_axis == feature_axis) @compileError("position and feature axes must differ");
-
-    const source = try x.rankView(rank);
-    const feature_dim = source.shape[feature_axis];
-    if (feature_dim % 2 != 0) return tensor.TensorError.InvalidShape;
-    if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
-    if (table.feature_dim != feature_dim) return tensor.TensorError.InvalidShape;
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const input = xx.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const strides = contiguousStridesArray(rank, source.shape);
-    const feature_stride = strides[feature_axis];
-    const pair_count = feature_dim / 2;
-    const total_vectors = input.len / feature_dim;
-    const sin_values = table.sinValues();
-    const cos_values = table.cosValues();
-
-    for (0..total_vectors) |vector_i| {
-        var remainder = vector_i;
-        var base_offset: usize = 0;
-        var position_coord: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            if (dim != feature_axis) {
-                const coord = remainder % source.shape[dim];
-                remainder /= source.shape[dim];
-                base_offset += coord * strides[dim];
-                if (dim == position_axis) position_coord = coord;
-            }
-        }
-
-        if (feature_stride == 1) {
-            const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
-            const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
-            switch (mode) {
-                .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset, sin_row, cos_row),
-                .half => rotatePairsHalf(output, input, base_offset, base_offset + pair_count, sin_row, cos_row),
-            }
-            continue;
-        }
-
-        for (0..pair_count) |pair_i| {
-            const angle_i = position_coord * pair_count + pair_i;
-            const sin_value = sin_values[angle_i];
-            const cos_value = cos_values[angle_i];
-
-            const first_feature = switch (mode) {
-                .interleaved, .interleaved_tail => 2 * pair_i,
-                .half => pair_i,
-            };
-            const second_feature = switch (mode) {
-                .interleaved, .interleaved_tail => 2 * pair_i + 1,
-                .half => pair_i + pair_count,
-            };
-            const first_offset = base_offset + first_feature * feature_stride;
-            const second_offset = base_offset + second_feature * feature_stride;
-            const first = input[first_offset];
-            const second = input[second_offset];
-            output[first_offset] = first * cos_value - second * sin_value;
-            output[second_offset] = first * sin_value + second * cos_value;
-        }
-    }
-
-    return out;
-}
-
-pub fn ropePartial(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    x: *const Tensor,
-    comptime position_axis: usize,
-    comptime feature_axis: usize,
-    rotary_dim: usize,
-    positions: []const i32,
-    theta_base: f32,
-    comptime mode: RopeMode,
-    comptime inverse: bool,
-) !Tensor {
-    var table = try prepareRopeTable(ctx, positions, rotary_dim, theta_base, inverse);
-    defer table.deinit();
-    return ropePartialWithTable(ctx, rank, x, position_axis, feature_axis, &table, mode);
-}
-
-pub fn ropePartialWithTable(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -462,7 +332,6 @@ pub fn ropePartialWithTable(
     const rotary_dim = table.feature_dim;
     if (rotary_dim == 0 or rotary_dim > feature_dim or rotary_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
-    if (rotary_dim == feature_dim) return ropeWithTable(ctx, rank, x, position_axis, feature_axis, table, mode);
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
@@ -471,7 +340,9 @@ pub fn ropePartialWithTable(
     var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
-    @memcpy(output, input);
+    // Partial span: the pass-through features are copied, the rotated ones
+    // overwritten below.
+    if (rotary_dim != feature_dim) @memcpy(output, input);
 
     const strides = contiguousStridesArray(rank, source.shape);
     const feature_stride = strides[feature_axis];
