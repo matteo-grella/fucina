@@ -885,9 +885,9 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
                     },
                 }
                 if (state.down.wantsQ8_0Lhs())
-                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(state.qg8, state.g_buf) catch unreachable
+                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(state.qg8, state.g_buf)
                 else
-                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(state.qg, state.g_buf) catch unreachable;
+                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_KIntoUnchecked(state.qg, state.g_buf);
                 if (state.profile_enabled) state.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);

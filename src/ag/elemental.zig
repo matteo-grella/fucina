@@ -43,7 +43,7 @@ const tags_mod = @import("../tags.zig");
 const tag_ops = @import("../tag_ops.zig");
 const parallel = @import("../parallel.zig");
 const custom = @import("custom.zig");
-const vector_common = @import("../backend.zig").vector_impl;
+const vector_common = @import("../backend.zig").simd;
 
 const Vec = vector_common.Vf32;
 const vec_len = vector_common.vector_len;

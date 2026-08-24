@@ -409,10 +409,10 @@ fn linearSeqFx4(
     // Prefill arm: dequantized weight panels through BLAS/AMX (the
     // backend's gate decides; decode and short bursts stay on the
     // mul-free ternary tile below).
-    if (comptime backend_mod.active_kind == .native and backend_mod.native_uses_blas) {
+    if (comptime backend_mod.blas.available) {
         var out_blas = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
         errdefer out_blas.deinit();
-        if (try backend_mod.native_impl.matmulFoldedx4Blas(
+        if (try backend_mod.blas.matmulFoldedx4(
             .{ .pool = ctx.workPool() },
             allocator,
             try out_blas.data(),

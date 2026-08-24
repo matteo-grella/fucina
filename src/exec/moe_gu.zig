@@ -143,7 +143,7 @@ fn runGemmaMoeDecodeChainTask(task: *GemmaMoeDecodeChainTask, chain: *const thre
                 for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                     g.* = up_v * backend_ops.geluQuantScalar(gate_v);
                 }
-                qm.q8k.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
+                qm.q8k.quantizeRowQ8_0IntoUnchecked(state.qg, state.g_buf);
                 if (state.profile_enabled) state.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -1145,7 +1145,7 @@ fn runGemmaMoeRawDecodeChainTask(task: *GemmaMoeRawDecodeChainTask, chain: *cons
                 for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                     g.* = up_v * backend_ops.geluQuantScalar(gate_v);
                 }
-                qm.q8k.quantizeRowQ8_0Into(state.qg, state.g_buf) catch unreachable;
+                qm.q8k.quantizeRowQ8_0IntoUnchecked(state.qg, state.g_buf);
                 if (state.profile_enabled) state.geglu_requant_ns += moeBatchProfileElapsed(geglu_requant_start, state.io);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -1498,7 +1498,7 @@ fn runGemmaMoeGatherTask(task: *const GemmaMoeGatherTask) void {
     for (0..m) |i| {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * task.hidden ..][0..task.hidden];
-        qm.q8k.quantizeRowQ8_KInto(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src) catch unreachable;
+        qm.q8k.quantizeRowQ8_KIntoUnchecked(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src);
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }
@@ -1570,7 +1570,7 @@ fn runGemmaMoeGegluTask(task: *const GemmaMoeGegluTask) void {
         g.* = up_v * backend_ops.geluQuantScalar(gate_v);
     }
     for (0..m) |i| {
-        qm.q8k.quantizeRowQ8_0Into(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]) catch unreachable;
+        qm.q8k.quantizeRowQ8_0IntoUnchecked(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]);
     }
     if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
 }

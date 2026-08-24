@@ -82,16 +82,57 @@ pub fn PackedRhsFor(comptime dt: DType) type {
 pub const Tensor = tensor.Tensor;
 pub const TensorOf = tensor.TensorOf;
 pub const ThreadPool = thread.Pool;
+// The two conformance-checked CPU providers. Microbench/parity escape
+// hatch ONLY (bench/backend.zig compares them side by side; parity_test
+// pins them numerically): production code above this band goes through
+// `kernels`, `blas`, or `simd`, never through a provider by name.
 pub const scalar_impl = @import("backend/cpu.zig");
 pub const native_impl = @import("backend/native.zig");
 const interface = @import("backend/interface.zig");
 // GPU GEMM provider selected by -Dgpu (metal.zig or cuda.zig, via the
 // backend/gpu.zig leaf); inert (never analyzed past the `enabled` flag) on
-// -Dgpu=none builds.
+// -Dgpu=none builds. This is the SECOND conformed contract: providers are
+// checked against backend/gpu_provider.zig's interface, so dispatch through
+// `gpu_impl` stays provider-neutral.
 pub const gpu_impl = @import("backend/gpu.zig").impl;
-// Pure-Zig vector kernels backing the native backend, exported so the GEMM
-// bench can compare the row-kernel and blocked paths directly.
+// Pure-Zig portable SIMD kernel library backing the native backend
+// (single implementation, backend-independent). Exported wholesale for the
+// microbenches that compare its row-kernel and blocked paths directly; the
+// curated upper-band vocabulary is `simd` below.
 pub const vector_impl = @import("backend/vector.zig");
+
+/// Provider extension: strided-view BLAS GEMM plus the nested-scope guard
+/// and the folded-ternary BLAS arm, available only on BLAS-backed native
+/// builds. Deliberately OUTSIDE the conformed `kernels` set (the scalar
+/// provider has no BLAS): callers gate on `blas.available` at comptime and
+/// fall back to the portable route, so a scalar or no-BLAS build never
+/// analyzes the aliases.
+pub const blas = if (build_options.backend_kind == .native and build_options.use_blas) struct {
+    pub const available = true;
+    pub const sgemmStrided = native_impl.sgemmStrided;
+    pub const NestedScope = native_impl.NestedBlasScope;
+    pub const beginNestedScope = native_impl.beginNestedBlasScope;
+    pub const endNestedScope = native_impl.endNestedBlasScope;
+    pub const matmulFoldedx4 = native_impl.matmulFoldedx4Blas;
+} else struct {
+    pub const available = false;
+};
+
+/// Portable-SIMD vocabulary seam: the machine vector type and the
+/// transcendental/VJP helpers upper bands may use directly. Single
+/// implementation, backend-independent; everything provider-varying stays
+/// behind `kernels`. `fucina.simd` re-exports the public subset.
+pub const simd = struct {
+    const vector_common = @import("backend/vector/common.zig");
+    const vector_primitives = @import("backend/vector/primitives.zig");
+    pub const Vf32 = vector_common.Vf32;
+    pub const vector_len = vector_common.vector_len;
+    pub const vexpf = vector_primitives.vexpf;
+    pub const sigmoidVec = vector_primitives.sigmoidVec;
+    pub const tanhVec = vector_primitives.tanhVec;
+    pub const unaryVjpVectorizes = vector_primitives.unaryVjpVectorizes;
+    pub const vecUnaryVjp = vector_primitives.vecUnaryVjp;
+};
 
 /// conv2d geometry (channel-last [H,W,Cin] -> [OH,OW,Cout]); see vector/conv.zig.
 pub const Conv2dDims = vector_impl.conv.Conv2dDims;

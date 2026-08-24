@@ -9,7 +9,7 @@ const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
-const vexpf = backend_mod.vector_impl.primitives.vexpf;
+const vexpf = backend_mod.simd.vexpf;
 
 pub const GroupedCausalAttentionBackwardResult = struct {
     q: ?tensor.Tensor = null,
@@ -292,10 +292,10 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
 
             var q_scales: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
-                backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(
+                backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(
                     q_q8[0 .. task.d / q8_0_block_size],
                     task.q_data[q_base..][0..task.d],
-                ) catch unreachable;
+                );
                 backend_mod.quantized_matmul.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
             }
             var max_score = -std.math.inf(f32);
@@ -456,8 +456,8 @@ pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausa
             var q_scales: [if (KvElem == BlockQ8_0) 2 * q8_blocks else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
                 const qm = backend_mod.quantized_matmul;
-                qm.q8k.quantizeRowQ8_0Into(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]) catch unreachable;
-                qm.q8k.quantizeRowQ8_0Into(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]) catch unreachable;
+                qm.q8k.quantizeRowQ8_0IntoUnchecked(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]);
+                qm.q8k.quantizeRowQ8_0IntoUnchecked(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]);
                 qm.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
                 qm.q8_0.q8RowScalesInto(q_scales[q8_blocks..][0 .. task.d / q8_0_block_size], q_q8[q8_blocks..][0 .. task.d / q8_0_block_size]);
             }
@@ -1494,16 +1494,16 @@ pub fn runGroupedCausalAttentionBackwardBlasTiledTask(task: *const GroupedCausal
 /// are deterministic for any task count but differ from the register route
 /// in the last ulps (different contraction associations).
 pub fn groupedCausalAttentionBackwardBlasTiles(task: GroupedCausalAttentionBackwardTiledTask) void {
-    if (comptime !(backend_mod.active_kind == .native and backend_mod.native_uses_blas)) {
+    if (comptime !backend_mod.blas.available) {
         return groupedCausalAttentionBackwardTiles(task);
     } else {
-        const sgemm = backend_mod.native_impl.sgemmStrided;
+        const sgemm = backend_mod.blas.sgemmStrided;
         // One task per head range, so this scope covers every strip sgemm this
         // worker issues; without it a self-threading BLAS starts an engine team
         // per call inside our own parallel region. The token restores whatever
         // this thread had.
-        const blas_scope = backend_mod.native_impl.beginNestedBlasScope();
-        defer backend_mod.native_impl.endNestedBlasScope(blas_scope);
+        const blas_scope = backend_mod.blas.beginNestedScope();
+        defer backend_mod.blas.endNestedScope(blas_scope);
         const tile_rows = attention_bwd_blas_tile_rows;
         const d = task.d;
         const q_seq_stride = task.heads * d;

@@ -20,6 +20,18 @@ const qk_k_block_size = types.qk_k_block_size;
 pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
     const block_count = try q8_0BlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
+    quantizeRowQ8_0IntoUnchecked(dst, src);
+}
+
+/// `quantizeRowQ8_0Into` for callers that have already proven the lengths:
+/// `src` is a whole number of q8_0 blocks and `dst` covers exactly that
+/// count (asserted in safe builds). The validate-then-unchecked entry, so
+/// pre-validated call sites (thread-task bodies) never suppress the checked
+/// twin's error set with `catch unreachable`.
+pub fn quantizeRowQ8_0IntoUnchecked(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
+    std.debug.assert(src.len % types.q8_0_block_size == 0);
+    std.debug.assert(dst.len == src.len / types.q8_0_block_size);
+    const block_count = dst.len;
 
     if (comptime builtin.cpu.arch == .aarch64) {
         return quantizeRowQ8_0IntoAarch64(dst, src);
@@ -239,6 +251,15 @@ pub fn quantizedMatmulRhsQ6_KFromBlocks(
 pub fn quantizeRowQ8_KInto(dst: []dtype_mod.BlockQ8_K, src: []const f32) !void {
     const block_count = try qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
+    quantizeRowQ8_KIntoUnchecked(dst, src);
+}
+
+/// `quantizeRowQ8_KInto` for callers that have already proven the lengths
+/// (same contract as `quantizeRowQ8_0IntoUnchecked`).
+pub fn quantizeRowQ8_KIntoUnchecked(dst: []dtype_mod.BlockQ8_K, src: []const f32) void {
+    std.debug.assert(src.len % qk_k_block_size == 0);
+    std.debug.assert(dst.len == src.len / qk_k_block_size);
+    const block_count = dst.len;
     if (comptime builtin.cpu.arch == .aarch64) {
         return quantizeRowQ8_KIntoAarch64(dst, src);
     }

@@ -271,13 +271,11 @@ pub const RopeTheta = exec.RopeTheta;
 /// `elementalBinary` vector bodies): the machine vector type, its width,
 /// and the transcendental helpers the built-in kernels use.
 pub const simd = struct {
-    const vector_common = @import("backend/vector/common.zig");
-    const vector_primitives = @import("backend/vector/primitives.zig");
-    pub const Vf32 = vector_common.Vf32;
-    pub const vector_len = vector_common.vector_len;
-    pub const vexpf = vector_primitives.vexpf;
-    pub const sigmoidVec = vector_primitives.sigmoidVec;
-    pub const tanhVec = vector_primitives.tanhVec;
+    pub const Vf32 = backend.simd.Vf32;
+    pub const vector_len = backend.simd.vector_len;
+    pub const vexpf = backend.simd.vexpf;
+    pub const sigmoidVec = backend.simd.sigmoidVec;
+    pub const tanhVec = backend.simd.tanhVec;
 };
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (see docs/reference/10-quantization.md).

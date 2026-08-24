@@ -735,7 +735,7 @@ pub const State = struct {
         var q_q8_buf: [16]BlockQ8_0 = undefined;
         var q_scales_buf: [16]f32 = undefined;
         if (use_q8) {
-            qkern.q8k.quantizeRowQ8_0Into(q_q8_buf[0..bpr], query) catch unreachable;
+            qkern.q8k.quantizeRowQ8_0IntoUnchecked(q_q8_buf[0..bpr], query);
             qkern.q8_0.q8RowScalesInto(q_scales_buf[0..bpr], q_q8_buf[0..bpr]);
         }
 

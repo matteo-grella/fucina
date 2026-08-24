@@ -7,7 +7,7 @@ const rng = @import("../rng.zig");
 const tensor = @import("../tensor.zig");
 const shape = @import("shape.zig");
 
-const vexpf = backend_mod.vector_impl.primitives.vexpf;
+const vexpf = backend_mod.simd.vexpf;
 const coordinateForLinear = shape.coordinateForLinear;
 const physicalOffsetExcludingAxis = shape.physicalOffsetExcludingAxis;
 const preSoftmaxValue = shape.preSoftmaxValue;
@@ -114,10 +114,10 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                         cols,
                     ),
                     .q8_k_rows => for (0..rows_in_group) |r| {
-                        backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(
+                        backend_mod.quantized_matmul.q8k.quantizeRowQ8_KIntoUnchecked(
                             task.row_blocks[(row0 + r) * task.blocks_per_row ..][0..task.blocks_per_row],
                             task.scratch[r * cols ..][0..cols],
-                        ) catch unreachable;
+                        );
                     },
                     .q8_0x4 => {
                         // The plain group packer reads all 4 lanes; zero rows

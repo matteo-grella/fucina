@@ -9,7 +9,7 @@ const parallel = @import("../../parallel.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
-const vector_primitives = @import("../../backend.zig").vector_impl.primitives;
+const vector_primitives = @import("../../backend.zig").simd;
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
