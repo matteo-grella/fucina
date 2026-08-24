@@ -169,25 +169,25 @@ fn mlpInference(ctx: *ExecContext, base: *const Base, comptime bias_mode: BiasMo
     errdefer h.deinit();
 
     switch (bias_mode) {
-        .full_bias => try ctx.addInPlace(&h, &base.b1_full),
+        .full_bias => try ctx.elementwiseInPlace(.add, &h, &base.b1_full),
         .broadcast_bias => {
             var b1 = try ctx.broadcastTo(&base.b1_vec, .{ base.case.batch, base.case.hidden });
             defer b1.deinit();
-            try ctx.addInPlace(&h, &b1);
+            try ctx.elementwiseInPlace(.add, &h, &b1);
         },
     }
 
-    try ctx.mulInPlace(&h, &base.gate);
+    try ctx.elementwiseInPlace(.mul, &h, &base.gate);
     defer h.deinit();
 
     var y = try ctx.matmul(.f32, &h, &base.w2);
     errdefer y.deinit();
     switch (bias_mode) {
-        .full_bias => try ctx.addInPlace(&y, &base.b2_full),
+        .full_bias => try ctx.elementwiseInPlace(.add, &y, &base.b2_full),
         .broadcast_bias => {
             var b2 = try ctx.broadcastTo(&base.b2_vec, .{ base.case.batch, base.case.out });
             defer b2.deinit();
-            try ctx.addInPlace(&y, &b2);
+            try ctx.elementwiseInPlace(.add, &y, &b2);
         },
     }
     return y;

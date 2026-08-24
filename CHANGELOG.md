@@ -226,6 +226,21 @@ this point; earlier history is `git log`.
   before, so results are bitwise unchanged. The `Tensor` facade
   (`rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `layerNorm`, `groupNorm`) is
   unchanged.
+- Ownership seam, `ExecContext`: the per-op spellings `addInPlace`,
+  `subInPlace`, `mulInPlace`, `divInPlace`, `takeAdd`, `takeSub`, `takeMul`,
+  `takeDiv`, `takeRelu`, `takeSilu` are the three entries they wrapped, with
+  the op as the parameter: `elementwiseInPlace(.add, target, other)`,
+  `takeElementwise(.add, target, other)`, `takeUnary(.relu, target)`
+  (`takeScale` stays: scaling is not an `ElementwiseOp`). The two contracts
+  stay two entries because they differ in signature, not in spelling: in
+  place mutates a contiguous `*Tensor` and returns nothing, take consumes
+  it and returns the result. `addAxisVectorInPlace(rank, op, target,
+  row_vector, axis)` takes the optional activation that
+  `addAxisVectorUnaryInPlace` spelled (`null` = plain bias add), and the
+  backend pair `addRowVectorSlice`/`addRowVectorUnarySlice` is one kernel
+  `addRowVectorSlice(op, ...)`. The `Tensor` facade (`takeAddNoGrad`,
+  `takeScaleNoGrad`, `addAxisVectorInPlace`, `addAxisVectorUnaryInPlace`)
+  is unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

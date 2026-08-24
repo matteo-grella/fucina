@@ -163,21 +163,18 @@ pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
     primitives.vecAddScaled(z, x, scalar_value);
 }
 
-pub fn addRowVectorSlice(z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
+/// `z[row] += row_vector` for every row, then `op` (a fused bias + activation
+/// when given).
+pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(z.len >= rows * cols);
     std.debug.assert(row_vector.len == cols);
     for (0..rows) |row_i| {
         const row = z[row_i * cols ..][0..cols];
-        primitives.vecAdd(row, row, row_vector);
-    }
-}
-
-pub fn addRowVectorUnarySlice(comptime op: ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
-    std.debug.assert(z.len >= rows * cols);
-    std.debug.assert(row_vector.len == cols);
-    for (0..rows) |row_i| {
-        const row = z[row_i * cols ..][0..cols];
-        primitives.vecAddUnary(op, row, row, row_vector);
+        if (comptime op) |actual_op| {
+            primitives.vecAddUnary(actual_op, row, row, row_vector);
+        } else {
+            primitives.vecAdd(row, row, row_vector);
+        }
     }
 }
 

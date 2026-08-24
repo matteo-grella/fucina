@@ -305,7 +305,7 @@ fn conv2dImpl(
 
         var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &input_2d, &weight_2d);
         errdefer out_2d.deinit();
-        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, &out_2d, b, 1);
+        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, null, &out_2d, b, 1);
         if (fused_relu) reluInPlace(ctx, &out_2d);
 
         var out_3d = try out_2d.viewWithStrides(&.{ oh, ow, cout }, &.{ ow * cout, cout, 1 });
@@ -394,7 +394,7 @@ fn conv2dImpl(
         var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &col, &weight_2d);
         col.deinit();
         errdefer out_2d.deinit();
-        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, &out_2d, b, 1);
+        if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, null, &out_2d, b, 1);
         if (fused_relu) reluInPlace(ctx, &out_2d);
         var out_3d = try out_2d.viewWithStrides(&.{ oh, ow, cout }, &.{ ow * cout, cout, 1 });
         errdefer out_3d.deinit();
@@ -948,7 +948,7 @@ pub fn convTranspose1d(
 
     var out = try col2im1d(ctx, &col, out_channels, taps, stride, pad, output_pad);
     errdefer out.deinit();
-    if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, &out, b, 1);
+    if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, null, &out, b, 1);
     return out;
 }
 

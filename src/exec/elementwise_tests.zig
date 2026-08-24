@@ -114,10 +114,10 @@ test "exec context applies in-place elementwise ops with contiguous and broadcas
     var broadcast = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer broadcast.deinit();
 
-    try ctx.addInPlace(&x, &broadcast);
+    try ctx.elementwiseInPlace(.add, &x, &broadcast);
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 14, 25, 36 }, x.dataConst());
 
-    try ctx.mulInPlace(&x, &gate);
+    try ctx.elementwiseInPlace(.mul, &x, &gate);
     try std.testing.expectEqualSlices(f32, &.{ 11, 44, 99, 56, 125, 216 }, x.dataConst());
 }
 
@@ -134,7 +134,7 @@ test "exec context take elementwise reuses unique contiguous input" {
     defer broadcast.deinit();
 
     const original_buffer = x.buffer;
-    var y = try ctx.takeAdd(&x, &broadcast);
+    var y = try ctx.takeElementwise(.add, &x, &broadcast);
     defer y.deinit();
 
     try std.testing.expect(y.buffer == original_buffer);
@@ -150,7 +150,7 @@ test "exec context take unary and scale reuse unique contiguous input" {
     var x = try ctx.fromSlice(.f32, &.{4}, &.{ -1, 2, -3, 4 });
     const original_buffer = x.buffer;
 
-    var y = try ctx.takeRelu(&x);
+    var y = try ctx.takeUnary(.relu, &x);
     try std.testing.expect(y.buffer == original_buffer);
     try std.testing.expectEqualSlices(f32, &.{ 0, 2, 0, 4 }, y.dataConst());
 
@@ -172,7 +172,7 @@ test "exec context take elementwise falls back for shared buffers" {
     var b = try ctx.fromSlice(.f32, &.{3}, &.{ 10, 20, 30 });
     defer b.deinit();
 
-    var y = try ctx.takeMul(&shared, &b);
+    var y = try ctx.takeElementwise(.mul, &shared, &b);
     defer y.deinit();
 
     try std.testing.expect(y.buffer != x.buffer);
@@ -192,7 +192,7 @@ test "exec context take elementwise falls back for views and preserves input on 
     var x = try ctx.fromSlice(.f32, &.{ 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer x.deinit();
 
-    var y = try ctx.takeSub(&broadcast, &x);
+    var y = try ctx.takeElementwise(.sub, &broadcast, &x);
     defer y.deinit();
     try std.testing.expect(y.buffer != source.buffer);
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -39, -48, -57 }, y.dataConst());
@@ -202,7 +202,7 @@ test "exec context take elementwise falls back for views and preserves input on 
     defer a.deinit();
     var b = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer b.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.takeAdd(&a, &b));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.takeElementwise(.add, &a, &b));
     try std.testing.expectEqualSlices(f32, &.{ 1, 2 }, a.dataConst());
 }
 

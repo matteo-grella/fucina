@@ -93,7 +93,6 @@ pub const kernels = struct {
     pub const scaleInto = vector.elementwise.scaleInto;
     pub const addScaledSlice = vector.elementwise.addScaledSlice;
     pub const addRowVectorSlice = vector.elementwise.addRowVectorSlice;
-    pub const addRowVectorUnarySlice = vector.elementwise.addRowVectorUnarySlice;
     pub const causalDepthwiseConv1dInto = vector.conv.causalDepthwiseConv1dInto;
     pub const causalDepthwiseConv1dBackwardInputInto = vector.conv.causalDepthwiseConv1dBackwardInputInto;
     pub const causalDepthwiseConv1dBackwardKernelInto = vector.conv.causalDepthwiseConv1dBackwardKernelInto;

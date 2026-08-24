@@ -45,7 +45,6 @@ pub const kernels = struct {
     pub const scaleInto = cpu.scaleInto;
     pub const addScaledSlice = cpu.addScaledSlice;
     pub const addRowVectorSlice = cpu.addRowVectorSlice;
-    pub const addRowVectorUnarySlice = cpu.addRowVectorUnarySlice;
     pub const causalDepthwiseConv1dInto = cpu.causalDepthwiseConv1dInto;
     pub const causalDepthwiseConv1dBackwardInputInto = cpu.causalDepthwiseConv1dBackwardInputInto;
     pub const causalDepthwiseConv1dBackwardKernelInto = cpu.causalDepthwiseConv1dBackwardKernelInto;
@@ -383,21 +382,18 @@ pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
     for (z, x) |*dst, xv| dst.* += xv * scalar_value;
 }
 
-pub fn addRowVectorSlice(z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
+/// `z[row] += row_vector` for every row, then `op` (a fused bias + activation
+/// when given).
+pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(z.len >= rows * cols);
     std.debug.assert(row_vector.len == cols);
     for (0..rows) |row_i| {
         const row = z[row_i * cols ..][0..cols];
-        for (row, row_vector) |*dst, value| dst.* += value;
-    }
-}
-
-pub fn addRowVectorUnarySlice(comptime op: ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
-    std.debug.assert(z.len >= rows * cols);
-    std.debug.assert(row_vector.len == cols);
-    for (0..rows) |row_i| {
-        const row = z[row_i * cols ..][0..cols];
-        for (row, row_vector) |*dst, value| dst.* = ops.unaryScalar(op, dst.* + value);
+        if (comptime op) |actual_op| {
+            for (row, row_vector) |*dst, value| dst.* = ops.unaryScalar(actual_op, dst.* + value);
+        } else {
+            for (row, row_vector) |*dst, value| dst.* += value;
+        }
     }
 }
 
@@ -1890,4 +1886,3 @@ fn dotSliceTyped(
     }
     return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
 }
-

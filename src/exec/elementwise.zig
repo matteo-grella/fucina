@@ -783,38 +783,10 @@ pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
     return out;
 }
 
-pub fn addInPlace(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-    return elementwiseInPlace(ctx, .add, target, other);
-}
-
-pub fn subInPlace(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-    return elementwiseInPlace(ctx, .sub, target, other);
-}
-
-pub fn mulInPlace(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-    return elementwiseInPlace(ctx, .mul, target, other);
-}
-
-pub fn divInPlace(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !void {
-    return elementwiseInPlace(ctx, .div, target, other);
-}
-
-pub fn takeAdd(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-    return takeElementwise(ctx, .add, target, other);
-}
-
-pub fn takeSub(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-    return takeElementwise(ctx, .sub, target, other);
-}
-
-pub fn takeMul(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-    return takeElementwise(ctx, .mul, target, other);
-}
-
-pub fn takeDiv(ctx: *ExecContext, target: *Tensor, other: *const Tensor) !Tensor {
-    return takeElementwise(ctx, .div, target, other);
-}
-
+/// Consume `target` and return `target * scalar_value`: the multiply runs in
+/// `target`'s storage when the runtime can take it (`canTakeInPlace`), else
+/// into a fresh tensor with `target` released. Either way the caller owns
+/// only the result.
 pub fn takeScale(ctx: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor {
     if (target.canTakeInPlace()) {
         ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
@@ -827,7 +799,8 @@ pub fn takeScale(ctx: *ExecContext, target: *Tensor, scalar_value: f32) !Tensor 
     return discardTakenInput(target, result);
 }
 
-fn takeUnary(ctx: *ExecContext, comptime op: UnaryOp, target: *Tensor) !Tensor {
+/// Consume `target` and return `op(target)`; ownership as `takeScale`.
+pub fn takeUnary(ctx: *ExecContext, comptime op: UnaryOp, target: *Tensor) !Tensor {
     if (target.canTakeInPlace()) {
         ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
         kernels.unaryContiguousIntoUnchecked(ctx.pc(), op, target, target, target.len());
@@ -837,14 +810,6 @@ fn takeUnary(ctx: *ExecContext, comptime op: UnaryOp, target: *Tensor) !Tensor {
     var result = try unary(ctx, op, target);
     errdefer result.deinit();
     return discardTakenInput(target, result);
-}
-
-pub fn takeRelu(ctx: *ExecContext, target: *Tensor) !Tensor {
-    return takeUnary(ctx, .relu, target);
-}
-
-pub fn takeSilu(ctx: *ExecContext, target: *Tensor) !Tensor {
-    return takeUnary(ctx, .silu, target);
 }
 
 /// Multiply by a scalar. `.f32` runs the SIMD kernel; 16-bit floats run
@@ -1099,11 +1064,9 @@ pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tenso
     kernels.addScaledSlice(target.data(), ss.tensor().dataConst(), scalar_value);
 }
 
-pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-    try addAxisVectorUnaryInPlace(ctx, rank, null, target, row_vector, axis);
-}
-
-pub fn addAxisVectorUnaryInPlace(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
+/// `target[..., i] += row_vector[i]` along the last axis `axis`, then `op`
+/// when given (a fused bias + activation), in `target`'s storage.
+pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -1115,11 +1078,7 @@ pub fn addAxisVectorUnaryInPlace(ctx: *ExecContext, comptime rank: usize, compti
 
     const rows = productBeforeAxis(rank, view.shape, axis);
     ctx.enableNativeVectorPoolForWork(target.len(), parallel.vector_elementwise_len_threshold);
-    if (comptime op) |actual_op| {
-        kernels.addRowVectorUnarySlice(actual_op, target.data(), row_vector, rows, axis_dim);
-    } else {
-        kernels.addRowVectorSlice(target.data(), row_vector, rows, axis_dim);
-    }
+    kernels.addRowVectorSlice(op, target.data(), row_vector, rows, axis_dim);
 }
 
 /// Shared validation for the channel-last per-channel row ops (PReLU,
@@ -1555,7 +1514,9 @@ fn reduceBroadcastFromRankToRank(
     return out;
 }
 
-fn takeElementwise(
+/// Consume `target` and return `op(target, other)` (same shape); ownership
+/// as `takeScale`.
+pub fn takeElementwise(
     ctx: *ExecContext,
     comptime op: ElementwiseOp,
     target: *Tensor,
@@ -1841,7 +1802,9 @@ fn elementwiseInto(
     return backendElementwiseContiguousUnchecked(ctx, op, out, aa.tensor(), bb.tensor(), out.len());
 }
 
-fn elementwiseInPlace(
+/// `target = op(target, other)` in `target`'s storage. `target` must be
+/// contiguous; `other` is the same shape, or a tail-broadcast row of it.
+pub fn elementwiseInPlace(
     ctx: *ExecContext,
     comptime op: ElementwiseOp,
     target: *Tensor,

@@ -296,7 +296,7 @@ pub const GradState = struct {
 
             if (self.grad) |*current| {
                 try prepareMutableAccumulator(engine, current);
-                try engine.ctx.addInPlace(current, &owned);
+                try engine.ctx.elementwiseInPlace(.add, current, &owned);
             } else {
                 try prepareInitialAccumulator(engine, &owned, will_accumulate_more);
                 self.grad = owned;

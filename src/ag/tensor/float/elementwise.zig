@@ -58,13 +58,13 @@ pub fn Ops(comptime Self: type) type {
         /// last axis `axis_tag`, mutating `self`.
         pub fn addAxisVectorInPlace(self: *Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !void {
             if (self.requiresGrad()) return error.UnsupportedGradient;
-            try ctx.addAxisVectorInPlace(tensor_rank, &self.value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorInPlace(tensor_rank, null, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place fused bias-add + unary activation `op`, mutating `self`.
         pub fn addAxisVectorUnaryInPlace(self: *Self, ctx: *ExecContext, comptime op: UnaryOp, bias: []const f32, comptime axis_tag: Tag) !void {
             if (self.requiresGrad()) return error.UnsupportedGradient;
-            try ctx.addAxisVectorUnaryInPlace(tensor_rank, op, &self.value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorInPlace(tensor_rank, op, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place scaled residual `self += alpha · other` (same shape).
@@ -79,7 +79,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn biasAdd(self: *const Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !Self {
             var value = try self.value.clone(ctx.allocator);
             errdefer value.deinit();
-            try ctx.addAxisVectorInPlace(tensor_rank, &value, bias, comptime Self.axis(axis_tag));
+            try ctx.addAxisVectorInPlace(tensor_rank, null, &value, bias, comptime Self.axis(axis_tag));
             return finishOp(tags, ctx, value, self.requiresGrad(), IdentityBackward(tags), .{ ctx.allocator, self.grad_state });
         }
 
@@ -278,7 +278,7 @@ pub fn Ops(comptime Self: type) type {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             if (self.requiresGrad() or other_ptr.requiresGrad()) return error.UnsupportedGradient;
             if (self.scope_owned) return error.ActiveExecScopeUnsupported;
-            var value = try ctx.takeAdd(&self.value, other_ptr.asRawTensor());
+            var value = try ctx.takeElementwise(.add, &self.value, other_ptr.asRawTensor());
             errdefer value.deinit();
             self.* = undefined;
             return finishNoGrad(tags, ctx, value);

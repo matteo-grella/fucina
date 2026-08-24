@@ -408,7 +408,7 @@ pub const Compiled = struct {
                 var y = try ctx.matmul(.f32, &xr, &p.w); // [1,out]
                 if (p.b) |*b| {
                     errdefer y.deinit();
-                    try ctx.addAxisVectorInPlace(2, &y, b.dataConst(), 1);
+                    try ctx.addAxisVectorInPlace(2, null, &y, b.dataConst(), 1);
                 }
                 return y;
             },
