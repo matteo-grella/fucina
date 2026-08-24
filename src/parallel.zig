@@ -1,7 +1,21 @@
-//! Parallel execution policies over the worker pool (`thread.zig`):
-//! chunked for-loops, reduction scaffolding, spin-budget tuning, and the
-//! thread-count gates kernels consult. Kernels never spawn threads
-//! directly; they size and split work through this module.
+//! Parallel-dispatch policy and substrate probes. Three things live here,
+//! and the actual chunking is none of them (`thread.Pool.parallelChunks`
+//! owns that):
+//!
+//!   1. the COMPTIME CPU crossover constants kernels consult before
+//!      engaging the worker pool (`vector_*_threshold`, `row_kernel_*`,
+//!      `backward_*`, ...); their runtime counterparts are
+//!      `src/tuning.zig`'s table, and the two files split one policy
+//!      surface on binding time;
+//!   2. CPU-topology detection: physical-core count, Linux affinity masks,
+//!      cgroup v1/v2 quotas, and the `FUCINA_MAX_THREADS` cap (the one env
+//!      variable read below the tuning table, because it sizes the
+//!      substrate the table's loader runs on);
+//!   3. the sanctioned environment readers (`envFlag`, `envFlagValue`,
+//!      `envPositiveUsize`, `envNonNegativeUsize`, `envStringIs`) with the
+//!      libc-free-Linux `/proc/self/environ` fallback, which the tuning
+//!      loader and the substrate gates read through.
+//!
 //! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const builtin = @import("builtin");

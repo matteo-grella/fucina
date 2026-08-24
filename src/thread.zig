@@ -522,7 +522,7 @@ const BarrierPool = struct {
             .worker_count = worker_count,
             .spin_budget = budgets.worker,
             .join_spin_budget = budgets.join,
-            .profile_enabled = parallel.envFlag("FUCINA_POOL_PROFILE"),
+            .profile_enabled = tuning.get().pool_profile,
         };
         if (self.profile_enabled and worker_count > 0) {
             self.profile_slots = try allocator.alloc(ProfileSlot, worker_count + 1);

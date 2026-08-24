@@ -1,6 +1,19 @@
-//! Runtime tuning policy: one typed table (`Table`) holding every FUCINA_*
-//! route gate and numeric crossover, the reflective env loader that fills
+//! Runtime tuning policy: one typed table (`Table`) of the env-tunable
+//! route gates and numeric crossovers, the reflective env loader that fills
 //! it, and the per-context overrides an `ExecContext` can carry.
+//!
+//! Scope, stated exactly. Every RUNTIME `FUCINA_*` policy value lives in
+//! the table. The exceptions are substrate and diagnostics that cannot or
+//! should not ride it: `FUCINA_MAX_THREADS` (read by `parallel.zig` before
+//! any table exists; it sizes the substrate the loader itself runs on),
+//! `FUCINA_GPU_KERNELS` (string-valued; the CUDA provider documents its
+//! direct read), `FUCINA_GPU_DEBUG` (read inside the Objective-C Metal
+//! shim, which has no Zig), and the test-run switches
+//! (`FUCINA_TEST_REQUIRE_MODELS`, per-suite bench flags) plus the
+//! model-band `FUCINA_MM_PROFILE` diagnostic, documented at their read
+//! sites. The COMPTIME CPU crossovers (work thresholds burned into kernel
+//! dispatch at build time) are `parallel.zig`'s constants: the two files
+//! split one policy surface on binding time, runtime here, comptime there.
 //!
 //! Each leaf field derives its environment variable from its path: `FUCINA_`
 //! plus the path segments upper-cased and joined with `_` (`decode_compact`
@@ -144,6 +157,9 @@ pub const Table = struct {
     /// single value wins every workload. See the `spin_budget` comment in
     /// thread.zig for when (and on which hardware) overriding pays.
     spin_budget: ?u64 = null,
+    /// Worker-team profiling: per-worker dispatch/park counters, read at
+    /// pool init (`src/thread.zig`). Diagnostic, not a route gate.
+    pool_profile: bool = false,
 
     gpu: Gpu = .{},
 
@@ -327,13 +343,23 @@ fn appendSegment(comptime prefix: [:0]const u8, comptime segment: []const u8) [:
 /// read is the point (tests).
 pub fn load() Table {
     var t: Table = .{};
-    loadGroup(Table, &t, "FUCINA", .positive);
+    overlay(Table, &t, loadEnv());
     return t;
+}
+
+/// The env-supplied leaves alone, as an optional shadow: non-null exactly
+/// where an environment variable provided a value. Keeping this separate
+/// from the merged `Table` is what lets `wasSet` distinguish "explicitly
+/// configured" from "measured default" after the values merge.
+fn loadEnv() Overrides {
+    var e: Overrides = .{};
+    loadGroup(Table, &e, "FUCINA", .positive);
+    return e;
 }
 
 fn loadGroup(
     comptime T: type,
-    out: *T,
+    out: *OptionalShadow(T),
     comptime prefix: [:0]const u8,
     comptime mode: EnvIntParse,
 ) void {
@@ -366,6 +392,7 @@ fn readInt(comptime name: [:0]const u8, comptime mode: EnvIntParse) ?u64 {
 }
 
 var base: Table = undefined;
+var env_values: Overrides = .{};
 var pins: Overrides = .{};
 var current: Table = undefined;
 var loaded = std.atomic.Value(bool).init(false);
@@ -387,7 +414,9 @@ fn ensureLoaded() void {
     lockTable();
     defer unlockTable();
     if (!loaded.load(.monotonic)) {
-        base = load();
+        env_values = loadEnv();
+        base = .{};
+        overlay(Table, &base, env_values);
         current = base;
         loaded.store(true, .release);
     }
@@ -450,6 +479,36 @@ pub fn Leaf(comptime path: []const u8) type {
 pub fn resolve(overrides: *const Overrides, comptime path: []const u8) Leaf(path) {
     if (leafGet(Overrides, overrides.*, path)) |v| return v;
     return leafGet(Table, get().*, path);
+}
+
+/// True when the field at `path` carries an EXPLICIT value right now: an
+/// environment variable supplied it at load, or a programmatic pin is
+/// active. The measured default does not count. This is the query behind
+/// seeding rules that depend on "did the user say anything", so consumers
+/// never re-read an env variable by hard-coded name.
+pub fn wasSet(comptime path: []const u8) bool {
+    ensureLoaded();
+    lockTable();
+    defer unlockTable();
+    if (leafGet(Overrides, pins, path) != null) return true;
+    return leafGet(Overrides, env_values, path) != null;
+}
+
+/// The Q6 seeding rule both GPU providers apply at their one-time
+/// configuration, stated once: an explicit `gpu.min_work.dense_q6` (env or
+/// pin) also re-seeds the provider's packed-Q6 tier; otherwise an explicit
+/// `gpu.min_work.qmoe` seeds the dense-Q6 floor; with neither explicit the
+/// dense floor keeps its measured default and the packed tier keeps the
+/// provider's `packed_q6_default`.
+pub fn gpuQ6Seeding(packed_q6_default: u64) struct { dense_q6: u64, packed_q6: u64 } {
+    const t = get();
+    if (wasSet("gpu.min_work.dense_q6")) {
+        return .{ .dense_q6 = t.gpu.min_work.dense_q6, .packed_q6 = t.gpu.min_work.dense_q6 };
+    }
+    if (wasSet("gpu.min_work.qmoe")) {
+        return .{ .dense_q6 = t.gpu.min_work.qmoe, .packed_q6 = packed_q6_default };
+    }
+    return .{ .dense_q6 = t.gpu.min_work.dense_q6, .packed_q6 = packed_q6_default };
 }
 
 fn LeafIn(comptime T: type, comptime path: []const u8) type {

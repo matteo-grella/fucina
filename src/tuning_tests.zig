@@ -31,6 +31,7 @@ test "env-name derivation reproduces the published spellings" {
         .{ .path = "winograd_f4_min", .name = "FUCINA_WINOGRAD_F4_MIN" },
         .{ .path = "winograd_f4_maxcin", .name = "FUCINA_WINOGRAD_F4_MAXCIN" },
         .{ .path = "spin_budget", .name = "FUCINA_SPIN_BUDGET" },
+        .{ .path = "pool_profile", .name = "FUCINA_POOL_PROFILE" },
         .{ .path = "gpu.enabled", .name = "FUCINA_GPU" },
         .{ .path = "gpu.decode", .name = "FUCINA_GPU_DECODE" },
         .{ .path = "gpu.tf32", .name = "FUCINA_GPU_TF32" },
