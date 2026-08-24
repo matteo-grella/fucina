@@ -45,6 +45,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const models = @import("fucina_models");
+const common = @import("cartridge_common");
 
 const optim = fucina.optim;
 const cartridge = models.text.cartridge;
@@ -56,49 +57,6 @@ const default_model = "models/Qwen3-0.6B-f16.gguf";
 /// the only parameters.
 const Trainer = models.qwen3.train.Trainer(.{ .q = false, .v = false });
 const GemmaTrainer = models.gemma.train.Trainer(.{ .q = false, .v = false });
-
-/// Chat-template strings the prompt builders splice (runtime values so one
-/// engine serves both architectures — the base cartridge CLI's Tpl).
-const Tpl = struct {
-    sys_open: []const u8,
-    user_open: []const u8,
-    asst_open: []const u8,
-    block_close: []const u8,
-    stop_marker: []const u8,
-};
-
-// ChatML (Qwen3); the assistant opener carries the empty think block so
-// generations answer directly.
-const qwen3_tpl = Tpl{
-    .sys_open = "<|im_start|>system\n",
-    .user_open = "<|im_start|>user\n",
-    .asst_open = "<|im_start|>assistant\n<think>\n\n</think>\n\n",
-    .block_close = "<|im_end|>\n",
-    .stop_marker = "<|im_end|>",
-};
-
-// Gemma 4's `<|turn>` format (thinking primed off).
-const gemma4_tpl = Tpl{
-    .sys_open = "<bos><|turn>system\n",
-    .user_open = "<|turn>user\n",
-    .asst_open = "<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
-    .block_close = "<turn|>\n",
-    .stop_marker = "<turn|>",
-};
-
-/// Duck-typed per-model KV-cache construction: uniform-geometry models
-/// (qwen3) size from config, per-layer-geometry models (gemma4) from geom.
-fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !models.text.kv_cache.KvCache {
-    const M = @TypeOf(model.*);
-    if (comptime @hasField(M, "geom")) {
-        return models.text.kv_cache.KvCache.initPerLayer(ctx, model.geom.kv_heads, model.geom.head_dim, capacity);
-    }
-    const cfg = model.config;
-    return models.text.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
-}
-
-/// Reference synthesizers/self_study.py SYSTEM_PROMPT_TEMPLATE.
-const system_prompt_template = "\nYou are in a conversation about the following user information.\n\n<info>\n{s}\n</info>";
 
 /// The seed-prompt set of the base cartridge CLI (reference five plus the
 /// mechanism / verbatim-precision additions — see apps/cartridge/main.zig).
@@ -210,57 +168,57 @@ pub fn main(init: std.process.Init) !void {
     var arg_i: usize = 1;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
-        if (try parseFlagStr(args, &arg_i, "--model")) |v| {
+        if (try common.parseFlagStr(args, &arg_i, "--model")) |v| {
             opts.model_path = v;
-        } else if (try parseFlagStr(args, &arg_i, "--docs")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--docs")) |v| {
             try doc_paths.append(allocator, v);
-        } else if (try parseFlagStr(args, &arg_i, "--fleet")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--fleet")) |v| {
             opts.fleet_dir = v;
-        } else if (try parseFlagStr(args, &arg_i, "--ask")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--ask")) |v| {
             opts.ask = v;
-        } else if (try parseFlagStr(args, &arg_i, "--oracle")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--oracle")) |v| {
             opts.oracle = v;
-        } else if (try parseFlagInt(args, &arg_i, "--p")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--p")) |v| {
             opts.p = v;
-        } else if (try parseFlagInt(args, &arg_i, "--frozen")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--frozen")) |v| {
             opts.frozen_prefix = v;
-        } else if (try parseFlagInt(args, &arg_i, "--budget")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--budget")) |v| {
             opts.budget = v;
-        } else if (try parseFlagInt(args, &arg_i, "--rotate-every")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--rotate-every")) |v| {
             opts.rotate_every = v;
-        } else if (try parseFlagF32(args, &arg_i, "--evict-frac")) |v| {
+        } else if (try common.parseFlagF32(args, &arg_i, "--evict-frac")) |v| {
             opts.evict_frac = v;
-        } else if (try parseFlagInt(args, &arg_i, "--warmup")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--warmup")) |v| {
             opts.warmup = v;
-        } else if (try parseFlagF32(args, &arg_i, "--p-iso")) |v| {
+        } else if (try common.parseFlagF32(args, &arg_i, "--p-iso")) |v| {
             opts.p_iso = v;
-        } else if (try parseFlagInt(args, &arg_i, "--distract-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--distract-max")) |v| {
             opts.distract_max = v;
-        } else if (try parseFlagInt(args, &arg_i, "--rounds")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--rounds")) |v| {
             opts.rounds = v;
-        } else if (try parseFlagInt(args, &arg_i, "--accum")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--accum")) |v| {
             opts.accum = v;
-        } else if (try parseFlagF32(args, &arg_i, "--lr")) |v| {
+        } else if (try common.parseFlagF32(args, &arg_i, "--lr")) |v| {
             opts.lr = v;
-        } else if (try parseFlagInt(args, &arg_i, "--chunk-min")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--chunk-min")) |v| {
             opts.chunk_min = v;
-        } else if (try parseFlagInt(args, &arg_i, "--chunk-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--chunk-max")) |v| {
             opts.chunk_max = v;
-        } else if (try parseFlagInt(args, &arg_i, "--top-k")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--top-k")) |v| {
             opts.top_k = v;
-        } else if (try parseFlagInt(args, &arg_i, "--max-q")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--max-q")) |v| {
             opts.max_q = v;
-        } else if (try parseFlagInt(args, &arg_i, "--max-a")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--max-a")) |v| {
             opts.max_a = v;
-        } else if (try parseFlagInt(args, &arg_i, "--seed")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--seed")) |v| {
             opts.seed = v;
-        } else if (try parseFlagInt(args, &arg_i, "--embed-chunk")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--embed-chunk")) |v| {
             opts.embed_chunk = v;
-        } else if (try parseFlagInt(args, &arg_i, "--rag-docs")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--rag-docs")) |v| {
             opts.rag_docs = v;
-        } else if (try parseFlagInt(args, &arg_i, "--rag-chunks")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--rag-chunks")) |v| {
             opts.rag_chunks = v;
-        } else if (try parseFlagInt(args, &arg_i, "--suffix-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--suffix-max")) |v| {
             opts.suffix_max = v;
         } else if (std.mem.eql(u8, arg, "--checkpoint")) {
             opts.checkpoint = true;
@@ -311,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var trainer = try GemmaTrainer.init(&ctx, &model, .{ .rank = 1, .alpha = 1 }, opts.seed);
         defer trainer.deinit();
-        return dispatch(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, gemma4_tpl, false, doc_paths.items, opts);
+        return dispatch(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, common.gemma4_tpl, false, doc_paths.items, opts);
     }
     if (!std.mem.startsWith(u8, arch, "qwen3")) {
         try stdout.print(
@@ -341,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
         opts2.pack = false;
         try stdout.print("--checkpoint: per-layer recompute on; visibility forced to isolated (p-iso 1)\n", .{});
     }
-    return dispatch(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, qwen3_tpl, true, doc_paths.items, opts2);
+    return dispatch(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, common.qwen3_tpl, true, doc_paths.items, opts2);
 }
 
 /// Mode dispatch shared by both architecture arms. `supports_packing`
@@ -356,7 +314,7 @@ fn dispatch(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     comptime supports_packing: bool,
     doc_paths: []const []const u8,
     opts: Options,
@@ -440,7 +398,7 @@ fn loadDoc(allocator: std.mem.Allocator, io: std.Io, tokenizer: anytype, path: [
     var dir = std.Io.Dir.cwd();
     const content = try dir.readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
     errdefer allocator.free(content);
-    const ids = try encodeUsize(allocator, tokenizer, content);
+    const ids = try common.encodeUsize(allocator, tokenizer, content);
     errdefer allocator.free(ids);
     const name = try allocator.dupe(u8, path);
     return .{ .name = name, .text = content, .ids = ids };
@@ -458,7 +416,7 @@ fn runFleetTrain(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     comptime supports_packing: bool,
     dir: []const u8,
     docs: []Doc,
@@ -501,7 +459,7 @@ fn runFleetTrain(
         // Init pass: every document's cartridge from its own opening tokens
         // (the paper's per-document initialization), persisted immediately
         // so rotation can load any of them.
-        const t0 = nowNs(io);
+        const t0 = common.nowNs(io);
         for (docs, 0..) |*doc, i| {
             const init_tokens = try systemInitTokens(allocator, tokenizer, tpl, doc.text, opts.p);
             defer allocator.free(init_tokens);
@@ -510,7 +468,7 @@ fn runFleetTrain(
             try created.evictResident(io, idx);
         }
         try stdout.print("fleet created at {s}: {d} per-document cartridges initialized (p = {d}) in {d:.1} s\n", .{
-            dir, docs.len, opts.p, seconds(nowNs(io) - t0),
+            dir, docs.len, opts.p, common.seconds(common.nowNs(io) - t0),
         });
         break :blk created;
     };
@@ -555,7 +513,7 @@ fn runFleetTrain(
     var caches_inited: usize = 0;
     defer for (caches[0..caches_inited]) |*c| c.deinit();
     for (caches) |*c| {
-        c.* = try makeCache(ctx, model, capacity);
+        c.* = try common.makeCache(ctx, model, capacity);
         caches_inited += 1;
     }
 
@@ -564,7 +522,7 @@ fn runFleetTrain(
 
     // Held-out conversation on manifest doc 0, isolated visibility: the
     // generalization signal for the fleet's first document.
-    var held: [1]Convo = undefined;
+    var held: [1]common.Convo = undefined;
     try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, tpl, supports_packing, caches[0..1], &docs[doc_of[0]], rand, opts, stop_id, &held);
     defer held[0].deinit(allocator);
     trainer.freeTransientRope();
@@ -579,9 +537,9 @@ fn runFleetTrain(
     const part_docs = try allocator.alloc(usize, opts.budget);
     defer allocator.free(part_docs);
     var trained_tokens: usize = 0;
-    const train_start = nowNs(io);
+    const train_start = common.nowNs(io);
     for (0..opts.rounds) |round_i| {
-        const round_start = nowNs(io);
+        const round_start = common.nowNs(io);
 
         // Target: resident doc sampled proportional to its token length.
         const target_slot = sampleResidentByLength(&fleet, rand);
@@ -621,7 +579,7 @@ fn runFleetTrain(
         const parts = parts_buf[0..n_parts];
 
         // Self-study group on the TARGET document's chunks.
-        const group = try allocator.alloc(Convo, opts.accum);
+        const group = try allocator.alloc(common.Convo, opts.accum);
         defer allocator.free(group);
         try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, tpl, supports_packing, caches, &docs[doc_of[target_doc]], rand, opts, stop_id, group);
         defer for (group) |*convo| convo.deinit(allocator);
@@ -699,7 +657,7 @@ fn runFleetTrain(
             if (n_parts == 1) "isolated" else "co-loaded",
             n_parts,
             round_loss,
-            seconds(nowNs(io) - round_start),
+            common.seconds(common.nowNs(io) - round_start),
         });
         try stdout.flush();
 
@@ -707,7 +665,7 @@ fn runFleetTrain(
         const rotated = try fleet.maybeRotate(ctx, io, stdout);
         if (rotated > 0) try fleet.writeManifest(io);
     }
-    const train_s = seconds(nowNs(io) - train_start);
+    const train_s = common.seconds(common.nowNs(io) - train_start);
     try stdout.print("self-study: {d} rounds x {d} conversations, {d} supervised answer tokens, {d:.1} min ({d:.1} s/conversation)\n", .{
         opts.rounds, opts.accum, trained_tokens, train_s / 60.0, train_s / @as(f64, @floatFromInt(opts.rounds * opts.accum)),
     });
@@ -725,7 +683,7 @@ fn runFleetTrain(
 
 /// Held-out distillation loss behind doc `doc_id`'s cartridge in isolation
 /// (loading it from disk if rotation moved it out).
-fn heldLoss(ctx: *fucina.ExecContext, io: std.Io, trainer: anytype, fleet: *fleet_mod.Fleet, doc_id: usize, convo: *const Convo) !f32 {
+fn heldLoss(ctx: *fucina.ExecContext, io: std.Io, trainer: anytype, fleet: *fleet_mod.Fleet, doc_id: usize, convo: *const common.Convo) !f32 {
     var slot = fleet.residentIndex(doc_id);
     var evict_after = false;
     if (slot == null) {
@@ -772,7 +730,7 @@ fn sampleResidentByLength(fleet: *const fleet_mod.Fleet, rand: std.Random) usize
 /// and serve-time queries must match; lmserve --fleet embeds queries the
 /// same way).
 fn embedTokens(ctx: *fucina.ExecContext, trainer: anytype, allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize, out: []f32) !void {
-    const suffix_ids = try encodeUsize(allocator, tokenizer, fleet_mod.embed_suffix);
+    const suffix_ids = try common.encodeUsize(allocator, tokenizer, fleet_mod.embed_suffix);
     defer allocator.free(suffix_ids);
     const full = try std.mem.concat(allocator, usize, &.{ ids, suffix_ids });
     defer allocator.free(full);
@@ -800,7 +758,7 @@ fn buildIndex(
     const vec = try allocator.alloc(f32, dim);
     defer allocator.free(vec);
 
-    const t0 = nowNs(io);
+    const t0 = common.nowNs(io);
     const chunk = fleet.manifest.embed_chunk;
     for (fleet.manifest.docs.items, 0..) |_, doc_id| {
         const ids = docs[doc_of[doc_id]].ids;
@@ -820,7 +778,7 @@ fn buildIndex(
     try fucina.training_checkpoint.writeFileAtomic(io, index_path, writer_ctx, writeIndexTo);
     try fleet.writeManifest(io);
     try stdout.print("retrieval index: {d} chunks x {d} dims embedded through the model in {d:.1} s -> {s}\n", .{
-        index.len(), dim, seconds(nowNs(io) - t0), index_path,
+        index.len(), dim, common.seconds(common.nowNs(io) - t0), index_path,
     });
 }
 
@@ -845,7 +803,7 @@ fn runServe(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     dir: []const u8,
     ask: []const u8,
     opts: Options,
@@ -876,7 +834,7 @@ fn runServe(
         var index = try fleet_mod.EmbedIndex.initFromBytes(allocator, mapped.bytes);
         defer index.deinit();
 
-        const query_ids = try encodeUsize(allocator, tokenizer, ask);
+        const query_ids = try common.encodeUsize(allocator, tokenizer, ask);
         defer allocator.free(query_ids);
         const query_vec = try allocator.alloc(f32, fleet.manifest.embed_dim);
         defer allocator.free(query_vec);
@@ -916,20 +874,20 @@ fn runServe(
 
     const prompt = try std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{ tpl.user_open, ask, tpl.block_close, tpl.asst_open });
     defer allocator.free(prompt);
-    const prompt_ids = try encodeUsize(allocator, tokenizer, prompt);
+    const prompt_ids = try common.encodeUsize(allocator, tokenizer, prompt);
     defer allocator.free(prompt_ids);
 
     // Composed cartridges ahead of the question.
     {
-        var cache = try makeCache(ctx, model, total_p + prompt_ids.len + opts.max_a + 16);
+        var cache = try common.makeCache(ctx, model, total_p + prompt_ids.len + opts.max_a + 16);
         defer cache.deinit();
         try cartridge.writeComposedToCache(ctx, parts, &cache);
-        const t0 = nowNs(io);
+        const t0 = common.nowNs(io);
         const ids = try generateIds(ctx, allocator, model, &cache, prompt_ids, opts.max_a, stop_id);
         defer allocator.free(ids);
-        const answer = try cleanGenerated(allocator, tokenizer, ids);
+        const answer = try common.cleanGenerated(allocator, tokenizer, ids);
         defer allocator.free(answer);
-        const secs = seconds(nowNs(io) - t0);
+        const secs = common.seconds(common.nowNs(io) - t0);
         try stdout.print("\n[{d} composed cartridge(s), {d} KV rows] ({d:.2} s, ~{d:.1} tok/s)\n{s}\n", .{
             parts.len, total_p, secs, @as(f64, @floatFromInt(ids.len)) / secs, answer,
         });
@@ -938,11 +896,11 @@ fn runServe(
 
     // Bare model for contrast.
     {
-        var cache = try makeCache(ctx, model, prompt_ids.len + opts.max_a + 16);
+        var cache = try common.makeCache(ctx, model, prompt_ids.len + opts.max_a + 16);
         defer cache.deinit();
         const ids = try generateIds(ctx, allocator, model, &cache, prompt_ids, opts.max_a, stop_id);
         defer allocator.free(ids);
-        const answer = try cleanGenerated(allocator, tokenizer, ids);
+        const answer = try common.cleanGenerated(allocator, tokenizer, ids);
         defer allocator.free(answer);
         try stdout.print("\n[bare model, no context]\n{s}\n", .{answer});
     }
@@ -975,10 +933,10 @@ fn runComposeEquiv(
     const full = ids.items[0 .. prefix_len + suffix_len];
     const suffix = full[prefix_len..];
 
-    const t0 = nowNs(io);
+    const t0 = common.nowNs(io);
     var teacher = try trainer.evalLogitsExt(ctx, full, .{});
     defer teacher.deinit();
-    const t1 = nowNs(io);
+    const t1 = common.nowNs(io);
 
     // One capture, split at p: part B's rows keep their positions p..2p-1.
     // Geometry is duck-typed per layer (gemma4 mixes shapes; qwen3 is
@@ -1015,11 +973,11 @@ fn runComposeEquiv(
     }
     var cart_b = try cartridge.Cartridge.initFromRowsVaried(ctx, allocator, opts.frozen_prefix, opts.p, kv_heads, head_dims, k_slices, v_slices);
     defer cart_b.deinit();
-    const t2 = nowNs(io);
+    const t2 = common.nowNs(io);
 
     var student = try trainer.evalLogitsExt(ctx, suffix, .{ .cartridges = &.{ &cart_a, &cart_b } });
     defer student.deinit();
-    const t3 = nowNs(io);
+    const t3 = common.nowNs(io);
 
     const vocab = trainer.model.config.vocab_size;
     const teacher_rows = (try teacher.dataConst())[prefix_len * vocab ..];
@@ -1050,7 +1008,7 @@ fn runComposeEquiv(
     );
     try stdout.print(
         "timings: teacher prefill {d:.2} s, capture+split {d:.2} s, composed eval {d:.2} s\n",
-        .{ seconds(t1 - t0), seconds(t2 - t1), seconds(t3 - t2) },
+        .{ common.seconds(t1 - t0), common.seconds(t2 - t1), common.seconds(t3 - t2) },
     );
     if (greedy_match != suffix_len) {
         // Quantized-MoE stacks are not GEMM-shape-invariant (near-tie
@@ -1082,25 +1040,6 @@ fn runComposeEquiv(
 // Self-study synthesis (the base cartridge CLI's engine, per-document)
 // ---------------------------------------------------------------------------
 
-/// One synthesized conversation (see apps/cartridge/main.zig): the seed-free
-/// student element plus the teacher's sparse top-k targets for its answer.
-const Convo = struct {
-    student_ids: []usize,
-    teacher_ids: []usize,
-    first_answer: usize,
-    answer_len: usize,
-    question: []u8,
-    builder: cartridge.TargetsBuilder,
-
-    fn deinit(self: *Convo, allocator: std.mem.Allocator) void {
-        allocator.free(self.student_ids);
-        allocator.free(self.teacher_ids);
-        allocator.free(self.question);
-        self.builder.deinit();
-        self.* = undefined;
-    }
-};
-
 /// Algorithm 1 with k = 1 over one accumulation group, chunks drawn from a
 /// SINGLE document: bot A asks (temp 0.6, lockstep batched), bot B answers
 /// with the chunk in context (greedy, batched), one packed teacher pass
@@ -1111,14 +1050,14 @@ fn synthesizeGroup(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     comptime supports_packing: bool,
     caches: []models.text.kv_cache.KvCache,
     doc: *const Doc,
     rand: std.Random,
     opts: Options,
     stop_id: ?usize,
-    out: []Convo,
+    out: []common.Convo,
 ) !void {
     const n = out.len;
     std.debug.assert(n > 0 and caches.len >= n);
@@ -1135,20 +1074,20 @@ fn synthesizeGroup(
         const chunk_max = @min(opts.chunk_max, doc.ids.len);
         const chunk_len = rand.intRangeAtMost(usize, @min(opts.chunk_min, chunk_max), chunk_max);
         const chunk_start = rand.intRangeAtMost(usize, 0, doc.ids.len - chunk_len);
-        const chunk_body = try decodeUsize(arena, tokenizer, doc.ids[chunk_start..][0..chunk_len]);
+        const chunk_body = try common.decodeUsize(arena, tokenizer, doc.ids[chunk_start..][0..chunk_len]);
         const chunk_text = try std.fmt.allocPrint(
             arena,
             "Below is an excerpt from {s}. It is part of a larger corpus of documents.\n\n{s}",
             .{ doc.name, chunk_body },
         );
-        sys_texts[i] = try std.fmt.allocPrint(arena, "{s}" ++ system_prompt_template ++ "{s}", .{ tpl.sys_open, chunk_text, tpl.block_close });
+        sys_texts[i] = try std.fmt.allocPrint(arena, "{s}" ++ common.system_prompt_template ++ "{s}", .{ tpl.sys_open, chunk_text, tpl.block_close });
         const seed_prompt = seed_prompts[rand.intRangeLessThan(usize, 0, seed_prompts.len)];
         const a_prompt = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}", .{ sys_texts[i], tpl.user_open, seed_prompt, tpl.block_close, tpl.asst_open });
-        a_prompts[i] = try encodeUsize(arena, tokenizer, a_prompt);
+        a_prompts[i] = try common.encodeUsize(arena, tokenizer, a_prompt);
         a_cfgs[i] = .{ .temperature = 0.6, .seed = rand.int(u64) };
     }
 
-    const a_outs = try generateIdsBatch(ctx, arena, model, caches[0..n], a_prompts, opts.max_q, stop_id, a_cfgs);
+    const a_outs = try common.generateIdsBatch(ctx, arena, model, caches[0..n], a_prompts, opts.max_q, stop_id, a_cfgs);
 
     // Bot B: greedy answers WITH each chunk in context.
     const b_prompts = try arena.alloc([]const usize, n);
@@ -1156,14 +1095,14 @@ fn synthesizeGroup(
     const convo_prefix_ids = try arena.alloc([]usize, n);
     const questions = try arena.alloc([]const u8, n);
     for (0..n) |i| {
-        questions[i] = try cleanGenerated(arena, tokenizer, a_outs[i]);
+        questions[i] = try common.cleanGenerated(arena, tokenizer, a_outs[i]);
         const convo_prefix = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ tpl.user_open, questions[i], tpl.block_close, tpl.asst_open });
-        convo_prefix_ids[i] = try encodeUsize(arena, tokenizer, convo_prefix);
+        convo_prefix_ids[i] = try common.encodeUsize(arena, tokenizer, convo_prefix);
         const b_prompt = try std.mem.concat(arena, u8, &.{ sys_texts[i], convo_prefix });
-        b_prompts[i] = try encodeUsize(arena, tokenizer, b_prompt);
+        b_prompts[i] = try common.encodeUsize(arena, tokenizer, b_prompt);
         b_cfgs[i] = .{};
     }
-    const b_outs = try generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
+    const b_outs = try common.generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
 
     var built: usize = 0;
     errdefer for (out[0..built]) |*convo| convo.deinit(allocator);
@@ -1172,7 +1111,7 @@ fn synthesizeGroup(
         if (answer_gen.len == 0) return error.EmptyAnswer;
         const stopped = answer_gen.len < opts.max_a and stop_id != null;
         const answer_len = answer_gen.len + @intFromBool(stopped);
-        const sys_ids = try encodeUsize(arena, tokenizer, sys_texts[i]);
+        const sys_ids = try common.encodeUsize(arena, tokenizer, sys_texts[i]);
 
         const prefix_len = convo_prefix_ids[i].len;
         const student_ids = try allocator.alloc(usize, prefix_len + answer_len);
@@ -1205,7 +1144,7 @@ fn teacherTargets(
     arena: std.mem.Allocator,
     trainer: anytype,
     comptime supports_packing: bool,
-    group: []Convo,
+    group: []common.Convo,
     opts: Options,
 ) !void {
     var total_len: usize = 0;
@@ -1292,89 +1231,6 @@ fn teacherTargets(
 // Generation helpers (see apps/cartridge/main.zig)
 // ---------------------------------------------------------------------------
 
-/// Batched lockstep generation: per-stream prefill, then one
-/// `forwardStepBatch` weight pass per token across the active streams.
-fn generateIdsBatch(
-    ctx: *fucina.ExecContext,
-    allocator: std.mem.Allocator,
-    model: anytype,
-    caches: []models.text.kv_cache.KvCache,
-    prompts: []const []const usize,
-    max_new: usize,
-    stop_id: ?usize,
-    cfgs: []const models.text.sampler.Config,
-) ![][]usize {
-    const n = prompts.len;
-    std.debug.assert(n > 0 and caches.len >= n and cfgs.len == n and max_new > 0);
-
-    const outs = try allocator.alloc([]usize, n);
-    errdefer allocator.free(outs);
-    var built: usize = 0;
-    errdefer for (outs[0..built]) |buf| allocator.free(buf);
-    for (outs) |*buf| {
-        buf.* = try allocator.alloc(usize, max_new);
-        built += 1;
-    }
-
-    const samplers = try allocator.alloc(models.text.sampler.Sampler, n);
-    defer allocator.free(samplers);
-    const lens = try allocator.alloc(usize, n);
-    defer allocator.free(lens);
-    const active = try allocator.alloc(usize, n);
-    defer allocator.free(active);
-    const batch_caches = try allocator.alloc(*models.text.kv_cache.KvCache, n);
-    defer allocator.free(batch_caches);
-    const batch_tokens = try allocator.alloc(usize, n);
-    defer allocator.free(batch_tokens);
-
-    var n_active: usize = 0;
-    for (0..n) |i| {
-        if (prompts[i].len + max_new > caches[i].capacity) return error.PromptTooLong;
-        caches[i].reset();
-        samplers[i] = models.text.sampler.Sampler.init(cfgs[i]);
-        lens[i] = 0;
-        var logits = try model.forwardStep(ctx, &caches[i], prompts[i], 0);
-        defer logits.deinit();
-        const next = try samplers[i].next(ctx, &logits, outs[i][0..0]);
-        if (stop_id != null and next == stop_id.?) continue;
-        outs[i][0] = next;
-        lens[i] = 1;
-        if (max_new > 1) {
-            active[n_active] = i;
-            n_active += 1;
-        }
-    }
-
-    while (n_active > 0) {
-        for (0..n_active) |j| {
-            const i = active[j];
-            batch_caches[j] = &caches[i];
-            batch_tokens[j] = outs[i][lens[i] - 1];
-        }
-        var logits = try model.forwardStepBatch(ctx, batch_caches[0..n_active], batch_tokens[0..n_active]);
-        defer logits.deinit();
-
-        var kept: usize = 0;
-        for (0..n_active) |j| {
-            const i = active[j];
-            var row = try logits.narrow(ctx, .seq, j, 1);
-            defer row.deinit();
-            const next = try samplers[i].next(ctx, &row, outs[i][0..lens[i]]);
-            if (stop_id != null and next == stop_id.?) continue;
-            outs[i][lens[i]] = next;
-            lens[i] += 1;
-            if (lens[i] < max_new) {
-                active[kept] = i;
-                kept += 1;
-            }
-        }
-        n_active = kept;
-    }
-
-    for (outs, lens) |*buf, len| buf.* = try allocator.realloc(buf.*, len);
-    return outs;
-}
-
 /// Greedy generation after `prompt_ids`, prefilling at the cache's CURRENT
 /// position (a preloaded composed prefix stays in place). The stop token is
 /// dropped from the returned ids.
@@ -1408,38 +1264,23 @@ fn generateIds(
     return allocator.realloc(out, produced);
 }
 
-/// Decode + trim a generation, dropping any leading think block/marker.
-fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
-    const text = try decodeUsize(allocator, tokenizer, ids);
-    defer allocator.free(text);
-    var content = std.mem.trim(u8, text, " \t\r\n");
-    if (std.mem.startsWith(u8, content, "<think>")) {
-        if (std.mem.indexOf(u8, content, "</think>")) |end| content = content[end + "</think>".len ..];
-    } else if (std.mem.startsWith(u8, content, "</think>")) {
-        content = content["</think>".len..];
-    }
-    content = std.mem.trim(u8, content, " \t\r\n");
-    if (content.len == 0) return error.EmptyGeneration;
-    return allocator.dupe(u8, content);
-}
-
 /// The per-document initialization token sequence: the document opening as
 /// a system block, truncated to exactly `p` tokens with the turn close
 /// re-appended (initialization/tokenization_utils.py semantics).
 fn systemInitTokens(
     allocator: std.mem.Allocator,
     tokenizer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     doc_text: []const u8,
     p: usize,
 ) ![]usize {
-    const close_ids = try encodeUsize(allocator, tokenizer, tpl.block_close);
+    const close_ids = try common.encodeUsize(allocator, tokenizer, tpl.block_close);
     defer allocator.free(close_ids);
     if (p < close_ids.len + 8) return error.CartridgeTooSmall;
 
-    const sys_text = try std.fmt.allocPrint(allocator, "{s}" ++ system_prompt_template ++ "{s}", .{ tpl.sys_open, doc_text, tpl.block_close });
+    const sys_text = try std.fmt.allocPrint(allocator, "{s}" ++ common.system_prompt_template ++ "{s}", .{ tpl.sys_open, doc_text, tpl.block_close });
     defer allocator.free(sys_text);
-    const sys_ids = try encodeUsize(allocator, tokenizer, sys_text);
+    const sys_ids = try common.encodeUsize(allocator, tokenizer, sys_text);
     defer allocator.free(sys_ids);
     if (sys_ids.len <= p) return allocator.dupe(usize, sys_ids);
 
@@ -1447,52 +1288,4 @@ fn systemInitTokens(
     @memcpy(out[0 .. p - close_ids.len], sys_ids[0 .. p - close_ids.len]);
     @memcpy(out[p - close_ids.len ..], close_ids);
     return out;
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-fn encodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, text: []const u8) ![]usize {
-    const ids32 = try tokenizer.encode(allocator, text);
-    defer allocator.free(ids32);
-    const out = try allocator.alloc(usize, ids32.len);
-    for (out, ids32) |*dst, id| dst.* = id;
-    return out;
-}
-
-fn decodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
-    const ids32 = try allocator.alloc(u32, ids.len);
-    defer allocator.free(ids32);
-    for (ids32, ids) |*dst, id| dst.* = @intCast(id);
-    return tokenizer.decode(allocator, ids32);
-}
-
-fn parseFlagStr(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?[]const u8 {
-    const arg = args[arg_i.*];
-    if (std.mem.eql(u8, arg, flag)) {
-        arg_i.* += 1;
-        if (arg_i.* >= args.len) return error.MissingFlagValue;
-        return args[arg_i.*];
-    }
-    if (std.mem.startsWith(u8, arg, flag ++ "=")) return arg[flag.len + 1 ..];
-    return null;
-}
-
-fn parseFlagInt(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?usize {
-    const text = (try parseFlagStr(args, arg_i, flag)) orelse return null;
-    return try std.fmt.parseInt(usize, text, 10);
-}
-
-fn parseFlagF32(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?f32 {
-    const text = (try parseFlagStr(args, arg_i, flag)) orelse return null;
-    return try std.fmt.parseFloat(f32, text);
-}
-
-fn nowNs(io: std.Io) i128 {
-    return std.Io.Clock.real.now(io).nanoseconds;
-}
-
-fn seconds(ns: i128) f64 {
-    return @as(f64, @floatFromInt(ns)) / 1e9;
 }
