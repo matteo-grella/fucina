@@ -4,7 +4,7 @@
 #   mem_tokens.pt     (148, 4096)          learned memory embeddings
 #   metalora.pth      nested dict           rank-128 Meta LoRA, all linears
 #   metanetwork.pth   state dict            4-layer M2P transformer
-# into one f32 GGUF that src/llm/qwen3/shine.zig loads next to the base
+# into one f32 GGUF that src/models/research/shine/shine.zig loads next to the base
 # Qwen3-8B GGUF. Tensor layouts are kept exactly as PyTorch stores them
 # (A: [in, r], B: [r, out], linear weights: [out, in]).
 #

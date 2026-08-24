@@ -7,11 +7,11 @@
 //! -> qwen3 cartridge forward -> CE), the `--verify-grads` discipline.
 const std = @import("std");
 const fucina = @import("fucina");
-const qwen3 = @import("model.zig");
+const qwen3 = @import("../../qwen3/model.zig");
 const shine = @import("shine.zig");
 const shine_train = @import("shine_train.zig");
-const qwen3_train = @import("train.zig");
-const cartridge = @import("../text/cartridge.zig");
+const qwen3_train = @import("../../qwen3/train.zig");
+const cartridge = @import("../../text/cartridge.zig");
 const weights = @import("fucina").weights;
 
 const ExecContext = fucina.ExecContext;

@@ -29,10 +29,10 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const weights = @import("fucina").weights;
-const decoder = @import("../decoder.zig");
-const kv_cache = @import("../text/kv_cache.zig");
-const qwen3 = @import("model.zig");
-const cartridge_mod = @import("../text/cartridge.zig");
+const decoder = @import("../../decoder.zig");
+const kv_cache = @import("../../text/kv_cache.zig");
+const qwen3 = @import("../../qwen3/model.zig");
+const cartridge_mod = @import("../../text/cartridge.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;

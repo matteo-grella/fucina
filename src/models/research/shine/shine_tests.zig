@@ -3,10 +3,10 @@
 //! checkpoint) lives in shine_golden_tests.zig, model-gated.
 const std = @import("std");
 const fucina = @import("fucina");
-const qwen3 = @import("model.zig");
+const qwen3 = @import("../../qwen3/model.zig");
 const shine = @import("shine.zig");
-const kv_cache = @import("../text/kv_cache.zig");
-const scaffolding = @import("train_tests.zig");
+const kv_cache = @import("../../text/kv_cache.zig");
+const scaffolding = @import("../../qwen3/train_tests.zig");
 
 const ExecContext = fucina.ExecContext;
 

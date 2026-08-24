@@ -1,4 +1,4 @@
-# Golden-value generator for Fucina's SHINE port (src/llm/qwen3/shine.zig).
+# Golden-value generator for Fucina's SHINE port (src/models/research/shine/shine.zig).
 #
 # SHINE (arXiv 2602.06358): an in-context hypernetwork that maps a context
 # passage to a rank-8 LoRA over every linear of a frozen Qwen3-8B in a single

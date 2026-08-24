@@ -15,9 +15,9 @@
 //! MODEL WIRING, not kernel math, so the scalar reference leg skips them
 //! (its kernel coverage lives in the exec/backend suites).
 const std = @import("std");
-const test_support = @import("../test_support.zig");
+const test_support = @import("../../test_support.zig");
 const fucina = @import("fucina");
-const qwen3 = @import("model.zig");
+const qwen3 = @import("../../qwen3/model.zig");
 const shine = @import("shine.zig");
 
 const ExecContext = fucina.ExecContext;

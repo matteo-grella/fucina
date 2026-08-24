@@ -8,13 +8,13 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
-const serving_open = @import("../text/serving/open.zig");
-const adapter_common = @import("../text/serving/adapter_common.zig");
-const gguf_chat = @import("../text/serving/gguf_chat.zig");
-const tokenizer_mod = @import("../text/tokenizer.zig");
-const cartridge_fleet = @import("../text/cartridge_fleet.zig");
-const qwen3_model = @import("model.zig");
-const qwen3_train = @import("train.zig");
+const serving_open = @import("../../text/serving/open.zig");
+const adapter_common = @import("../../text/serving/adapter_common.zig");
+const gguf_chat = @import("../../text/serving/gguf_chat.zig");
+const tokenizer_mod = @import("../../text/tokenizer.zig");
+const cartridge_fleet = @import("../../text/cartridge_fleet.zig");
+const qwen3_model = @import("../../qwen3/model.zig");
+const qwen3_train = @import("../../qwen3/train.zig");
 const qwen3_shine = @import("shine.zig");
 
 const Allocator = std.mem.Allocator;

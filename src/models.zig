@@ -21,7 +21,7 @@ pub const qwen3 = struct {
     pub const serving = @import("models/qwen3/serving.zig");
     /// SHINE adapter-fleet serving (`text.serving.open`'s counterpart for
     /// the research adapters in `research.shine`).
-    pub const shine_serving = @import("models/qwen3/shine_serving.zig");
+    pub const shine_serving = @import("models/research/shine/shine_serving.zig");
 };
 
 /// Qwen3.5 Gated-DeltaNet hybrid. Files in `models/qwen35/`.
@@ -48,7 +48,7 @@ pub const diffusion_gemma = struct {
 /// Research tier: evaluators and memory modules that install into the
 /// production forwards through typed seams (`qwen3.runner.AttentionOverride`,
 /// `qwen3.train.ResidualHook`), plus the model ports kept for study.
-/// Files in `models/research/` (shine rides `models/qwen3/`).
+/// Files in `models/research/` (shine included).
 /// Stability: experimental (CHANGELOG.md tiers).
 pub const research = struct {
     /// SubQ attention: decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md);
@@ -59,8 +59,8 @@ pub const research = struct {
     pub const engram = @import("models/research/engram.zig");
     /// SHINE context-to-LoRA hypernetwork and its trainer (qwen3 dense);
     /// served through `qwen3.shine_serving`.
-    pub const shine = @import("models/qwen3/shine.zig");
-    pub const shine_train = @import("models/qwen3/shine_train.zig");
+    pub const shine = @import("models/research/shine/shine.zig");
+    pub const shine_train = @import("models/research/shine/shine_train.zig");
     /// Kimi-K3 (Kimi-Linear lineage: KDA + Gated-MLA-NoPE hybrid, latent
     /// MoE, attention residuals, SiTU). Files in `models/research/kimi3/`.
     pub const kimi3 = struct {

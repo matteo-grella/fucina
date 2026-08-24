@@ -28,7 +28,7 @@ family-agnostic helpers stay flat:
 | `models.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `models/glm4moe/` |
 | `models.deepseek4` | `model`, `serving` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `models/deepseek4/` |
 | `models.inkling` | `model`, `mmproj`, `chat`, `serving` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `models/inkling/` |
-| `models.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `models.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `models/research/subq.zig`, `models/research/engram.zig`, `models/qwen3/shine*.zig`, `models/research/kimi3/` |
+| `models.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `models.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `models/research/subq.zig`, `models/research/engram.zig`, `models/research/shine/`, `models/research/kimi3/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|
@@ -2274,7 +2274,7 @@ test "engram: hashed n-gram memory with a zero-init graft gate" {
 }
 ```
 
-## 13.12 SHINE (`src/models/qwen3/shine.zig`)
+## 13.12 SHINE (`src/models/research/shine/shine.zig`)
 
 ```zig
 pub const Config = struct { hidden_size: usize, num_mem_token: usize, lora_r: usize, scale: f32, ... };
@@ -2480,7 +2480,7 @@ instantiation per model/tokenizer pair): resident KV reuse slots with
 token-LCP adoption and cross-slot prefix share, the `kv_persist` disk
 tier ([§13.4](13-the-model-stack-fucina_models.md#134-kv-cache-srcmodelstextkv_cachezig)), the llguidance `ConstraintCache` (init once per distinct
 grammar, clone per request), cartridge / cartridge-fleet / SHINE-fleet
-serving hooks ([§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig), [§13.12](13-the-model-stack-fucina_models.md#1312-shine-srcmodelsqwen3shinezig)), and batch decode over
+serving hooks ([§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig), [§13.12](13-the-model-stack-fucina_models.md#1312-shine-srcmodelsresearchshineshinezig)), and batch decode over
 `Model.forwardStepBatch`. `kvRamVerdict`/`kvRamGuardSlots` implement the
 startup RAM guard: slot caches commit lazily, so an overcommitted pool
 would otherwise fail mid-serving as page-cache eviction, not at startup.
@@ -2504,7 +2504,7 @@ architectures return `error.UnsupportedArchitecture`. `OpenOptions`
 `cartridge_path`, `fleet_dir` + the `rag_*` knobs); excluded
 combinations return `error.InvalidOptions`, and the engine-hosted
 families reject the cartridge/fleet/KV-disk options the same way. SHINE adapter fleets are served by
-`models.qwen3.shine_serving.open`/`openFromFile` ([§13.12](13-the-model-stack-fucina_models.md#1312-shine-srcmodelsqwen3shinezig)), which mirror
+`models.qwen3.shine_serving.open`/`openFromFile` ([§13.12](13-the-model-stack-fucina_models.md#1312-shine-srcmodelsresearchshineshinezig)), which mirror
 these entries with the fleet directory as an explicit argument and share
 `OpenOptions`. `serving.openFromFile` is the same entry
 over an already-loaded `fucina.gguf.File` (it takes ownership of the file
