@@ -27,7 +27,7 @@ possible at all: every claim in the text points at a function you can jump
 to in your editor and single-step in a debugger.
 
 The course is not documentation for the library (that is
-[`docs/REFERENCE.md`](../REFERENCE.md)). It is the reconstruction of how a
+[`docs/reference/`](../reference/00-index.md)). It is the reconstruction of how a
 library like this comes to exist — each design decision arriving as the
 answer to a problem you have just watched appear — with clean code,
 verification discipline, and CPU-first performance as the constant threads.
@@ -176,7 +176,7 @@ looking at:
 
 - **Repo code is cited, never invented.** Snippets copied from the
   repository carry their path (e.g. *from `src/tags.zig`*), and often line
-  numbers. Snippets quoted from [`docs/REFERENCE.md`](../REFERENCE.md) are
+  numbers. Snippets quoted from [`docs/reference/`](../reference/00-index.md) are
   **machine-verified**: the repo's `zig build snippet-check` gate compiles
   and runs them against the real modules in CI
   ([Chapter 16](16-the-craft.md) §16.4 shows how).

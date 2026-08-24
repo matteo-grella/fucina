@@ -1,7 +1,7 @@
 """Reference-activation dump for the Pocket TTS parity gate.
 
 Monkeypatches the stock pocket-tts checkout to capture every tensor
-src/llm/pockettts/pocket_tests.zig compares against: text tokens, backbone
+src/models/pockettts/model_tests.zig compares against: text tokens, backbone
 transformer in/out, the flow-net noise and sampled latent, the Mimi decoder
 stages (latent in, upsampled, transformer out, PCM chunk), and the final
 audio. The torch seed is fixed so the run is reproducible.

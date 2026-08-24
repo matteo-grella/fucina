@@ -69,7 +69,7 @@ the stock TQ2_0 row kernels — `pocket.zig`'s `Linear` union).
 
 ## Parity
 
-`src/models/pockettts/pocket_tests.zig` pins the port against per-stage dumps
+`src/models/pockettts/model_tests.zig` pins the port against per-stage dumps
 of the PyTorch reference (`refs/pocket-tts-dump-smoke.py`): tokenizer
 token-for-token, text-pass backbone rows, flow head at two checkpoints with
 the reference's noise injected (torch RNG is never reproduced), the latent

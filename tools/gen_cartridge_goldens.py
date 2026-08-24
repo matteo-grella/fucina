@@ -4,12 +4,12 @@
 # generators):
 #   python3.11 -m venv /tmp/fucina-golden
 #   /tmp/fucina-golden/bin/pip install torch==2.12
-#   /tmp/fucina-golden/bin/python tools/gen_cartridge_goldens.py src/llm/cartridge_golden_tests.zig
+#   /tmp/fucina-golden/bin/python tools/gen_cartridge_goldens.py src/models/text/cartridge_golden_tests.zig
 #
 """Golden-value generator for Fucina's cartridge (trainable KV prefix) test.
 
 An independent PyTorch (autograd) implementation of the EXACT mechanism that
-src/llm/cartridge.zig composes out of public ops — verified op by op against
+src/models/text/cartridge.zig composes out of public ops — verified op by op against
 the Zig source and the HazyResearch/cartridges reference semantics:
 
   - q/k/v = x @ W.T (W stored [out, in])                    frozen-RHS dot
@@ -40,7 +40,7 @@ the values inside the Zig file are auditable.
 
 Usage:
     /tmp/fucina-golden/bin/python tools/gen_cartridge_goldens.py \
-        src/llm/cartridge_golden_tests.zig
+        src/models/text/cartridge_golden_tests.zig
 """
 
 import hashlib
@@ -64,7 +64,7 @@ ROPE_THETA = 10_000.0
 
 GEN_CMD = (
     "/tmp/fucina-golden/bin/python tools/gen_cartridge_goldens.py "
-    "src/llm/cartridge_golden_tests.zig"
+    "src/models/text/cartridge_golden_tests.zig"
 )
 
 
@@ -354,7 +354,7 @@ test "cartridge attention + distillation matches the PyTorch goldens" {
 
 output = header + body.replace("@@DATA@@", data_section)
 
-out_path = sys.argv[1] if len(sys.argv) > 1 else "src/llm/cartridge_golden_tests.zig"
+out_path = sys.argv[1] if len(sys.argv) > 1 else "src/models/text/cartridge_golden_tests.zig"
 with open(out_path, "w") as f:
     f.write(output)
 

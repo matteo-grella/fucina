@@ -25,7 +25,7 @@ Development-surface tooling. Tiers, in order of how load-bearing they are:
 | `replay_experts.zig` | release tool | replay a recorded MoE routing trace through cache policies |
 | `bench_subq_decode.zig` / `bench_subq_kernels.zig` / `bench_subq_scaling.zig` / `eval_subq_freerun.zig` | research (compile-gated via bench-check) | SubQ attention evaluator benchmarks and Gate C evaluation |
 | `gen_cartridge_goldens.py` / `gen_engram_goldens.py` / `gen_es_goldens.py` / `gen_optim_goldens.py` / `gen_qwen3_train_goldens.py` / `gen_shine_goldens.py` / `gen_shine_train_goldens.py` / `kimi3_goldens.py` | golden generator | produced the recorded values in the matching `*_tests.zig` |
-| `gen_unicode_categories.py` | golden generator | produced `src/llm/unicode_categories.zig` |
+| `gen_unicode_categories.py` | golden generator | produced `src/models/text/unicode_categories.zig` |
 | `bench_generate_mps.py` / `bench_lora_train_mps.py` / `bench_shine_train_mps.py` | reference harness | torch-MPS apples-to-apples counterparts of the Zig benches |
 | `check_es_parity.py` | reference harness | evolution-strategies parity vs the Python reference |
 | `torch_opbench.py` / `torch_train_step.py` | reference harness | torch op/train-step timing counterparts |

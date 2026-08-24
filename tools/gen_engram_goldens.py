@@ -4,12 +4,12 @@
 # generators; numpy is needed for the reference int64 hash semantics):
 #   python3.11 -m venv /tmp/fucina-golden
 #   /tmp/fucina-golden/bin/pip install torch==2.12 numpy
-#   /tmp/fucina-golden/bin/python tools/gen_engram_goldens.py src/llm/engram_golden_tests.zig
+#   /tmp/fucina-golden/bin/python tools/gen_engram_goldens.py src/models/research/engram_golden_tests.zig
 #
 """Golden-value generator for Fucina's Engram (conditional n-gram memory).
 
 An independent PyTorch/numpy implementation of the EXACT mechanism that
-src/llm/engram.zig composes out of public ops — verified statement by
+src/models/research/engram.zig composes out of public ops — verified statement by
 statement against the pinned reference (refs/engram/engram_demo_v1.py,
 deepseek-ai/Engram @fb7f84a):
 
@@ -44,7 +44,7 @@ the values inside the Zig file are auditable.
 
 Usage:
     /tmp/fucina-golden/bin/python tools/gen_engram_goldens.py \
-        src/llm/engram_golden_tests.zig
+        src/models/research/engram_golden_tests.zig
 """
 
 import hashlib
@@ -82,7 +82,7 @@ CONV_EPS = 1e-5
 
 GEN_CMD = (
     "/tmp/fucina-golden/bin/python tools/gen_engram_goldens.py "
-    "src/llm/engram_golden_tests.zig"
+    "src/models/research/engram_golden_tests.zig"
 )
 
 # ------------------------------------------------------------------- hashing

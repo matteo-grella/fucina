@@ -4,7 +4,7 @@ zig-out/
 .docs-site-out/
 .mkdocs-gen.yml
 bench/baselines/
-models
+/models
 .DS_Store
 refs/
 compare/

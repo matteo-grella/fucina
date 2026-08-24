@@ -194,6 +194,52 @@ designing.
 | Training pipeline | `apps/nanochat/`, `examples/spirals/main.zig`, `apps/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
 | HTTP/API frontend | `apps/lmserve/main.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
 
+### 3.1 Adding one tensor op, end to end
+
+One differentiable float op touches a fixed file list. Walk it top to
+bottom; every stop is either compile-checked or named here so nothing is
+left to memory. Use an existing op in the same domain as the line-level
+template (e.g. `softmax` for a row op, `maxPool2d` for a pool op).
+
+1. `src/backend/ops.zig` — only if the op needs a new selector enum
+   member. The consuming switches are exhaustive, so every arm site below
+   becomes a compile error until handled. One exception is named in step 8.
+2. `src/backend/interface.zig` — add the kernel name to the set (and to
+   `generic_names`/`pool_free_names` as applicable). `conform` then forces
+   both providers.
+3. `src/backend/cpu.zig` — the scalar reference implementation. This is
+   the specification (see 1.10).
+4. `src/backend/native.zig` + `src/backend/vector/<domain>.zig` — the
+   SIMD implementation, `pc`-first signature.
+5. `src/backend/parity_test.zig` or the domain's `vector/*_tests.zig` —
+   pin scalar and native to each other.
+6. `src/exec/<domain>.zig` — the op body over `*ExecContext` (validate,
+   then call the unchecked kernel), plus one alias line in `src/exec.zig`
+   under the domain's banner.
+7. `src/ag/backward/<domain>.zig` — the VJP, plus one alias line in
+   `src/ag/backward.zig`.
+8. If the op is a `UnaryOp`: classify it in
+   `ag/backward/elementwise.zig`'s `unaryUsesOutput` — the switch is
+   exhaustive, and a wrong classification is a wrong gradient, so decide
+   deliberately whether the derivative is cheaper from the forward output.
+9. `src/ag/tensor/float/<domain>.zig` — the facade method (tag algebra,
+   result finishing), plus one alias line in `src/ag/tensor.zig`.
+10. `src/ag/tensor/typed_constant.zig` — only if the op should also exist
+    on non-f32 constant tensors.
+11. GPU offload (only if warranted by measurement): the provider seam in
+    `src/backend/gpu_provider.zig` plus both providers and `gpu_none.zig`;
+    the conformance check forces all three.
+12. Tests: `src/exec/<domain>_tests.zig` (exec semantics),
+    `src/ag/tensor_tests/<domain>.zig` (facade + gradcheck; forward the
+    file from `src/ag/tensor.zig`'s test block).
+13. Docs: the op's row in `docs/reference/04-tensor-operations.md` (or the
+    domain chapter); runnable snippets are compile-gated by
+    `zig build snippet-check`.
+
+Gates for the whole loop: `zig build test`, `zig build test-fucina
+-Dbackend=scalar`, `zig build arch-check`, and `zig build bench` (or the
+domain bench) when the op is hot-path (see 4.3).
+
 ## 4. The delivery loop
 
 ### 4.1 Plan with mechanical accepts
@@ -330,11 +376,27 @@ short "Internal reorganization" paragraph naming the areas.
 
 ### 7.1 Test organization
 
-Tests live in **sibling `*_tests.zig` files** next to the production file
-they cover: `exec.zig` ↔ `exec_tests.zig`,
+The default home for tests is a **sibling `*_tests.zig` file** next to the
+production file it covers: `exec.zig` ↔ `exec_tests.zig`,
 `src/models/text/tokenizer.zig` ↔ `src/models/text/tokenizer_tests.zig`,
-and so on. The production file pulls its sibling in with a forwarding
-stanza, so analyzing the production file analyzes its tests:
+and so on. Two sanctioned variations exist, each with a stated reason:
+
+- **Directory suites** for a surface too large for one sibling:
+  `src/ag/tensor_tests/` holds one file per op domain plus a shared
+  `util.zig` helper, all forwarded from `src/ag/tensor.zig`'s test block.
+  `arch-check` treats every file under a `<name>_tests/` directory as a
+  test file, forwarded transitively.
+- **Inline `test` blocks** where the tests exercise file-private symbols
+  that a sibling cannot reach (`parallel.zig` documents this split in
+  `parallel_tests.zig`'s header), or where the module is small enough that
+  a sibling would be ceremony (`caching_allocator.zig`, the serving
+  transport files).
+
+A subdirectory facade forwards its children instead: `src/optim.zig`
+forwards `src/optim/`, and its tests live in the root-level
+`optim_tests.zig` covering the whole subtree. Whatever the shape, the
+production file pulls its tests in with a forwarding stanza, so analyzing
+the production file analyzes its tests:
 
 ```zig
 test {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate src/llm/unicode_categories.zig from llama.cpp's unicode tables.
+"""Generate src/models/text/unicode_categories.zig from llama.cpp's unicode tables.
 
 Extracts the \\p{L} (LETTER) and \\p{N} (NUMBER) codepoint ranges and the \\s
 whitespace set from refs/llama.cpp/src/unicode-data.cpp (itself generated from
@@ -8,7 +8,7 @@ pretokenizer classifies codepoints EXACTLY like llama.cpp's tokenizer — the
 parity oracle for token-ID-exact encoding.
 
 Usage (from the repo root):
-    python3 tools/gen_unicode_categories.py > src/llm/unicode_categories.zig
+    python3 tools/gen_unicode_categories.py > src/models/text/unicode_categories.zig
 """
 
 import re
@@ -57,7 +57,7 @@ def main() -> None:
     w("//! tokenizer (refs/llama.cpp/src/unicode-data.cpp), for token-ID-exact\n")
     w("//! pretokenizer parity. Regenerate with:\n")
     w("//!\n")
-    w("//!     python3 tools/gen_unicode_categories.py > src/llm/unicode_categories.zig\n")
+    w("//!     python3 tools/gen_unicode_categories.py > src/models/text/unicode_categories.zig\n")
     w("\n")
     w("const std = @import(\"std\");\n")
     w("\n")

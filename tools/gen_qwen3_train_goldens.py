@@ -1,15 +1,15 @@
 # Committed verbatim from /tmp/fucina-golden/gen_qwen3_train_goldens.py — the
-# generator that produced src/llm/qwen3/train_golden_tests.zig.
+# generator that produced src/models/qwen3/train_golden_tests.zig.
 #
 # Environment + invocation (torch CPU only):
 #   python3 -m venv /tmp/fucina-golden
 #   /tmp/fucina-golden/bin/pip install torch==2.12
-#   /tmp/fucina-golden/bin/python tools/gen_qwen3_train_goldens.py src/llm/qwen3/train_golden_tests.zig
+#   /tmp/fucina-golden/bin/python tools/gen_qwen3_train_goldens.py src/models/qwen3/train_golden_tests.zig
 #
 """Golden-value generator for Fucina's Qwen3 LoRA fine-tuning parity test.
 
 An independent PyTorch (autograd) implementation of the EXACT same tiny dense
-Qwen3 model that src/llm/qwen3_train.zig `Trainer(.{})` runs — verified op by
+Qwen3 model that src/models/qwen3/train.zig `Trainer(.{})` runs — verified op by
 op against the Zig source:
 
   - embedding lookup (frozen rows)                       weights.getRowsAs
@@ -40,7 +40,7 @@ values inside the Zig file are auditable.
 
 Usage (same venv as gen_optim_goldens.py, torch 2.12 CPU):
     /tmp/fucina-golden/bin/python tools/gen_qwen3_train_goldens.py \
-        src/llm/qwen3/train_golden_tests.zig
+        src/models/qwen3/train_golden_tests.zig
 """
 
 import hashlib
@@ -72,7 +72,7 @@ MASKED_POSITIONS = (0, 7, 19, 40, 63)  # a few ignore_index labels
 
 GEN_CMD = (
     "/tmp/fucina-golden/bin/python tools/gen_qwen3_train_goldens.py "
-    "src/llm/qwen3/train_golden_tests.zig"
+    "src/models/qwen3/train_golden_tests.zig"
 )
 
 
