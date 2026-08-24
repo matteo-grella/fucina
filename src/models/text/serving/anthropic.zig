@@ -43,6 +43,7 @@ const chat = @import("../chat.zig");
 const types = @import("contract.zig");
 const openai = @import("openai.zig");
 const toolcall = @import("toolcall.zig");
+const wire_json = @import("wire_json.zig");
 
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
@@ -89,79 +90,62 @@ pub fn parse(arena: Allocator, body: []const u8, info: types.Info) openai.ParseO
     };
     if (root != .object) return .{ .err = ErrorInfo.invalid("request body must be a JSON object", null) };
 
-    var p = Parser{ .arena = arena, .obj = root.object, .info = info };
+    var p = Parser{ .h = .{ .arena = arena, .obj = root.object, .info = info } };
     const parsed = p.parseMessages() catch |e| switch (e) {
-        error.Invalid => return .{ .err = p.err.? },
+        error.Invalid => return .{ .err = p.h.err.? },
         error.OutOfMemory => return .{ .err = .{ .status = .internal_server_error, .kind = "api_error", .message = "out of memory" } },
     };
     return .{ .ok = parsed };
 }
 
 const Parser = struct {
-    arena: Allocator,
-    obj: std.json.ObjectMap,
-    info: types.Info,
-    err: ?ErrorInfo = null,
-    /// Set by tool_choice `any`/`tool`: compiled into the forced-call
-    /// grammar once the other constraints are resolved.
-    forced_decls: ?[]const toolcall.Decl = null,
+    /// The dialect-independent parser state and helpers (`wire_json.zig`);
+    /// everything below forwards to it one line per method.
+    h: wire_json.Head(ErrorInfo),
 
-    const Error = error{ Invalid, OutOfMemory };
-
-    /// Declarations in both forms the pipeline needs: the serialized
-    /// objects the hermes system block embeds, and the (name, schema)
-    /// pairs the forced-call grammar is built from.
-    const ToolSet = struct {
-        json: []const []const u8 = &.{},
-        decls: []const toolcall.Decl = &.{},
-    };
+    const Error = wire_json.Error;
+    const ToolSet = wire_json.ToolSet;
 
     fn fail(self: *Parser, info: ErrorInfo) Error {
-        if (self.err == null) self.err = info;
-        return error.Invalid;
+        return self.h.fail(info);
     }
 
     fn failInvalid(self: *Parser, message: []const u8, param: ?[]const u8) Error {
-        return self.fail(ErrorInfo.invalid(message, param));
+        return self.h.failInvalid(message, param);
     }
 
-    // ---- typed field access over the dynamic Value ----
+    // ---- typed field access over the dynamic Value (`wire_json.Head`) ----
 
     fn optField(self: *Parser, obj: std.json.ObjectMap, name: []const u8) ?Value {
-        _ = self;
-        const v = obj.get(name) orelse return null;
-        if (v == .null) return null;
-        return v;
+        return self.h.optField(obj, name);
     }
 
     fn optString(self: *Parser, obj: std.json.ObjectMap, name: []const u8) Error!?[]const u8 {
-        const v = self.optField(obj, name) orelse return null;
-        if (v != .string) return self.failInvalid("expected a string", name);
-        return v.string;
+        return self.h.optString(obj, name);
     }
 
     fn optBool(self: *Parser, obj: std.json.ObjectMap, name: []const u8) Error!?bool {
-        const v = self.optField(obj, name) orelse return null;
-        if (v != .bool) return self.failInvalid("expected a boolean", name);
-        return v.bool;
+        return self.h.optBool(obj, name);
     }
 
     fn optF32(self: *Parser, obj: std.json.ObjectMap, name: []const u8, min: f32, max: f32) Error!?f32 {
-        const v = self.optField(obj, name) orelse return null;
-        const x: f64 = switch (v) {
-            .integer => |i| @floatFromInt(i),
-            .float => |f| f,
-            else => return self.failInvalid("expected a number", name),
-        };
-        if (!std.math.isFinite(x) or x < min or x > max) return self.failInvalid("value out of range", name);
-        return @floatCast(x);
+        return self.h.optF32(obj, name, min, max);
     }
 
     fn optInt(self: *Parser, obj: std.json.ObjectMap, name: []const u8, min: i64) Error!?i64 {
-        const v = self.optField(obj, name) orelse return null;
-        if (v != .integer) return self.failInvalid("expected an integer", name);
-        if (v.integer < min) return self.failInvalid("value out of range", name);
-        return v.integer;
+        return self.h.optInt(obj, name, min);
+    }
+
+    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8)) Error!void {
+        return self.h.flushToolResponses(messages, fold);
+    }
+
+    fn forceNamed(self: *Parser, decls: []const toolcall.Decl, name: []const u8) Error!void {
+        return self.h.forceNamed("tool", decls, name);
+    }
+
+    fn forceDecls(self: *Parser, decls: []const toolcall.Decl) Error!void {
+        return self.h.forceDecls(decls);
     }
 
     // ---- content blocks ----
@@ -182,7 +166,7 @@ const Parser = struct {
                         return self.failInvalid("system blocks must be text blocks", "system");
                     const text = (try self.optString(part.object, "text")) orelse
                         return self.failInvalid("text block missing \"text\"", "system");
-                    try out.appendSlice(self.arena, text);
+                    try out.appendSlice(self.h.arena, text);
                 }
                 return out.items;
             },
@@ -205,19 +189,12 @@ const Parser = struct {
                         return self.fail(ErrorInfo.unsupported("only text blocks are supported here", "messages"));
                     const text = (try self.optString(part.object, "text")) orelse
                         return self.failInvalid("text block missing \"text\"", "messages");
-                    try out.appendSlice(self.arena, text);
+                    try out.appendSlice(self.h.arena, text);
                 }
                 return out.items;
             },
             else => return self.failInvalid("message content must be a string or an array of blocks", "messages"),
         }
-    }
-
-    /// Flush accumulated tool-result sections as one user turn (Qwen3's
-    /// template shape: consecutive results share the turn).
-    fn flushToolResponses(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8)) Error!void {
-        if (fold.items.len == 0) return;
-        try messages.append(self.arena, .{ .role = .user, .content = try fold.toOwnedSlice(self.arena) });
     }
 
     /// One user/assistant message: text blocks concatenate,
@@ -228,11 +205,11 @@ const Parser = struct {
     /// assistant turn, so they flush as their own user turn before this
     /// message's text.
     fn appendTurn(self: *Parser, messages: *std.ArrayList(chat.Message), fold: *std.ArrayList(u8), role: chat.Message.Role, content: Value) Error!void {
-        const hermes = self.info.tool_style == .hermes;
+        const hermes = self.h.info.tool_style == .hermes;
         const parts = switch (content) {
             .string => |s| {
                 try self.flushToolResponses(messages, fold);
-                try messages.append(self.arena, .{ .role = role, .content = s });
+                try messages.append(self.h.arena, .{ .role = role, .content = s });
                 return;
             },
             .array => |parts| parts.items,
@@ -249,7 +226,7 @@ const Parser = struct {
             if (std.mem.eql(u8, ptype, "text")) {
                 const text = (try self.optString(pobj, "text")) orelse
                     return self.failInvalid("text block missing \"text\"", "messages");
-                turn.appendSlice(self.arena, text) catch return error.OutOfMemory;
+                turn.appendSlice(self.h.arena, text) catch return error.OutOfMemory;
             } else if (std.mem.eql(u8, ptype, "thinking") or std.mem.eql(u8, ptype, "redacted_thinking")) {
                 // Dropped: prior-turn reasoning.
             } else if (std.mem.eql(u8, ptype, "tool_use")) {
@@ -259,15 +236,15 @@ const Parser = struct {
                     return self.failInvalid("tool_use block missing \"name\"", "messages");
                 const args: []const u8 = if (self.optField(pobj, "input")) |input| blk: {
                     if (input != .object) return self.failInvalid("tool_use \"input\" must be an object", "messages");
-                    break :blk std.json.Stringify.valueAlloc(self.arena, input, .{}) catch return error.OutOfMemory;
+                    break :blk std.json.Stringify.valueAlloc(self.h.arena, input, .{}) catch return error.OutOfMemory;
                 } else "{}";
-                toolcall.appendCallSection(self.arena, &turn, name, args) catch return error.OutOfMemory;
+                toolcall.appendCallSection(self.h.arena, &turn, name, args) catch return error.OutOfMemory;
                 had_call = true;
             } else if (std.mem.eql(u8, ptype, "tool_result")) {
                 if (!hermes)
                     return self.fail(ErrorInfo.unsupported("tool use is not supported by this model backend", "messages"));
                 const result = if (self.optField(pobj, "content")) |rc| try self.messageText(rc) else "";
-                toolcall.appendResponseSection(self.arena, fold, result) catch return error.OutOfMemory;
+                toolcall.appendResponseSection(self.h.arena, fold, result) catch return error.OutOfMemory;
                 had_result = true;
             } else if (std.mem.eql(u8, ptype, "image") or std.mem.eql(u8, ptype, "document")) {
                 return self.fail(ErrorInfo.unsupported("only text content is supported (no images or documents)", "messages"));
@@ -280,7 +257,7 @@ const Parser = struct {
         const has_turn = turn.items.len > 0 or had_call or (role == .user and !had_result);
         if (has_turn) {
             try self.flushToolResponses(messages, fold);
-            try messages.append(self.arena, .{ .role = role, .content = turn.items });
+            try messages.append(self.h.arena, .{ .role = role, .content = turn.items });
         }
     }
 
@@ -291,8 +268,8 @@ const Parser = struct {
     /// in the grammar.
     fn parseTools(self: *Parser, items: []const Value) Error!ToolSet {
         if (items.len == 0) return .{};
-        const json = try self.arena.alloc([]const u8, items.len);
-        const decls = try self.arena.alloc(toolcall.Decl, items.len);
+        const json = try self.h.arena.alloc([]const u8, items.len);
+        const decls = try self.h.arena.alloc(toolcall.Decl, items.len);
         for (items, json, decls) |tv, *dst, *decl| {
             if (tv != .object) return self.failInvalid("tools must be objects", "tools");
             if (try self.optString(tv.object, "type")) |t| {
@@ -303,35 +280,14 @@ const Parser = struct {
                 return self.failInvalid("tool missing \"name\"", "tools");
             decl.* = .{ .name = name };
             if (self.optField(tv.object, "input_schema")) |sv|
-                decl.params_json = std.json.Stringify.valueAlloc(self.arena, sv, .{}) catch return error.OutOfMemory;
+                decl.params_json = std.json.Stringify.valueAlloc(self.h.arena, sv, .{}) catch return error.OutOfMemory;
             dst.* = self.nestedFunctionJson(tv.object, name) catch return error.OutOfMemory;
         }
         return .{ .json = json, .decls = decls };
     }
 
-    fn forceNamed(self: *Parser, decls: []const toolcall.Decl, name: []const u8) Error!void {
-        for (decls) |d| {
-            if (std.mem.eql(u8, d.name, name)) {
-                const one = try self.arena.alloc(toolcall.Decl, 1);
-                one[0] = d;
-                return self.forceDecls(one);
-            }
-        }
-        return self.failInvalid("tool_choice names an undeclared tool", "tool_choice");
-    }
-
-    fn forceDecls(self: *Parser, decls: []const toolcall.Decl) Error!void {
-        if (decls.len == 0)
-            return self.failInvalid("tool_choice requires tools to be declared", "tool_choice");
-        for (decls) |d| {
-            if (!toolcall.plainName(d.name))
-                return self.failInvalid("tool names must use [A-Za-z0-9_.:-] characters for a forced tool_choice", "tools");
-        }
-        self.forced_decls = decls;
-    }
-
     fn nestedFunctionJson(self: *Parser, tool: std.json.ObjectMap, name: []const u8) ![]const u8 {
-        var aw = std.Io.Writer.Allocating.init(self.arena);
+        var aw = std.Io.Writer.Allocating.init(self.h.arena);
         var s: std.json.Stringify = .{ .writer = &aw.writer };
         try s.beginObject();
         try s.objectField("type");
@@ -348,7 +304,7 @@ const Parser = struct {
         }
         if (tool.get("input_schema")) |sv| {
             if (sv != .null) {
-                const stext = try std.json.Stringify.valueAlloc(self.arena, sv, .{});
+                const stext = try std.json.Stringify.valueAlloc(self.h.arena, sv, .{});
                 try s.objectField("parameters");
                 try s.print("{s}", .{stext});
             }
@@ -361,8 +317,8 @@ const Parser = struct {
     // ---- the request ----
 
     fn parseMessages(self: *Parser) Error!openai.Parsed {
-        const obj = self.obj;
-        const inf = self.info;
+        const obj = self.h.obj;
+        const inf = self.h.info;
         var parsed = openai.Parsed{ .gen = .{ .messages = &.{}, .sampling = .{}, .max_tokens = 0 } };
 
         // Required by the Messages API; the value is not matched — this
@@ -376,7 +332,7 @@ const Parser = struct {
             for (v.array.items) |item| {
                 if (item != .string or item.string.len == 0)
                     return self.failInvalid("expected non-empty strings", "stop_sequences");
-                stop_list.append(self.arena, item.string) catch return error.OutOfMemory;
+                stop_list.append(self.h.arena, item.string) catch return error.OutOfMemory;
             }
         }
         // Declarations render on hermes backends; elsewhere they are
@@ -413,7 +369,7 @@ const Parser = struct {
         var messages: std.ArrayList(chat.Message) = .empty;
         if (self.optField(obj, "system")) |sys| {
             const text = try self.systemText(sys);
-            if (text.len > 0) try messages.append(self.arena, .{ .role = .system, .content = text });
+            if (text.len > 0) try messages.append(self.h.arena, .{ .role = .system, .content = text });
         }
 
         // messages: user/assistant only; a system prompt goes in the
@@ -442,9 +398,9 @@ const Parser = struct {
                     return self.failInvalid("the first message must use the \"user\" role; a system prompt goes in the top-level \"system\" field", "messages");
                 const text = try self.messageText(content_v);
                 try self.flushToolResponses(&messages, &tool_fold);
-                try messages.append(self.arena, .{
+                try messages.append(self.h.arena, .{
                     .role = .user,
-                    .content = try std.fmt.allocPrint(self.arena, "<system-reminder>\n{s}\n</system-reminder>", .{text}),
+                    .content = try std.fmt.allocPrint(self.h.arena, "<system-reminder>\n{s}\n</system-reminder>", .{text}),
                 });
                 continue;
             }
@@ -463,10 +419,10 @@ const Parser = struct {
             // Declarations render into the leading system slot (Qwen3's
             // template shape) and the reply scanner arms.
             if (messages.items.len > 0 and messages.items[0].role == .system) {
-                messages.items[0].content = toolcall.renderSystemWithTools(self.arena, messages.items[0].content, tools.json) catch return error.OutOfMemory;
+                messages.items[0].content = toolcall.renderSystemWithTools(self.h.arena, messages.items[0].content, tools.json) catch return error.OutOfMemory;
             } else {
-                const content = toolcall.renderSystemWithTools(self.arena, "", tools.json) catch return error.OutOfMemory;
-                messages.insert(self.arena, 0, .{ .role = .system, .content = content }) catch return error.OutOfMemory;
+                const content = toolcall.renderSystemWithTools(self.h.arena, "", tools.json) catch return error.OutOfMemory;
+                messages.insert(self.h.arena, 0, .{ .role = .system, .content = content }) catch return error.OutOfMemory;
             }
             parsed.tools_active = true;
         }
@@ -520,7 +476,7 @@ const Parser = struct {
                     const schema = self.optField(fv.object, "schema") orelse
                         return self.failInvalid("format missing \"schema\"", "output_config.format");
                     // llguidance takes the schema as text.
-                    const schema_text = std.json.Stringify.valueAlloc(self.arena, schema, .{}) catch return error.OutOfMemory;
+                    const schema_text = std.json.Stringify.valueAlloc(self.h.arena, schema, .{}) catch return error.OutOfMemory;
                     parsed.format_kind = .json_schema;
                     parsed.gen.constraint = .{ .json_schema = schema_text };
                 } else if (!std.mem.eql(u8, kind, "text")) {
@@ -532,7 +488,7 @@ const Parser = struct {
         // A forced tool_choice compiles to a grammar over the hermes call
         // shape; it owns the reply from token 0 and excludes
         // output_config.format.
-        if (self.forced_decls) |decls| {
+        if (self.h.forced_decls) |decls| {
             if (parsed.gen.constraint != null)
                 return self.failInvalid("a forced tool_choice already constrains the reply; output_config.format cannot combine with it", "tool_choice");
             if (!inf.caps.grammar) {
@@ -543,7 +499,7 @@ const Parser = struct {
                     .param = "tool_choice",
                 });
             }
-            parsed.gen.constraint = .{ .lark = toolcall.forcedCallGrammar(self.arena, decls) catch return error.OutOfMemory };
+            parsed.gen.constraint = .{ .lark = toolcall.forcedCallGrammar(self.h.arena, decls) catch return error.OutOfMemory };
         }
 
         // A grammar constraint governs the reply from token 0: reasoning off.

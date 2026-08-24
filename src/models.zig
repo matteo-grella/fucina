@@ -225,6 +225,7 @@ test {
     // Serving-band internals (not on the band index): compile their tests.
     _ = @import("models/text/serving/adapter_common.zig");
     _ = @import("models/text/serving/fleet_serve.zig");
+    _ = @import("models/text/serving/wire_json.zig");
     _ = gemma.model;
     _ = gemma.train;
     _ = gemma.moe;
