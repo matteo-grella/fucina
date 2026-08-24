@@ -106,8 +106,13 @@ pub const GroupedCausalAttentionBackwardResult = exec_attention.GroupedCausalAtt
 /// Masked-mean forward result: the per-lane means plus the per-lane counts of
 /// selected elements (the mean's divisor, which the VJP reuses).
 pub const MaskedMeanResult = exec_reduce.MaskedMeanResult;
-pub const LayerNormAffineBackwardResult = exec_norm.LayerNormAffineBackwardResult;
-pub const GroupNormBackwardResult = exec_norm.GroupNormBackwardResult;
+pub const AffineOptions = exec_norm.AffineOptions;
+pub const AffineSlices = exec_norm.AffineSlices;
+pub const AffineBackwardOptions = exec_norm.AffineBackwardOptions;
+pub const AffineBackwardResult = exec_norm.AffineBackwardResult;
+pub const RmsNormOptions = exec_norm.RmsNormOptions;
+pub const RmsNormBackwardOptions = exec_norm.RmsNormBackwardOptions;
+pub const RmsNormBackwardResult = exec_norm.RmsNormBackwardResult;
 pub const SnakeBackwardParamsResult = exec_elementwise.SnakeBackwardParamsResult;
 
 const MoeDecodeScratch = exec_moe.MoeDecodeScratch;
@@ -441,19 +446,13 @@ pub const ExecContext = struct {
     // norm: RMS/layer/group normalization and their fused arms (exec/norm.zig)
     // ----------------------------------------------------------------------
     pub const rmsNorm = exec_norm.rmsNorm;
-    pub const rmsNormMul = exec_norm.rmsNormMul;
-    pub const rmsNormMulAdd = exec_norm.rmsNormMulAdd;
-    pub const rmsNormMulBackwardInput = exec_norm.rmsNormMulBackwardInput;
-    pub const rmsNormMulBackwardWeight = exec_norm.rmsNormMulBackwardWeight;
-    pub const rmsNormMulRopeWithTable = exec_norm.rmsNormMulRopeWithTable;
     pub const rmsNormBackward = exec_norm.rmsNormBackward;
-    pub const layerNormAffineRows = exec_norm.layerNormAffineRows;
+    pub const rmsNormMulRopeWithTable = exec_norm.rmsNormMulRopeWithTable;
     pub const layerNorm = exec_norm.layerNorm;
+    pub const layerNormRows = exec_norm.layerNormRows;
+    pub const layerNormBackward = exec_norm.layerNormBackward;
     pub const groupNorm = exec_norm.groupNorm;
     pub const groupNormBackward = exec_norm.groupNormBackward;
-    pub const layerNormAffine = exec_norm.layerNormAffine;
-    pub const layerNormBackward = exec_norm.layerNormBackward;
-    pub const layerNormAffineBackward = exec_norm.layerNormAffineBackward;
 
     // ----------------------------------------------------------------------
     // loss: cross-entropy family and reductions (exec/loss.zig)

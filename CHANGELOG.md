@@ -206,6 +206,26 @@ this point; earlier history is `git log`.
   `rope` takes its on-the-fly source as one `exec.RopeTheta`. `RopeTable`
   drops the unused `theta_base` field. The `Tensor.rope` facade is
   unchanged.
+- Norm seam, `ExecContext`: the affine and residual terms and the
+  requested gradients are options. `rmsNorm(rank, x, axis, eps, .{ .weight,
+  .residual })` replaces `rmsNorm`/`rmsNormMul`/`rmsNormMulAdd`;
+  `rmsNormBackward(rank, x, gy, axis, eps, .{ .weight, .need_input,
+  .need_weight })` returns an `exec.RmsNormBackwardResult` and replaces
+  `rmsNormBackward`/`rmsNormMulBackwardInput`/`rmsNormMulBackwardWeight`;
+  `layerNorm(rank, x, axis, eps, .{ .weight, .bias })` replaces
+  `layerNorm`/`layerNormAffine` (weight and bias are now independently
+  optional); `layerNormBackward(rank, x, gy, axis, eps, .{ .weight,
+  .need_input, .need_weight, .need_bias })` returns an
+  `exec.AffineBackwardResult` and replaces
+  `layerNormBackward`/`layerNormAffineBackward`; `layerNormRows(input,
+  rows, cols, eps, .{ .weight, .bias })` (slices) replaces
+  `layerNormAffineRows`; `groupNorm`/`groupNormBackward` take the same
+  `exec.AffineOptions`/`exec.AffineBackwardOptions`.
+  `LayerNormAffineBackwardResult` and `GroupNormBackwardResult` are the one
+  `exec.AffineBackwardResult`. Every combination runs the kernel it ran
+  before, so results are bitwise unchanged. The `Tensor` facade
+  (`rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `layerNorm`, `groupNorm`) is
+  unchanged.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

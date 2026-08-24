@@ -1,10 +1,13 @@
-//! RMSNorm (+ weighted / +residual / fused-rope variants) and LayerNorm
-//! (plain + affine) forward and backward.
+//! RMSNorm, LayerNorm and GroupNorm forward and backward, one entry each:
+//! the optional affine terms (`weight`, `bias`, `residual`) and the requested
+//! gradients are options, not name variants. The fused rms-norm+rope kernel
+//! is the one deliberate extra entry (its numerics differ from the composed
+//! pair).
 //!
 //! Domain module: every op receives an explicit `*ExecContext`. Per-row SIMD
 //! kernels + Task structs stay in the `row_ops` leaf; the fused rms-norm+rope
 //! kernel reads the rope table's pub `sinValues()`/`cosValues()`. Home of
-//! `LayerNormAffineBackwardResult` (re-exported by `exec.zig`).
+//! the options and result types (re-exported by `exec.zig`).
 
 const backend_mod = @import("../backend.zig");
 const kernels = backend_mod.kernels;
@@ -47,18 +50,40 @@ const rmsNormMulRows = exec_row_ops.rmsNormMulRows;
 const rmsNormMulAddRows = exec_row_ops.rmsNormMulAddRows;
 const rmsNormMulBackwardInputRows = exec_row_ops.rmsNormMulBackwardInputRows;
 const rmsNormMulBackwardWeightRows = exec_row_ops.rmsNormMulBackwardWeightRows;
-const layerNormRows = exec_row_ops.layerNormRows;
 const layerNormBackwardInputRows = exec_row_ops.layerNormBackwardInputRows;
 const layerNormAffineParamGradRows = exec_row_ops.layerNormAffineParamGradRows;
 const layerNormRowStats = exec_row_ops.layerNormRowStats;
 const layerNormParamGradColumns = exec_row_ops.layerNormParamGradColumns;
 
-pub const LayerNormAffineBackwardResult = struct {
+/// Optional per-feature affine terms of layerNorm and groupNorm: `weight`
+/// scales the normalized row, `bias` adds to it (each rank-1 `[axis_dim]`,
+/// each independently optional). Applied in the same row pass.
+pub const AffineOptions = struct {
+    weight: ?*const Tensor = null,
+    bias: ?*const Tensor = null,
+};
+
+/// The same terms as `[]const f32` slices, for the slice-level entries.
+pub const AffineSlices = struct {
+    weight: ?[]const f32 = null,
+    bias: ?[]const f32 = null,
+};
+
+/// Which gradients an affine normalization backward computes. `weight` must
+/// be the forward's weight when it had one (it feeds dx) and null otherwise.
+pub const AffineBackwardOptions = struct {
+    weight: ?*const Tensor = null,
+    need_input: bool = true,
+    need_weight: bool = false,
+    need_bias: bool = false,
+};
+
+pub const AffineBackwardResult = struct {
     input: ?Tensor = null,
     weight: ?Tensor = null,
     bias: ?Tensor = null,
 
-    pub fn deinit(self: *LayerNormAffineBackwardResult) void {
+    pub fn deinit(self: *AffineBackwardResult) void {
         if (self.input) |*value| value.deinit();
         if (self.weight) |*value| value.deinit();
         if (self.bias) |*value| value.deinit();
@@ -66,14 +91,79 @@ pub const LayerNormAffineBackwardResult = struct {
     }
 };
 
-pub fn rmsNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+/// Optional terms of rmsNorm: `weight` (rank-1 `[axis_dim]`) scales the
+/// normalized row, `residual` (same shape as `x`) is added after it, both in
+/// the same row pass.
+pub const RmsNormOptions = struct {
+    weight: ?*const Tensor = null,
+    residual: ?*const Tensor = null,
+};
+
+/// Which gradients rmsNormBackward computes. `weight` must be the forward's
+/// weight when it had one (it feeds dx) and null otherwise; the weight
+/// gradient `sum_rows gy * x_hat` does not depend on it.
+pub const RmsNormBackwardOptions = struct {
+    weight: ?*const Tensor = null,
+    need_input: bool = true,
+    need_weight: bool = false,
+};
+
+pub const RmsNormBackwardResult = struct {
+    input: ?Tensor = null,
+    weight: ?Tensor = null,
+
+    pub fn deinit(self: *RmsNormBackwardResult) void {
+        if (self.input) |*value| value.deinit();
+        if (self.weight) |*value| value.deinit();
+        self.* = undefined;
+    }
+};
+
+/// RMSNorm over `axis`: y = x / sqrt(mean(x^2) + eps), then `* weight` and
+/// `+ residual` when given. The weighted rows go through the row kernels
+/// (`inner == 1`, large inputs); every other combination through the scalar
+/// loop. Each combination computes the same expression in the same order,
+/// so an option is never a different numeric result.
+pub fn rmsNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormOptions) !Tensor {
+    if (options.weight) |weight| {
+        if (options.residual) |residual| return rmsNormMulAdd(ctx, rank, x, weight, residual, axis, eps);
+        return rmsNormMul(ctx, rank, x, weight, axis, eps);
+    }
+    return rmsNormPlain(ctx, rank, x, options.residual, axis, eps);
+}
+
+/// VJP of rmsNorm; computes only the requested gradients. dx recomputes the
+/// row rms from `x` (weighted or plain per `options.weight`); dweight is
+/// `sum_rows gy * x_hat`, accumulated per column in row order.
+pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormBackwardOptions) !RmsNormBackwardResult {
+    var result = RmsNormBackwardResult{};
+    errdefer result.deinit();
+    if (options.need_input) {
+        result.input = if (options.weight) |weight|
+            try rmsNormBackwardInputWeighted(ctx, rank, x, weight, gy, axis, eps)
+        else
+            try rmsNormBackwardInputPlain(ctx, rank, x, gy, axis, eps);
+    }
+    if (options.need_weight) result.weight = try rmsNormBackwardWeight(ctx, rank, x, gy, axis, eps);
+    return result;
+}
+
+fn rmsNormPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, residual: ?*const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
+    if (residual) |r| try tensor.requireSameShape(x, r);
 
     const source = try x.rankView(rank);
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
+    var rr: ?ExecContext.PreparedTensor = null;
+    defer if (rr) |*p| p.deinit();
+    var residual_data: ?[]const f32 = null;
+    if (residual) |r| {
+        rr = try ctx.prepareContiguous(.f32, r);
+        residual_data = rr.?.tensor().dataConst();
+    }
 
     var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
@@ -94,14 +184,15 @@ pub fn rmsNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compti
             const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
             for (0..axis_dim) |axis_i| {
                 const offset = base + axis_i * inner + inner_i;
-                output[offset] = input[offset] * scale_value;
+                const value = input[offset] * scale_value;
+                output[offset] = if (residual_data) |r| r[offset] + value else value;
             }
         }
     }
     return out;
 }
 
-pub fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
 
@@ -163,7 +254,7 @@ pub fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, wei
     return out;
 }
 
-pub fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, residual);
@@ -230,7 +321,7 @@ pub fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, 
     return out;
 }
 
-pub fn rmsNormMulBackwardInput(
+fn rmsNormBackwardInputWeighted(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -309,7 +400,7 @@ pub fn rmsNormMulBackwardInput(
     return out;
 }
 
-pub fn rmsNormMulBackwardWeight(
+fn rmsNormBackwardWeight(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
@@ -585,7 +676,7 @@ pub fn rmsNormMulRopeWithTable(
     return out;
 }
 
-pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
+fn rmsNormBackwardInputPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
@@ -634,24 +725,24 @@ pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor
 /// row: mean first, then the centered sum of squares (ggml-style; one
 /// extra subtraction over the E[x²]−μ² shortcut but immune to its
 /// catastrophic cancellation).
-pub fn layerNormAffineRows(
+pub fn layerNormRows(
     ctx: *ExecContext,
     input: []const f32,
     rows: usize,
     cols: usize,
-    weight: []const f32,
-    bias: []const f32,
     eps: f32,
+    affine: AffineSlices,
 ) !Tensor {
     if (input.len != rows * cols) return tensor.TensorError.InvalidDataLength;
-    if (weight.len != cols or bias.len != cols) return tensor.TensorError.ShapeMismatch;
+    if (affine.weight) |w| if (w.len != cols) return tensor.TensorError.ShapeMismatch;
+    if (affine.bias) |b| if (b.len != cols) return tensor.TensorError.ShapeMismatch;
 
     var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     const base_task: LayerNormRowsTask = .{
         .input = input,
-        .weights = weight,
-        .biases = bias,
+        .weights = affine.weight,
+        .biases = affine.bias,
         .output = out.data(),
         .axis_dim = cols,
         .inv_axis_dim = 1 / @as(f32, @floatFromInt(cols)),
@@ -664,37 +755,40 @@ pub fn layerNormAffineRows(
             return out;
         }
     }
-    layerNormRows(base_task);
+    exec_row_ops.layerNormRows(base_task);
     return out;
 }
 
-pub fn layerNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    return layerNormDispatchAxisRank(ctx, rank, x, null, null, axis, eps);
-}
-
-/// Fused affine LayerNorm: layerNorm followed by `* weight + bias`
-/// (both rank-1 of the axis length) in the same row pass.
-pub fn layerNormAffine(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    x: *const Tensor,
-    weight: *const Tensor,
-    bias: *const Tensor,
-    comptime axis: usize,
-    eps: f32,
-) !Tensor {
+/// LayerNorm over `axis` with the optional affine terms of `options` applied
+/// in the same row pass (`* weight`, then `+ bias`).
+pub fn layerNorm(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: AffineOptions) !Tensor {
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
-    const weight_view = try weight.rankView(1);
-    if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
-    const bias_view = try bias.rankView(1);
-    if (bias_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
-
-    var ww = try ctx.prepareContiguous(.f32, weight);
+    var ww = try prepareAffineTerm(ctx, options.weight, axis_dim);
     defer ww.deinit();
-    var bb = try ctx.prepareContiguous(.f32, bias);
+    var bb = try prepareAffineTerm(ctx, options.bias, axis_dim);
     defer bb.deinit();
-    return layerNormDispatchAxisRank(ctx, rank, x, ww.tensor().dataConst(), bb.tensor().dataConst(), axis, eps);
+    return layerNormDispatchAxisRank(ctx, rank, x, ww.slice(), bb.slice(), axis, eps);
+}
+
+/// An optional rank-1 `[axis_dim]` affine term made contiguous f32.
+const PreparedAffineTerm = struct {
+    prepared: ?ExecContext.PreparedTensor = null,
+
+    fn slice(self: *PreparedAffineTerm) ?[]const f32 {
+        return if (self.prepared) |*p| p.tensor().dataConst() else null;
+    }
+
+    fn deinit(self: *PreparedAffineTerm) void {
+        if (self.prepared) |*p| p.deinit();
+    }
+};
+
+fn prepareAffineTerm(ctx: *ExecContext, term: ?*const Tensor, axis_dim: usize) !PreparedAffineTerm {
+    const t = term orelse return .{};
+    const view = try t.rankView(1);
+    if (view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
+    return .{ .prepared = try ctx.prepareContiguous(.f32, t) };
 }
 
 fn layerNormDispatchAxisRank(
@@ -740,7 +834,7 @@ fn layerNormDispatchAxisRank(
             }
         }
 
-        layerNormRows(base_task);
+        exec_row_ops.layerNormRows(base_task);
         return out;
     }
 
@@ -761,7 +855,8 @@ fn layerNormDispatchAxisRank(
             for (0..axis_dim) |axis_i| {
                 const offset = base + axis_i * inner + inner_i;
                 var value = (input[offset] - mean_value) * inv_sigma;
-                if (weights) |w| value = value * w[axis_i] + biases.?[axis_i];
+                if (weights) |w| value = value * w[axis_i];
+                if (biases) |b| value = value + b[axis_i];
                 output[offset] = value;
             }
         }
@@ -776,38 +871,17 @@ fn layerNormDispatchAxisRank(
 /// applied in f32 (eps INSIDE the sqrt; the 1/sqrt scale is computed in f32,
 /// matching ggml). Optional per-channel affine `y = y*weight[c] + bias[c]`
 /// (`[C]` each) is applied AFTER normalization.
-pub fn groupNorm(
-    ctx: *ExecContext,
-    x: *const Tensor,
-    groups: usize,
-    eps: f32,
-    weight: ?*const Tensor,
-    bias: ?*const Tensor,
-) !Tensor {
+pub fn groupNorm(ctx: *ExecContext, x: *const Tensor, groups: usize, eps: f32, options: AffineOptions) !Tensor {
     const source = try x.rankView(2);
     const rows = source.shape[0];
     const cols = source.shape[1];
     if (rows == 0 or cols == 0) return tensor.TensorError.InvalidShape;
     if (groups == 0 or cols % groups != 0) return tensor.TensorError.InvalidShape;
 
-    var ww: ?ExecContext.PreparedTensor = null;
-    defer if (ww) |*p| p.deinit();
-    var weight_slice: ?[]const f32 = null;
-    if (weight) |w| {
-        const wv = try w.rankView(1);
-        if (wv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        ww = try ctx.prepareContiguous(.f32, w);
-        weight_slice = ww.?.tensor().dataConst();
-    }
-    var bb: ?ExecContext.PreparedTensor = null;
-    defer if (bb) |*p| p.deinit();
-    var bias_slice: ?[]const f32 = null;
-    if (bias) |b| {
-        const bv = try b.rankView(1);
-        if (bv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        bb = try ctx.prepareContiguous(.f32, b);
-        bias_slice = bb.?.tensor().dataConst();
-    }
+    var ww = try prepareAffineTerm(ctx, options.weight, cols);
+    defer ww.deinit();
+    var bb = try prepareAffineTerm(ctx, options.bias, cols);
+    defer bb.deinit();
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
@@ -815,22 +889,9 @@ pub fn groupNorm(
     var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
-    kernels.groupNormInto(ctx.pc(), &out, xx.tensor(), weight_slice, bias_slice, rows, cols, groups, eps);
+    kernels.groupNormInto(ctx.pc(), &out, xx.tensor(), ww.slice(), bb.slice(), rows, cols, groups, eps);
     return out;
 }
-
-pub const GroupNormBackwardResult = struct {
-    input: ?Tensor = null,
-    weight: ?Tensor = null,
-    bias: ?Tensor = null,
-
-    pub fn deinit(self: *GroupNormBackwardResult) void {
-        if (self.input) |*value| value.deinit();
-        if (self.weight) |*value| value.deinit();
-        if (self.bias) |*value| value.deinit();
-        self.* = undefined;
-    }
-};
 
 /// VJP of groupNorm. Computes only the requested gradients:
 ///   dx = (1/σ_g)·(ĝ − mean_G(ĝ) − x̂·mean_G(ĝ·x̂)) per group, with
@@ -839,21 +900,9 @@ pub const GroupNormBackwardResult = struct {
 ///        f64-accumulate / f32-apply policy (the layerNorm VJP convention —
 ///        nothing is saved from the forward);
 ///   dweight[c] = Σ_t gy[t,c]·x̂[t,c];  dbias[c] = Σ_t gy[t,c].
-/// `weight` must be the forward's weight when it had one (it feeds dx) and
-/// null otherwise. One backend kernel fills all requested outputs, parallel
-/// over whole groups (disjoint column slices ⇒ bitwise identical for any
-/// thread count).
-pub fn groupNormBackward(
-    ctx: *ExecContext,
-    x: *const Tensor,
-    gy: *const Tensor,
-    groups: usize,
-    eps: f32,
-    weight: ?*const Tensor,
-    need_input: bool,
-    need_weight: bool,
-    need_bias: bool,
-) !GroupNormBackwardResult {
+/// One backend kernel fills all requested outputs, parallel over whole
+/// groups (disjoint column slices ⇒ bitwise identical for any thread count).
+pub fn groupNormBackward(ctx: *ExecContext, x: *const Tensor, gy: *const Tensor, groups: usize, eps: f32, options: AffineBackwardOptions) !AffineBackwardResult {
     const source = try x.rankView(2);
     const rows = source.shape[0];
     const cols = source.shape[1];
@@ -861,27 +910,20 @@ pub fn groupNormBackward(
     if (groups == 0 or cols % groups != 0) return tensor.TensorError.InvalidShape;
     try tensor.requireSameShape(x, gy);
 
-    var ww: ?ExecContext.PreparedTensor = null;
-    defer if (ww) |*p| p.deinit();
-    var weight_slice: ?[]const f32 = null;
-    if (weight) |w| {
-        const wv = try w.rankView(1);
-        if (wv.shape[0] != cols) return tensor.TensorError.ShapeMismatch;
-        ww = try ctx.prepareContiguous(.f32, w);
-        weight_slice = ww.?.tensor().dataConst();
-    }
+    var ww = try prepareAffineTerm(ctx, options.weight, cols);
+    defer ww.deinit();
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
 
-    var result = GroupNormBackwardResult{};
+    var result = AffineBackwardResult{};
     errdefer result.deinit();
-    if (need_input) result.input = try ctx.empty(.f32, .{ rows, cols });
-    if (need_weight) result.weight = try ctx.empty(.f32, .{cols});
-    if (need_bias) result.bias = try ctx.empty(.f32, .{cols});
-    if (!need_input and !need_weight and !need_bias) return result;
+    if (options.need_input) result.input = try ctx.empty(.f32, .{ rows, cols });
+    if (options.need_weight) result.weight = try ctx.empty(.f32, .{cols});
+    if (options.need_bias) result.bias = try ctx.empty(.f32, .{cols});
+    if (!options.need_input and !options.need_weight and !options.need_bias) return result;
 
     ctx.enableNativeVectorPoolForWork(rows * cols, parallel.vector_elementwise_len_threshold);
     kernels.groupNormBackwardInto(
@@ -891,7 +933,7 @@ pub fn groupNormBackward(
         if (result.bias) |*t| t else null,
         xx.tensor(),
         gg.tensor(),
-        weight_slice,
+        ww.slice(),
         rows,
         cols,
         groups,
@@ -900,39 +942,19 @@ pub fn groupNormBackward(
     return result;
 }
 
-/// VJP of layerNorm (dx only):
-/// dx = (1/σ)(gy − mean(gy) − x̂·mean(gy·x̂)) with x̂ = (x−μ)/σ.
-pub fn layerNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    const result = try layerNormBackwardDispatchAxisRank(ctx, rank, x, null, gy, axis, eps, true, false, false);
-    return result.input.?;
-}
-
-/// VJP of layerNormAffine. Computes only the requested gradients:
-/// dx as in layerNormBackward with g' = gy⊙weight in place of gy,
-/// dweight = Σ_rows gy⊙x̂, dbias = Σ_rows gy. The dweight/dbias row
-/// reduction always accumulates each column in row order — serially for
-/// small inputs (layerNormAffineParamGradRows), column-partitioned across
-/// the pool for large ones (layerNormParamGradColumns) — so it is bitwise
-/// identical for any thread count.
-pub fn layerNormAffineBackward(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    x: *const Tensor,
-    weight: *const Tensor,
-    gy: *const Tensor,
-    comptime axis: usize,
-    eps: f32,
-    need_input: bool,
-    need_weight: bool,
-    need_bias: bool,
-) !LayerNormAffineBackwardResult {
+/// VJP of layerNorm. Computes only the requested gradients:
+/// dx = (1/σ)(g' − mean(g') − x̂·mean(g'·x̂)) with x̂ = (x−μ)/σ and
+/// g' = gy⊙weight (gy when the forward had no weight), dweight = Σ_rows gy⊙x̂,
+/// dbias = Σ_rows gy. The dweight/dbias row reduction always accumulates each
+/// column in row order — serially for small inputs
+/// (layerNormAffineParamGradRows), column-partitioned across the pool for
+/// large ones (layerNormParamGradColumns) — so it is bitwise identical for
+/// any thread count.
+pub fn layerNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32, options: AffineBackwardOptions) !AffineBackwardResult {
     const source = try x.rankView(rank);
-    const weight_view = try weight.rankView(1);
-    if (weight_view.dim(0) != source.shape[axis]) return tensor.TensorError.ShapeMismatch;
-
-    var ww = try ctx.prepareContiguous(.f32, weight);
+    var ww = try prepareAffineTerm(ctx, options.weight, source.shape[axis]);
     defer ww.deinit();
-    return layerNormBackwardDispatchAxisRank(ctx, rank, x, ww.tensor().dataConst(), gy, axis, eps, need_input, need_weight, need_bias);
+    return layerNormBackwardDispatchAxisRank(ctx, rank, x, ww.slice(), gy, axis, eps, options.need_input, options.need_weight, options.need_bias);
 }
 
 fn layerNormBackwardDispatchAxisRank(
@@ -946,7 +968,7 @@ fn layerNormBackwardDispatchAxisRank(
     need_input: bool,
     need_weight: bool,
     need_bias: bool,
-) !LayerNormAffineBackwardResult {
+) !AffineBackwardResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
@@ -961,7 +983,7 @@ fn layerNormBackwardDispatchAxisRank(
     const input = xx.tensor().dataConst();
     const grad = ggy.tensor().dataConst();
 
-    var result = LayerNormAffineBackwardResult{};
+    var result = AffineBackwardResult{};
     errdefer result.deinit();
     if (need_input) result.input = try ctx.empty(.f32, source.shape);
     if (need_weight) result.weight = try ctx.zeros(.f32, .{axis_dim});

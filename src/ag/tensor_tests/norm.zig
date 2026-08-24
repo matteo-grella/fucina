@@ -530,7 +530,7 @@ fn groupNormFdLoss(c: GroupNormFdContext) anyerror!f32 {
     defer if (weight) |*w| w.deinit();
     var bias: ?RawTensor = if (c.b_vals) |bv| try c.ctx.fromSlice(.f32, &.{c.cols}, bv) else null;
     defer if (bias) |*b| b.deinit();
-    var y = try c.ctx.groupNorm(&x, c.groups, c.eps, if (weight) |*w| w else null, if (bias) |*b| b else null);
+    var y = try c.ctx.groupNorm(&x, c.groups, c.eps, .{ .weight = if (weight) |*w| w else null, .bias = if (bias) |*b| b else null });
     defer y.deinit();
     return fdWeightedSum(y.dataConst(), c.coef);
 }

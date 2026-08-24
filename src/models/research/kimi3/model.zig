@@ -447,7 +447,7 @@ pub const Model = struct {
                 boundary = true;
             }
 
-            var normed = try ctx.rmsNormMul(2, &hidden, &layer.input_norm, 1, cfg.rms_norm_eps);
+            var normed = try ctx.rmsNorm(2, &hidden, 1, cfg.rms_norm_eps, .{ .weight = &layer.input_norm });
             defer normed.deinit();
             if (probe) |pr| pr.emit("input_layernorm", layer_idx, normed.dataConst());
             var attn_out = switch (layer.attn) {
@@ -468,7 +468,7 @@ pub const Model = struct {
 
             var mixed2 = try self.applyAttnRes(ctx, &prefix, bank.items, layer.mlp_res_norm, layer.mlp_res_proj);
             defer mixed2.deinit();
-            var normed2 = try ctx.rmsNormMul(2, &mixed2, &layer.post_norm, 1, cfg.rms_norm_eps);
+            var normed2 = try ctx.rmsNorm(2, &mixed2, 1, cfg.rms_norm_eps, .{ .weight = &layer.post_norm });
             defer normed2.deinit();
             var ffn_out = switch (layer.ffn) {
                 .dense => |*w| try self.denseMlp(ctx, &normed2, w),
@@ -483,7 +483,7 @@ pub const Model = struct {
         var final_mix = try self.applyAttnRes(ctx, &x, bank.items, self.out_res_norm, self.out_res_proj);
         x.deinit();
         defer final_mix.deinit();
-        var final_normed = try ctx.rmsNormMul(2, &final_mix, &self.final_norm, 1, cfg.rms_norm_eps);
+        var final_normed = try ctx.rmsNorm(2, &final_mix, 1, cfg.rms_norm_eps, .{ .weight = &self.final_norm });
         defer final_normed.deinit();
         return ctx.matmulTransB(&final_normed, &self.lm_head);
     }
@@ -565,7 +565,7 @@ pub const Model = struct {
         defer result.deinit();
 
         // o_norm: per-head RMSNorm(o)·weight × sigmoid(full-rank gate).
-        var o_normed = try ctx.rmsNormMul(3, &result.o, &w.o_norm, 2, cfg.rms_norm_eps);
+        var o_normed = try ctx.rmsNorm(3, &result.o, 2, cfg.rms_norm_eps, .{ .weight = &w.o_norm });
         defer o_normed.deinit();
         var gate = try ctx.matmulTransB(h, &w.g_proj);
         defer gate.deinit();
@@ -607,7 +607,7 @@ pub const Model = struct {
 
         var q_low = try ctx.matmulTransB(h, &w.q_a);
         defer q_low.deinit();
-        var q_low_n = try ctx.rmsNormMul(2, &q_low, &w.q_a_norm, 1, cfg.rms_norm_eps);
+        var q_low_n = try ctx.rmsNorm(2, &q_low, 1, cfg.rms_norm_eps, .{ .weight = &w.q_a_norm });
         defer q_low_n.deinit();
         var q_full = try ctx.matmulTransB(&q_low_n, &w.q_b);
         defer q_full.deinit();
@@ -626,7 +626,7 @@ pub const Model = struct {
                 @memcpy(kv_low_values[t * kv_lora ..][0..kv_lora], ckv_data[t * (kv_lora + rope) ..][0..kv_lora]);
             }
         }
-        var kv_low_n = try ctx.rmsNormMul(2, &kv_low, &w.kv_a_norm, 1, cfg.rms_norm_eps);
+        var kv_low_n = try ctx.rmsNorm(2, &kv_low, 1, cfg.rms_norm_eps, .{ .weight = &w.kv_a_norm });
         defer kv_low_n.deinit();
         var kv_full = try ctx.matmulTransB(&kv_low_n, &w.kv_b);
         defer kv_full.deinit();
@@ -763,7 +763,7 @@ pub const Model = struct {
             }
         }
 
-        var routed_n = try ctx.rmsNormMul(2, &routed, &w.latent_norm, 1, cfg.rms_norm_eps);
+        var routed_n = try ctx.rmsNorm(2, &routed, 1, cfg.rms_norm_eps, .{ .weight = &w.latent_norm });
         defer routed_n.deinit();
         var up_out = try ctx.matmulTransB(&routed_n, &w.up_proj);
         defer up_out.deinit();

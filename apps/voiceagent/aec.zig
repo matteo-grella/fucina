@@ -123,7 +123,7 @@ const FrameArena = struct {
     fn alloc(self: *FrameArena, c: usize, f: usize) Frame {
         const n = c * f;
         std.debug.assert(self.used + n <= self.buf.len);
-        const d = self.buf[self.used ..][0..n];
+        const d = self.buf[self.used..][0..n];
         self.used += n;
         @memset(d, 0);
         return .{ .c = c, .f = f, .d = d };
@@ -532,7 +532,7 @@ pub const Session = struct {
     /// `intra_ln.w/b` as [33, 16] = 528, i.e. torch `LayerNorm((F, C))`, so
     /// this is one 528-wide row, not per-row normalization.
     fn layerNormWhole(self: *Session, x: []f32, w: *const W, b: *const W, eps: f32) !void {
-        var y = try self.ctx.layerNormAffineRows(x, 1, x.len, w.data[0..x.len], b.data[0..x.len], eps);
+        var y = try self.ctx.layerNormRows(x, 1, x.len, eps, .{ .weight = w.data[0..x.len], .bias = b.data[0..x.len] });
         defer y.deinit();
         @memcpy(x, y.dataConst());
     }

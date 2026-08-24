@@ -363,7 +363,7 @@ fn layerNormRaw(ctx: *ExecContext, in: []const f32, t_len: usize, d: usize, g: [
     // (the `layerNormAffine` kernel) are DIFFERENT kernels — routing
     // through the facade shifted the `--compare encoder` cosine (0.99999766 →
     // 0.99999782), so per the no-parity-drift rule this stays on the row kernel.
-    return ctx.layerNormAffineRows(in, t_len, d, g, b, 1e-5);
+    return ctx.layerNormRows(in, t_len, d, 1e-5, .{ .weight = g, .bias = b });
 }
 
 pub fn layerNorm(ctx: *ExecContext, in: []const f32, t_len: usize, d: usize, g: []const f32, b: []const f32) !Tensor2 {

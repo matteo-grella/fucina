@@ -218,7 +218,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn rmsNorm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32) !Self {
             var wide = try widen(self, ctx, "rmsNorm");
             defer wide.deinit();
-            var wide_value = try ctx.rmsNorm(tag_rank, &wide, Self.axis(tag), eps);
+            var wide_value = try ctx.rmsNorm(tag_rank, &wide, Self.axis(tag), eps, .{});
             defer wide_value.deinit();
             return narrow(tags, ctx, &wide_value);
         }
@@ -228,7 +228,7 @@ pub fn Ops(comptime Self: type) type {
             defer wide.deinit();
             var wide_weight = try widenOther(weight, ctx, "rmsNormMul");
             defer wide_weight.deinit();
-            var wide_value = try ctx.rmsNormMul(tag_rank, &wide, &wide_weight, Self.axis(tag), eps);
+            var wide_value = try ctx.rmsNorm(tag_rank, &wide, Self.axis(tag), eps, .{ .weight = &wide_weight });
             defer wide_value.deinit();
             return narrow(tags, ctx, &wide_value);
         }
@@ -237,7 +237,7 @@ pub fn Ops(comptime Self: type) type {
             comptime requirePlainOptions(options, "typed layerNorm supports only plain .{} options; cast to f32 for the affine path");
             var wide = try widen(self, ctx, "layerNorm");
             defer wide.deinit();
-            var wide_value = try ctx.layerNorm(tag_rank, &wide, Self.axis(tag), eps);
+            var wide_value = try ctx.layerNorm(tag_rank, &wide, Self.axis(tag), eps, .{});
             defer wide_value.deinit();
             return narrow(tags, ctx, &wide_value);
         }

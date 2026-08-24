@@ -167,7 +167,7 @@ test "exec context layer norm matches a naive f64 reference" {
                 for ([_]f32{ 1e-5, 1e-6 }) |eps| {
                     const ref_plain = try testNaiveLayerNorm(allocator, data, outer, axis_dim, inner, null, null, eps);
                     defer allocator.free(ref_plain);
-                    var y_plain = try ctx.layerNorm(rank, &x, 1, eps);
+                    var y_plain = try ctx.layerNorm(rank, &x, 1, eps, .{});
                     defer y_plain.deinit();
                     for (y_plain.dataConst(), ref_plain) |got, want| {
                         try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -175,7 +175,7 @@ test "exec context layer norm matches a naive f64 reference" {
 
                     const ref_affine = try testNaiveLayerNorm(allocator, data, outer, axis_dim, inner, weights, biases, eps);
                     defer allocator.free(ref_affine);
-                    var y_affine = try ctx.layerNormAffine(rank, &x, &w, &b, 1, eps);
+                    var y_affine = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &b });
                     defer y_affine.deinit();
                     for (y_affine.dataConst(), ref_affine) |got, want| {
                         try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -239,7 +239,7 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             // Plain dx.
             var ref_plain = try testNaiveLayerNormBackward(allocator, data, grad, outer, axis_dim, inner, null, eps);
             defer ref_plain.deinit(allocator);
-            var gx_plain = try ctx.layerNormBackward(rank, &x, &gy, 1, eps);
+            var gx_plain = (try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{})).input.?;
             defer gx_plain.deinit();
             for (gx_plain.dataConst(), ref_plain.dx) |got, want| {
                 try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -248,7 +248,7 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             // Affine dx + dweight + dbias.
             var ref_affine = try testNaiveLayerNormBackward(allocator, data, grad, outer, axis_dim, inner, weights, eps);
             defer ref_affine.deinit(allocator);
-            var full = try ctx.layerNormAffineBackward(rank, &x, &w, &gy, 1, eps, true, true, true);
+            var full = try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
             defer full.deinit();
             for (full.input.?.dataConst(), ref_affine.dx) |got, want| {
                 try expectCloseToF64(want, got, 5e-4, 5e-5);
@@ -263,13 +263,13 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             // needs-grad pruning at the kernel level: partial runs return
             // only the requested gradients and match the full run bitwise
             // (the param pass is the same serial code either way).
-            var weight_only = try ctx.layerNormAffineBackward(rank, &x, &w, &gy, 1, eps, false, true, false);
+            var weight_only = try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{ .weight = &w, .need_input = false, .need_weight = true, .need_bias = false });
             defer weight_only.deinit();
             try std.testing.expect(weight_only.input == null);
             try std.testing.expect(weight_only.bias == null);
             try std.testing.expectEqualSlices(f32, full.weight.?.dataConst(), weight_only.weight.?.dataConst());
 
-            var bias_only = try ctx.layerNormAffineBackward(rank, &x, &w, &gy, 1, eps, false, false, true);
+            var bias_only = try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{ .weight = &w, .need_input = false, .need_weight = false, .need_bias = true });
             defer bias_only.deinit();
             try std.testing.expect(bias_only.input == null);
             try std.testing.expect(bias_only.weight == null);
@@ -278,16 +278,16 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             // Bitwise determinism across runs (the big case exercises the
             // parallel dx dispatch; dweight/dbias are one serial row pass,
             // bitwise identical for any thread count by construction).
-            var again = try ctx.layerNormAffineBackward(rank, &x, &w, &gy, 1, eps, true, true, true);
+            var again = try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
             defer again.deinit();
             try std.testing.expectEqualSlices(f32, full.input.?.dataConst(), again.input.?.dataConst());
             try std.testing.expectEqualSlices(f32, full.weight.?.dataConst(), again.weight.?.dataConst());
             try std.testing.expectEqualSlices(f32, full.bias.?.dataConst(), again.bias.?.dataConst());
 
             // Forward determinism on the same shapes.
-            var y_one = try ctx.layerNormAffine(rank, &x, &w, &w, 1, eps);
+            var y_one = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
             defer y_one.deinit();
-            var y_two = try ctx.layerNormAffine(rank, &x, &w, &w, 1, eps);
+            var y_two = try ctx.layerNorm(rank, &x, 1, eps, .{ .weight = &w, .bias = &w });
             defer y_two.deinit();
             try std.testing.expectEqualSlices(f32, y_one.dataConst(), y_two.dataConst());
         }
@@ -305,7 +305,7 @@ test "groupNorm: hand-computed G=1, G=C, and affine cases + rejection" {
     // G=1: one group over ALL T*C elements [1,2,3,4]: mean 2.5, biased var 1.25.
     var x = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer x.deinit();
-    var y1 = try ctx.groupNorm(&x, 1, eps, null, null);
+    var y1 = try ctx.groupNorm(&x, 1, eps, .{});
     defer y1.deinit();
     const inv1 = 1.0 / @sqrt(@as(f32, 1.25) + eps);
     const want1 = [_]f32{ -1.5 * inv1, -0.5 * inv1, 0.5 * inv1, 1.5 * inv1 };
@@ -313,7 +313,7 @@ test "groupNorm: hand-computed G=1, G=C, and affine cases + rejection" {
 
     // G=C: per-channel over time (InstanceNorm over T; the HuBERT layer-0
     // configuration). col0 = {1,3}: mean 2, var 1; col1 = {2,4}: mean 3, var 1.
-    var y2 = try ctx.groupNorm(&x, 2, eps, null, null);
+    var y2 = try ctx.groupNorm(&x, 2, eps, .{});
     defer y2.deinit();
     const inv2 = 1.0 / @sqrt(@as(f32, 1.0) + eps);
     const want2 = [_]f32{ -inv2, -inv2, inv2, inv2 };
@@ -324,17 +324,17 @@ test "groupNorm: hand-computed G=1, G=C, and affine cases + rejection" {
     defer wt.deinit();
     var bt = try ctx.fromSlice(.f32, .{2}, &.{ 10.0, 20.0 });
     defer bt.deinit();
-    var y3 = try ctx.groupNorm(&x, 2, eps, &wt, &bt);
+    var y3 = try ctx.groupNorm(&x, 2, eps, .{ .weight = &wt, .bias = &bt });
     defer y3.deinit();
     const want3 = [_]f32{ -inv2 * 2 + 10, -inv2 * 3 + 20, inv2 * 2 + 10, inv2 * 3 + 20 };
     for (want3, y3.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
 
     // groups must divide C; affine vectors must be [C].
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNorm(&x, 3, eps, null, null));
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNorm(&x, 0, eps, null, null));
+    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNorm(&x, 3, eps, .{}));
+    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNorm(&x, 0, eps, .{}));
     var bad_w = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     defer bad_w.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNorm(&x, 2, eps, &bad_w, null));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNorm(&x, 2, eps, .{ .weight = &bad_w }));
 }
 
 test "groupNorm backward: hand-computed G=C case + rejection" {
@@ -355,7 +355,7 @@ test "groupNorm backward: hand-computed G=C case + rejection" {
     var gy = try ctx.fromSlice(.f32, .{ 2, 2 }, &.{ 1, 0, 0, 2 });
     defer gy.deinit();
 
-    var result = try ctx.groupNormBackward(&x, &gy, 2, eps, null, true, true, true);
+    var result = try ctx.groupNormBackward(&x, &gy, 2, eps, .{ .need_input = true, .need_weight = true, .need_bias = true });
     defer result.deinit();
 
     const want_dx = [_]f32{
@@ -369,7 +369,7 @@ test "groupNorm backward: hand-computed G=C case + rejection" {
     try std.testing.expectApproxEqAbs(@as(f32, 2), result.bias.?.dataConst()[1], 1e-6);
 
     // Only the requested gradients are returned.
-    var dx_only = try ctx.groupNormBackward(&x, &gy, 2, eps, null, true, false, false);
+    var dx_only = try ctx.groupNormBackward(&x, &gy, 2, eps, .{ .need_input = true, .need_weight = false, .need_bias = false });
     defer dx_only.deinit();
     try std.testing.expect(dx_only.input != null);
     try std.testing.expect(dx_only.weight == null);
@@ -379,9 +379,9 @@ test "groupNorm backward: hand-computed G=C case + rejection" {
     // gy must match x; groups must divide C; the affine weight must be [C].
     var bad_gy = try ctx.fromSlice(.f32, .{ 1, 2 }, &.{ 1, 2 });
     defer bad_gy.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNormBackward(&x, &bad_gy, 2, eps, null, true, false, false));
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNormBackward(&x, &gy, 3, eps, null, true, false, false));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNormBackward(&x, &bad_gy, 2, eps, .{ .need_input = true, .need_weight = false, .need_bias = false }));
+    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.groupNormBackward(&x, &gy, 3, eps, .{ .need_input = true, .need_weight = false, .need_bias = false }));
     var bad_w = try ctx.fromSlice(.f32, .{3}, &.{ 1, 2, 3 });
     defer bad_w.deinit();
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNormBackward(&x, &gy, 2, eps, &bad_w, true, false, false));
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNormBackward(&x, &gy, 2, eps, .{ .weight = &bad_w, .need_input = true, .need_weight = false, .need_bias = false }));
 }

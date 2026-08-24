@@ -141,12 +141,12 @@ fn benchLayerNormBackwardAxis0(ctx: *ExecContext, io: std.Io, allocator: std.mem
     const eps: f32 = 1e-5;
 
     for (0..2) |_| {
-        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 0, eps, true, true, true);
+        var grads = try ctx.layerNormBackward(2, &x, &gy, 0, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
         grads.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 0, eps, true, true, true);
+        var grads = try ctx.layerNormBackward(2, &x, &gy, 0, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
         grads.deinit();
     }
     const ns = timer.read() / iters;
@@ -326,24 +326,24 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     const eps: f32 = 1e-5;
 
     for (0..2) |_| {
-        var y = try ctx.layerNormAffine(2, &x, &w, &b, 1, eps);
+        var y = try ctx.layerNorm(2, &x, 1, eps, .{ .weight = &w, .bias = &b });
         y.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var y = try ctx.layerNormAffine(2, &x, &w, &b, 1, eps);
+        var y = try ctx.layerNorm(2, &x, 1, eps, .{ .weight = &w, .bias = &b });
         y.deinit();
     }
     const fwd_ns = timer.read() / iters;
     try printRow(stdout, "layernorm-aff fwd", rows, cols, fwd_ns, iters);
 
     for (0..2) |_| {
-        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 1, eps, true, true, true);
+        var grads = try ctx.layerNormBackward(2, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
         grads.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grads = try ctx.layerNormAffineBackward(2, &x, &w, &gy, 1, eps, true, true, true);
+        var grads = try ctx.layerNormBackward(2, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
         grads.deinit();
     }
     const bwd_ns = timer.read() / iters;
@@ -352,29 +352,25 @@ fn benchLayerNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     // rmsNormMul at the same shape: the sanity baseline (layerNorm should sit
     // within ~1.5-2x given the extra mean pass).
     for (0..2) |_| {
-        var y = try ctx.rmsNormMul(2, &x, &w, 1, eps);
+        var y = try ctx.rmsNorm(2, &x, 1, eps, .{ .weight = &w });
         y.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var y = try ctx.rmsNormMul(2, &x, &w, 1, eps);
+        var y = try ctx.rmsNorm(2, &x, 1, eps, .{ .weight = &w });
         y.deinit();
     }
     const rms_fwd_ns = timer.read() / iters;
     try printRow(stdout, "rmsnorm-mul fwd", rows, cols, rms_fwd_ns, iters);
 
     for (0..2) |_| {
-        var gx = try ctx.rmsNormMulBackwardInput(2, &x, &w, &gy, 1, eps);
-        gx.deinit();
-        var gw = try ctx.rmsNormMulBackwardWeight(2, &x, &gy, 1, eps);
-        gw.deinit();
+        var grads = try ctx.rmsNormBackward(2, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true });
+        grads.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var gx = try ctx.rmsNormMulBackwardInput(2, &x, &w, &gy, 1, eps);
-        gx.deinit();
-        var gw = try ctx.rmsNormMulBackwardWeight(2, &x, &gy, 1, eps);
-        gw.deinit();
+        var grads = try ctx.rmsNormBackward(2, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true });
+        grads.deinit();
     }
     const rms_bwd_ns = timer.read() / iters;
     try printRow(stdout, "rmsnorm-mul bwd", rows, cols, rms_bwd_ns, iters);

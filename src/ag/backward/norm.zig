@@ -34,7 +34,7 @@ pub fn RmsNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps);
+            out[0] = (try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -76,12 +76,12 @@ pub fn RmsNormMulBackward(comptime tags: anytype, comptime axis: usize) type {
         }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.rmsNormMulBackwardInput(rawRank(tags.len), &self.input, &self.weight, gy, axis, self.eps);
-            }
-            if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.rmsNormMulBackwardWeight(rawRank(tags.len), &self.input, gy, axis, self.eps);
-            }
+            const need_input = needs_grad.len > 0 and needs_grad[0];
+            const need_weight = needs_grad.len > 1 and needs_grad[1];
+            if (!need_input and !need_weight) return;
+            const result = try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
+            out[0] = result.input;
+            if (need_weight) out[1] = result.weight;
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -125,11 +125,12 @@ pub fn RmsNormMulAddBackward(comptime tags: anytype, comptime axis: usize) type 
         }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
-                out[0] = try ctx.rmsNormMulBackwardInput(rawRank(tags.len), &self.input, &self.weight, gy, axis, self.eps);
-            }
-            if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.rmsNormMulBackwardWeight(rawRank(tags.len), &self.input, gy, axis, self.eps);
+            const need_input = needs_grad.len > 0 and needs_grad[0];
+            const need_weight = needs_grad.len > 1 and needs_grad[1];
+            if (need_input or need_weight) {
+                const result = try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
+                out[0] = result.input;
+                if (need_weight) out[1] = result.weight;
             }
             if (needs_grad.len > 2 and needs_grad[2]) {
                 out[2] = try gy.cloneView();
@@ -165,7 +166,7 @@ pub fn LayerNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
-            out[0] = try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps);
+            out[0] = (try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -213,17 +214,7 @@ pub fn LayerNormAffineBackward(comptime tags: anytype, comptime axis: usize) typ
             const need_bias = needs_grad.len > 2 and needs_grad[2];
             if (!need_input and !need_weight and !need_bias) return;
 
-            const result = try ctx.layerNormAffineBackward(
-                rawRank(tags.len),
-                &self.input,
-                &self.weight,
-                gy,
-                axis,
-                self.eps,
-                need_input,
-                need_weight,
-                need_bias,
-            );
+            const result = try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });
             if (need_input) out[0] = result.input.?;
             if (need_weight) out[1] = result.weight.?;
             if (need_bias) out[2] = result.bias.?;
@@ -285,12 +276,9 @@ pub fn RmsNormMulRopeBackward(
             const rank = comptime rawRank(tags.len);
             var unrotated = try ctx.ropeWithTable(rank, gy, position_axis, feature_axis, &self.inverse_table, mode);
             defer unrotated.deinit();
-            if (need_input) {
-                out[0] = try ctx.rmsNormMulBackwardInput(rank, &self.input, &self.weight, &unrotated, feature_axis, self.eps);
-            }
-            if (need_weight) {
-                out[1] = try ctx.rmsNormMulBackwardWeight(rank, &self.input, &unrotated, feature_axis, self.eps);
-            }
+            const result = try ctx.rmsNormBackward(rank, &self.input, &unrotated, feature_axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
+            out[0] = result.input;
+            if (need_weight) out[1] = result.weight;
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
@@ -351,16 +339,7 @@ pub fn GroupNormBackward(comptime tags: anytype) type {
             const need_bias = needs_grad.len > 2 and needs_grad[2];
             if (!need_input and !need_weight and !need_bias) return;
 
-            const result = try ctx.groupNormBackward(
-                &self.input_value,
-                gy,
-                self.groups,
-                self.eps,
-                if (self.weight_value) |*w| w else null,
-                need_input,
-                need_weight,
-                need_bias,
-            );
+            const result = try ctx.groupNormBackward(&self.input_value, gy, self.groups, self.eps, .{ .weight = if (self.weight_value) |*w| w else null, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });
             if (need_input) out[0] = result.input.?;
             if (need_weight) out[1] = result.weight.?;
             if (need_bias) out[2] = result.bias.?;

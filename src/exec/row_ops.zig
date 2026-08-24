@@ -1120,25 +1120,21 @@ pub fn layerNormRows(task: LayerNormRowsTask) void {
         const inv_sigma = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
         const sigma_vec: Vec = @splat(inv_sigma);
 
-        // Pass 3: scale (and the fused affine weight/bias when present).
+        // Pass 3: scale, then the affine weight and bias when present. The
+        // terms apply left to right in one expression per element, so each
+        // combination is the same rounding sequence as the composed ops.
         axis_i = 0;
-        if (task.weights) |weights| {
-            const biases = task.biases.?;
-            while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-                const w: Vec = weights[axis_i..][0..vector_width].*;
-                const b: Vec = biases[axis_i..][0..vector_width].*;
-                row_out[axis_i..][0..vector_width].* = @as(Vec, row_out[axis_i..][0..vector_width].*) * sigma_vec * w + b;
-            }
-            while (axis_i < task.axis_dim) : (axis_i += 1) {
-                row_out[axis_i] = row_out[axis_i] * inv_sigma * weights[axis_i] + biases[axis_i];
-            }
-        } else {
-            while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-                row_out[axis_i..][0..vector_width].* = @as(Vec, row_out[axis_i..][0..vector_width].*) * sigma_vec;
-            }
-            while (axis_i < task.axis_dim) : (axis_i += 1) {
-                row_out[axis_i] *= inv_sigma;
-            }
+        while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
+            var v = @as(Vec, row_out[axis_i..][0..vector_width].*) * sigma_vec;
+            if (task.weights) |weights| v = v * @as(Vec, weights[axis_i..][0..vector_width].*);
+            if (task.biases) |biases| v = v + @as(Vec, biases[axis_i..][0..vector_width].*);
+            row_out[axis_i..][0..vector_width].* = v;
+        }
+        while (axis_i < task.axis_dim) : (axis_i += 1) {
+            var v = row_out[axis_i] * inv_sigma;
+            if (task.weights) |weights| v = v * weights[axis_i];
+            if (task.biases) |biases| v = v + biases[axis_i];
+            row_out[axis_i] = v;
         }
     }
 }
