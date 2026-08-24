@@ -231,13 +231,19 @@ Autograd:
   programmatic pins), and the per-context `Overrides` carried by
   `ExecContext` (`setTuning`).
 - `src/ag/tensor.zig`: public tagged/autograd tensor facade — the `Tensor`
-  dispatcher, the f32 struct core, and one-line aliases onto the per-domain
-  method mixins in `src/ag/tensor/float/` (elementwise, matmul, reduce,
-  shape, ...); `src/ag/tensor/typed_constant.zig`: the non-f32 constant
-  tensor band; `src/ag/tensor/plumbing.zig`: shared result-finishing and
-  dispatch helpers. The `src/ag/tensor/` files never import the facade
-  back — they receive it as a comptime parameter (`Self.ag_root` /
-  `Mod(ag_tensor)`), keeping the import graph acyclic.
+  dispatcher (normalizes the spec, then instantiates one of four branches:
+  f32, typed float, typed scalar, block-quantized) and, per branch, one
+  alias line per method onto the shared mixins in `src/ag/tensor/`:
+  `common.zig` (lifetime, raw access, tag/shape queries, every branch),
+  `views.zig` (the dtype-generic views and data movement, every scalar
+  dtype; differentiable on f32), `autograd.zig` (leaves, gradients,
+  backward; f32 and the 16-bit leaves), the f32-only per-domain mixins in
+  `src/ag/tensor/float/` (elementwise, matmul, reduce, shape, ...), and
+  `typed_constant.zig` (typed constructors and the non-f32 math);
+  `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
+  helpers. The `src/ag/tensor/` files never import the facade back — they
+  receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),
+  keeping the import graph acyclic.
 - `src/ag/backward.zig`: re-export facade over the per-domain VJP modules
   in `src/ag/backward/` (mirroring `src/exec/`'s taxonomy, over a shared
   `common.zig`); `src/ag/core.zig`:
@@ -277,7 +283,8 @@ fucina.zig
      safetensors, training_checkpoint)
 
 ag/tensor.zig
-  -> ag/tensor/ (float/ method mixins, typed_constant.zig, plumbing.zig),
+  -> ag/tensor/ (common/views/autograd mixins, float/ method mixins,
+     typed_constant.zig, plumbing.zig),
      ag/{core,backward,control}.zig, tags.zig, tag_ops.zig, exec.zig,
      backend.zig, tensor.zig, dtype.zig
 

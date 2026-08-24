@@ -13,6 +13,7 @@
 //! ExecContext ops, weight unions) is built on.
 const std = @import("std");
 const tensor_mod = @import("tensor.zig");
+const dtype_mod = @import("dtype.zig");
 const exec_mod = @import("exec.zig");
 const tags_mod = @import("tags.zig");
 
@@ -50,33 +51,38 @@ pub const PointwiseOp = enum {
     min,
 };
 
-/// Tag-driven broadcasting pointwise op: broadcasts both operands to the
-/// pointwise result tags, then dispatches the rank-matched kernel.
+/// Tag-driven broadcasting pointwise op over any dtype with a native
+/// kernel: broadcasts both operands to the pointwise result tags, then
+/// dispatches the rank-matched kernel. Which (op, dtype) pairs exist is
+/// the exec kernel's contract (integer `div` and float `max`/`min` are
+/// compile errors there); the facade states the rule in words.
 pub fn pointwise(
+    comptime tensor_dtype: DType,
     comptime op: PointwiseOp,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const RawTensor,
-) !RawTensor {
-    try validateTensorRank(.f32, left_tags, left);
-    try validateTensorRank(.f32, right_tags, right);
+    right: *const tensor_mod.TensorOf(tensor_dtype),
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.pointwise, tensor_dtype)) {
+    try validateTensorRank(tensor_dtype, left_tags, left);
+    try validateTensorRank(tensor_dtype, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
-    const result_shape = try broadcastResultShape(result_tags, left_tags, left, right_tags, right);
+    const result_shape = try broadcastResultShape(tensor_dtype, result_tags, left_tags, left, right_tags, right);
 
-    var left_view = try broadcastTensorTo(.f32, left_tags, left, result_tags, result_shape);
+    var left_view = try broadcastTensorTo(tensor_dtype, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
-    var right_view = try broadcastTensorTo(.f32, right_tags, right, result_tags, result_shape);
+    var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
+    const rank = comptime rawRank(result_tags.len);
     return switch (op) {
-        .add => ctx.add(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .sub => ctx.sub(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .mul => ctx.mul(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .div => ctx.div(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .max => ctx.max(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .min => ctx.min(.f32, rawRank(result_tags.len), &left_view, &right_view),
+        .add => ctx.add(tensor_dtype, rank, &left_view, &right_view),
+        .sub => ctx.sub(tensor_dtype, rank, &left_view, &right_view),
+        .mul => ctx.mul(tensor_dtype, rank, &left_view, &right_view),
+        .div => ctx.div(tensor_dtype, rank, &left_view, &right_view),
+        .max => ctx.max(tensor_dtype, rank, &left_view, &right_view),
+        .min => ctx.min(tensor_dtype, rank, &left_view, &right_view),
     };
 }
 
@@ -92,7 +98,7 @@ pub fn gatedPointwise(
     try validateTensorRank(.f32, left_tags, left);
     try validateTensorRank(.f32, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
-    const result_shape = try broadcastResultShape(result_tags, left_tags, left, right_tags, right);
+    const result_shape = try broadcastResultShape(.f32, result_tags, left_tags, left, right_tags, right);
 
     var left_view = try broadcastTensorTo(.f32, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
@@ -667,16 +673,17 @@ fn einsumGenericGemm(
 /// Tags-rank pointwise broadcast shape (zero-length for scalar results), used
 /// by `pointwise`/`gatedPointwise` to feed `broadcastTensorTo` directly.
 fn broadcastResultShape(
+    comptime tensor_dtype: DType,
     comptime result_tags: anytype,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
     comptime right_tags: anytype,
-    right: *const RawTensor,
+    right: *const tensor_mod.TensorOf(tensor_dtype),
 ) ![result_tags.len]usize {
     var shape: [result_tags.len]usize = undefined;
     inline for (result_tags, 0..) |tag, i| {
-        const left_dim = dimForTag(.f32, left_tags, left, tag);
-        const right_dim = dimForTag(.f32, right_tags, right, tag);
+        const left_dim = dimForTag(tensor_dtype, left_tags, left, tag);
+        const right_dim = dimForTag(tensor_dtype, right_tags, right, tag);
         if (left_dim == right_dim) {
             shape[i] = left_dim;
         } else if (left_dim == 1) {

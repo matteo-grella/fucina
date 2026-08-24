@@ -101,8 +101,8 @@ unsupported operation is a compile error, never a runtime failure
 | Branch | dtypes | Capabilities |
 |---|---|---|
 | Float (differentiable) | `.f32` | Full surface: autograd (`variable`, `backward`, `grad`), all math/NN ops ([§4](04-tensor-operations.md)), load-time dense `packRhs`, all views and structural ops |
-| Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), the full structural set (`split`/`merge`/`flatten`/`reshape`/`sliceStep`/`flip`/`roll`/`stack`/`repeatAxis` + the [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index) base set), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`, load-time dense `packRhs`; [§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries ([§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig)) |
-| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64`, `.f8_e4m3`, `.f8_e5m2` | Constants only; construction, data access, structural ops, `to` (scalar casts, [§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)), and integer forward math ([§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` ([§4.6](04-tensor-operations.md#46-masks-comparisons-and-conditionals-srcagtensorzig)). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot`. The f8 storage floats (`.f8_e4m3`/`.f8_e5m2`, [§8.1](08-data-types-storage-and-the-raw-tensor-layer-internal.md#81-the-dtype-enum-srcdtypezig)) keep only construction, data access, structural ops, and `to` VALUE casts through the f32 bridge (no integer or float forward math) |
+| Typed float | `.f16`, `.bf16`, `.f64` (`supportsForwardFloatMath`) | Forward math: the native typed set (`add/sub/mul/div/sum/mean/sumAll/dot/scale/divScalar`, `to`), every view and structural op of the f32 branch except the constant-fill family (the shared set in [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)), and — **f16/bf16 only** — the widened forward set (unary family, gated, softmax/norm family, remaining reductions, masks, `pad`, `einsum`, load-time dense `packRhs`; [§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)). **f16/bf16 only, autograd LEAVES**: `variable`/`variableFromSlice` with f32 gradients; differentiable `to` casts and mixed-RHS `dot`/`einsum` are the graph entries ([§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig)) |
+| Typed scalar constant | `.bool`, `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64`, `.f8_e4m3`, `.f8_e5m2` | Constants only; construction, data access, the shared view/structural set ([§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)), `to` (scalar casts, [§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)), and integer forward math ([§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)): wrapping `add`/`sub`/`mul`, `maximum`/`minimum`, explicit `divTrunc`/`divFloor` + `rem`/`mod`, bitwise `bitAnd`/`bitOr`/`bitXor`, i64-returning `sum`/`sumAll`, plus exact integer `compare` ([§4.6](04-tensor-operations.md#46-masks-comparisons-and-conditionals-srcagtensorzig)). `.bool` keeps only `to`, the counting `sum`/`sumAll`, and the mask combinators `logicalAnd`/`logicalOr`/`logicalXor`/`logicalNot`. The f8 storage floats (`.f8_e4m3`/`.f8_e5m2`, [§8.1](08-data-types-storage-and-the-raw-tensor-layer-internal.md#81-the-dtype-enum-srcdtypezig)) keep only construction, data access, structural ops, and `to` VALUE casts through the f32 bridge (no integer or float forward math) |
 | Block-quantized constant | `q1_0/q2_0`, `q4_0 … q8_k`, `iq*`, `tq1_0/tq2_0`, `mxfp4`, `nvfp4` (`isBlockQuantized`) | Constants only; block construction, `to(.f32)` dequantize, `getRows`, row `concat`, `packRhs`/`packRhsAs` ([§10](10-quantization.md)) |
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)):
@@ -1095,13 +1095,21 @@ methods are documented above; [§4](04-tensor-operations.md) covers every math/N
 `snake`. The root free function `fucina.einsumMany(ctx, out_tags, operands)`
 is the N-ary companion of `einsum` ([§4.8](04-tensor-operations.md#48-dot-tag-directed-contraction-srcagtensorzig-srctag_opszig)).
 
+**Shared view set** (every scalar-dtype branch, one implementation in
+`src/ag/tensor/views.zig`; differentiable on f32, no-grad constants
+elsewhere, where a grad-requiring operand is `error.UnsupportedGradient`):
+`materialize`, `contiguous`, `detach`, `withTags`, `viewWithStrides`,
+`alignTo`, `permuteTo`, `transpose`, `insertAxis`, `squeeze`, `split`,
+`merge`, `reshape`, `broadcastTo`, `flatten`, `flip`, `roll`, `rollBy`,
+`narrow`, `select`, `sliceStep`, `slice`, `gather`, `setSlice`, `setRows`,
+`concat`, `stack`, `unbindInto`, `repeatAxis`.
+
 **Typed scalar-constant branch** (`.bool`/ints): `constant`, `fromTensor`,
 `fromSlice`, `fromBorrowedConstSlice`, `empty`, `zeros`, `ones`,
 `emptyLike`, `zerosLike`, `onesLike`, `item`,
 `data`, `dataConst`, `copyTo`, `axis`, `hasTag`, `deinit`, `asRawTensor`,
-`requiresGrad`, `dim`, `shape`, `isContiguous`, `materialize`, `withTags`, `alignTo`,
-`permuteTo`, `transpose`, `insertAxis`, `squeeze`, `broadcastTo`, `gather`,
-`narrow`, `concat`, `setSlice`, `setRows` — all [§3](03-tensors-types-construction-and-data-access.md) — plus `to` ([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)), the
+`requiresGrad`, `dim`, `shape`, `isContiguous`, and the shared view set
+above — all [§3](03-tensors-types-construction-and-data-access.md) — plus `to` ([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)), the
 integer forward math `add`, `sub`, `mul`, `maximum`, `minimum`,
 `divTrunc`, `divFloor`, `rem`, `mod`, `bitAnd`, `bitOr`, `bitXor`,
 `sum`, `sumAll` ([§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig); on `.bool` the arithmetic
@@ -1112,16 +1120,14 @@ only — the `bandMask` constructor ([§4.6](04-tensor-operations.md#46-masks-co
 `logicalAnd`, `logicalOr`, `logicalXor`, `logicalNot`.
 
 **Typed float branch** (`.f16`/`.bf16`/`.f64`): everything in the
-scalar-constant branch's [§3](03-tensors-types-construction-and-data-access.md) list, plus `requiresGrad`, `zeroGrad`, and
-`detach` on every typed float dtype (on f64 no leaf can exist, so
-`requiresGrad` is `false`, `zeroGrad` no-ops and
-`detach` just returns a no-grad view), plus — f16/bf16 only, compile
-errors on f64 — the leaf-autograd surface `variable`, `variableFromSlice`,
-`grad`, `gradView` (f32 gradients; [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig)), plus `to`
-([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)), the forward-only math `add`,
-`sub`, `mul`, `div`, `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`,
-and the structural set `split`, `merge`, `flatten`, `reshape`, `sliceStep`,
-`flip`, `roll`, `stack`, `repeatAxis`. **f16/bf16 only** (each computes
+scalar-constant branch's [§3](03-tensors-types-construction-and-data-access.md) list (the shared view set included), plus `requiresGrad` and
+`zeroGrad` on every typed float dtype (on f64 no leaf can exist, so
+`requiresGrad` is `false` and `zeroGrad` no-ops), plus — f16/bf16 only,
+compile errors on f64 — the leaf-autograd surface `variable`,
+`variableFromSlice`, `grad`, `gradView` (f32 gradients; [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig)), plus `to`
+([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)) and the forward-only math `add`,
+`sub`, `mul`, `div`, `sum`, `mean`, `sumAll`, `dot`, `scale`, `divScalar`.
+**f16/bf16 only** (each computes
 through f32 and narrows once; a compile error on f64 — [§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)): `unary` and
 the named unary aliases (`relu`, `exp`, `sqrt`, `rsqrt`, `sigmoid`, `silu`,
 `log`, `log1p`, `neg`, `abs`, `sin`, `cos`, `tanh`, `fastTanh`, `softcap30`,

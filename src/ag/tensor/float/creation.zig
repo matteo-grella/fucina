@@ -1,16 +1,15 @@
-//! f32 tensor methods: constructors and fills (variable/constant/from*, zeros..eye). A mixin over the ag
-//! FloatTensor struct; aliased back onto it in ../../tensor.zig.
+//! f32 tensor methods: constructors and fills (constant/from*, zeros..eye;
+//! the trainable-leaf constructors are in ../autograd.zig). A mixin over
+//! the ag FloatTensor struct; aliased back onto it in ../../tensor.zig.
 
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
-const core = @import("../../core.zig");
 const rng = @import("../../../rng.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
-const GradState = core.GradState;
 const validateTensorRank = tag_ops.validateTensorRank;
 
 pub fn Ops(comptime Self: type) type {
@@ -20,23 +19,6 @@ pub fn Ops(comptime Self: type) type {
         const tag_count = Self.tag_count;
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
-
-        /// Consumes `value` on success; on error, ownership stays with the caller.
-        pub fn variable(ctx: *ExecContext, value: RawTensor) !Self {
-            var v = value;
-            try validateTensorRank(.f32, tags, &v);
-
-            const state = try GradState.leaf(ctx.allocator);
-            errdefer state.deinit();
-
-            return .{ .value = v, .grad_state = state };
-        }
-
-        pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromSlice(.f32, raw_shape, values);
-            errdefer value.deinit();
-            return Self.variable(ctx, value);
-        }
 
         /// Consumes `value` on success; on error, ownership stays with the caller.
         pub fn constant(ctx: *ExecContext, value: RawTensor) !Self {

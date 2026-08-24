@@ -208,32 +208,31 @@ with an O(n²) pairwise check, free because it runs at compile time.
 > argument values, same returned type.
 
 Here is the real constructor, elided to its skeleton
-(src/ag/tensor.zig:189–215):
+(`src/ag/tensor.zig`):
 
 ```zig
-pub fn Tensor(comptime tags_spec: anytype) type {
-    const tensor_dtype = dtypeFromSpec(tags_spec);
-    if (comptime tensor_dtype == .f32) return FloatTensor(tags_spec);
-    if (comptime dtype_mod.isBlockQuantized(tensor_dtype)) return QuantizedConstantTensor(tags_spec, tensor_dtype);
-    return TypedConstantTensor(tags_spec, tensor_dtype);
+pub fn Tensor(comptime spec: anytype) type {
+    const tensor_dtype = comptime dtypeFromSpec(spec);
+    const tags = comptime normalizeTags(spec);
+    if (comptime tensor_dtype == .f32) return FloatTensor(tags);
+    if (comptime dtype_mod.isBlockQuantized(tensor_dtype)) return QuantizedTensor(tags, tensor_dtype);
+    if (comptime dtype_mod.supportsForwardFloatMath(tensor_dtype)) return TypedFloatTensor(tags, tensor_dtype);
+    return TypedScalarTensor(tags, tensor_dtype);
 }
 
-fn FloatTensor(comptime tags_spec: anytype) type {
-    const tags = normalizeTags(tags_spec);
-    comptime validateUniqueTags(tags);
-    const tag_rank = tags.len;
-    if (tag_rank > tensor_mod.max_rank) @compileError("too many tensor tags");
+fn FloatTensor(comptime tags: anytype) type {
+    comptime validateSpecTags(tags);
 
     return struct {
         pub const axis_tags = tags;
-        pub const tag_count = tag_rank;
-        pub const tensor_rank = rawRank(tag_rank);
+        pub const tag_count = tags.len;
+        pub const tensor_rank = rawRank(tags.len);
         pub const dtype = DType.f32;
 
         value: RawTensor,
         grad_state: ?*GradState = null,
         scope_owned: bool = false,
-        // ... every method of the f32 tensor follows
+        // ... every method of the f32 tensor follows, one alias line each
     };
 }
 ```
@@ -331,12 +330,13 @@ test "Tensor spec forms and comptime introspection" {
 }
 ```
 
-Notice *where* Fucina normalizes: `FloatTensor` computes
-`const tags = normalizeTags(tags_spec);` **before** `return struct { ... }`,
-so every comptime value the struct captures is already canonical. Spellings
-that mean the same thing converge before the type is declared; with Zig
-0.16.0, the returned types are then equal, as the snippet gate verifies on
-every CI run. That is the contract this course states — observed,
+Notice *where* Fucina normalizes: `Tensor` computes
+`const tags = comptime normalizeTags(spec);` **before** it instantiates a
+branch, so the branch builder receives the canonical tag list as its
+comptime argument and every spelling of the same tensor is the same call.
+Spellings that mean the same thing converge before the type is declared;
+the returned types are then equal by construction, as the snippet gate
+verifies on every CI run. That is the contract this course states — observed,
 test-pinned behavior plus the documented rule — and we won't speculate
 about compiler internals beyond it. The flip side needs no subtlety at all:
 `Tensor(.{ .batch, .in })` and `Tensor(.{ .in, .batch })` normalize to

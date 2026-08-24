@@ -225,7 +225,6 @@ fn expectNoFloatMath(comptime non_float_dtype: DType) void {
         "mean",
         "variance",
         "sumMany",
-        "flatten",
         "argmax",
         "max",
         "min",

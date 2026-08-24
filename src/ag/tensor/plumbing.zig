@@ -73,7 +73,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 }
             }
 
-            var value = try tag_ops.pointwise(op, left_tags, left_tensor, ctx, right_tags, right_tensor);
+            var value = try tag_ops.pointwise(.f32, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, left.requiresGrad() or right.requiresGrad(), PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, left.grad_state, right.grad_state, left_tensor, right_tensor });
         }

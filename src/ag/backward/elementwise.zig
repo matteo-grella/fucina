@@ -86,7 +86,7 @@ pub fn PointwiseBackward(
             defer half_ties.deinit();
             var weight = try ctx.elementwise(.add, &wins, &half_ties);
             defer weight.deinit();
-            return tag_ops.pointwise(.mul, result_tags, gy, ctx, result_tags, &weight);
+            return tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, result_tags, &weight);
         }
 
         pub fn vjp(
@@ -99,8 +99,8 @@ pub fn PointwiseBackward(
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var g = switch (op) {
                     .add, .sub => try gy.cloneView(),
-                    .mul => try tag_ops.pointwise(.mul, result_tags, gy, ctx, right_tags, &self.right_value.?),
-                    .div => try tag_ops.pointwise(.div, result_tags, gy, ctx, right_tags, &self.right_value.?),
+                    .mul => try tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, right_tags, &self.right_value.?),
+                    .div => try tag_ops.pointwise(.f32, .div, result_tags, gy, ctx, right_tags, &self.right_value.?),
                     .max, .min => try self.winnerWeightGrad(ctx, gy, .left),
                 };
                 defer g.deinit();
@@ -110,14 +110,14 @@ pub fn PointwiseBackward(
                 var g = switch (op) {
                     .add => try gy.cloneView(),
                     .sub => try ctx.scale(.f32, gy, -1),
-                    .mul => try tag_ops.pointwise(.mul, result_tags, gy, ctx, left_tags, &self.left_value.?),
+                    .mul => try tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, left_tags, &self.left_value.?),
                     .div => blk: {
                         const num_tags = comptime pointwiseResultTags(result_tags, left_tags);
-                        var numerator = try tag_ops.pointwise(.mul, result_tags, gy, ctx, left_tags, &self.left_value.?);
+                        var numerator = try tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, left_tags, &self.left_value.?);
                         defer numerator.deinit();
-                        var denominator = try tag_ops.pointwise(.mul, right_tags, &self.right_value.?, ctx, right_tags, &self.right_value.?);
+                        var denominator = try tag_ops.pointwise(.f32, .mul, right_tags, &self.right_value.?, ctx, right_tags, &self.right_value.?);
                         defer denominator.deinit();
-                        var quotient = try tag_ops.pointwise(.div, num_tags, &numerator, ctx, right_tags, &denominator);
+                        var quotient = try tag_ops.pointwise(.f32, .div, num_tags, &numerator, ctx, right_tags, &denominator);
                         defer quotient.deinit();
                         const neg = try ctx.scale(.f32, &quotient, -1);
                         break :blk neg;

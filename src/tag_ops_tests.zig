@@ -98,7 +98,7 @@ test "tag library: pointwise broadcasts operands by tag" {
         if (result.len != 2 or result[0] != .batch or result[1] != .d) @compileError("unexpected pointwise result tags");
     }
 
-    var y = try pointwise(.add, .{ .batch, .d }, &x, &ctx, .{.d}, &bias);
+    var y = try pointwise(.f32, .add, .{ .batch, .d }, &x, &ctx, .{.d}, &bias);
     defer y.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, y.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 14, 25, 36 }, y.dataConst());
@@ -108,7 +108,7 @@ test "tag library: pointwise broadcasts operands by tag" {
         if (result.len != 2 or result[0] != .d or result[1] != .batch) @compileError("unexpected flipped result tags");
     }
 
-    var z = try pointwise(.add, .{.d}, &bias, &ctx, .{ .batch, .d }, &x);
+    var z = try pointwise(.f32, .add, .{.d}, &bias, &ctx, .{ .batch, .d }, &x);
     defer z.deinit();
     try std.testing.expectEqualSlices(usize, &.{ 3, 2 }, z.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 11, 14, 22, 25, 33, 36 }, z.dataConst());
@@ -166,7 +166,7 @@ test "tag library: pointwise broadcasts scalars without materializing the source
     var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
-    var y = try pointwise(.mul, .{}, &scalar, &ctx, .{ .batch, .d }, &x);
+    var y = try pointwise(.f32, .mul, .{}, &scalar, &ctx, .{ .batch, .d }, &x);
     defer y.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, y.shape.slice());
@@ -184,7 +184,7 @@ test "tag library: rejects incompatible broadcast dimensions" {
     var y = try ctx.fromSlice(.f32, .{2}, &.{ 10, 20 });
     defer y.deinit();
 
-    try std.testing.expectError(TensorError.ShapeMismatch, pointwise(.add, .{.d}, &x, &ctx, .{.d}, &y));
+    try std.testing.expectError(TensorError.ShapeMismatch, pointwise(.f32, .add, .{.d}, &x, &ctx, .{.d}, &y));
     try std.testing.expectError(TensorError.ShapeMismatch, broadcastTensorTo(.f32, .{.d}, &x, .{.d}, .{2}));
 }
 

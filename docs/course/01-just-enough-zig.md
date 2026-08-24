@@ -718,18 +718,20 @@ is a compile error. Now scale the idea: what if the parameters were not a
 length but a tuple of *axis names*?
 
 That is precisely the library's public API. `fucina.Tensor` is a function —
-`src/ag/tensor.zig:189-194`:
+`src/ag/tensor.zig`:
 
 ```zig
-pub fn Tensor(comptime tags_spec: anytype) type {
-    const tensor_dtype = dtypeFromSpec(tags_spec);
-    if (comptime tensor_dtype == .f32) return FloatTensor(tags_spec);
-    if (comptime dtype_mod.isBlockQuantized(tensor_dtype)) return QuantizedConstantTensor(tags_spec, tensor_dtype);
-    return TypedConstantTensor(tags_spec, tensor_dtype);
+pub fn Tensor(comptime spec: anytype) type {
+    const tensor_dtype = comptime dtypeFromSpec(spec);
+    const tags = comptime normalizeTags(spec);
+    if (comptime tensor_dtype == .f32) return FloatTensor(tags);
+    if (comptime dtype_mod.isBlockQuantized(tensor_dtype)) return QuantizedTensor(tags, tensor_dtype);
+    if (comptime dtype_mod.supportsForwardFloatMath(tensor_dtype)) return TypedFloatTensor(tags, tensor_dtype);
+    return TypedScalarTensor(tags, tensor_dtype);
 }
 ```
 
-Six lines that carry the whole design. `Tensor(.{ .batch, .in })` calls this
+Eight lines that carry the whole design. `Tensor(.{ .batch, .in })` calls this
 function *during compilation*; it returns a freshly built struct type whose
 comptime declarations record the tags (`axis_tags`, `tag_count`,
 `tensor_rank` — `src/ag/tensor.zig:203-206`). `Tensor(.{ .batch, .in })` and

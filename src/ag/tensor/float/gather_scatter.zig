@@ -1,5 +1,7 @@
-//! f32 tensor methods: indexed reads and writes. A mixin over the ag
-//! FloatTensor struct; aliased back onto it in ../../tensor.zig.
+//! f32 tensor methods: indexed reads and writes beyond the dtype-generic
+//! views in ../views.zig (which own `gather`, `setSlice`, `setRows`). A
+//! mixin over the ag FloatTensor struct; aliased back onto it in
+//! ../../tensor.zig.
 
 const std = @import("std");
 const tensor_mod = @import("../../../tensor.zig");
@@ -13,9 +15,6 @@ const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const replaceTag = tags_mod.replaceTag;
 const RelposShiftBackward = backward.RelposShiftBackward;
-const GatherBackward = backward.GatherBackward;
-const SetSliceBackward = backward.SetSliceBackward;
-const SetRowsBackward = backward.SetRowsBackward;
 const IndexAddBackward = backward.IndexAddBackward;
 const TakeAlongBackward = backward.TakeAlongBackward;
 const ScatterAlongBackward = backward.ScatterAlongBackward;
@@ -61,20 +60,6 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.relposShift(self.asRawTensor(), t_k);
             errdefer value.deinit();
             return finishOp(out_tags, ctx, value, self.requiresGrad(), RelposShiftBackward, .{ ctx.allocator, self.grad_state, self.value.shape.slice()[2] });
-        }
-
-        pub fn gather(
-            self: *const Self,
-            ctx: *ExecContext,
-            comptime tag: Tag,
-            indices: []const usize,
-            comptime out_tag: Tag,
-        ) !Tensor(replaceTag(tags, tag, out_tag)) {
-            const result_tags = replaceTag(tags, tag, out_tag);
-            const gather_axis = comptime axis(tag);
-            var value = try ctx.gatherAxis(.f32, tag_rank, self.asRawTensor(), gather_axis, indices);
-            errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), GatherBackward(tags, gather_axis), .{ ctx.allocator, self.grad_state, &self.value, indices });
         }
 
         /// `gather` with a tensor of indices (torch.index_select): `indices`
@@ -236,20 +221,6 @@ pub fn Ops(comptime Self: type) type {
             var dense = try gathered.split(ctx, values_tag, tags, self.shape());
             defer dense.deinit();
             return dense.where(ctx, mask, self);
-        }
-
-        pub fn setSlice(self: *const Self, ctx: *ExecContext, comptime tag: Tag, start: usize, update: *const Self) !Self {
-            const slice_axis = comptime axis(tag);
-            var value = try ctx.setSliceAxis(.f32, tag_rank, self.asRawTensor(), update.asRawTensor(), slice_axis, start);
-            errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetSliceBackward(tags, slice_axis), .{ ctx.allocator, self.grad_state, update.grad_state, update.asRawTensor(), start });
-        }
-
-        pub fn setRows(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const Self) !Self {
-            const rows_axis = comptime axis(tag);
-            var value = try ctx.setRows(.f32, tag_rank, self.asRawTensor(), update.asRawTensor(), rows_axis, indices);
-            errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetRowsBackward(tags, rows_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
         }
 
         /// Functional row accumulation (torch.index_add): a copy of `self`

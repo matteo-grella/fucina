@@ -165,6 +165,26 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `Tensor(spec)`: one set of shared method mixins behind the four branches.
+  Views and data movement (`materialize`, `contiguous`, `detach`,
+  `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
+  `insertAxis`, `squeeze`, `split`, `merge`, `reshape`, `broadcastTo`,
+  `flatten`, `flip`, `roll`, `rollBy`, `narrow`, `select`, `sliceStep`,
+  `slice`, `gather`, `setSlice`, `setRows`, `concat`, `stack`,
+  `unbindInto`, `repeatAxis`) are written once over the dtype
+  (`src/ag/tensor/views.zig`) and are now the same set on the f32, typed
+  float, and typed scalar branches; integer, bool, and f8 tensors gain the
+  entries they lacked (`split`, `merge`, `flatten`, `reshape`,
+  `sliceStep`, `flip`, `roll`, `stack`, `repeatAxis`, and the composed
+  `contiguous`/`select`/`slice`/`unbindInto`/`rollBy`/`viewWithStrides`,
+  which the typed float branch gains too). On the typed branches these
+  ops stay no-grad constants: a grad-requiring operand is
+  `error.UnsupportedGradient`. The lifetime/accessor methods share one
+  implementation (`common.zig`), so `data()` on a 16-bit leaf that
+  requires gradients now returns `error.MutableDataRequiresNoGrad`, the
+  f32 rule. The dispatcher normalizes the spec before instantiating a
+  branch, so every spelling of the same (dtype, tags) is the same type by
+  construction.
 - `ExecContext` cross-entropy: the eight entries collapse into two.
   `crossEntropyLoss(ctx, rank, logits, axis, labels, options)` takes the
   options directly (`.{}` for the defaults); `CrossEntropyOptions` gains

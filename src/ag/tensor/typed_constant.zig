@@ -1,12 +1,13 @@
-//! The typed-constant tensor band: non-f32 `Tensor(...)` object
-//! types (integer/half/quantized storage, no-grad constants) and
-//! the `typedConstant*` op implementations they alias.
+//! The typed-constant math band: the constructors shared by the typed
+//! float and typed scalar branches (`TypedConstantBase`) and the
+//! `typedConstant*` op implementations those branches alias (forward math
+//! over the stored dtype, the f16/bf16 widened family, integer and mask
+//! math, casts). Views live in views.zig, accessors in common.zig.
 
 const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
 const dtype_mod = @import("../../dtype.zig");
 const exec_mod = @import("../../exec.zig");
-const backend_mod = @import("../../backend.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
@@ -23,23 +24,11 @@ const UnaryOp = exec_mod.UnaryOp;
 const GatedOp = exec_mod.GatedOp;
 const GradState = core.GradState;
 const Tag = tags_mod.Tag;
-const normalizeTags = tags_mod.normalizeTags;
-const validateUniqueTags = tags_mod.validateUniqueTags;
-const validateSameTagSet = tags_mod.validateSameTagSet;
 const rawRank = tags_mod.rawRank;
-const tagIndex = tags_mod.tagIndex;
-const tagIndexOrCompileError = tags_mod.tagIndexOrCompileError;
-const identityAxes = tags_mod.identityAxes;
-const alignAxes = tags_mod.alignAxes;
-const insertAxes = tags_mod.insertAxes;
-const squeezeAxes = tags_mod.squeezeAxes;
 const removeTag = tags_mod.removeTag;
-const replaceTag = tags_mod.replaceTag;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
 const dotResultTags = tags_mod.dotResultTags;
-const insertTagAt = tags_mod.insertTagAt;
-const splitTags = tags_mod.splitTags;
-const mergeTags = tags_mod.mergeTags;
+const normalizeTags = tags_mod.normalizeTags;
 const broadcastTensorTo = tag_ops.broadcastTensorTo;
 const pointwiseShape = tag_ops.pointwiseShape;
 const validateTensorRank = tag_ops.validateTensorRank;
@@ -49,211 +38,17 @@ const CastBackward = backward.CastBackward;
 pub fn Mod(comptime ag_tensor: type) type {
     return struct {
         const Tensor = ag_tensor.Tensor;
-        const PackedRhs = ag_tensor.PackedRhs;
-        const concat_inline_inputs = ag_tensor.concat_inline_inputs;
 
         const plumbing = @import("plumbing.zig").Mod(ag_tensor);
-        const pointwise = plumbing.pointwise;
-        const gatedPointwise = plumbing.gatedPointwise;
         const finishOp = plumbing.finishOp;
         const finishNoGrad = plumbing.finishNoGrad;
-        const axisViewTensorOf = plumbing.axisViewTensorOf;
         const typedDotRaw = plumbing.typedDotRaw;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
-        pub fn QuantizedConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: DType) type {
-            const tags = normalizeTags(tags_spec);
-            comptime validateUniqueTags(tags);
-            const tag_rank = tags.len;
-            if (tag_rank > tensor_mod.max_rank) @compileError("too many tensor tags");
-
-            const RawTypedTensor = tensor_mod.TensorOf(tensor_dtype);
-            const Elem = dtype_mod.Storage(tensor_dtype);
-
-            return struct {
-                pub const axis_tags = tags;
-                pub const tag_count = tag_rank;
-                pub const tensor_rank = rawRank(tag_rank);
-                pub const dtype = tensor_dtype;
-
-                value: RawTypedTensor,
-
-                const Self = @This();
-
-                /// Consumes `value` on success; on error, ownership stays with the caller.
-                pub fn constant(ctx: *ExecContext, value: RawTypedTensor) !Self {
-                    _ = ctx;
-                    var v = value;
-                    try validateTensorRank(tensor_dtype, tags, &v);
-                    return .{ .value = v };
-                }
-
-                pub fn fromTensor(ctx: *ExecContext, value: RawTypedTensor) !Self {
-                    return try Self.constant(ctx, value);
-                }
-
-                pub fn fromBlocks(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-                    var value = try ctx.fromStorageSlice(tensor_dtype, raw_shape, values);
-                    errdefer value.deinit();
-                    return try Self.constant(ctx, value);
-                }
-
-                pub fn fromStorageSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-                    return Self.fromBlocks(ctx, raw_shape, values);
-                }
-
-                pub fn fromBorrowedBlocks(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []Elem) !Self {
-                    var value = try ctx.fromBorrowedStorageSlice(tensor_dtype, raw_shape, values);
-                    errdefer value.deinit();
-                    return try Self.constant(ctx, value);
-                }
-
-                pub fn deinit(self: *Self) void {
-                    self.value.deinit();
-                    self.* = undefined;
-                }
-
-                pub fn asRawTensor(self: *const Self) *const RawTypedTensor {
-                    return &self.value;
-                }
-
-                pub fn data(self: *Self) ![]Elem {
-                    return self.value.dataChecked();
-                }
-
-                pub fn dataConst(self: *const Self) ![]const Elem {
-                    return self.value.dataConstChecked();
-                }
-
-                pub fn copyTo(self: *const Self, dst: []Elem) !void {
-                    return self.value.copyTo(dst);
-                }
-
-                pub fn requiresGrad(_: *const Self) bool {
-                    return false;
-                }
-
-                pub fn axis(comptime tag: Tag) usize {
-                    return tagIndexOrCompileError(tags, tag);
-                }
-
-                pub fn hasTag(comptime tag: Tag) bool {
-                    return comptime tagIndex(tags, tag) != null;
-                }
-
-                pub fn dim(self: *const Self, comptime tag: Tag) usize {
-                    return self.asRawTensor().shape.at(axis(tag));
-                }
-
-                pub fn shape(self: *const Self) [tensor_rank]usize {
-                    var out: [tensor_rank]usize = undefined;
-                    inline for (0..tensor_rank) |i| {
-                        out[i] = self.asRawTensor().shape.at(i);
-                    }
-                    return out;
-                }
-
-                pub fn withTags(self: *const Self, ctx: *ExecContext, comptime new_tags_spec: anytype) !Tensor(.{ .dtype = tensor_dtype, .tags = normalizeTags(new_tags_spec) }) {
-                    const new_tags = normalizeTags(new_tags_spec);
-                    comptime {
-                        validateUniqueTags(new_tags);
-                        if (new_tags.len != tag_rank) @compileError("withTags requires the same rank");
-                    }
-                    var value = try self.asRawTensor().cloneView();
-                    errdefer value.deinit();
-                    return Tensor(.{ .dtype = tensor_dtype, .tags = new_tags }).fromTensor(ctx, value);
-                }
-
-                pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
-                    comptime if (target_dtype != .f32) @compileError("block-quantized tensors can currently only be converted to f32");
-                    var value = try ctx.dequantizeTensor(tensor_dtype, self.asRawTensor());
-                    errdefer value.deinit();
-                    return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
-                }
-
-                pub fn isContiguous(self: *const Self) bool {
-                    return self.value.isContiguous();
-                }
-
-                pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
-                    var value = try ctx.materialize(tensor_dtype, self.asRawTensor());
-                    errdefer value.deinit();
-                    return Self.fromTensor(ctx, value);
-                }
-
-                pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
-                    comptime {
-                        if (tag_rank != 2) @compileError("block-quantized concat currently requires a rank-2 tensor");
-                        if (axis(tag) != 0) @compileError("block-quantized concat currently supports the row axis only");
-                    }
-
-                    var raw_inputs = try ctx.allocator.alloc(*const tensor_mod.TensorOf(tensor_dtype), others.len + 1);
-                    defer ctx.allocator.free(raw_inputs);
-
-                    raw_inputs[0] = self.asRawTensor();
-                    for (others, 0..) |other, i| raw_inputs[i + 1] = other.asRawTensor();
-
-                    var value = try ctx.concatQuantizedRows(tensor_dtype, raw_inputs);
-                    errdefer value.deinit();
-                    return Self.fromTensor(ctx, value);
-                }
-
-                /// Pack this rank-2 quantized weight into the ISA-best packed matmul
-                /// RHS layout for its dtype (see `PackedRhs`): q8_0→x4, q6_k→x4,
-                /// q5_k→x8, q4_k→x2mmla on aarch64+i8mm targets else x8. Use
-                /// `packRhsAs` to force a specific container instead.
-                pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(tensor_dtype) {
-                    comptime if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
-                    return ctx.packMatmulRhs(tensor_dtype, self.asRawTensor());
-                }
-
-                /// Explicit-layout escape hatch over `packRhs`: pack into a specific
-                /// container type (`fucina.quant.QuantizedMatmulRhsQ4_Kx8`, ...),
-                /// comptime-validated against the tensor dtype. Needed e.g. to
-                /// exercise the fused x8 kernels on hardware where `packRhs` would
-                /// select x2mmla, at the cost of the ISA-best kernel.
-                pub fn packRhsAs(self: *const Self, ctx: *ExecContext, comptime Rhs: type) !Rhs {
-                    comptime {
-                        if (tag_rank != 2) @compileError("packRhsAs requires a rank-2 tensor");
-                        if (Rhs == backend_mod.PackedDenseRhs) @compileError("packRhsAs(PackedDenseRhs) requires an f32/f16/bf16 tensor; call its packRhs method");
-                        if (Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4) @compileError("packRhsAs: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
-                        if (!ag_tensor.isPackedRhsType(Rhs)) @compileError("packRhsAs: " ++ @typeName(Rhs) ++ " is not a packed matmul RHS");
-                        if (tensor_dtype != Rhs.dtype) @compileError("packRhsAs(" ++ @typeName(Rhs) ++ ") requires a ." ++ @tagName(Rhs.dtype) ++ " tensor");
-                    }
-                    return ctx.packMatmulRhsAs(Rhs, self.asRawTensor());
-                }
-
-                pub fn getRows(
-                    self: *const Self,
-                    ctx: *ExecContext,
-                    comptime tag: Tag,
-                    indices: []const usize,
-                    comptime out_tag: Tag,
-                ) !Tensor(.{ .dtype = .f32, .tags = replaceTag(tags, tag, out_tag) }) {
-                    comptime {
-                        if (tag_rank != 2) @compileError("quantized getRows currently requires a rank-2 tensor");
-                        if (axis(tag) != 0) @compileError("quantized getRows gathers rows from the first axis");
-                    }
-                    const result_tags = replaceTag(tags, tag, out_tag);
-                    var value = try ctx.getRowsQuantized(tensor_dtype, self.asRawTensor(), indices);
-                    errdefer value.deinit();
-                    return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
-                }
-            };
-        }
-
-        pub fn TypedConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: DType) type {
-            if (comptime dtype_mod.supportsForwardFloatMath(tensor_dtype)) {
-                return TypedFloatConstantTensor(tags_spec, tensor_dtype);
-            }
-            return TypedScalarConstantTensor(tags_spec, tensor_dtype);
-        }
-
-        /// Shared constructor/accessor tier for the two typed-constant branches,
-        /// extending the `typedConstant*` shared-fn pattern below to everything the
-        /// branches duplicated verbatim: the branches differ only in which MATH decls
-        /// they add (`TypedFloatConstantTensor` layers to/add/.../dot on top).
+        /// Constructors shared by the typed float and typed scalar branches:
+        /// the no-grad wrap, slice and borrowed-slice construction, fills,
+        /// the i64 seed-stream constructors, and the `.bool` band mask.
         pub fn TypedConstantBase(comptime SelfT: type, comptime tags: anytype, comptime tensor_dtype: DType) type {
             const tensor_rank = rawRank(tags.len);
             const RawTypedTensor = tensor_mod.TensorOf(tensor_dtype);
@@ -313,7 +108,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 /// (torch.randint) from the deterministic counter-based stream at
                 /// `seed` (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md): element i is a pure function of `(seed, i)` via
                 /// the widening multiply-shift map (`fucina.rng.randintFill`).
-                /// i64-only — the repo-wide index dtype; cast with `to` for
+                /// i64-only (the repo-wide index dtype); cast with `to` for
                 /// narrower integers. `low >= high` is `InvalidShape`.
                 pub fn randint(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, low: i64, high: i64) !SelfT {
                     comptime if (tensor_dtype != .i64) @compileError("randint is i64-only (the repo-wide index dtype); cast the result with to()");
@@ -324,8 +119,8 @@ pub fn Mod(comptime ag_tensor: type) type {
                     return try @This().constant(ctx, value);
                 }
 
-                /// Rank-1 no-grad random permutation of `{0, …, n-1}`
-                /// (torch.randperm) as i64: Fisher–Yates driven by the
+                /// Rank-1 no-grad random permutation of `{0, ..., n-1}`
+                /// (torch.randperm) as i64: Fisher-Yates driven by the
                 /// counter-based stream at `seed` (`fucina.rng.randpermFill`;
                 /// same seed, same permutation). `n == 0` is `InvalidShape`
                 /// (zero-size tensors are not representable).
@@ -385,495 +180,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub fn onesLike(self: *const SelfT, ctx: *ExecContext) !SelfT {
                     return SelfT.ones(ctx, self.shape());
                 }
-
-                pub fn item(self: *const SelfT) !Elem {
-                    if (!self.value.isScalar()) return TensorError.InvalidShape;
-                    return (try self.value.dataConstChecked())[0];
-                }
-
-                pub fn data(self: *SelfT) ![]Elem {
-                    return self.value.dataChecked();
-                }
-
-                pub fn dataConst(self: *const SelfT) ![]const Elem {
-                    return self.value.dataConstChecked();
-                }
-
-                pub fn copyTo(self: *const SelfT, dst: []Elem) !void {
-                    return self.value.copyTo(dst);
-                }
-
-                pub fn axis(comptime tag: Tag) usize {
-                    return tagIndexOrCompileError(tags, tag);
-                }
-
-                pub fn hasTag(comptime tag: Tag) bool {
-                    return comptime tagIndex(tags, tag) != null;
-                }
             };
-        }
-
-        pub fn TypedScalarConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: DType) type {
-            const tags = normalizeTags(tags_spec);
-            comptime validateUniqueTags(tags);
-            const tag_rank = tags.len;
-            if (tag_rank > tensor_mod.max_rank) @compileError("too many tensor tags");
-
-            const RawTypedTensor = tensor_mod.TensorOf(tensor_dtype);
-
-            return struct {
-                pub const axis_tags = tags;
-                pub const tag_count = tag_rank;
-                pub const tensor_rank = rawRank(tag_rank);
-                pub const dtype = tensor_dtype;
-
-                value: RawTypedTensor,
-                const Self = @This();
-                const base = TypedConstantBase(Self, tags, tensor_dtype);
-
-                pub const constant = base.constant;
-                pub const fromTensor = base.fromTensor;
-                pub const fromSlice = base.fromSlice;
-                pub const fromBorrowedConstSlice = base.fromBorrowedConstSlice;
-                pub const empty = base.empty;
-                pub const zeros = base.zeros;
-                pub const ones = base.ones;
-                pub const emptyLike = base.emptyLike;
-                pub const zerosLike = base.zerosLike;
-                pub const onesLike = base.onesLike;
-                pub const randint = base.randint;
-                pub const randperm = base.randperm;
-                pub const bandMask = base.bandMask;
-                pub const item = base.item;
-                pub const data = base.data;
-                pub const dataConst = base.dataConst;
-                pub const copyTo = base.copyTo;
-                pub const axis = base.axis;
-                pub const hasTag = base.hasTag;
-
-                pub const deinit = typedConstantDeinit;
-                pub const asRawTensor = typedConstantAsRawTensor;
-                pub const requiresGrad = typedConstantRequiresGrad;
-
-                pub const dim = typedConstantDim;
-                pub const shape = typedConstantShape;
-                pub const isContiguous = typedConstantIsContiguous;
-                pub const materialize = typedConstantMaterialize;
-                pub const withTags = typedConstantWithTags;
-                pub const alignTo = typedConstantAlignTo;
-                pub const permuteTo = typedConstantPermuteTo;
-                pub const transpose = typedConstantTranspose;
-                pub const insertAxis = typedConstantInsertAxis;
-                pub const squeeze = typedConstantSqueeze;
-                pub const broadcastTo = typedConstantBroadcastTo;
-                pub const gather = typedConstantGather;
-                pub const narrow = typedConstantNarrow;
-                pub const concat = typedConstantConcat;
-                pub const setSlice = typedConstantSetSlice;
-                pub const setRows = typedConstantSetRows;
-
-                // Integer forward math (see docs/reference/04-tensor-operations.md): wrapping two's-complement
-                // pointwise, explicit division/remainder, bitwise combinators,
-                // i64-returning reductions, and scalar casts. On `.bool` the
-                // arithmetic entries are compile errors — only `to` and the
-                // counting `sum`/`sumAll` apply.
-                pub const to = typedConstantTo;
-                pub const add = typedConstantAdd;
-                pub const sub = typedConstantSub;
-                pub const mul = typedConstantMul;
-                pub const maximum = typedConstantMaximum;
-                pub const minimum = typedConstantMinimum;
-                pub const divTrunc = typedConstantDivTrunc;
-                pub const divFloor = typedConstantDivFloor;
-                pub const rem = typedConstantRem;
-                pub const mod = typedConstantMod;
-                pub const bitAnd = typedConstantBitAnd;
-                pub const bitOr = typedConstantBitOr;
-                pub const bitXor = typedConstantBitXor;
-                pub const sum = typedConstantSum;
-                pub const sumAll = typedConstantSumAll;
-
-                // Masks (see docs/reference/04-tensor-operations.md): integer `compare` is exact at any magnitude; the
-                // logical combinators live on the `.bool` branch.
-                pub const compare = typedConstantCompare;
-                pub const logicalAnd = typedConstantLogicalAnd;
-                pub const logicalOr = typedConstantLogicalOr;
-                pub const logicalXor = typedConstantLogicalXor;
-                pub const logicalNot = typedConstantLogicalNot;
-            };
-        }
-
-        pub fn TypedFloatConstantTensor(comptime tags_spec: anytype, comptime tensor_dtype: DType) type {
-            const tags = normalizeTags(tags_spec);
-            comptime validateUniqueTags(tags);
-            const tag_rank = tags.len;
-            if (tag_rank > tensor_mod.max_rank) @compileError("too many tensor tags");
-
-            const RawTypedTensor = tensor_mod.TensorOf(tensor_dtype);
-
-            return struct {
-                pub const axis_tags = tags;
-                pub const tag_count = tag_rank;
-                pub const tensor_rank = rawRank(tag_rank);
-                pub const dtype = tensor_dtype;
-
-                value: RawTypedTensor,
-                grad_state: ?*GradState = null,
-                scope_owned: bool = false,
-                const Self = @This();
-                const base = TypedConstantBase(Self, tags, tensor_dtype);
-
-                pub const constant = base.constant;
-                pub const fromTensor = base.fromTensor;
-                pub const fromSlice = base.fromSlice;
-                pub const fromBorrowedConstSlice = base.fromBorrowedConstSlice;
-                pub const empty = base.empty;
-                pub const zeros = base.zeros;
-                pub const ones = base.ones;
-                pub const emptyLike = base.emptyLike;
-                pub const zerosLike = base.zerosLike;
-                pub const onesLike = base.onesLike;
-                pub const item = base.item;
-                pub const data = base.data;
-                pub const dataConst = base.dataConst;
-                pub const copyTo = base.copyTo;
-                pub const axis = base.axis;
-                pub const hasTag = base.hasTag;
-
-                /// Trainable 16-bit leaf: the VALUE is stored in this dtype, the
-                /// accumulated gradient is ALWAYS f32 (there is no 16-bit gradient
-                /// anywhere). f16/bf16 only — f64 training is unsupported.
-                pub fn variable(ctx: *ExecContext, value: RawTypedTensor) !Self {
-                    comptime requireHalfFloatGrad(tensor_dtype, "variable");
-                    var v = value;
-                    try validateTensorRank(tensor_dtype, tags, &v);
-                    const state = try GradState.leaf(ctx.allocator);
-                    errdefer state.deinit();
-                    return .{ .value = v, .grad_state = state };
-                }
-
-                pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Scalar(tensor_dtype)) !Self {
-                    comptime requireHalfFloatGrad(tensor_dtype, "variableFromSlice");
-                    var value = try ctx.fromSlice(tensor_dtype, raw_shape, values);
-                    errdefer value.deinit();
-                    return try Self.variable(ctx, value);
-                }
-
-                pub fn requiresGrad(self: *const Self) bool {
-                    return self.grad_state != null;
-                }
-
-                pub fn zeroGrad(self: *const Self) void {
-                    if (self.grad_state) |state| state.zeroGrad();
-                }
-
-                /// The accumulated gradient as an owned f32 constant (null before
-                /// backward). The gradient of a 16-bit tensor is f32 by contract.
-                pub fn grad(self: *const Self, ctx: *ExecContext) !?Tensor(.{ .dtype = .f32, .tags = tags }) {
-                    comptime requireHalfFloatGrad(tensor_dtype, "grad");
-                    const state = self.grad_state orelse return null;
-                    var value = (try state.gradClone(ctx.allocator)) orelse return null;
-                    errdefer value.deinit();
-                    return try Tensor(.{ .dtype = .f32, .tags = tags }).constant(ctx, value);
-                }
-
-                /// Aliasing f32 view of the accumulated gradient (see `grad`).
-                pub fn gradView(self: *const Self, ctx: *ExecContext) !?Tensor(.{ .dtype = .f32, .tags = tags }) {
-                    comptime requireHalfFloatGrad(tensor_dtype, "gradView");
-                    const state = self.grad_state orelse return null;
-                    var value = (try state.gradView()) orelse return null;
-                    errdefer value.deinit();
-                    return try Tensor(.{ .dtype = .f32, .tags = tags }).constant(ctx, value);
-                }
-
-                /// No-grad view of the same storage (caller-owned constant).
-                pub fn detach(self: *const Self, ctx: *ExecContext) !Self {
-                    var value = try self.value.cloneView();
-                    errdefer value.deinit();
-                    return Self.fromTensor(ctx, value);
-                }
-
-                pub fn deinit(self: *Self) void {
-                    if (self.scope_owned) return; // borrow: the exec scope owns value + node
-                    self.value.deinit();
-                    if (self.grad_state) |state| state.deinit();
-                    self.* = undefined;
-                }
-
-                pub const asRawTensor = typedConstantAsRawTensor;
-
-                pub const dim = typedConstantDim;
-                pub const shape = typedConstantShape;
-                pub const isContiguous = typedConstantIsContiguous;
-                pub const materialize = typedConstantMaterialize;
-                pub const withTags = typedConstantWithTags;
-                pub const alignTo = typedConstantAlignTo;
-                pub const permuteTo = typedConstantPermuteTo;
-                pub const transpose = typedConstantTranspose;
-                pub const insertAxis = typedConstantInsertAxis;
-                pub const squeeze = typedConstantSqueeze;
-                pub const broadcastTo = typedConstantBroadcastTo;
-                pub const gather = typedConstantGather;
-                pub const narrow = typedConstantNarrow;
-                pub const concat = typedConstantConcat;
-                pub const setSlice = typedConstantSetSlice;
-                pub const setRows = typedConstantSetRows;
-
-                pub const to = typedConstantTo;
-                pub const add = typedConstantAdd;
-                pub const sub = typedConstantSub;
-                pub const mul = typedConstantMul;
-                pub const div = typedConstantDiv;
-                pub const sum = typedConstantSum;
-                pub const mean = typedConstantMean;
-                pub const sumAll = typedConstantSumAll;
-                pub const dot = typedConstantDot;
-
-                /// Snapshot this rank-2 f16/bf16 `[out, contract]` weight as f32
-                /// output-row panels for a FloatTensor `dotPacked`. Widening happens
-                /// once here; the returned resource is caller-owned and no-grad.
-                pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(tensor_dtype) {
-                    comptime {
-                        if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
-                        if (tensor_dtype != .f16 and tensor_dtype != .bf16)
-                            @compileError("dense packRhs supports f32, f16, and bf16 weights");
-                    }
-                    if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
-                    return ctx.packDenseMatmulRhs(tensor_dtype, self.asRawTensor());
-                }
-
-                // Structural ops (views / data movement; every typed float dtype).
-                pub const split = typedConstantSplit;
-                pub const merge = typedConstantMerge;
-                pub const flatten = typedConstantFlatten;
-                pub const reshape = typedConstantReshape;
-                pub const sliceStep = typedConstantSliceStep;
-                pub const flip = typedConstantFlip;
-                pub const roll = typedConstantRoll;
-                pub const stack = typedConstantStack;
-                pub const repeatAxis = typedConstantRepeatAxis;
-                pub const scale = typedConstantScale;
-                pub const divScalar = typedConstantDivScalar;
-
-                // Widened forward math (f16/bf16 only: f32 compute, one final round).
-                pub const unary = typedConstantUnary;
-                pub const relu = TypedUnaryMethod(.relu).call;
-                pub const exp = TypedUnaryMethod(.exp).call;
-                pub const sqrt = TypedUnaryMethod(.sqrt).call;
-                pub const rsqrt = TypedUnaryMethod(.rsqrt).call;
-                pub const sigmoid = TypedUnaryMethod(.sigmoid).call;
-                pub const silu = TypedUnaryMethod(.silu).call;
-                pub const log = TypedUnaryMethod(.log).call;
-                pub const log1p = TypedUnaryMethod(.log1p).call;
-                pub const neg = TypedUnaryMethod(.neg).call;
-                pub const abs = TypedUnaryMethod(.abs).call;
-                pub const sin = TypedUnaryMethod(.sin).call;
-                pub const cos = TypedUnaryMethod(.cos).call;
-                pub const tanh = TypedUnaryMethod(.tanh).call;
-                pub const fastTanh = TypedUnaryMethod(.fast_tanh).call;
-                pub const softcap30 = TypedUnaryMethod(.softcap_30).call;
-                pub const softcap15 = TypedUnaryMethod(.softcap_15).call;
-                pub const gelu = TypedUnaryMethod(.gelu).call;
-                pub const quickGelu = TypedUnaryMethod(.quick_gelu).call;
-                pub const elu = TypedUnaryMethod(.elu).call;
-                pub const geluErf = TypedUnaryMethod(.gelu_erf).call;
-                pub const erf = TypedUnaryMethod(.erf).call;
-                pub const floor = TypedUnaryMethod(.floor).call;
-                pub const ceil = TypedUnaryMethod(.ceil).call;
-                pub const round = TypedUnaryMethod(.round).call;
-                pub const sign = TypedUnaryMethod(.sign).call;
-                pub const reciprocal = TypedUnaryMethod(.reciprocal).call;
-                pub const leakyRelu = typedConstantLeakyRelu;
-                pub const clamp = typedConstantClamp;
-                pub const addScalar = typedConstantAddScalar;
-                pub const subScalar = typedConstantSubScalar;
-                pub const powScalar = typedConstantPowScalar;
-                pub const maximum = typedConstantMaximum;
-                pub const minimum = typedConstantMinimum;
-                pub const gated = typedConstantGated;
-                pub const glu = typedConstantGlu;
-                pub const swiglu = typedConstantSwiglu;
-                pub const geglu = typedConstantGeglu;
-                pub const softmax = typedConstantSoftmax;
-                pub const logSoftmax = typedConstantLogSoftmax;
-                pub const rmsNorm = typedConstantRmsNorm;
-                pub const rmsNormMul = typedConstantRmsNormMul;
-                pub const layerNorm = typedConstantLayerNorm;
-                pub const cumsum = typedConstantCumsum;
-                pub const cumprod = typedConstantCumprod;
-                pub const where = typedConstantWhere;
-                pub const maskedFill = typedConstantMaskedFill;
-                pub const compare = typedConstantCompare;
-                pub const pad = typedConstantPad;
-                pub const einsum = typedConstantEinsum;
-
-                // Widened reductions (f16/bf16 only; f32 result per the dtype policy in docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md).
-                pub const max = typedConstantMax;
-                pub const min = typedConstantMin;
-                pub const argmax = typedConstantArgmax;
-                pub const prod = typedConstantProd;
-                pub const variance = typedConstantVariance;
-                pub const logsumexp = typedConstantLogsumexp;
-            };
-        }
-
-        pub fn typedConstantDeinit(self: anytype) void {
-            self.value.deinit();
-            self.* = undefined;
-        }
-
-        pub fn typedConstantAsRawTensor(self: anytype) *const tensor_mod.TensorOf(TensorObject(@TypeOf(self)).dtype) {
-            return &self.value;
-        }
-
-        pub fn typedConstantRequiresGrad(_: anytype) bool {
-            return false;
-        }
-
-        pub fn typedConstantDim(self: anytype, comptime tag: Tag) usize {
-            const Self = TensorObject(@TypeOf(self));
-            return self.asRawTensor().shape.at(Self.axis(tag));
-        }
-
-        pub fn typedConstantShape(self: anytype) [TensorObject(@TypeOf(self)).tensor_rank]usize {
-            const Self = TensorObject(@TypeOf(self));
-            var out: [Self.tensor_rank]usize = undefined;
-            inline for (0..Self.tensor_rank) |i| {
-                out[i] = self.asRawTensor().shape.at(i);
-            }
-            return out;
-        }
-
-        pub fn typedConstantIsContiguous(self: anytype) bool {
-            return self.value.isContiguous();
-        }
-
-        pub fn typedConstantMaterialize(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.materialize(Self.dtype, self.asRawTensor());
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantWithTags(self: anytype, ctx: *ExecContext, comptime new_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(new_tags_spec) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const new_tags = normalizeTags(new_tags_spec);
-            comptime {
-                validateUniqueTags(new_tags);
-                if (new_tags.len != Self.tag_count) @compileError("withTags requires the same rank");
-            }
-            return typedConstantAxisView(self, ctx, identityAxes(Self.tag_count), new_tags);
-        }
-
-        pub fn typedConstantAlignTo(self: anytype, ctx: *ExecContext, comptime target_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(target_tags_spec) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const target_tags = normalizeTags(target_tags_spec);
-            return typedConstantAxisView(self, ctx, alignAxes(Self.axis_tags, target_tags), target_tags);
-        }
-
-        pub fn typedConstantPermuteTo(self: anytype, ctx: *ExecContext, comptime target_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(target_tags_spec) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const target_tags = normalizeTags(target_tags_spec);
-            comptime validateSameTagSet(Self.axis_tags, target_tags);
-            return typedConstantAxisView(self, ctx, alignAxes(Self.axis_tags, target_tags), target_tags);
-        }
-
-        pub fn typedConstantTranspose(self: anytype, ctx: *ExecContext, comptime target_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(target_tags_spec) }) {
-            return typedConstantPermuteTo(self, ctx, target_tags_spec);
-        }
-
-        pub fn typedConstantInsertAxis(self: anytype, ctx: *ExecContext, comptime tag: Tag, comptime axis_index: usize) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = insertTagAt(TensorObject(@TypeOf(self)).axis_tags, tag, axis_index) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const result_tags = insertTagAt(Self.axis_tags, tag, axis_index);
-            return typedConstantAxisView(self, ctx, insertAxes(Self.tag_count, axis_index), result_tags);
-        }
-
-        pub fn typedConstantSqueeze(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const result_tags = removeTag(Self.axis_tags, tag);
-            const axis_index = comptime tagIndexOrCompileError(Self.axis_tags, tag);
-            if (self.asRawTensor().shape.at(axis_index) != 1) return TensorError.InvalidShape;
-            return typedConstantAxisView(self, ctx, squeezeAxes(Self.tag_count, axis_index), result_tags);
-        }
-
-        pub fn typedConstantBroadcastTo(
-            self: anytype,
-            ctx: *ExecContext,
-            comptime target_tags_spec: anytype,
-            target_shape: [normalizeTags(target_tags_spec).len]usize,
-        ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(target_tags_spec) }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            const target_tags = normalizeTags(target_tags_spec);
-            var value = try broadcastTensorTo(Self.dtype, Self.axis_tags, self.asRawTensor(), target_tags, target_shape);
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = target_tags }).fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantGather(
-            self: anytype,
-            ctx: *ExecContext,
-            comptime tag: Tag,
-            indices: []const usize,
-            comptime out_tag: Tag,
-        ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = replaceTag(TensorObject(@TypeOf(self)).axis_tags, tag, out_tag) }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            const result_tags = replaceTag(Self.axis_tags, tag, out_tag);
-            var value = try ctx.gatherAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), indices);
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantNarrow(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.narrowAxis(Self.dtype, Self.tag_count, self.asRawTensor(), Self.axis(tag), start, length);
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantConcat(self: anytype, ctx: *ExecContext, comptime tag: Tag, others: []const *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            for (others) |other_item| try typedRequireNoGrad(other_item);
-            const Self = TensorObject(@TypeOf(self));
-            const RawTypedTensor = tensor_mod.TensorOf(Self.dtype);
-            var raw_inputs = try ctx.allocator.alloc(*const RawTypedTensor, others.len + 1);
-            defer ctx.allocator.free(raw_inputs);
-
-            raw_inputs[0] = self.asRawTensor();
-            for (others, 0..) |other, i| raw_inputs[i + 1] = other.asRawTensor();
-
-            var value = try ctx.concatAxis(Self.dtype, Self.tag_count, raw_inputs, Self.axis(tag));
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantSetSlice(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, update: *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            try typedRequireNoGrad(update);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.setSliceAxis(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), start);
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantSetRows(self: anytype, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const TensorObject(@TypeOf(self))) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            try typedRequireNoGrad(update);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try ctx.setRows(Self.dtype, Self.tag_count, self.asRawTensor(), update.asRawTensor(), Self.axis(tag), indices);
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantAxisView(self: anytype, ctx: *ExecContext, comptime axes: anytype, comptime target_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = target_tags }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try axisViewTensorOf(Self.dtype, self.asRawTensor(), axes, target_tags);
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = target_tags }).fromTensor(ctx, value);
         }
 
         pub fn typedConstantTo(self: anytype, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = TensorObject(@TypeOf(self)).axis_tags }) {
@@ -952,18 +259,12 @@ pub fn Mod(comptime ag_tensor: type) type {
 
         // Widened typed-float ops: forward coverage for ops with no native typed
         // kernel. The input widens to f32, the f32 exec kernel runs, and the result
-        // narrows ONCE on store — f32 accumulation with a single final round, the
+        // narrows ONCE on store: f32 accumulation with a single final round, the
         // dtype policy in docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md. f64 is excluded at comptime: f64 math must stay f64, and
         // rounding it through f32 would silently lose precision.
         pub fn requireWidenedTypedFloat(comptime tensor_dtype: DType, comptime what: []const u8) void {
             if (tensor_dtype != .f16 and tensor_dtype != .bf16) {
-                @compileError(what ++ " on the typed float branch is f16/bf16 only (it computes through f32; f64 must not round through f32 — cast explicitly)");
-            }
-        }
-
-        pub fn requireHalfFloatGrad(comptime tensor_dtype: DType, comptime what: []const u8) void {
-            if (tensor_dtype != .f16 and tensor_dtype != .bf16) {
-                @compileError(what ++ " requires an f16/bf16 tensor (gradients are always f32; f64 training is unsupported)");
+                @compileError(what ++ " on the typed float branch is f16/bf16 only (it computes through f32; f64 must not round through f32; cast explicitly)");
             }
         }
 
@@ -972,10 +273,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// path; the differentiable typed entries are `to` and the mixed-RHS
         /// `dot`/`einsum`).
         pub fn typedRequireNoGrad(operand: anytype) !void {
-            const Operand = TensorObject(@TypeOf(operand));
-            if (comptime @hasField(Operand, "grad_state")) {
-                if (operand.grad_state != null) return error.UnsupportedGradient;
-            }
+            if (operand.requiresGrad()) return error.UnsupportedGradient;
         }
 
         /// Scope payload for a grad-carrying 16-bit result: the exec-scope slot
@@ -997,7 +295,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         }
 
         /// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the
-        /// f32 → f16/bf16 cast). Same contract as `finishOp`: consumes `value` on
+        /// f32 -> f16/bf16 cast). Same contract as `finishOp`: consumes `value` on
         /// success; under an active exec scope the result is a scope-owned borrow.
         pub fn typedFinishOp(
             comptime tensor_dtype: DType,
@@ -1046,7 +344,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
         pub fn TypedUnaryMethod(comptime op: UnaryOp) type {
             return struct {
-                fn call(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
+                pub fn call(self: anytype, ctx: *ExecContext) !TensorObject(@TypeOf(self)) {
                     return typedConstantUnary(self, ctx, op);
                 }
             };
@@ -1132,7 +430,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             defer wide_left.deinit();
             var wide_right = try ctx.cast(Self.dtype, .f32, other_ptr.asRawTensor());
             defer wide_right.deinit();
-            var wide_value = try tag_ops.pointwise(op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
+            var wide_value = try tag_ops.pointwise(.f32, op, Self.axis_tags, &wide_left, ctx, Other.axis_tags, &wide_right);
             defer wide_value.deinit();
             return typedFromWidened(Self.dtype, result_tags, ctx, &wide_value);
         }
@@ -1237,7 +535,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         }
 
         /// Bitwise combinators on two's-complement bit patterns, with the standard
-        /// tag-broadcast rule. Integer dtypes only — `.bool` masks use the
+        /// tag-broadcast rule. Integer dtypes only: `.bool` masks use the
         /// truthiness `logicalAnd/Or/Xor`, and floats have no bit-pattern algebra.
         pub fn typedIntBitwise(
             comptime op: exec_mod.IntBitwiseOp,
@@ -1604,7 +902,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
         /// Widened einsum: both operands widen to f32 and the f32 GEMM lowering
         /// runs (f32 accumulation); the result narrows to the input dtype per the
-        /// matmul dtype policy (docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md) — the same contract as the typed `dot`.
+        /// matmul dtype policy (docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md), the same contract as the typed `dot`.
         pub fn typedConstantEinsum(self: anytype, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(out_tags) }) {
             try typedRequireNoGrad(self);
             try typedRequireNoGrad(other);
@@ -1634,141 +932,10 @@ pub fn Mod(comptime ag_tensor: type) type {
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
 
-        // Typed structural ops: pure views / data movement, valid for every typed
-        // float dtype (f64 included — nothing rounds through f32).
-        pub fn typedConstantSplit(
-            self: anytype,
-            ctx: *ExecContext,
-            comptime tag: Tag,
-            comptime split_tags_spec: anytype,
-            split_shape: [normalizeTags(split_tags_spec).len]usize,
-        ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = splitTags(TensorObject(@TypeOf(self)).axis_tags, tag, normalizeTags(split_tags_spec)) }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            const split_tags = normalizeTags(split_tags_spec);
-            const result_tags = splitTags(Self.axis_tags, tag, split_tags);
-            var value = try tag_ops.splitAxisView(Self.dtype, Self.axis_tags, self.asRawTensor(), tag, split_tags, split_shape);
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantMerge(self: anytype, ctx: *ExecContext, comptime out_tag: Tag, comptime merge_tags_spec: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = mergeTags(TensorObject(@TypeOf(self)).axis_tags, out_tag, normalizeTags(merge_tags_spec)) }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            const merge_tags = normalizeTags(merge_tags_spec);
-            const result_tags = mergeTags(Self.axis_tags, out_tag, merge_tags);
-            var value = try tag_ops.mergeAxesView(Self.dtype, Self.axis_tags, self.asRawTensor(), out_tag, merge_tags);
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = result_tags }).fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantFlatten(self: anytype, ctx: *ExecContext, comptime out_tag: Tag) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = .{out_tag} }) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            var value = try tag_ops.flattenTensor(Self.dtype, ctx, self.asRawTensor());
-            errdefer value.deinit();
-            return Tensor(.{ .dtype = Self.dtype, .tags = .{out_tag} }).fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantReshape(
-            self: anytype,
-            ctx: *ExecContext,
-            comptime new_tags_spec: anytype,
-            new_shape: [normalizeTags(new_tags_spec).len]usize,
-        ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(new_tags_spec) }) {
-            const new_tags = comptime normalizeTags(new_tags_spec);
-            if (comptime new_tags.len == 1) {
-                if (self.asRawTensor().len() != new_shape[0]) return TensorError.InvalidShape;
-                return typedConstantFlatten(self, ctx, new_tags[0]);
-            }
-            var flat = try typedConstantFlatten(self, ctx, new_tags[0]);
-            defer flat.deinit();
-            return typedConstantSplit(&flat, ctx, new_tags[0], new_tags_spec, new_shape);
-        }
-
-        pub fn typedConstantSliceStep(self: anytype, ctx: *ExecContext, comptime tag: Tag, start: usize, length: usize, step: usize) !TensorObject(@TypeOf(self)) {
-            try typedRequireNoGrad(self);
-            const Self = TensorObject(@TypeOf(self));
-            const slice_axis = comptime Self.axis(tag);
-            const raw = self.asRawTensor();
-            const axis_dim = raw.shape.at(slice_axis);
-            if (step == 0 or length == 0) return TensorError.InvalidShape;
-            if (start >= axis_dim or start + (length - 1) * step >= axis_dim) return TensorError.InvalidShape;
-            var new_shape: [Self.tensor_rank]usize = undefined;
-            var new_strides: [Self.tensor_rank]usize = undefined;
-            inline for (0..Self.tensor_rank) |i| {
-                new_shape[i] = raw.shape.at(i);
-                new_strides[i] = raw.strides.at(i);
-            }
-            new_shape[slice_axis] = length;
-            new_strides[slice_axis] = raw.strides.at(slice_axis) * step;
-            var value = try raw.viewWithStridesOffset(&new_shape, &new_strides, start * raw.strides.at(slice_axis));
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn typedConstantFlip(self: anytype, ctx: *ExecContext, comptime tag: Tag) !TensorObject(@TypeOf(self)) {
-            const Self = TensorObject(@TypeOf(self));
-            const n = self.asRawTensor().shape.at(Self.axis(tag));
-            const indices = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(indices);
-            for (indices, 0..) |*index, i| index.* = n - 1 - i;
-            return typedConstantGather(self, ctx, tag, indices, tag);
-        }
-
-        pub fn typedConstantRoll(self: anytype, ctx: *ExecContext, comptime tag: Tag, shift: isize) !TensorObject(@TypeOf(self)) {
-            const Self = TensorObject(@TypeOf(self));
-            const n = self.asRawTensor().shape.at(Self.axis(tag));
-            const indices = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(indices);
-            // out[i] = x[(i - shift) mod n]; s = shift mod n in [0, n).
-            const s: usize = @intCast(@mod(shift, @as(isize, @intCast(n))));
-            for (indices, 0..) |*index, i| index.* = (i + n - s) % n;
-            return typedConstantGather(self, ctx, tag, indices, tag);
-        }
-
-        pub fn typedConstantStack(
-            self: anytype,
-            ctx: *ExecContext,
-            comptime new_tag: Tag,
-            comptime axis_index: usize,
-            others: []const *const TensorObject(@TypeOf(self)),
-        ) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = insertTagAt(TensorObject(@TypeOf(self)).axis_tags, new_tag, axis_index) }) {
-            const Self = TensorObject(@TypeOf(self));
-            const Expanded = Tensor(.{ .dtype = Self.dtype, .tags = insertTagAt(Self.axis_tags, new_tag, axis_index) });
-            var expanded = try ctx.allocator.alloc(Expanded, others.len + 1);
-            defer ctx.allocator.free(expanded);
-            var created: usize = 0;
-            defer for (expanded[0..created]) |*view| view.deinit();
-
-            expanded[0] = try typedConstantInsertAxis(self, ctx, new_tag, axis_index);
-            created = 1;
-            for (others) |other| {
-                expanded[created] = try typedConstantInsertAxis(other, ctx, new_tag, axis_index);
-                created += 1;
-            }
-
-            var ptrs_stack: [concat_inline_inputs]*const Expanded = undefined;
-            const ptrs = if (others.len <= ptrs_stack.len)
-                ptrs_stack[0..others.len]
-            else
-                try ctx.allocator.alloc(*const Expanded, others.len);
-            defer if (others.len > ptrs_stack.len) ctx.allocator.free(ptrs);
-            for (ptrs, expanded[1..]) |*ptr, *view| ptr.* = view;
-            return typedConstantConcat(&expanded[0], ctx, new_tag, ptrs);
-        }
-
-        pub fn typedConstantRepeatAxis(self: anytype, ctx: *ExecContext, comptime tag: Tag, n: usize) !TensorObject(@TypeOf(self)) {
-            const Self = TensorObject(@TypeOf(self));
-            if (n == 0) return TensorError.InvalidShape;
-            if (n == 1) return typedConstantWithTags(self, ctx, Self.axis_tags);
-            const ptrs = try ctx.allocator.alloc(*const Self, n - 1);
-            defer ctx.allocator.free(ptrs);
-            const self_ptr = tensorObjectPtrFrom(@TypeOf(self), &self);
-            for (ptrs) |*ptr| ptr.* = self_ptr;
-            return typedConstantConcat(self_ptr, ctx, tag, ptrs);
-        }
-
+        /// Native typed pointwise over the tag-broadcast rule (`tag_ops.pointwise`
+        /// on `tensor_dtype`). The facade rules stated here: integer `div` is
+        /// explicit (`divTrunc`/`divFloor`), float `maximum`/`minimum` widen
+        /// through f32, and `.bool` has no arithmetic.
         pub fn typedPointwise(
             comptime tensor_dtype: DType,
             comptime op: PointwiseOp,
@@ -1779,38 +946,19 @@ pub fn Mod(comptime ag_tensor: type) type {
             try typedRequireNoGrad(self);
             try typedRequireNoGrad(other);
             const SelfTensor = TensorObject(@TypeOf(self));
-            const left_tags = SelfTensor.axis_tags;
             const Other = TensorObject(@TypeOf(other));
-            if (Other.dtype != tensor_dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
-            if (comptime tensor_dtype == .bool) @compileError("bool tensors have no pointwise arithmetic; cast with to() first");
-            const right_tags = Other.axis_tags;
+            comptime {
+                if (Other.dtype != tensor_dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
+                if (tensor_dtype == .bool) @compileError("bool tensors have no pointwise arithmetic; cast with to() first");
+                if (op == .div and dtype_mod.supportsIntMath(tensor_dtype))
+                    @compileError("integer `div` is explicit: use divTrunc/divFloor (torch's `/` promotes to float; Fucina keeps promotion explicit)");
+                if ((op == .max or op == .min) and !dtype_mod.supportsIntMath(tensor_dtype))
+                    @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)");
+            }
             const left = tensorObjectPtrFrom(@TypeOf(self), &self);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
-            const result_tags = pointwiseResultTags(left_tags, right_tags);
-            const result_shape = try pointwiseShape(tensor_dtype, result_tags, left_tags, left.asRawTensor(), right_tags, right.asRawTensor());
-
-            var left_view = try broadcastTensorTo(tensor_dtype, left_tags, left.asRawTensor(), result_tags, result_shape);
-            defer left_view.deinit();
-            var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right.asRawTensor(), result_tags, result_shape);
-            defer right_view.deinit();
-
-            var value = switch (op) {
-                .add => try ctx.add(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .sub => try ctx.sub(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .mul => try ctx.mul(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .div => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
-                    @compileError("integer `div` is explicit: use divTrunc/divFloor (torch's `/` promotes to float; Fucina keeps promotion explicit)")
-                else
-                    try ctx.div(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view),
-                .max => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
-                    try ctx.max(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
-                else
-                    @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
-                .min => if (comptime dtype_mod.supportsIntMath(tensor_dtype))
-                    try ctx.min(tensor_dtype, rawRank(result_tags.len), &left_view, &right_view)
-                else
-                    @compileError("float typed maximum/minimum widen through f32 (the f16/bf16 facade entries)"),
-            };
+            const result_tags = pointwiseResultTags(SelfTensor.axis_tags, Other.axis_tags);
+            var value = try tag_ops.pointwise(tensor_dtype, op, SelfTensor.axis_tags, left.asRawTensor(), ctx, Other.axis_tags, right.asRawTensor());
             errdefer value.deinit();
             return Tensor(.{ .dtype = dtype_mod.outputDType(.pointwise, tensor_dtype), .tags = result_tags }).fromTensor(ctx, value);
         }

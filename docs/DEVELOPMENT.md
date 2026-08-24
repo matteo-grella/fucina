@@ -225,7 +225,9 @@ template (e.g. `softmax` for a row op, `maxPool2d` for a pool op).
 9. `src/ag/tensor/float/<domain>.zig` — the facade method (tag algebra,
    result finishing), plus one alias line in `src/ag/tensor.zig`.
 10. `src/ag/tensor/typed_constant.zig` — only if the op should also exist
-    on non-f32 constant tensors.
+    on non-f32 constant tensors. A view or data-movement op with a
+    dtype-generic kernel goes in `src/ag/tensor/views.zig` instead, once,
+    for every scalar dtype.
 11. GPU offload (only if warranted by measurement): the provider seam in
     `src/backend/gpu_provider.zig` plus both providers and `gpu_none.zig`;
     the conformance check forces all three.
