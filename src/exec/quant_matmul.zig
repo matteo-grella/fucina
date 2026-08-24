@@ -1,3 +1,8 @@
+//! Quantized matmul dispatch: dequantize/getRows, the tensor-RHS and
+//! packed-RHS matmul entries, RHS pack preparation, the fused
+//! activation+quantize+GEMM arms (`splitSwiGlu`/`rmsNormMul`/`geglu` over
+//! the Q8_0x4 and K-quant packs), and the GPU dense-quant entries. Domain
+//! module: every op receives an explicit `*ExecContext`.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const kernels = backend_mod.kernels;
@@ -480,19 +485,47 @@ fn fusedActQuantDispatch(self: *ExecContext, comptime TaskT: type, base: TaskT, 
 const KQuantFusedRhsKind = enum { q4_kx8, q5_kx8, q6_kx4 };
 
 fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsKind, gate_up: *const Tensor, rhs: anytype) !Tensor {
-    const qm = backend_mod.quantized_matmul;
     const gv = try gate_up.rankView(2);
     const m = gv.dim(0);
     const axis_dim = gv.dim(1);
     if (axis_dim % 2 != 0) return tensor.TensorError.InvalidShape;
     const k = axis_dim / 2;
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try qm.q8k.qkBlockCount(k);
-    const n = rhs.n;
 
     var gg = try self.prepareContiguous(.f32, gate_up);
     defer gg.deinit();
-    const input = gg.tensor().dataConst();
+    return fusedKQuantGemm(self, kind, .split_swiglu, rhs, gg.tensor().dataConst(), axis_dim, m, k, .{});
+}
+
+/// Act-specific task fields the fused K-quant engine threads through to
+/// `FusedActQuantTask`; fields an act does not use keep the Task defaults.
+const FusedKQuantExtras = struct {
+    up: []const f32 = &.{},
+    eps: f32 = 0,
+    inv_cols: f32 = 0,
+    rows_kernel: bool = true,
+};
+
+/// The shared engine of the fused activation+quantize+K-quant-GEMM entries
+/// (`splitSwiGluMatmulKQuantImpl`, `rmsNormMulMatmulKQuantImpl`): the
+/// x4-batch policy, the Q8_Kx4 prefix arm, the per-row Q8_K tail arm,
+/// scratch and pool setup, and the packed GEMM per stage. Callers validate
+/// shapes and prepare `input` (contiguous f32 rows, `input_row_stride`
+/// elements apart); the act picks the task family.
+fn fusedKQuantGemm(
+    self: *ExecContext,
+    comptime kind: KQuantFusedRhsKind,
+    comptime act: exec_row_ops.FusedActKind,
+    rhs: anytype,
+    input: []const f32,
+    input_row_stride: usize,
+    m: usize,
+    k: usize,
+    extras: FusedKQuantExtras,
+) !Tensor {
+    const qm = backend_mod.quantized_matmul;
+    const blocks_per_row = try qm.q8k.qkBlockCount(k);
+    const n = rhs.n;
 
     var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
@@ -520,14 +553,17 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
         var qlhs_x4_lease = try self.buffers.acquireScratch(qm.BlockQ8_Kx4, try checkedTensorProduct(row_groups, blocks_per_row));
         defer qlhs_x4_lease.release();
         const qlhs_x4 = qlhs_x4_lease.items;
-        const TaskT = FusedActQuantTask(.split_swiglu, .q8_kx4);
+        const TaskT = FusedActQuantTask(act, .q8_kx4);
         fusedActQuantDispatch(self, TaskT, .{
             .gate = input,
-            .up = &.{},
+            .up = extras.up,
             .scratch = &.{},
             .rows = prefix_rows,
             .cols = k,
             .blocks_per_row = blocks_per_row,
+            .eps = extras.eps,
+            .inv_cols = extras.inv_cols,
+            .rows_kernel = extras.rows_kernel,
             .row_group_start = 0,
             .row_group_end = row_groups,
             .x4_blocks = qlhs_x4,
@@ -543,14 +579,17 @@ fn splitSwiGluMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhs
         var qlhs_rows_lease = try self.buffers.acquireScratch(dtype_mod.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
         defer qlhs_rows_lease.release();
         const qlhs_rows = qlhs_rows_lease.items;
-        const TaskT = FusedActQuantTask(.split_swiglu, .q8_k_rows);
+        const TaskT = FusedActQuantTask(act, .q8_k_rows);
         fusedActQuantDispatch(self, TaskT, .{
-            .gate = input[prefix_rows * axis_dim ..],
-            .up = &.{},
+            .gate = input[prefix_rows * input_row_stride ..],
+            .up = extras.up,
             .scratch = &.{},
             .rows = tail_rows,
             .cols = k,
             .blocks_per_row = blocks_per_row,
+            .eps = extras.eps,
+            .inv_cols = extras.inv_cols,
+            .rows_kernel = extras.rows_kernel,
             .row_group_start = 0,
             .row_group_end = tail_groups,
             .row_blocks = qlhs_rows,
@@ -573,94 +612,23 @@ pub fn rmsNormMulMatmulPacked(self: *ExecContext, x: *const Tensor, norm_weights
 }
 
 fn rmsNormMulMatmulKQuantImpl(self: *ExecContext, comptime kind: KQuantFusedRhsKind, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: anytype) !Tensor {
-    const qm = backend_mod.quantized_matmul;
     const xv = try x.rankView(2);
     const m = xv.dim(0);
     const k = xv.dim(1);
     if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
     const wv = try norm_weights.rankView(1);
     if (wv.dim(0) != k) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try qm.q8k.qkBlockCount(k);
-    const n = rhs.n;
 
     var xx = try self.prepareContiguous(.f32, x);
     defer xx.deinit();
-    const input = xx.tensor().dataConst();
     var ww = try self.prepareContiguous(.f32, norm_weights);
     defer ww.deinit();
-    const weights = ww.tensor().dataConst();
-    const inv_cols: f32 = 1.0 / @as(f32, @floatFromInt(k));
-
-    var out = try self.empty(.f32, .{ m, n });
-    errdefer out.deinit();
-    const out_data = out.data();
-
-    // Pinned mode forces the per-row tail kernels for every row (see the
-    // matching gate in splitSwiGluMatmulKQuantImpl).
-    const use_x4 = !self.pin_rowwise_kernels and switch (kind) {
-        .q4_kx8 => m % 4 == 0 or m >= 64 or (m >= 4 and m < 32),
-        .q5_kx8 => m % 4 == 0 or m >= 128,
-        .q6_kx4 => false,
-    };
-    const pad_x4 = kind == .q4_kx8;
-    const prefix_rows = if (!use_x4) 0 else if (pad_x4) m else m - m % 4;
-
-    const scratch_storage = try self.buffers.acquire(parallel.vector_max_threads * 4 * k);
-    defer scratch_storage.release();
-    const scratch = scratch_storage.data[0 .. parallel.vector_max_threads * 4 * k];
-
-    self.enableNativeMatmulPoolForWork(comptime packedRhsDType(@TypeOf(rhs)), m, n, k);
-
-    if (prefix_rows > 0) {
-        const row_groups = if (pad_x4) (prefix_rows + 3) / 4 else prefix_rows / 4;
-        var qlhs_x4_lease = try self.buffers.acquireScratch(qm.BlockQ8_Kx4, try checkedTensorProduct(row_groups, blocks_per_row));
-        defer qlhs_x4_lease.release();
-        const qlhs_x4 = qlhs_x4_lease.items;
-        const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_kx4);
-        fusedActQuantDispatch(self, TaskT, .{
-            .gate = input,
-            .up = weights,
-            .scratch = &.{},
-            .rows = prefix_rows,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-            .eps = eps,
-            .inv_cols = inv_cols,
-            .rows_kernel = m * k >= parallel.row_kernel_len_threshold,
-            .row_group_start = 0,
-            .row_group_end = row_groups,
-            .x4_blocks = qlhs_x4,
-        }, row_groups, scratch);
-        // Only the x4-capable kinds reach this stage (use_x4 is false for
-        // .q6_kx4, so its prefix is always empty).
-        if (comptime kind == .q6_kx4) unreachable else kernels.matmulPackedSlice(self.pc(), out_data[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
-    }
-
-    if (prefix_rows < m) {
-        const tail_rows = m - prefix_rows;
-        const tail_groups = (tail_rows + 3) / 4;
-        var qlhs_rows_lease = try self.buffers.acquireScratch(dtype_mod.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
-        defer qlhs_rows_lease.release();
-        const qlhs_rows = qlhs_rows_lease.items;
-        const TaskT = FusedActQuantTask(.rms_norm_mul, .q8_k_rows);
-        fusedActQuantDispatch(self, TaskT, .{
-            .gate = input[prefix_rows * k ..],
-            .up = weights,
-            .scratch = &.{},
-            .rows = tail_rows,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-            .eps = eps,
-            .inv_cols = inv_cols,
-            .rows_kernel = m * k >= parallel.row_kernel_len_threshold,
-            .row_group_start = 0,
-            .row_group_end = tail_groups,
-            .row_blocks = qlhs_rows,
-        }, tail_groups, scratch);
-        const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
-        kernels.matmulPackedSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k);
-    }
-    return out;
+    return fusedKQuantGemm(self, kind, .rms_norm_mul, rhs, xx.tensor().dataConst(), k, m, k, .{
+        .up = ww.tensor().dataConst(),
+        .eps = eps,
+        .inv_cols = 1.0 / @as(f32, @floatFromInt(k)),
+        .rows_kernel = m * k >= parallel.row_kernel_len_threshold,
+    });
 }
 
 /// Fused rmsNormMul + Q8_0x4 LHS quantize + packed GEMM: normalizes the
