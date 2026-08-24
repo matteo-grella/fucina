@@ -385,7 +385,7 @@ test "exec context runs typed float forward math kernels" {
 
     var packed_rhs = try ctx.packMatmulRhs(.f16, &hright);
     defer packed_rhs.deinit();
-    var packed_product = try ctx.matmul2DWithPackedRhs(.f16, &hleft, &packed_rhs);
+    var packed_product = try ctx.matmulPacked(&hleft, &packed_rhs);
     defer packed_product.deinit();
     try std.testing.expectEqualSlices(f16, hproduct.dataConst(), packed_product.dataConst());
 
@@ -418,7 +418,7 @@ test "exec context runs typed float forward math kernels" {
 
     var bf16_packed_rhs = try ctx.packMatmulRhs(.bf16, &right);
     defer bf16_packed_rhs.deinit();
-    var bf16_packed_product = try ctx.matmul2DWithPackedRhs(.bf16, &left, &bf16_packed_rhs);
+    var bf16_packed_product = try ctx.matmulPacked(&left, &bf16_packed_rhs);
     defer bf16_packed_product.deinit();
     try std.testing.expectEqualSlices(u16, product.dataConst(), bf16_packed_product.dataConst());
 

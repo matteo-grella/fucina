@@ -221,7 +221,7 @@ test "exec context cross entropy ex matches a naive reference across options" {
                             var ref = try testNaiveCrossEntropy(allocator, data, outer, class_count, inner, labels, options, upstream, per_row);
                             defer ref.deinit(allocator);
 
-                            var loss = try ctx.crossEntropyLossEx(rank, &logits, 1, labels, options);
+                            var loss = try ctx.crossEntropyLoss(rank, &logits, 1, labels, options);
                             defer loss.deinit();
                             if (reduction == .none) {
                                 const losses = loss.dataConst();
@@ -233,15 +233,11 @@ test "exec context cross entropy ex matches a naive reference across options" {
                                 try expectCloseToF64(ref.loss, loss.item(), 2e-4, 2e-5);
                             }
 
-                            var grad = try ctx.crossEntropyBackwardEx(
-                                rank,
-                                &logits,
-                                1,
-                                labels,
-                                options,
-                                upstream,
-                                if (reduction == .none) per_row else null,
-                            );
+                            const up: exec.CrossEntropyUpstream = if (reduction == .none)
+                                .{ .rows = .{ .per_row = per_row, .scale = upstream } }
+                            else
+                                .{ .scale = upstream };
+                            var grad = try ctx.crossEntropyBackward(rank, &logits, 1, labels, options, up);
                             defer grad.deinit();
                             for (grad.dataConst(), ref.grads) |got, want| {
                                 try expectCloseToF64(want, got, 2e-4, 2e-5);
@@ -308,17 +304,22 @@ test "exec cross entropy backward with saved stats is bitwise identical to recom
                                 .reduction = reduction,
                                 .label_smoothing = label_smoothing,
                             };
-                            const per_row_arg: ?[]const f32 = if (reduction == .none) per_row else null;
+                            const up: exec.CrossEntropyUpstream = if (reduction == .none)
+                                .{ .rows = .{ .per_row = per_row, .scale = upstream } }
+                            else
+                                .{ .scale = upstream };
+                            var stats_options = options;
+                            stats_options.row_stats = row_stats;
 
-                            var plain_loss = try ctx.crossEntropyLossEx(rank, &logits, 1, labels, options);
+                            var plain_loss = try ctx.crossEntropyLoss(rank, &logits, 1, labels, options);
                             defer plain_loss.deinit();
-                            var stats_loss = try ctx.crossEntropyLossExStats(rank, &logits, 1, labels, options, row_stats);
+                            var stats_loss = try ctx.crossEntropyLoss(rank, &logits, 1, labels, stats_options);
                             defer stats_loss.deinit();
                             try std.testing.expectEqualSlices(f32, plain_loss.dataConst(), stats_loss.dataConst());
 
-                            var grad_recompute = try ctx.crossEntropyBackwardEx(rank, &logits, 1, labels, options, upstream, per_row_arg);
+                            var grad_recompute = try ctx.crossEntropyBackward(rank, &logits, 1, labels, options, up);
                             defer grad_recompute.deinit();
-                            var grad_stats = try ctx.crossEntropyBackwardExStats(rank, &logits, 1, labels, options, upstream, per_row_arg, row_stats);
+                            var grad_stats = try ctx.crossEntropyBackward(rank, &logits, 1, labels, stats_options, up);
                             defer grad_stats.deinit();
                             try std.testing.expectEqualSlices(f32, grad_recompute.dataConst(), grad_stats.dataConst());
                         }
@@ -332,8 +333,9 @@ test "exec cross entropy backward with saved stats is bitwise identical to recom
     var logits = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer logits.deinit();
     var short_stats = [_]f32{ 0, 0 };
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyLossExStats(2, &logits, 1, &.{ 0, 1 }, .{}, &short_stats));
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardExStats(2, &logits, 1, &.{ 0, 1 }, .{}, 1, null, &.{ 0, 0, 0 }));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 1 }, .{ .row_stats = &short_stats }));
+    var bad_stats = [_]f32{ 0, 0, 0 };
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 1 }, .{ .row_stats = &bad_stats }, .{ .scale = 1 }));
 }
 
 test "exec fused linear cross-entropy backward matches the composed two-GEMM path" {
@@ -392,7 +394,9 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                     // Fresh logits per case: the fused VJP consumes them.
                     var logits = try ctx.matmulTransB(&x, &w);
                     defer logits.deinit();
-                    var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, options, row_stats);
+                    var stats_options = options;
+                    stats_options.row_stats = row_stats;
+                    var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, stats_options);
                     loss.deinit();
 
                     var gy = if (reduction == .none)
@@ -402,16 +406,11 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                     defer gy.deinit();
 
                     // Composed reference (before the fused call eats logits).
-                    var dlogits = try ctx.crossEntropyBackwardExStats(
-                        2,
-                        &logits,
-                        1,
-                        labels,
-                        options,
-                        if (reduction == .none) 1 else 0.75,
-                        if (reduction == .none) per_row else null,
-                        row_stats,
-                    );
+                    const up: exec.CrossEntropyUpstream = if (reduction == .none)
+                        .{ .rows = .{ .per_row = per_row } }
+                    else
+                        .{ .scale = 0.75 };
+                    var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, stats_options, up);
                     defer dlogits.deinit();
                     var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
                     defer dx_ref.deinit();
@@ -437,11 +436,11 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         defer keeper.deinit();
         const before = try allocator.dupe(f32, logits.dataConst());
         defer allocator.free(before);
-        var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, row_stats);
+        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{ .row_stats = row_stats });
         loss.deinit();
         var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
         defer gy.deinit();
-        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
         var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
         defer dx_ref.deinit();
@@ -480,42 +479,42 @@ test "exec context cross entropy ex handles ignored labels and validation" {
     // Every position ignored (in-range ignore_index): loss 0, grads exactly 0.
     // (Deliberate divergence from PyTorch's NaN.)
     const all_ignored = CrossEntropyOptions{ .ignore_index = 2, .reduction = .mean };
-    var loss = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored);
+    var loss = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored);
     defer loss.deinit();
     try std.testing.expectEqual(@as(f32, 0), loss.item());
-    var grad = try ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored, 1, null);
+    var grad = try ctx.crossEntropyBackward(2, &logits, 1, &.{ 2, 2, 2 }, all_ignored, .{ .scale = 1 });
     defer grad.deinit();
     for (grad.dataConst()) |value| try std.testing.expectEqual(@as(f32, 0), value);
 
     // An in-range ignore_index drops exactly the matching positions, and the
     // mean denominator counts only the remaining ones.
-    var partial = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 4, 2, 0 }, all_ignored);
+    var partial = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 4, 2, 0 }, all_ignored);
     defer partial.deinit();
     var row0 = try ctx.fromSlice(.f32, .{ 1, 5 }, &.{ 1, 2, 3, 4, 5 });
     defer row0.deinit();
     var row2 = try ctx.fromSlice(.f32, .{ 1, 5 }, &.{ 2, 2, -2, 0, 1 });
     defer row2.deinit();
-    var loss0 = try ctx.crossEntropyLossEx(2, &row0, 1, &.{4}, .{ .reduction = .sum });
+    var loss0 = try ctx.crossEntropyLoss(2, &row0, 1, &.{4}, .{ .reduction = .sum });
     defer loss0.deinit();
-    var loss2 = try ctx.crossEntropyLossEx(2, &row2, 1, &.{0}, .{ .reduction = .sum });
+    var loss2 = try ctx.crossEntropyLoss(2, &row2, 1, &.{0}, .{ .reduction = .sum });
     defer loss2.deinit();
     try std.testing.expectApproxEqAbs((loss0.item() + loss2.item()) / 2, partial.item(), 1e-6);
 
     // Labels must be < class_count or == ignore_index.
-    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyLossEx(2, &logits, 1, &.{ 0, 5, 1 }, .{}));
-    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 9, 1 }, .{ .ignore_index = 7 }, 1, null));
+    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 5, 1 }, .{}));
+    try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 9, 1 }, .{ .ignore_index = 7 }, .{ .scale = 1 }));
     // label_smoothing must be in [0, 1).
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.crossEntropyLossEx(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
     // .none requires a per-row upstream of matching length; mean/sum forbid it.
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 1, 2 }, .{ .reduction = .none }, 1, null));
-    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackwardEx(2, &logits, 1, &.{ 0, 1, 2 }, .{}, 1, &.{ 1, 1, 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 1, 2 }, .{ .reduction = .none }, .{ .scale = 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 1, 2 }, .{}, .{ .rows = .{ .per_row = &.{ 1, 1, 1 } } }));
 
-    // Default options keep the legacy behavior: mean over all positions.
-    var legacy = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 4, 2, 0 });
-    defer legacy.deinit();
-    var ex_default = try ctx.crossEntropyLossEx(2, &logits, 1, &.{ 4, 2, 0 }, .{});
-    defer ex_default.deinit();
-    try std.testing.expectEqual(legacy.item(), ex_default.item());
+    // `.{}` is the mean over all positions.
+    var mean_default = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 4, 2, 0 }, .{});
+    defer mean_default.deinit();
+    var mean_explicit = try ctx.crossEntropyLoss(2, &logits, 1, &.{ 4, 2, 0 }, .{ .reduction = .mean });
+    defer mean_explicit.deinit();
+    try std.testing.expectEqual(mean_default.item(), mean_explicit.item());
 }
 
 // These drive the substrate alloc primitives (ctx.zeros,

@@ -328,10 +328,7 @@ pub fn Ops(comptime Self: type) type {
                 error.GradientPackedMatmulUnsupported
             else
                 error.GradientQuantizedMatmulUnsupported;
-            var value = if (comptime Rhs == backend_mod.PackedDenseRhs)
-                try ctx.matmul2DWithPackedDenseRhs(self.asRawTensor(), rhs)
-            else
-                try ctx.matmulPacked(self.asRawTensor(), rhs);
+            var value = try ctx.matmulPacked(self.asRawTensor(), rhs);
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
         }

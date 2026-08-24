@@ -224,7 +224,7 @@ pub const ParakeetWeights = struct {
         const wi = try self.file.get(w_name);
         const shape = try linearShape(wi);
         // f16: borrow the mmap'd weight for EVERY batch size. The packed path
-        // (getLinear → LinearWeight.linearSeq) runs the identical `matmulTransB2DWithF16Rhs`
+        // (getLinear → LinearWeight.linearSeq) runs the identical `matmulTransB2DWithHalfRhs`
         // kernel but first COPIES the full weight (loadDenseF16Weight) — pure overhead
         // that dominated streaming wall-clock on the 0.6B encoder (the one-time pack was
         // ~30% of a short clip's time). Numerics are bit-identical (same kernel, same

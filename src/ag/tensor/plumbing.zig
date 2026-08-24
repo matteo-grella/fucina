@@ -468,11 +468,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), k });
                 defer right_matrix.deinit();
 
-                var matmul = switch (comptime rhs_dtype) {
-                    .f16 => try ctx.matmulTransB2DWithF16Rhs(&left_matrix, &right_matrix),
-                    .bf16 => try ctx.matmulTransB2DWithBf16Rhs(&left_matrix, &right_matrix),
-                    else => unreachable,
-                };
+                var matmul = try ctx.matmulTransB2DWithHalfRhs(rhs_dtype, &left_matrix, &right_matrix);
                 errdefer matmul.deinit();
 
                 if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;

@@ -380,73 +380,6 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
     return kernels.packDenseMatmulRhsTyped(dtype, self.allocator, rr.tensor());
 }
 
-pub fn matmul2DWithPackedDenseRhs(
-    self: *ExecContext,
-    a: *const Tensor,
-    rhs: *const backend_mod.PackedDenseRhs,
-) !Tensor {
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-
-    var aa = try self.prepareContiguous(.f32, a);
-    defer aa.deinit();
-    var out = try self.empty(.f32, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
-    try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
-/// Packed dense matmul into caller-supplied contiguous storage. This is the
-/// buffer-reuse form of `matmul2DWithPackedDenseRhs`; accelerator builds are
-/// synchronized before return because callers may consume the borrowed host
-/// slice directly rather than crossing a later Tensor visibility boundary.
-pub fn matmul2DWithPackedDenseRhsInto(
-    self: *ExecContext,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const backend_mod.PackedDenseRhs,
-) !void {
-    const av = try a.rankView(2);
-    const ov = try out.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k or ov.dim(0) != m or ov.dim(1) != rhs.n) return tensor.TensorError.ShapeMismatch;
-    if (!out.isContiguous()) return tensor.TensorError.UnsupportedView;
-
-    var aa = try self.prepareContiguous(.f32, a);
-    defer aa.deinit();
-    self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
-    try kernels.matmul2DIntoUncheckedPackedDenseRhs(self.pc(), out, aa.tensor(), rhs, m, rhs.n, k);
-    _ = try out.dataConstChecked();
-}
-
-pub fn matmul2DWithPackedRhs(
-    self: *ExecContext,
-    comptime dtype: DType,
-    a: *const tensor.TensorOf(dtype),
-    rhs: *const backend_mod.PackedMatmulRhsFor(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-    comptime ensureForwardFloatMath(dtype);
-    const output_dtype = comptime dtype_mod.outputDType(.matmul, dtype);
-
-    const av = try a.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    if (k != rhs.k) return tensor.TensorError.ShapeMismatch;
-
-    var aa = try self.prepareContiguous(dtype, a);
-    defer aa.deinit();
-
-    var out = try self.empty(output_dtype, .{ m, rhs.n });
-    errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(dtype, m, rhs.n, k);
-    try kernels.matmul2DIntoUncheckedPackedRhsTyped(self.pc(), dtype, self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-    return out;
-}
-
 // ---------------------------------------------------------------------------
 // CPU f32 weight shadow (FUCINA_CPU_F32_SHADOW=1; CPU builds only).
 //
@@ -558,50 +491,18 @@ fn matmulTransB2DViaShadow(
     return out;
 }
 
-pub fn matmulTransB2DWithF16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.f16)) !Tensor {
-    const av = try a.rankView(2);
-    const bv = try b.rankView(2);
-    const m = av.dim(0);
-    const k = av.dim(1);
-    const n = bv.dim(0);
-    if (k != bv.dim(1)) return tensor.TensorError.ShapeMismatch;
-
-    var aa_f32 = try self.prepareContiguous(.f32, a);
-    defer aa_f32.deinit();
-    var bb = try self.prepareContiguous(.f16, b);
-    defer bb.deinit();
-
-    // Opt-in cached-shadow BLAS arm for prefill-shaped GEMMs (see the
-    // FUCINA_CPU_F32_SHADOW block above); the per-call-widen objection
-    // below does not apply to a widen-once copy.
-    if (comptime !build_options.use_gpu) {
-        if (cpuShadowMinM(self)) |min_m| {
-            if (m >= min_m) {
-                if (matmulTransB2DViaShadow(self, .f16, aa_f32.tensor(), bb.tensor(), m, n, k)) |out| return out;
-            }
-        }
-    }
-
-    var aa = try exec_convert.cast(self, .f32, .f16, aa_f32.tensor());
-    defer aa.deinit();
-
-    var out = try self.empty(.f32, .{ m, n });
-    errdefer out.deinit();
-    // Deliberately no default BLAS arm here: sgemm would need both operands
-    // widened to f32, and a PER-CALL RHS widen alone costs an order of
-    // magnitude more than the streaming f16 kernels' whole GEMM at LLM
-    // shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
-    // cached widened copy is unsound when f16 weights are trained in place,
-    // which is why the shadow arm above is opt-in.
-    self.enableNativeMatmulPoolForWork(.f16, m, n, k);
-    kernels.matmulTransB2DIntoUncheckedF16Operands(self.pc(), &out, &aa, bb.tensor(), m, n, k);
-    return out;
-}
-
-/// Mixed-precision twin of matmulTransB2DWithF16Rhs for bf16 weights. The
-/// LHS stays f32 (no cast: the kernel widens the bf16 RHS in-register and
-/// accumulates in f32), so only contiguity is prepared here.
-pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const tensor.TensorOf(.bf16)) !Tensor {
+/// Mixed-precision `a[m,k] x b[n,k]^T -> f32 [m,n]` over a 16-bit weight
+/// (`dtype` is `.f16` or `.bf16`; f32 accumulation). The f16 arm casts the
+/// LHS to f16 for the f16-operand streaming kernel; the bf16 arm keeps the
+/// LHS f32 (the kernel widens the bf16 RHS in-register), so only
+/// contiguity is prepared. Deliberately no default BLAS arm: sgemm would
+/// need both operands widened to f32, and a PER-CALL RHS widen alone costs
+/// an order of magnitude more than the streaming kernels' whole GEMM at
+/// LLM shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
+/// cached widened copy is unsound when 16-bit weights are trained in
+/// place, which is why the shadow arm below is opt-in.
+pub fn matmulTransB2DWithHalfRhs(self: *ExecContext, comptime dtype: DType, a: *const Tensor, b: *const tensor.TensorOf(dtype)) !Tensor {
+    comptime if (dtype != .f16 and dtype != .bf16) @compileError("matmulTransB2DWithHalfRhs: the RHS dtype must be .f16 or .bf16");
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
     const m = av.dim(0);
@@ -611,23 +512,33 @@ pub fn matmulTransB2DWithBf16Rhs(self: *ExecContext, a: *const Tensor, b: *const
 
     var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    var bb = try self.prepareContiguous(.bf16, b);
+    var bb = try self.prepareContiguous(dtype, b);
     defer bb.deinit();
 
-    // Opt-in cached-shadow BLAS arm (see FUCINA_CPU_F32_SHADOW above); the
-    // bf16 widen is a pure bit shift, exact.
+    // Opt-in cached-shadow BLAS arm for prefill-shaped GEMMs (see the
+    // FUCINA_CPU_F32_SHADOW block above); the per-call-widen objection
+    // does not apply to a widen-once copy (the bf16 widen is a pure bit
+    // shift, exact).
     if (comptime !build_options.use_gpu) {
         if (cpuShadowMinM(self)) |min_m| {
             if (m >= min_m) {
-                if (matmulTransB2DViaShadow(self, .bf16, aa.tensor(), bb.tensor(), m, n, k)) |out| return out;
+                if (matmulTransB2DViaShadow(self, dtype, aa.tensor(), bb.tensor(), m, n, k)) |out| return out;
             }
         }
     }
 
     var out = try self.empty(.f32, .{ m, n });
     errdefer out.deinit();
-    self.enableNativeMatmulPoolForWork(.bf16, m, n, k);
-    kernels.matmulTransB2DIntoUncheckedBf16Rhs(self.pc(), &out, aa.tensor(), bb.tensor(), m, n, k);
+    self.enableNativeMatmulPoolForWork(dtype, m, n, k);
+    switch (comptime dtype) {
+        .f16 => {
+            var a16 = try exec_convert.cast(self, .f32, .f16, aa.tensor());
+            defer a16.deinit();
+            kernels.matmulTransB2DIntoUncheckedF16Operands(self.pc(), &out, &a16, bb.tensor(), m, n, k);
+        },
+        .bf16 => kernels.matmulTransB2DIntoUncheckedBf16Rhs(self.pc(), &out, aa.tensor(), bb.tensor(), m, n, k),
+        else => unreachable,
+    }
     return out;
 }
 

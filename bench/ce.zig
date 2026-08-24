@@ -181,24 +181,24 @@ fn benchCrossEntropy(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator
     defer allocator.free(labels);
 
     for (0..2) |_| {
-        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels);
+        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{});
         loss.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels);
+        var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{});
         loss.deinit();
     }
     const fwd_ns = timer.read() / iters;
     try printRow(stdout, "cross-entropy fwd", rows, cols, fwd_ns, iters);
 
     for (0..2) |_| {
-        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, 1);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{}, .{ .scale = 1 });
         grad.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, 1);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{}, .{ .scale = 1 });
         grad.deinit();
     }
     const bwd_ns = timer.read() / iters;
@@ -208,15 +208,15 @@ fn benchCrossEntropy(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator
     // node takes (bitwise identical to the recompute row above).
     const stats = try allocator.alloc(f32, 2 * rows);
     defer allocator.free(stats);
-    var stats_loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, stats);
+    var stats_loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{ .row_stats = stats });
     stats_loss.deinit();
     for (0..2) |_| {
-        var grad = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, stats);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = stats }, .{ .scale = 1 });
         grad.deinit();
     }
     timer.reset();
     for (0..iters) |_| {
-        var grad = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, stats);
+        var grad = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = stats }, .{ .scale = 1 });
         grad.deinit();
     }
     const stats_ns = timer.read() / iters;
@@ -240,13 +240,13 @@ fn benchLinearCe(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, st
 
     var logits = try ctx.matmulTransB(&x, &w);
     defer logits.deinit();
-    var loss = try ctx.crossEntropyLossExStats(2, &logits, 1, labels, .{}, row_stats);
+    var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{ .row_stats = row_stats });
     loss.deinit();
     var gy = try ctx.fromSlice(.f32, .{1}, &.{1});
     defer gy.deinit();
 
     for (0..2) |_| {
-        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
         var dx = try ctx.matmul(.f32, &dlogits, &w);
         dx.deinit();
@@ -255,7 +255,7 @@ fn benchLinearCe(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, st
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
-        var dlogits = try ctx.crossEntropyBackwardExStats(2, &logits, 1, labels, .{}, 1, null, row_stats);
+        var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
         var dx = try ctx.matmul(.f32, &dlogits, &w);
         dx.deinit();

@@ -36,8 +36,8 @@ const distillBackwardRows = exec_row_ops.distillBackwardRows;
 
 pub const Reduction = enum { mean, sum, none };
 
-/// PyTorch-parity cross-entropy options for `crossEntropyLossEx` /
-/// `crossEntropyBackwardEx`.
+/// PyTorch-parity cross-entropy options for `crossEntropyLoss` /
+/// `crossEntropyBackward`. One value drives both directions.
 pub const CrossEntropyOptions = struct {
     /// A position whose label equals this index contributes zero loss and zero
     /// gradient and is excluded from the `.mean` denominator. Labels must be
@@ -53,6 +53,28 @@ pub const CrossEntropyOptions = struct {
     /// (1-eps)*onehot + (eps/K) uniform over all K classes (PyTorch
     /// semantics, target class included in the uniform mass).
     label_smoothing: f32 = 0,
+    /// Per-position softmax statistics slot: {max, sum_exp} interleaved f32
+    /// pairs, length 2 * position count. `crossEntropyLoss` fills it when
+    /// non-null (ignored positions get {0, 1}); `crossEntropyBackward` reads
+    /// it when non-null and emits final gradients in ONE pass over the
+    /// logits, bitwise identical to the recompute path (the stats are the
+    /// exact f32 values the backward would recompute). Null on both sides is
+    /// the plain two-pass backward.
+    row_stats: ?[]f32 = null,
+};
+
+/// The upstream gradient `crossEntropyBackward` scales the VJP by.
+pub const CrossEntropyUpstream = union(enum) {
+    /// Scalar upstream for `.mean`/`.sum`.
+    scale: f32,
+    /// `.none` reduction: the per-position upstream gradient (length
+    /// outer*inner, position order matching `labels`), additionally scaled
+    /// by `scale`.
+    rows: struct { per_row: []const f32, scale: f32 = 1 },
+    /// The autograd form: a scalar tensor for `.mean`/`.sum`, the
+    /// per-position tensor (logits shape with the class axis removed) for
+    /// `.none`.
+    tensor: *const Tensor,
 };
 
 /// Options for `mseLoss` (torch F.mse_loss semantics): per-element (x - t)².
@@ -112,10 +134,6 @@ pub const LossWrt = enum { input, target };
 /// (returning huge boundary gradients rather than 0).
 pub const bce_eps: f32 = 1e-7;
 
-pub fn crossEntropyLoss(ctx: *ExecContext, comptime rank: usize, logits: *const Tensor, comptime axis: usize, labels: []const usize) !Tensor {
-    return crossEntropyLossEx(ctx, rank, logits, axis, labels, .{});
-}
-
 /// Validates labels against `class_count` / `options.ignore_index` and
 /// counts the non-ignored positions for the `.mean` denominator.
 fn validateCrossEntropyLabels(labels: []const usize, position_count: usize, class_count: usize, options: CrossEntropyOptions) !usize {
@@ -133,38 +151,23 @@ fn validateCrossEntropyLabels(labels: []const usize, position_count: usize, clas
 }
 
 /// Cross-entropy forward with PyTorch-parity options (see
-/// `CrossEntropyOptions`). `.mean`/`.sum` return a scalar; `.none` returns
-/// per-position losses shaped like the logits with the class axis removed.
-/// The `.mean`/`.sum` reduction is one serial sum over per-row losses in
-/// row order, so the result is bitwise identical for any thread count.
-pub fn crossEntropyLossEx(
+/// `CrossEntropyOptions`; `.{}` is the defaults). `.mean`/`.sum` return a
+/// scalar; `.none` returns per-position losses shaped like the logits with
+/// the class axis removed. The `.mean`/`.sum` reduction is one serial sum
+/// over per-row losses in row order, so the result is bitwise identical
+/// for any thread count. `options.row_stats`, when set, receives the
+/// per-position softmax statistics the backward can reuse.
+pub fn crossEntropyLoss(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
     labels: []const usize,
     options: CrossEntropyOptions,
-) !Tensor {
-    return crossEntropyLossExStats(ctx, rank, logits, axis, labels, options, null);
-}
-
-/// As `crossEntropyLossEx`, additionally writing the per-position
-/// softmax statistics {max, sum_exp} (interleaved f32 pairs, length
-/// 2 * position count) into `row_stats` when non-null. Feeding them to
-/// `crossEntropyBackwardExUpstreamStats` makes the backward a
-/// single pass with bitwise-identical gradients (the stats are the exact
-/// f32 values the backward would recompute). Ignored positions get {0, 1}.
-pub fn crossEntropyLossExStats(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    logits: *const Tensor,
-    comptime axis: usize,
-    labels: []const usize,
-    options: CrossEntropyOptions,
-    row_stats: ?[]f32,
 ) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
+    const row_stats = options.row_stats;
 
     const source = try logits.rankView(rank);
     const class_count = source.shape[axis];
@@ -274,23 +277,45 @@ pub fn crossEntropyLossExStats(
     }
 }
 
+/// Cross-entropy VJP. `upstream` is the scalar (`.mean`/`.sum`) or
+/// per-position (`.none`) upstream gradient, as f32 values or as the
+/// autograd tensor. With `options.row_stats` (saved by `crossEntropyLoss`)
+/// the kernel emits final gradients in ONE pass over the logits, bitwise
+/// identical to the recompute path. Ignored positions get exactly zero
+/// gradient.
 pub fn crossEntropyBackward(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
     comptime axis: usize,
     labels: []const usize,
-    scale_value: f32,
+    options: CrossEntropyOptions,
+    upstream: CrossEntropyUpstream,
 ) !Tensor {
-    return crossEntropyBackwardEx(ctx, rank, logits, axis, labels, .{}, scale_value, null);
+    switch (upstream) {
+        .scale => |scale_value| return crossEntropyBackwardScaled(ctx, rank, logits, axis, labels, options, scale_value, null),
+        .rows => |rows| return crossEntropyBackwardScaled(ctx, rank, logits, axis, labels, options, rows.scale, rows.per_row),
+        .tensor => |gy| {
+            if (options.reduction == .none) {
+                const source = try logits.rankView(rank);
+                const out_rank = if (rank == 1) 1 else rank - 1;
+                const expected_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
+                const gv = try gy.rankView(out_rank);
+                if (!std.mem.eql(usize, gv.shape[0..], expected_shape[0..])) return tensor.TensorError.ShapeMismatch;
+                var gg = try ctx.prepareContiguous(.f32, gy);
+                defer gg.deinit();
+                return crossEntropyBackwardScaled(ctx, rank, logits, axis, labels, options, 1, gg.tensor().dataConst());
+            }
+            if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
+            return crossEntropyBackwardScaled(ctx, rank, logits, axis, labels, options, gy.item(), null);
+        },
+    }
 }
 
-/// Cross-entropy VJP with options. `scale_value` is the scalar upstream
-/// gradient (mean/sum); for `.none` reduction `per_row_scale` carries the
-/// per-position upstream gradient (length outer*inner, position order
-/// matching `labels`) and is additionally scaled by `scale_value`.
-/// Ignored positions get exactly zero gradient.
-pub fn crossEntropyBackwardEx(
+/// The f32-upstream body of `crossEntropyBackward`: `scale_value` is the
+/// scalar upstream (mean/sum) or the common factor over `per_row_scale`
+/// (`.none`, required there and rejected elsewhere).
+fn crossEntropyBackwardScaled(
     ctx: *ExecContext,
     comptime rank: usize,
     logits: *const Tensor,
@@ -299,28 +324,10 @@ pub fn crossEntropyBackwardEx(
     options: CrossEntropyOptions,
     scale_value: f32,
     per_row_scale: ?[]const f32,
-) !Tensor {
-    return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, scale_value, per_row_scale, null);
-}
-
-/// As `crossEntropyBackwardEx`, additionally taking the per-position
-/// {max, sum_exp} statistics saved by `crossEntropyLossExStats`
-/// (interleaved f32 pairs, length 2 * position count). With stats the kernel
-/// emits final gradients in ONE pass over the logits — bitwise identical to
-/// the recompute path.
-pub fn crossEntropyBackwardExStats(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    logits: *const Tensor,
-    comptime axis: usize,
-    labels: []const usize,
-    options: CrossEntropyOptions,
-    scale_value: f32,
-    per_row_scale: ?[]const f32,
-    row_stats: ?[]const f32,
 ) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
+    const row_stats: ?[]const f32 = options.row_stats;
 
     const source = try logits.rankView(rank);
     const class_count = source.shape[axis];
@@ -425,48 +432,6 @@ pub fn crossEntropyBackwardExStats(
     return out;
 }
 
-/// As `crossEntropyBackwardEx`, taking the upstream gradient as a
-/// tensor: scalar for `.mean`/`.sum`, per-position (logits shape with the
-/// class axis removed) for `.none`. This is the entry point the autograd
-/// VJP uses.
-pub fn crossEntropyBackwardExUpstream(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    logits: *const Tensor,
-    comptime axis: usize,
-    labels: []const usize,
-    options: CrossEntropyOptions,
-    gy: *const Tensor,
-) !Tensor {
-    return crossEntropyBackwardExUpstreamStats(ctx, rank, logits, axis, labels, options, gy, null);
-}
-
-/// As `crossEntropyBackwardExUpstream` with forward-saved
-/// {max, sum_exp} statistics (see `crossEntropyBackwardExStats`).
-pub fn crossEntropyBackwardExUpstreamStats(
-    ctx: *ExecContext,
-    comptime rank: usize,
-    logits: *const Tensor,
-    comptime axis: usize,
-    labels: []const usize,
-    options: CrossEntropyOptions,
-    gy: *const Tensor,
-    row_stats: ?[]const f32,
-) !Tensor {
-    if (options.reduction == .none) {
-        const source = try logits.rankView(rank);
-        const out_rank = if (rank == 1) 1 else rank - 1;
-        const expected_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-        const gv = try gy.rankView(out_rank);
-        if (!std.mem.eql(usize, gv.shape[0..], expected_shape[0..])) return tensor.TensorError.ShapeMismatch;
-        var gg = try ctx.prepareContiguous(.f32, gy);
-        defer gg.deinit();
-        return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, 1, gg.tensor().dataConst(), row_stats);
-    }
-    if (!gy.isScalar()) return tensor.TensorError.ShapeMismatch;
-    return crossEntropyBackwardExStats(ctx, rank, logits, axis, labels, options, gy.item(), null, row_stats);
-}
-
 // --- Fused linear + cross-entropy VJP --------------------------------------
 
 /// Gradients of `CE(xÂ·Wáµ, labels)` with respect to x and/or W. Both are
@@ -533,7 +498,7 @@ pub fn linearCrossEntropyBackwardUpstream(
     if (row_stats.len != 2 * rows) return tensor.TensorError.InvalidDataLength;
     if (!need_x and !need_weight) return .{ .dx = null, .dweight = null };
 
-    // Upstream contract as crossEntropyBackwardExUpstreamStats.
+    // Upstream contract as crossEntropyBackward's `.tensor` arm.
     var scale_value: f32 = 1;
     var upstream: ?ExecContext.PreparedTensor = null;
     defer if (upstream) |*p| p.deinit();

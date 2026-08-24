@@ -541,7 +541,7 @@ two layout families, plus an older backend-only typed bridge:
   over the pool). This bridge preserves a same-dtype f16/bf16 result and is
   distinct from the public f32-lhs `PackedDenseRhs` panel. It is reached
   through `ExecContext.packMatmulRhs` (`.f16`/`.bf16`) /
-  `matmul2DWithPackedRhs` ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)).
+  `matmulPacked` ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)).
 
 **Arch-gated int8 dot arms.** The K-quant/Q8 kernels select their inner dot
 at comptime: aarch64 `sdot` inline asm (all aarch64), aarch64 `smmla` behind

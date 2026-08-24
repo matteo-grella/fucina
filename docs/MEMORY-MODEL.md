@@ -78,7 +78,7 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
   call-site changes: the per-projection f16 LHS cast in
-  `matmulTransB2DWithF16Rhs` (`src/exec/matmul.zig`), typed gathers, typed
+  `matmulTransB2DWithHalfRhs` (`src/exec/matmul.zig`), typed gathers, typed
   matmul outputs. Non-DType packed block scratch (the quantized-LHS layouts
   in the fused K-quant FFN paths, `src/exec/quant_matmul.zig`) uses the same
   arm via `acquireScratch(T, len)` leases.

@@ -209,7 +209,7 @@ pub fn loadDenseF16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape
 
 /// bf16 stays RESIDENT (2 B/weight, like llama.cpp): the linearSeq fast path
 /// streams the raw bits through the mixed f32 x bf16 TransB kernel
-/// (`matmulTransB2DWithBf16Rhs`), which widens in-register (u16 << 16, exact)
+/// (`matmulTransB2DWithHalfRhs(.bf16)`), which widens in-register (u16 << 16, exact)
 /// and accumulates in f32. `Scalar(.bf16)` is the raw `u16` bit pattern.
 pub fn loadDenseBf16Weight(ctx: *ExecContext, info: *const gguf.TensorInfo, shape: [2]usize) !WeightBf16 {
     if (info.ggml_type != .bf16) return Error.UnsupportedWeightType;

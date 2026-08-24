@@ -322,7 +322,7 @@ pub const MmProj = struct {
         errdefer allocator.free(out);
         var output = try ctx.fromBorrowedSlice(.f32, .{ rows, dense_rhs.n }, out);
         defer output.deinit();
-        try ctx.matmul2DWithPackedDenseRhsInto(&output, &input, dense_rhs);
+        try ctx.matmulPackedInto(&output, &input, dense_rhs);
         return out;
     }
 

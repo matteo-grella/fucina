@@ -165,6 +165,37 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `ExecContext` cross-entropy: the eight entries collapse into two.
+  `crossEntropyLoss(ctx, rank, logits, axis, labels, options)` takes the
+  options directly (`.{}` for the defaults); `CrossEntropyOptions` gains
+  `row_stats: ?[]f32`, the per-position `{max, sum_exp}` slot the forward
+  fills and the backward reads, so one options value drives both
+  directions. `crossEntropyBackward(ctx, rank, logits, axis, labels,
+  options, upstream)` takes a `CrossEntropyUpstream` union: `.{ .scale = s
+  }` (mean/sum), `.{ .rows = .{ .per_row = g, .scale = s } }` (`.none`),
+  or `.{ .tensor = &gy }` (the autograd form). Rewrites:
+  `crossEntropyLoss(r, &x, a, l)` -> `crossEntropyLoss(r, &x, a, l, .{})`;
+  `crossEntropyLossEx(..., o)` -> `crossEntropyLoss(..., o)`;
+  `crossEntropyLossExStats(..., o, stats)` -> `crossEntropyLoss(..., o with
+  .row_stats = stats)`; `crossEntropyBackward(..., s)` ->
+  `crossEntropyBackward(..., .{}, .{ .scale = s })`;
+  `crossEntropyBackwardEx(..., o, s, rows)` -> `crossEntropyBackward(...,
+  o, .{ .rows = .{ .per_row = rows, .scale = s } })` (or `.{ .scale = s }`
+  when `rows` was null); the `*ExStats` twins fold the stats into
+  `o.row_stats`; `crossEntropyBackwardExUpstream[Stats](..., o, &gy[,
+  stats])` -> `crossEntropyBackward(..., o, .{ .tensor = &gy })`. The
+  fused `linearCrossEntropyBackwardUpstream` keeps its explicit
+  `row_stats` parameter (a stats-only kernel).
+- `ExecContext` packed matmul: `matmulPacked(a, rhs)` is the one entry
+  over every pre-packed RHS; the container type selects the arm
+  (`MatmulPackedOutput` names the LHS/output dtypes). Rewrites:
+  `matmul2DWithPackedDenseRhs(&a, &rhs)` -> `matmulPacked(&a, &rhs)`;
+  `matmul2DWithPackedDenseRhsInto(&out, &a, &rhs)` ->
+  `matmulPackedInto(&out, &a, &rhs)`; `matmul2DWithPackedRhs(.f16, &a,
+  &rhs)` -> `matmulPacked(&a, &rhs)`. The two mixed-precision twins merge:
+  `matmulTransB2DWithF16Rhs(&a, &b)` / `matmulTransB2DWithBf16Rhs(&a,
+  &b)` -> `matmulTransB2DWithHalfRhs(.f16 | .bf16, &a, &b)`.
+
 The LLM band is renamed to the model band. The module `fucina_llm` is now
 `fucina_models` (root `src/models.zig`); the one-line consumer rewrite is
 `@import("fucina_llm")` -> `@import("fucina_models")`. Dependency-context

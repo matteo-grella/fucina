@@ -262,7 +262,7 @@ test "exec context matmul transposed f16 RHS uses backend output" {
     var b = try ctx.fromSlice(.f16, .{ 2, 3 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
-    var got = try ctx.matmulTransB2DWithF16Rhs(&a, &b);
+    var got = try ctx.matmulTransB2DWithHalfRhs(.f16, &a, &b);
     defer got.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 50, 68, 122, 167 }, got.dataConst());
@@ -286,7 +286,7 @@ test "exec context matmul transposed bf16 RHS uses backend output" {
     });
     defer b.deinit();
 
-    var got = try ctx.matmulTransB2DWithBf16Rhs(&a, &b);
+    var got = try ctx.matmulTransB2DWithHalfRhs(.bf16, &a, &b);
     defer got.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 50, 68, 122, 167 }, got.dataConst());
@@ -324,16 +324,16 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     defer bbf.deinit();
 
     exec_matmul.setCpuF32Shadow(false, null);
-    var want16 = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    var want16 = try ctx.matmulTransB2DWithHalfRhs(.f16, &a, &b16);
     defer want16.deinit();
-    var wantbf = try ctx.matmulTransB2DWithBf16Rhs(&a, &bbf);
+    var wantbf = try ctx.matmulTransB2DWithHalfRhs(.bf16, &a, &bbf);
     defer wantbf.deinit();
 
     exec_matmul.setCpuF32Shadow(true, 4);
     defer exec_matmul.setCpuF32Shadow(null, 32);
-    var got16 = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    var got16 = try ctx.matmulTransB2DWithHalfRhs(.f16, &a, &b16);
     defer got16.deinit();
-    var gotbf = try ctx.matmulTransB2DWithBf16Rhs(&a, &bbf);
+    var gotbf = try ctx.matmulTransB2DWithHalfRhs(.bf16, &a, &bbf);
     defer gotbf.deinit();
 
     // The shadow's widen is exact for both formats; results differ from the
@@ -345,7 +345,7 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     // Second call reuses the cached shadow (the buffer's .cpu resource).
     try std.testing.expect(b16.buffer.acceleratorResource(.cpu) != null);
     const first = b16.buffer.acceleratorResource(.cpu).?;
-    var again = try ctx.matmulTransB2DWithF16Rhs(&a, &b16);
+    var again = try ctx.matmulTransB2DWithHalfRhs(.f16, &a, &b16);
     defer again.deinit();
     try std.testing.expect(b16.buffer.acceleratorResource(.cpu).? == first);
     try std.testing.expectEqualSlices(f32, got16.dataConst(), again.dataConst());
@@ -364,14 +364,14 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     defer b16_ovr.deinit();
     var a_ovr = try ctx_on.fromSlice(.f32, &.{ m, k }, &a_data);
     defer a_ovr.deinit();
-    var got_ovr = try ctx_on.matmulTransB2DWithF16Rhs(&a_ovr, &b16_ovr);
+    var got_ovr = try ctx_on.matmulTransB2DWithHalfRhs(.f16, &a_ovr, &b16_ovr);
     defer got_ovr.deinit();
     try std.testing.expect(b16_ovr.buffer.acceleratorResource(.cpu) != null); // shadow route ran
     for (want16.dataConst(), got_ovr.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
 
     var b16_plain = try ctx.fromSlice(.f16, .{ n, k }, &b16_data);
     defer b16_plain.deinit();
-    var got_plain = try ctx.matmulTransB2DWithF16Rhs(&a, &b16_plain);
+    var got_plain = try ctx.matmulTransB2DWithHalfRhs(.f16, &a, &b16_plain);
     defer got_plain.deinit();
     try std.testing.expect(b16_plain.buffer.acceleratorResource(.cpu) == null); // gate off, no shadow
 }
