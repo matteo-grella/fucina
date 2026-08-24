@@ -41,6 +41,8 @@ const usage =
     \\              --moe-pin-mb=N --moe-no-learn --moe-cache-slots=N
     \\  deepseek2:  --mla=full|latent --dsa --dsa-top-k=N --index-probe --index-share=N
     \\              --moe-experts=N --moe-top-p=F --moe-skip-miss=F
+    \\  spec:       --spec   draft-model-free speculative decode (cascade SAM + recycling;
+    \\              rewind-capable families, greedy-only, lossless)
     \\  glm4moe:    --mtp[=depth]   native multi-token-prediction speculative decode
     \\  inkling:    --mmproj P (--image f.png | --audio f.wav) --prompt "... <__media__> ..." [--embd-out P]
     \\  other:      --info --threads N
@@ -95,6 +97,7 @@ const Cli = struct {
     moe_skip_miss: f32 = 0,
     // glm4moe MTP depth (0 = plain decode).
     mtp_depth: usize = 0,
+    spec: bool = false,
     // inkling multimodal.
     mmproj: ?[]const u8 = null,
     image: ?[]const u8 = null,
@@ -216,6 +219,8 @@ pub fn main(init: std.process.Init) !void {
             cli.moe_top_p = try std.fmt.parseFloat(f32, v);
         } else if (try flagValue(args, &arg_i, "--moe-skip-miss")) |v| {
             cli.moe_skip_miss = try std.fmt.parseFloat(f32, v);
+        } else if (std.mem.eql(u8, arg, "--spec")) {
+            cli.spec = true;
         } else if (std.mem.eql(u8, arg, "--mtp")) {
             cli.mtp_depth = 2;
         } else if (std.mem.startsWith(u8, arg, "--mtp=")) {
@@ -330,6 +335,18 @@ fn runFamily(
     }
     if (!is_glm4moe and cli.mtp_depth > 0) {
         try stdout.print("--mtp is the glm4moe native MTP path (deepseek4's rides `zig build deepseek4`)\n", .{});
+        return error.UnknownArgument;
+    }
+    if (cli.spec and cli.mtp_depth > 0) {
+        try stdout.print("--spec and --mtp are alternative draft sources; pick one\n", .{});
+        return error.UnknownArgument;
+    }
+    if (cli.spec and !comptime Model.caps.rewind) {
+        try stdout.print("--spec needs a rewind-capable family (KV truncate); this architecture has none\n", .{});
+        return error.UnknownArgument;
+    }
+    if (cli.spec and cli.temp > 0) {
+        try stdout.print("--spec is greedy-only in the runner (drop --temp)\n", .{});
         return error.UnknownArgument;
     }
     if (!is_inkling and (cli.mmproj != null or cli.image != null or cli.audio != null or cli.embd_out != null)) {
@@ -495,6 +512,15 @@ fn runFamily(
     // and the shared SpeculativeDecoder verifies/commits/rewinds.
     if (is_glm4moe and cli.mtp_depth > 0) {
         return runGlmMtp(init, allocator, ctx, &model, &cache, &tokenizer, &tokens, logits.?, cli, stdout);
+    }
+
+    // Generic --spec: the cascade drafts, the shared decoder verifies —
+    // any rewind-capable family, no sidecar weights.
+    if (cli.spec) {
+        if (comptime Model.caps.rewind) {
+            return runSpec(Model, init, allocator, ctx, &model, &cache, &tokenizer, &tokens, logits.?, cli, stdout);
+        }
+        unreachable; // rejected by the guard above
     }
 
     // Decode: greedy by default, sampled past --temp 0.
@@ -808,6 +834,103 @@ fn runGlmMtp(
     try stdout.print("generated ids:", .{});
     for (tokens.items[tokens.items.len - produced ..]) |t| try stdout.print(" {d}", .{t});
     try stdout.print("\nprompt: {s}\ntext:  {s}\n", .{ cli.prompt, reply.items });
+}
+
+/// Generic `--spec`: draft-model-free speculation for any rewind-capable
+/// family — the cascade drafts from the committed stream (conversation SAM
+/// + token recycling), the shared SpeculativeDecoder verifies, commits and
+/// rewinds. Lossless: greedy-matching prefixes commit, so the output is
+/// byte-identical to the plain greedy decode loop.
+fn runSpec(
+    comptime Model: type,
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    ctx: *fucina.ExecContext,
+    model: *Model,
+    cache: *Model.Cache,
+    tokenizer: anytype,
+    tokens: *std.ArrayList(usize),
+    prefill_logits: fucina.Tensor(.{ .seq, .vocab }),
+    cli: *const Cli,
+    stdout: *std.Io.Writer,
+) !void {
+    const eos = tokenizer.eosId();
+    const next_token = try argmaxRow(try prefill_logits.dataConst());
+    // The logits row is [1, vocab]: the family-agnostic vocab size.
+    const vocab_size = (try prefill_logits.dataConst()).len;
+
+    const spec_options = models.text.speculative.core.Options{
+        .stop_token = if (eos) |e| @as(usize, e) else null,
+    };
+    var index = try models.text.speculative.cascade.SpeculationIndex.init(allocator, vocab_size);
+    defer index.deinit();
+    index.accounting_min_draft = spec_options.min_draft;
+    var spec = try models.text.speculative.core.SpeculativeDecoder(Model).init(allocator, index.asDraftSource(), spec_options);
+    defer spec.deinit();
+    spec.io = init.io; // live verify/plain cost measurement for the auto-off gate
+    index.observe(tokens.items); // the prompt is committed context
+
+    var reply: std.ArrayList(u8) = .empty;
+    defer reply.deinit(allocator);
+    var produced: usize = 0;
+    var forwards: usize = 0;
+    const decode_start = nowNs(init.io);
+    const base_max_draft = spec.options.max_draft;
+
+    // Decoder invariant: history holds every committed token and its LAST
+    // element is not yet forwarded (same bootstrap as runGlmMtp).
+    var stopped = eos != null and next_token == eos.?;
+    if (!stopped) {
+        try tokenizer.decodeAppend(allocator, @intCast(next_token), &reply);
+        try tokens.append(allocator, next_token);
+        // The committed stream must reach the index token-for-token, in
+        // order (the cascade's contract); the decoder observes everything
+        // it commits itself from here on.
+        index.observe(tokens.items[tokens.items.len - 1 ..]);
+        produced += 1;
+    }
+    var sampler = models.text.sampler.Sampler.init(.{}); // greedy (the losslessness oracle)
+    const Emit = struct {
+        allocator: std.mem.Allocator,
+        tokenizer: @TypeOf(tokenizer),
+        reply: *std.ArrayList(u8),
+        eos: ?u32,
+        saw_eos: bool = false,
+
+        fn emit(ptr: *anyopaque, token: usize) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.eos) |e| if (token == e) {
+                self.saw_eos = true;
+                return;
+            };
+            try self.tokenizer.decodeAppend(self.allocator, @intCast(token), self.reply);
+        }
+    };
+    var emit = Emit{ .allocator = allocator, .tokenizer = tokenizer, .reply = &reply, .eos = eos };
+    const sink = models.text.speculative.core.TokenSink{ .ptr = &emit, .func = Emit.emit };
+    while (!stopped and produced < cli.gen) {
+        spec.options.max_draft = @min(base_max_draft, cli.gen - produced -| 1);
+        const committed = try spec.step(ctx, model, cache, &sampler, tokens, sink);
+        produced += committed - @intFromBool(emit.saw_eos);
+        stopped = emit.saw_eos;
+    }
+    if (emit.saw_eos) _ = tokens.pop();
+    forwards = spec.stats.spec_steps + spec.stats.fallback_steps + spec.stats.disabled_steps;
+
+    const decode_ns = nowNs(init.io) - decode_start;
+    try stdout.print("decode: {d} tokens in {d} forwards, {d:.1} ms, {d:.2} tok/s ({d:.2} tok/forward)\n", .{
+        produced, forwards, seconds(decode_ns) * 1e3, @as(f64, @floatFromInt(produced)) / seconds(decode_ns), @as(f64, @floatFromInt(produced)) / @as(f64, @floatFromInt(@max(forwards, 1))),
+    });
+    if (spec.stats.drafted > 0) {
+        try stdout.print("spec: {d}/{d} drafts accepted ({d:.1}%)\n", .{ spec.stats.accepted, spec.stats.drafted, @as(f64, @floatFromInt(spec.stats.accepted)) * 100.0 / @as(f64, @floatFromInt(spec.stats.drafted)) });
+    }
+    try stdout.print("generated ids:", .{});
+    for (tokens.items[tokens.items.len - produced ..]) |t| try stdout.print(" {d}", .{t});
+    if (cli.prompt_file != null) {
+        try stdout.print("\nprompt: ({d} bytes from file)\ntext:  {s}\n", .{ cli.prompt.len, reply.items });
+    } else {
+        try stdout.print("\nprompt: {s}\ntext:  {s}\n", .{ cli.prompt, reply.items });
+    }
 }
 
 /// The MTP decoder's token sink: decode committed tokens into the reply
