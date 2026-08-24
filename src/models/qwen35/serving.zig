@@ -16,6 +16,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const contract = @import("../text/serving/contract.zig");
+const adapter_common = @import("../text/serving/adapter_common.zig");
 const gguf_chat = @import("../text/serving/gguf_chat.zig");
 const chat = @import("../text/chat.zig");
 const llguidance = @import("../text/llguidance.zig");
@@ -157,23 +158,27 @@ pub const Backend = struct {
     }
 };
 
-/// The served engine box (heap-pinned; `serving.open` dispatches here for
-/// the qwen35/qwen35moe archs). Takes ownership of `file` on every path.
-const Box = struct {
-    allocator: Allocator,
-    model_id: []u8,
-    model: model_mod.Model,
-    tokenizer: tokenizer_mod.Tokenizer,
-    adapter: Backend,
+/// `serving.open` wiring for the qwen35/qwen35moe archs: the shared engine
+/// box (`adapter_common.openFromFile`) with this family's policies.
+const Wiring = struct {
+    pub const Adapter = Backend;
+    pub const Extra = void;
+    pub const template: adapter_common.TemplatePolicy = .detect_or_fallback;
+    /// Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
+    pub const sampling: adapter_common.SamplingPolicy = .from_gguf;
+    pub const reports_expert_store = true;
 
-    fn destroy(ptr: *anyopaque) void {
-        const box: *Box = @ptrCast(@alignCast(ptr));
-        const a = box.allocator;
-        box.adapter.deinit();
-        box.tokenizer.deinit();
-        box.model.deinit();
-        a.free(box.model_id);
-        a.destroy(box);
+    pub fn initAdapter(built: adapter_common.Built(model_mod.Family, Wiring)) !Backend {
+        return Backend.init(
+            built.allocator,
+            built.ctx,
+            built.model,
+            built.tokenizer,
+            built.template.?,
+            built.model_id,
+            built.options.context_len,
+            built.default_sampling,
+        );
     }
 };
 
@@ -186,45 +191,5 @@ pub fn openFromFile(
     options: contract.OpenOptions,
     stderr: *std.Io.Writer,
 ) !contract.Opened {
-    _ = io;
-    var file_alive = true;
-    errdefer if (file_alive) file.deinit();
-
-    const box = try allocator.create(Box);
-    errdefer allocator.destroy(box);
-    box.allocator = allocator;
-    box.model_id = try allocator.dupe(u8, model_id);
-    errdefer allocator.free(box.model_id);
-
-    box.tokenizer = tokenizer_mod.Tokenizer.initFromGguf(allocator, file, .{}) catch {
-        try stderr.writeAll("this GGUF has no usable tokenizer metadata\n");
-        return error.TokenizerUnavailable;
-    };
-    errdefer box.tokenizer.deinit();
-    const template = chat.Template.detect(file.getString("tokenizer.chat_template")) orelse
-        chat.Template{ .format = model_mod.Family.template_fallback.? };
-    // Bonsai GGUFs carry their recommended sampling (`general.sampling.*`).
-    const default_sampling = contract.samplingFromGguf(file);
-
-    box.model = try model_mod.Family.load(ctx, file, .{ .moe_stream = options.moe_stream });
-    errdefer box.model.deinit();
-    file.deinit();
-    file_alive = false;
-
-    box.adapter = try Backend.init(
-        allocator,
-        ctx,
-        &box.model,
-        &box.tokenizer,
-        template,
-        box.model_id,
-        options.context_len,
-        default_sampling,
-    );
-    return .{
-        .ptr = box,
-        .destroyFn = Box.destroy,
-        .backend = box.adapter.backend(),
-        .expert_store = box.model.expert_store,
-    };
+    return adapter_common.openFromFile(model_mod.Family, Wiring, ctx, io, allocator, file, model_id, options, stderr);
 }
