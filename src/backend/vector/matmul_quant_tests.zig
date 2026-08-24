@@ -131,7 +131,7 @@ test "pooled tq2_0 int8 matmul column split matches serial bitwise" {
 // row/column micro-tiling at (r0, c0) (the aarch64 q8_0 tile does), so a
 // split range's group phase and tail differ from the full range's and the
 // per-cell rounding drifts in the last ulps — the same reassociation
-// stance the backend states for GEMMs (§9.3). What a mis-transcribed
+// stance the backend states for GEMMs (see docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md). What a mis-transcribed
 // SplitPolicy produces instead is order-of-magnitude wrong values (a lane
 // group bisected, a column attributed to the wrong task), so the check is
 // bitwise-first with a tight per-element tolerance fallback. Inputs are

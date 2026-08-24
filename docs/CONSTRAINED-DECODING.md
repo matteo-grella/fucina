@@ -107,7 +107,7 @@ The contract (`src/models/text/logit_processor.zig:35`):
   practice this fires only on genuinely broken custom processors.
 - One processor per decode stream, single-threaded, adjacent to its
   sampler. `sendBatch` enforces this: two streams sharing one processor
-  pointer is `error.SharedBatchProcessor` (`src/models/text/chat.zig:412`).
+  pointer is `error.SharedBatchProcessor` (`src/models/text/chat.zig:850`).
 
 Stop handling needs **no new mechanism**: when a grammar completes, the
 mask allows only the configured stop/EOS token, the sampler can only select
@@ -188,7 +188,7 @@ the grammar forbids is masked to `-inf` at its verify row, so the sampled
 token *cannot* equal it; the `sampled == draft` comparison fails; the
 sampled token IS the correction. Rejection sampling semantics are exactly
 preserved, and the constrained speculative stream equals the constrained
-plain stream token-for-token (given bitwise-equal logits — the same §13.9
+plain stream token-for-token (given bitwise-equal logits — the same [§13.9](reference/13-the-model-stack-fucina_models.md#139-speculative-decoding-srcmodelstextspeculative)
 caveat as unconstrained speculation).
 
 The turn boundary is the one place a sampled token does *not* enter
@@ -350,9 +350,9 @@ Consumers:
 | Structural hooks are pure lookaheads; clone independence | `src/models/text/llguidance_tests.zig` |
 | Combinator policy (forced preemption, invalid-prefix truncation, pending accounting, top-k mirroring) | `src/models/text/speculative/constrained_tests.zig` |
 | Constrained plain == speculative (greedy + sampled), forced spans drafted AND accepted, per-turn reset, batch == sequential per-stream constraints, shared-processor guard | `src/models/text/chat_tests.zig` |
-| Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (§2.7 convention) |
+| Doc snippets (incl. the flag-gated llguidance snippet) | `zig build snippet-check` (authoring contract: [DEVELOPMENT.md §7.2](DEVELOPMENT.md#72-doc-snippets-are-tests-too)) |
 | E2E schema/regex conformance, `--spec` byte-parity + acceptance, `--streams` cross-check | qwen3 runner on Qwen3-0.6B-Q8_0 (2026-07-11; grammar commands in `RUNNING-MODELS.md` §"Constrained decoding", the `--spec`/`--streams` commands in `examples/qwen3/README.md`) |
-| Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; §2.8) — first proven natively on the dev rig, 2026-07-11 |
+| Linux staticlib link + full gated suite (x86-64 glibc) | CI llguidance leg (`ci.yml`, ubuntu; [DEVELOPMENT.md §7.3](DEVELOPMENT.md#73-continuous-integration-githubworkflowsciyml)) — first proven natively on the dev rig, 2026-07-11 |
 
-Reference documentation: REFERENCE.md §13.6 (seam + engine), §13.9.6
-(drafting), §2.2 (`-Dllguidance`), §13.8 (chat wiring).
+Reference documentation: [§13.6](reference/13-the-model-stack-fucina_models.md#136-sampling-srcmodelstextsamplerzig) (seam + engine), [§13.9.6](reference/13-the-model-stack-fucina_models.md#1396-grammar-constrained-drafting-speculativeconstrainedzig)
+(drafting), [§2.2](reference/02-toolchain-build-and-project-wiring.md#22-build-options-buildzig) (`-Dllguidance`), [§13.8](reference/13-the-model-stack-fucina_models.md#138-chat-srcmodelstextchatzig) (chat wiring).

@@ -2,7 +2,7 @@
 //! `openFromFile` mirror `serving.open` / `serving.openFromFile` with the
 //! fleet directory as an explicit argument and return the same `Opened`
 //! handle, decoding through the `qwen3/shine.zig` AdaptedModel box with
-//! per-request adapter selection (REFERENCE §13.12). The generic engine
+//! per-request adapter selection (see docs/reference/13-the-model-stack-fucina_models.md). The generic engine
 //! (`serving/open.zig`) carries no SHINE branch; `examples/lmserve` routes
 //! its `--shine-fleet` flag here. Public as `models.qwen3.shine_serving`.
 
@@ -177,7 +177,7 @@ fn openQwen3ShineFleet(
     return .{ .ptr = box, .destroyFn = ShineBox.destroy, .backend = box.adapter.backend() };
 }
 
-/// SHINE adapter fleet serving state (REFERENCE §13.12): the manifest's doc
+/// SHINE adapter fleet serving state (see docs/reference/13-the-model-stack-fucina_models.md): the manifest's doc
 /// names and adapter files, the retrieval index (the cartridge fleets'
 /// EmbedIndex, same `embed_suffix` contract), the query-embedding trainer,
 /// a small adapter LRU, and the AdaptedModel box the backend decodes

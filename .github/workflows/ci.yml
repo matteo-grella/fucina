@@ -29,7 +29,7 @@ jobs:
         run: zig build arch-check
       - name: Doc-index link check
         run: zig build doc-check
-      - name: REFERENCE.md snippet check
+      - name: Reference snippet check
         run: zig build snippet-check
       - name: Cross-ISA dot parity check
         run: zig build x86dot-check
@@ -52,7 +52,7 @@ jobs:
 
   # Package-consumer gate: package the tracked tree (git archive) and consume
   # it from a scratch project via `zig fetch` + b.dependency — the README /
-  # REFERENCE §2.5 flow — so the manifest, the module exports, and the
+  # reference ch 2 consuming flow — so the manifest, the module exports, and the
   # module-carried BLAS linkage (Accelerate by default on macOS) cannot rot.
   consume:
     strategy:

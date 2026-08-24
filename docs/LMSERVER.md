@@ -5,7 +5,7 @@
 in-tree language models behind the two OpenAI wire dialects plus the
 Anthropic Messages API. The server itself is library surface: the transport
 and the generic engine live in `models.text.serving` (`src/models/text/serving/`,
-REFERENCE.md §13.13), a model family integrates through one small
+[§13.13](reference/13-the-model-stack-fucina_models.md#1313-serving-srcmodelstextserving)), a model family integrates through one small
 `Backend` vtable, and this example is the CLI front end plus the adapters
 for the families the generic engine cannot host.
 
@@ -31,7 +31,7 @@ accepted and ignored — one process serves one model).
 ## Design: accept concurrently, generate sequentially
 
 `ExecContext` is single-threaded by contract and one forward pass already
-fork-joins across every performance core (REFERENCE.md, Threading), so the
+fork-joins across every performance core ([§9.8](reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md#98-threading-the-worker-team-srcthreadzig-srcparallelzig)), so the
 server does not try to overlap generations:
 
 ```

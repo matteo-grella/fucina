@@ -97,8 +97,8 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-8B-Q8_0.gguf \
 # (shine.cartridge_rows > 0; trained with ShineTrainer.lossCartridge)
 # compiles the context into a STANDARD KV-prefix cartridge instead of a
 # LoRA adapter — the same safetensors artifact `zig build cartridge`
-# distills, served/evaluated/fleeted exactly the same way (REFERENCE
-# §13.12 "Cartridge readout")
+# distills, served/evaluated/fleeted exactly the same way (see "Cartridge
+# readout" in docs/reference/13-the-model-stack-fucina_models.md)
 zig build qwen3 -Doptimize=ReleaseFast -- <base.gguf> \
   --shine <shine-cartridge.gguf> --shine-context @doc.txt \
   --shine-save-cartridge doc.cartridge.safetensors
@@ -284,8 +284,8 @@ Constrained decoding (needs a `-Dllguidance=true` build):
 The three grammar flags are mutually exclusive; `@F` reads the grammar from
 a file. Usage guidance (composition with `--no-think`/`--spec`/`--streams`,
 sampling advice, examples) is in
-[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md) and REFERENCE.md
-§13.6.
+[`docs/RUNNING-MODELS.md`](../../docs/RUNNING-MODELS.md) and
+[§13.6](../../docs/reference/13-the-model-stack-fucina_models.md#136-sampling-srcmodelstextsamplerzig).
 
 Interactions: `--streams` ignores `--spec` and `--stop` (all streams run the
 full length); `--spec` with `--bench` R>1 is ignored (`--bench` is the

@@ -1,3 +1,4 @@
+<!-- docs-nav: group="Run & serve" title="Descriptor runner" weight=15 -->
 # The qwen3 descriptor runner
 
 `models.qwen3.runner` (`src/models/qwen3/runner.zig`) is one family-independent decoder

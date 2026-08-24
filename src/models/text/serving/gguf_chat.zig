@@ -156,7 +156,7 @@ pub const GgufChatOptions = struct {
     /// both. Slot reuse stays on, keyed by selection: only a slot whose
     /// cartridge selection matches the request's is adoptable.
     fleet: ?FleetOptions = null,
-    /// SHINE adapter fleet serving (arXiv 2602.06358, REFERENCE §13.12):
+    /// SHINE adapter fleet serving (arXiv 2602.06358; see docs/reference/13-the-model-stack-fucina_models.md):
     /// the same contextual query embeds through `embedFn`, the cosine
     /// index picks ONE document, and the apply hook swaps that document's
     /// saved adapter into the served AdaptedModel box before decode

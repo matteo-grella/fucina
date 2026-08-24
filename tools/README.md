@@ -16,8 +16,8 @@ Development-surface tooling. Tiers, in order of how load-bearing they are:
 |---|---|---|
 | `check_import_graph.zig` | build gate | `zig build arch-check`: zero import SCCs, every test file forwarded |
 | `check_doc_links.zig` | build gate | `zig build doc-check`: doc-index links exist, README fetch pin matches build.zig.zon |
-| `gen_snippet_tests.zig` | build gate | `zig build snippet-check`: every runnable REFERENCE.md snippet compiles and asserts |
-| `gen_docs_site.zig` | build gate | stages the MkDocs manual from REFERENCE.md (docs site is self-derived) |
+| `gen_snippet_tests.zig` | build gate | `zig build snippet-check`: every runnable docs/reference snippet compiles and asserts |
+| `gen_docs_site.zig` | build gate | stages the MkDocs manual from the repo markdown (docs site is self-derived) |
 | `bench_gate.py` / `opbench_gate.py` | build gate | measured-throughput regression gates over the bench binaries |
 | `export_gguf.zig` | release tool | GGUF export: the train, export, serve-anywhere loop |
 | `convert_ds4_fp4.zig` | release tool | DeepSeek-V4 fp4-expert to tied-PTQTP GGUF converter |

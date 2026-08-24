@@ -370,31 +370,6 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   and the `matmulPacked*Slice` family → `kernels.matmulPackedSlice`.
   Every collapsed entry calls the identical kernel with identical
   arguments; numerics are unchanged.
-- Internal layout, no public spelling changes: `src/models/model_common.zig`
-  holds the PTQTP-aware projection loader, the dense-FFN containers, the
-  MoE expert-trio loader, the embed/norm/lm-head trio, and the GQA head
-  map the runner and qwen35 previously each carried; `weights/moe_stream.zig`
-  holds `MoeStreamOptions`; `exec/moe_gu.zig`'s
-  packed and raw batch bodies share one chain-wiring skeleton; `optim.zig`
-  is a facade over `optim/{common,frame,moment_pair,muon,apollo,sgd,schedule,set}.zig`
-  (every `fucina.optim.*` spelling and every checkpoint byte unchanged);
-  the three core model-I/O files import their home modules directly
-  instead of a shadow `fucina` struct. Recorded goldens and llama.cpp parity gates are
-  unchanged.
-- `parallel.row_kernel_len_threshold` and `parallel.attention_work_threshold`
-  name the halved pool gates the fused row kernels and attention paths
-  use (previously 27 inline `threshold / 2` sites); values unchanged.
-- docs/ARCHITECTURE.md: the band table now lists every `src/*.zig` file,
-  and the kernel-boundary wording in `exec.zig`/`backend.zig` states where
-  the fused kernels actually live (exec, backend-independent).
-- `ExecContext` is one type: the `Runtime` substrate is merged into it
-  (its fields are `ExecContext` fields, its methods are free functions in
-  `exec/runtime.zig` aliased into the struct); domain modules take
-  `*ExecContext`; `ctx.rt.X` -> `ctx.X`. `Runtime` is not public API, so
-  no public spelling changes. `zig build arch-check` permits one SCC
-  shape, a same-band SCC anchored on a directory root (`exec.zig` <->
-  `exec/*.zig`), and reports it in its summary line; every other SCC
-  stays an error.
 - `fucina.Backend` is gone: the kernel dispatch struct carried no state
   beyond the worker-pool pointer, which now lives on `ExecContext`
   (`parallel_pool`, read through `ctx.pc()`). `fucina.BackendKind` and
@@ -407,23 +382,6 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   kernel signature takes `pc: ParallelConfig` first when it uses the pool
   and drops the `WithConfig` suffix (`scaleIntoWithConfig(out, a, s,
   config)` -> `scaleInto(pc, out, a, s)`); the config-less twins are gone.
-- GPU providers: the per-provider kernel ABI tag enum is `KernelFormatTag`
-  (was `QFormat`; `fucina.internal.backend_mod.gpu_impl.QFormat` →
-  `.KernelFormatTag`), a wire value rather than a format identity, and each
-  provider maps a dtype to it with `kernelTag(dt) ?KernelFormatTag` (null
-  when the provider has no kernel for that dtype); the exec offload seams
-  and the MoE gate/up path use it instead of hand-written dtype-to-tag
-  switches. `expert_store.StreamedQuant` keeps its members (each spelled
-  like its `DType` tag; `tq2_0_fx4` is the one non-`DType` member) and
-  derives block geometry from `dtype.block_formats`; `fromDType`/
-  `streamable` make the enum the one place the streamable subset is listed.
-- Internal layout, no public spelling changes: the `backend/quant/` and
-  `backend/vector/` children are addressed by module (`quant.q4_k.X`,
-  `vector.gemm.X`) instead of through re-export manifests in `quant.zig`
-  and `vector.zig`; `quant/matmul_api.zig` is removed; the vector leaves
-  take `pc: ParallelConfig` first with no `WithConfig` suffix, so
-  `native.kernels` is a list of aliases; the Q8_Kx4 lane-dot helpers q4_k
-  and q5_k each carried live once in `quant/common.zig`.
 - The research modules live under one namespace, so the facade states the
   tier: `models.research.subq` → `models.research.subq`, `models.engram` →
   `models.research.engram`, `models.qwen3.shine`/`models.qwen3.shine_train` →
@@ -463,13 +421,22 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   takes the state type first, and the JSON codec pair
   (`writeTrainerStateJson`, `parseTrainerState`) is exported. The on-disk
   format is byte-identical.
-- Internal layout, no public spelling changes: `src/store/` is the new
-  `store` band between `exec` and `backend`, and
-  `src/exec/expert_store.zig` moved there (`fucina.expert_store` /
-  `fucina.ExpertStore` unchanged); `-Dgpu=none` resolves to the null
-  provider `src/backend/gpu_none.zig` instead of a disabled `metal.zig`,
-  so the default build analyzes no real GPU provider and the Metal
-  provider tests run only under `-Dgpu=metal`.
+
+- Internal reorganization (no public spelling changes; details in `git
+  log`): the `Runtime` substrate merged into `ExecContext` (domain modules
+  take `*ExecContext`; `zig build arch-check` permits and counts the one
+  root-anchored `exec.zig` <-> `exec/*.zig` SCC); the `backend/quant/` and
+  `backend/vector/` children addressed by module, with the kernel set named
+  once in `backend/interface.zig`; the GPU providers' kernel ABI tag
+  (`KernelFormatTag`, was `QFormat`) and the `expert_store` streamable-quant
+  enum derived from `dtype.block_formats`; the new `src/store/` band
+  (`src/exec/expert_store.zig` moved there) and the `-Dgpu=none` null
+  provider `backend/gpu_none.zig`; the shared model load band
+  (`src/models/model_common.zig`, `weights/moe_stream.zig`, the
+  `exec/moe_gu.zig` chain skeleton); the `optim/` facade split; named
+  `parallel.*` pool-gate thresholds; and the docs' per-file band table.
+  Kernels, numerics, recorded goldens, checkpoint bytes, and every public
+  spelling are unchanged.
 
 ### Deprecated
 

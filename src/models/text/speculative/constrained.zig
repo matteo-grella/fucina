@@ -16,7 +16,7 @@
 //!   verify compute and drags the source's acceptance gates down.
 //!
 //! Losslessness is untouched: drafts never affect WHAT is committed (the
-//! §13.9 rejection-sampling contract), and both hooks are deterministic pure
+//! rejection-sampling contract, see docs/reference/13-the-model-stack-fucina_models.md), and both hooks are deterministic pure
 //! lookaheads, so the source stays deterministic. The wrapped processor MUST
 //! be the same one installed on the decode stream's sampler — the
 //! acceptance-probability-1 property comes from the mask and the drafts

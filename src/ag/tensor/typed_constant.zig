@@ -311,7 +311,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
                 /// No-grad tensor of uniform integer draws in `[low, high)`
                 /// (torch.randint) from the deterministic counter-based stream at
-                /// `seed` (§6.8): element i is a pure function of `(seed, i)` via
+                /// `seed` (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md): element i is a pure function of `(seed, i)` via
                 /// the widening multiply-shift map (`fucina.rng.randintFill`).
                 /// i64-only — the repo-wide index dtype; cast with `to` for
                 /// narrower integers. `low >= high` is `InvalidShape`.
@@ -472,7 +472,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub const setSlice = typedConstantSetSlice;
                 pub const setRows = typedConstantSetRows;
 
-                // Integer forward math (§4.19): wrapping two's-complement
+                // Integer forward math (see docs/reference/04-tensor-operations.md): wrapping two's-complement
                 // pointwise, explicit division/remainder, bitwise combinators,
                 // i64-returning reductions, and scalar casts. On `.bool` the
                 // arithmetic entries are compile errors — only `to` and the
@@ -493,7 +493,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub const sum = typedConstantSum;
                 pub const sumAll = typedConstantSumAll;
 
-                // Masks (§4.6): integer `compare` is exact at any magnitude; the
+                // Masks (see docs/reference/04-tensor-operations.md): integer `compare` is exact at any magnitude; the
                 // logical combinators live on the `.bool` branch.
                 pub const compare = typedConstantCompare;
                 pub const logicalAnd = typedConstantLogicalAnd;
@@ -707,7 +707,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 pub const pad = typedConstantPad;
                 pub const einsum = typedConstantEinsum;
 
-                // Widened reductions (f16/bf16 only; f32 result per §8.3).
+                // Widened reductions (f16/bf16 only; f32 result per the dtype policy in docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md).
                 pub const max = typedConstantMax;
                 pub const min = typedConstantMin;
                 pub const argmax = typedConstantArgmax;
@@ -953,7 +953,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         // Widened typed-float ops: forward coverage for ops with no native typed
         // kernel. The input widens to f32, the f32 exec kernel runs, and the result
         // narrows ONCE on store — f32 accumulation with a single final round, the
-        // §8.3 policy. f64 is excluded at comptime: f64 math must stay f64, and
+        // dtype policy in docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md. f64 is excluded at comptime: f64 math must stay f64, and
         // rounding it through f32 would silently lose precision.
         pub fn requireWidenedTypedFloat(comptime tensor_dtype: DType, comptime what: []const u8) void {
             if (tensor_dtype != .f16 and tensor_dtype != .bf16) {
@@ -1431,7 +1431,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             return typedFromWidened(Self.dtype, Self.axis_tags, ctx, &wide_value);
         }
 
-        // Widened reductions return f32 like the native typed sum/mean (§8.3:
+        // Widened reductions return f32 like the native typed sum/mean (see docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md:
         // reductions on 16-bit floats keep the accumulator dtype).
         pub fn typedConstantLogsumexp(self: anytype, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .f32, .tags = removeTag(TensorObject(@TypeOf(self)).axis_tags, tag) }) {
             try typedRequireNoGrad(self);
@@ -1604,7 +1604,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
         /// Widened einsum: both operands widen to f32 and the f32 GEMM lowering
         /// runs (f32 accumulation); the result narrows to the input dtype per the
-        /// §8.3 matmul policy — the same contract as the typed `dot`.
+        /// matmul dtype policy (docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md) — the same contract as the typed `dot`.
         pub fn typedConstantEinsum(self: anytype, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(.{ .dtype = TensorObject(@TypeOf(self)).dtype, .tags = normalizeTags(out_tags) }) {
             try typedRequireNoGrad(self);
             try typedRequireNoGrad(other);

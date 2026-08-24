@@ -3,7 +3,7 @@
 //! one worker owns the backend (and through it the one ExecContext) — the
 //! engine's intended shape, since a single forward pass already fork-joins
 //! across every performance core and ExecContext is single-threaded by
-//! contract (docs/REFERENCE.md, Threading).
+//! contract (docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md, Threading).
 
 const std = @import("std");
 const types = @import("contract.zig");

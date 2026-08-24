@@ -329,26 +329,15 @@ way to somewhere else.
 
 **[The manual](https://matteo-grella.github.io/fucina/docs/)** renders all
 of it — reference, guides, course, and per-example pages — with search.
-The sources:
+[docs/README.md](docs/README.md) is the full source index; the entry
+points:
 
 | Doc | Contents |
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | the actual source layout, layer by layer — start here |
-| [docs/REFERENCE.md](docs/REFERENCE.md) | the detailed API reference: the full public surface, exact semantics, machine-verified snippets |
-| [docs/course/](docs/course/README.md) | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and chatting language models; per-chapter video scripts included |
+| [docs/reference/](docs/reference/00-index.md) | the detailed API reference, one chapter per file: the full public surface, exact semantics, machine-verified snippets |
 | [docs/RUNNING-MODELS.md](docs/RUNNING-MODELS.md) | the model index: verified weight downloads + licenses, the example-to-README map, shared runner machinery |
-| [docs/LMSERVER.md](docs/LMSERVER.md) | the lmserve example: OpenAI API mapping tables, streaming contracts, server architecture |
-| [docs/BENCHMARK.md](docs/BENCHMARK.md) | the measurement protocol and dated Fucina-vs-llama.cpp records, wins and losses |
-| [docs/TRAINING.md](docs/TRAINING.md) | the training guide: autograd, optimizers, LoRA, evolution strategies, checkpoints, gradient verification |
-| [docs/MEMORY-MODEL.md](docs/MEMORY-MODEL.md) | ownership rules and the buffer-pool-not-arena adjudication |
-| [docs/PORTING.md](docs/PORTING.md) | the porting method — how every model family here earned its parity claims, written for the next port |
-| [docs/SPECULATIVE.md](docs/SPECULATIVE.md) | design record: lossless draft-model-free speculative decoding |
-| [docs/PTQTP-RECIPE.md](docs/PTQTP-RECIPE.md) | walkthrough: PTQTP-quantize any GGUF (MoE experts included) and run it, resident or streamed |
-| [docs/CONSTRAINED-DECODING.md](docs/CONSTRAINED-DECODING.md) | design record: grammar/JSON-schema constrained decoding and its speculation composition |
-| [docs/CARTRIDGES.md](docs/CARTRIDGES.md) | design record: trained KV-prefix corpus compression (Cartridges) — self-study distillation, serving, gates |
-| [docs/ENGRAM.md](docs/ENGRAM.md) | design record: conditional n-gram memory (Engram) — hashed lookup tables, graft mode, reference parity |
-| `AGENTS.md` | build/test/bench commands, build options, repo map, house rules |
-| [docs/THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md) | full provenance and license inventory of third-party material |
+| [docs/course/](docs/course/README.md) | *Forging Deep Learning in Zig* — a book-length course that teaches Zig and deep learning together by rebuilding this library's journey, from a dtype enum to a live guitar amp and chatting language models; per-chapter video scripts included |
 
 ## Status and scope
 

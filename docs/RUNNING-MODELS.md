@@ -221,7 +221,7 @@ every cache-hit expert dot runs the folded one-pass ternary kernel
 (2.09-2.37× the two-pass dot; the store folds the planes into the cache
 slab at fill). `--ptqtp=3 --ptqtp-tie` is the near-parity quality shape
 instead (two-pass serving). The full walkthrough with measured numbers
-is [`PTQTP-RECIPE.md`](PTQTP-RECIPE.md).
+is the Recipe section of [`PTQTP.md`](PTQTP.md#recipe-quantize-a-model-and-run-it-resident-or-streamed).
 
 ### Native MTP drafting
 
@@ -252,11 +252,12 @@ serves the same grammars for every backend it fronts, including
 Ternary-Bonsai-27B ([examples/qwen35/README.md](../examples/qwen35/README.md)).
 
 ```sh
-# Constrained decoding (needs a -Dllguidance=true build — REFERENCE.md §13.6):
+# Constrained decoding (needs a -Dllguidance=true build; design record:
+# docs/CONSTRAINED-DECODING.md):
 # the reply must satisfy a JSON schema, regex, or Lark grammar. Combine with
 # --no-think (the grammar governs the whole reply, thinking channel included);
 # works in --chat/--repl/--prompt, composes with --spec (grammar-forced spans
-# draft themselves — REFERENCE.md 13.9.6) and with --streams (one grammar
+# draft themselves — docs/CONSTRAINED-DECODING.md §5) and with --streams (one grammar
 # clone per stream). Prefer sampling over --temp 0 and bound open-ended
 # fields (maximum/maxLength/{m,n}) — a greedy argmax inside an unbounded
 # field can loop until the token budget.

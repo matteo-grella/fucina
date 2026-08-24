@@ -1,7 +1,7 @@
 //! Zig-native SHINE hypernetwork training (`zig build shine-train`): learn
 //! context -> generated parameters over a frozen qwen3 base, with either
 //! readout: `--rows N` trains the CARTRIDGE readout (context -> standard
-//! KV-prefix cartridge; REFERENCE.md §13.12 "Cartridge readout"),
+//! KV-prefix cartridge; see "Cartridge readout" in docs/reference/13-the-model-stack-fucina_models.md),
 //! `--lora-r N` the LoRA readout. Data is triple JSONL: one object per
 //! line with `evidence` (the raw context), `instruction`, `response`
 //! (chat-templated, prompt-masked, the same encoding the finetune

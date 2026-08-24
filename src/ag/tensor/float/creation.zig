@@ -172,7 +172,7 @@ pub fn Ops(comptime Self: type) type {
         }
 
         /// No-grad tensor of uniform draws in `[0, 1)` (torch.rand) from
-        /// the deterministic counter-based stream at `seed` (§6.8,
+        /// the deterministic counter-based stream at `seed` (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md;
         /// `fucina.rng`): element i is a pure function of `(seed, i)`, so
         /// the same seed always reproduces the same tensor — the stream IS
         /// the generator abstraction (store the seed, regenerate the

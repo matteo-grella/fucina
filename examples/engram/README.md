@@ -5,7 +5,8 @@ gated into the residual stream — to a FROZEN Qwen3 GGUF and train only the
 graft (optionally plus LoRA adapters).
 [docs/ENGRAM.md](../../docs/ENGRAM.md) is the design record for the
 underlying `src/models/research/engram.zig` module (reference semantics, parity gates,
-graft mode); the API surface is `docs/REFERENCE.md` §13.11. This example is
+graft mode); the API surface is
+[§13.11](../../docs/reference/13-the-model-stack-fucina_models.md#1311-engram-srcmodelsresearchengramzig). This example is
 the experiment driver: it wires the module into the qwen3 trainer and
 measures whether the memory helps.
 

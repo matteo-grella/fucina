@@ -150,7 +150,7 @@ test "public Tensor accepts non-f32 dtype specs for token tensors" {
 
     const TokenIds = Tensor(.{ .dtype = .u16, .tags = .{ .batch, .seq } });
     try std.testing.expect(TokenIds.dtype == .u16);
-    // Integer tensors carry the wrapping forward-math set (§4.19); float
+    // Integer tensors carry the wrapping forward-math set (see docs/reference/04-tensor-operations.md); float
     // `div` stays absent (integer division is explicit divTrunc/divFloor).
     try std.testing.expect(@hasDecl(TokenIds, "add"));
     try std.testing.expect(!@hasDecl(TokenIds, "div"));
@@ -199,7 +199,7 @@ test "public integer and bool Tensor excludes float math at comptime" {
 fn expectNoFloatMath(comptime non_float_dtype: DType) void {
     const T = Tensor(.{ .dtype = non_float_dtype, .tags = .{ .batch, .d } });
     // `to`, wrapping add/sub/mul, maximum/minimum, divTrunc/divFloor, and
-    // the i64-returning sum/sumAll are integer ops now (§4.19); `div`
+    // the i64-returning sum/sumAll are integer ops now (see docs/reference/04-tensor-operations.md); `div`
     // stays float-only (integer division is explicit).
     const forbidden = .{
         "div",

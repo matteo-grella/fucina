@@ -788,7 +788,8 @@ Generic helpers stay flat in `src/models/`:
   lossless one-draw contract; the init errors are
   `SpeculationWithBatch`/`SpeculationWithReuse`). `sendBatch` runs lockstep batch-N decode
   over N sibling conversations sharing one model via `Model.forwardStepBatch`
-  (speculation excluded; ownership contract in `REFERENCE.md`).
+  (speculation excluded; ownership contract in
+  [§13.8](reference/13-the-model-stack-fucina_models.md#138-chat-srcmodelstextchatzig)).
 - `serving.zig` + `serving/`: the serving band. `serving/contract.zig` is
   the model-agnostic contract (`GenerateRequest`/`GenerateResult`, `Caps`,
   the per-family `Backend` vtable); `serving/http.zig` (accept loop, SSE
@@ -849,12 +850,12 @@ Generic helpers stay flat in `src/models/`:
 and `raw_backend` (rooted at `src/backend.zig`) microbench modules.
 `build.zig.zon` names the package `.fucina`, so both library modules are
 consumable from another project via `zig fetch` + `b.dependency`
-(REFERENCE.md §2.5). The full step list and options live in `AGENTS.md`;
+([§2.5](reference/02-toolchain-build-and-project-wiring.md#25-consuming-fucina-from-another-project)). The full step list and options live in `AGENTS.md`;
 the verification-relevant steps are:
 
 - `zig build test` (+ `-Dbackend=scalar`, `-Dblas=none`, optimize variants):
-  drives nine test roots — `src/fucina.zig`, `src/models.zig`, and the
-  `examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,nanochat}/main.zig`
+  drives every test root — `src/fucina.zig`, `src/models.zig`, and the
+  `examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,voiceagent,nanochat}/main.zig`
   roots (`zig build test-fucina` runs the fucina root alone, the routine
   `-Dbackend=scalar` leg). Parity suites needing local model/reference assets
   are env-gated (e.g. `OMNIVOICE_PARITY`) and skip by default.
@@ -883,28 +884,7 @@ kernels in `src/backend/quant/cold.zig`). The forwarding stanzas are why
 production files still contain `test` blocks; they are not license for inline
 behavioral tests, and `arch-check` ignores the imports inside them.
 
-## Current Strengths
-
-- Clean, machine-enforced dependency direction; the only production SCC
-  is the root-anchored `exec.zig` / `exec/*.zig` pair the checker permits.
-- Single public tensor API for no-grad and grad execution; the raw layer is
-  sealed behind a comptime guard with an explicit `internal` escape hatch.
-- Explicit ownership and view semantics for storage, with deterministic
-  cleanup and release hooks for borrowed/device-resident bytes.
-- Eager runtime simple enough to reason about: one `ExecContext` type,
-  domain modules monomorphic over an explicit `*ExecContext`.
-- Precisely scoped allocation contract: outputs are exec-supplied everywhere,
-  compute leaves are allocation-free, and the one allocating tier (quantized
-  LHS scratch) is deliberate and documented.
-- Native backend reaches BLAS/GPU when profitable while keeping pure Zig
-  fallback kernels; quantized decode is golden-tested bit-exactly vs ggml.
-- Tagged tensors provide named-axis expressiveness without a second tensor
-  type; VJPs reuse the same tag-ops library, and one einsum lowering serves
-  every contraction (`einsum`, `dot`, and their backward records).
-- Training loop is complete on CPU (optimizers, checkpointing, LoRA,
-  gradient verification) with golden-parity evidence.
-
-## Current Production Gaps
+## Known limitations
 
 - No stable external API contract: the package manifest and 0.x tags give
   consumers a pin (`zig fetch --save git+...#v0.3.0`), not a semver
@@ -927,13 +907,3 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 - No documented thread-safety contract for users sharing tensor handles
   across threads (the runtime's internal pools are thread-safe; handle
   sharing is not specified).
-
-## Production Readiness Assessment
-
-Current assessment: **production-oriented core, not production-ready
-product**. The architecture is strong enough to keep iterating: dependencies
-are clean and enforced, ownership is explicit, and the eager
-execution/autograd split is coherent — the LLM runners and the training loop
-are built on it end-to-end. Treat the public API as unstable until the gaps
-above (API contract, session lifecycle, cross-platform backend coverage) are
-addressed.

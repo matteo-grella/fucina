@@ -1,30 +1,26 @@
 # AGENTS.md — Fucina
 
 Fucina is a close-to-metal **CPU tensor / autograd runtime + LLM inference engine** written in
-**Zig 0.16**. North Star: **match or beat llama.cpp on CPU**. It runs Qwen3
-dense and the Qwen3-MoE (`qwen3moe`) family, Gemma 4, and several other model families from GGUF
-weights (see `docs/RUNNING-MODELS.md`; model weights are not part of the repo). It is CPU-first, with an
-optional Metal GPU GEMM offload via `-Dgpu=metal` (see the build options + `src/backend/metal.zig`
-below). There is no ggml graph runtime and no C/CMake build — pure Zig vector kernels plus optional
-CBLAS for GEMM (the Metal `shim.m`/`.metal` kernels are vendored, not a CMake build).
-
-This file is the working guide for contributors and coding agents: toolchain, build/test commands,
-repo map, house rules, and the doc index.
+**Zig 0.16**. North Star: **match or beat llama.cpp on CPU**. It runs Qwen3 dense and MoE, Gemma 4,
+and several other model families from GGUF weights (`docs/RUNNING-MODELS.md`; weights are not part
+of the repo). CPU-first, with optional GPU GEMM offload via `-Dgpu=metal|cuda`; no ggml graph
+runtime and no C/CMake build — pure Zig vector kernels plus optional CBLAS for GEMM (the vendored
+Metal/CUDA kernels and audio shims are compiled by `build.zig` itself). This file is the working
+guide for contributors and coding agents: toolchain, commands, repo map, house rules, doc index.
 
 ## Toolchain
 
-- Pinned to **Zig 0.16.0** (`zig version` → `0.16.0`).
-- `build.zig.zon` is the package manifest (`.version`, `.paths` = the shipped surface; `zig build doc-check` asserts README's fetch pin matches its version); modules are wired in `build.zig` and exported as `fucina` / `fucina_models`.
+- Pinned to **Zig 0.16.0** (`zig version` → `0.16.0`). `build.zig.zon` is the package manifest (`.version`, `.paths` = the shipped surface; `zig build doc-check` asserts README's fetch pin matches its version); modules are wired in `build.zig` and exported as `fucina` / `fucina_models`.
 
 ## Build, test, run, bench
 
 ```sh
-zig build test                 # unit tests — TEN roots: src/fucina.zig, src/models.zig, examples/{lmserve,nam,parakeet,omnivoice,locate_anything,facedetect,voiceagent,nanochat}/main.zig; every root also has a solo step (test-fucina, test-models, test-lmserve, test-nam, test-parakeet, test-omnivoice, test-locate-anything, test-facedetect, test-voiceagent, test-nanochat)
-zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full ten-root matrix is a native gate
+zig build test                 # unit tests, every test root: src/fucina.zig, src/models.zig, and the test-carrying examples; each root also has a solo step (test-fucina, test-models, test-<example>)
+zig build test-fucina -Dbackend=scalar  # THE scalar leg: fucina root only (the kernel/spec surface). The scalar backend verifies kernels/math; real-model golden forwards are native-only by design, so the full test matrix is a native gate
 zig build test -Dblas=none        # native backend via pure Zig vector kernels (no CBLAS)
-zig build arch-check           # production-only import graph over src/ + examples/ + bench/ + tools/ (AST-based, test-aware): 0 forbidden SCCs (a same-band SCC anchored on a directory root, exec.zig <-> exec/*.zig, is permitted and counted), 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded
-zig build doc-check            # doc rot gate: every doc named in AGENTS.md's doc index must exist, and README's zig-fetch pin must match build.zig.zon's version (tools/check_doc_links.zig)
-zig build snippet-check        # REFERENCE.md snippet gate: every runnable ```zig snippet (named test block) extracted and run against the real fucina/fucina_models modules (tools/gen_snippet_tests.zig)
+zig build arch-check           # production-only import graph over src/ + examples/ + bench/ + tools/ (AST-based, test-aware): 0 forbidden SCCs (the root-anchored exec.zig <-> exec/*.zig SCC is permitted and counted), 0 band inversions (the ARCHITECTURE.md Layer Stack, encoded as band_table in the tool), every sibling test file forwarded
+zig build doc-check            # doc rot gate: docs/README.md (the index) matches the docs-nav set; intra-doc links, anchors, and src:line citations resolve; README's zig-fetch pin matches build.zig.zon (tools/check_doc_links.zig)
+zig build snippet-check        # reference snippet gate: every runnable ```zig snippet (named test block) in docs/reference/ extracted and run against the real fucina/fucina_models modules (tools/gen_snippet_tests.zig)
 zig build x86dot-check         # cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot parity checker (follows -Dtarget) + compile-only AVX2/VNNI/smmla bit-rot legs (src/x86dot_check.zig)
 zig build bench-check          # compile every bench executable and the subq research tools without running them
 zig build cuda-check           # compile-only -Dgpu=cuda legs (x86_64-linux-gnu fucina/models roots + NVRTC PTX generator, not run): CUDA-provider bit-rot gate for GPU-less machines
@@ -47,6 +43,8 @@ zig build spirals              # two-spirals training demo: SGD/AdamW/Muon/APOLL
 zig build nam -- <args>        # Neural Amp Modeler: .nam profile import/run/train/export, GGUF interchange, live amp sim (examples/nam/main.zig)
 zig build finetune -- <args>   # LoRA fine-tune a Qwen3 GGUF on CPU (examples/finetune/main.zig)
 zig build cartridge -- <args>  # Cartridges (arXiv 2506.06266): train a corpus into a reusable KV prefix by in-process self-study distillation + serve it (examples/cartridge/main.zig; see docs/CARTRIDGES.md)
+zig build cartridge-fleet -- <args>  # per-document cartridge fleets: joint training, budget manager, cosine cartridge-RAG (examples/cartridge_fleet/main.zig)
+zig build engram -- <args>     # conditional n-gram memory graft trained on a frozen Qwen3 GGUF (examples/engram/main.zig; see docs/ENGRAM.md)
 zig build es-finetune -- <args>  # gradient-free ES fine-tune of a Qwen3 GGUF (examples/es_finetune/main.zig; --mode lora|full, --reward rule|nll|acc)
 zig build es-spirals           # two-spirals MLP trained FROM SCRATCH by ES (examples/es_spirals/main.zig; self-verifying, member-parallel replicas)
 zig build es-ternary-spirals   # two-spirals MLP with PACKED TERNARY (TQ2_0) hidden/output layers trained by ternary-native ES — training state IS the int8 inference model (examples/es_ternary_spirals/main.zig; see docs/TERNARY.md)
@@ -57,15 +55,18 @@ zig build bench                # MLP-shaped inference/backward benchmarks
 zig build bench-gate           # paired Fucina-vs-llama benchmark gate (tools/bench_gate.py; protocol in docs/BENCHMARK.md)
 zig build bench-optim          # optimizer step kernels at LLM shapes (bench/optim.zig)
 zig build bench-ce             # softmax / cross-entropy / layerNorm row kernels at LLM shapes (bench/ce.zig)
+zig build bench-conv           # conv2d forward/backward-input/backward-weight at CNN shapes (bench/conv.zig)
 zig build bench-scatter        # scatter-add (embedding-gradient) kernel at vocab x dim shapes (bench/scatter.zig)
 zig build bench-masked-reduce  # masked reductions: fused vs maskedFill+reduce vs unmasked (bench/masked_reduce.zig)
 zig build bench-backend        # scalar vs native backends on representative ops
 zig build bench-f16gemm        # f16 TransB GEMM parallel-efficiency microbench
 zig build bench-gemm           # large-shape f32 GEMM: row kernels vs blocked packed kernel vs BLAS dispatch (bench/gemm.zig)
 zig build bench-packed-gemm    # pack-once dense f32/f16/bf16 RHS GEMM at skinny-m inference shapes (bench/packed_gemm.zig)
+zig build bench-train-step     # end-to-end GPT autograd training step on a fixed synthetic sequence; --inference = eval-mode forward, --dump <dir> feeds tools/torch_train_step.py (bench/train_step.zig)
 zig build bench-gpu-dispatch  # CPU BLAS vs blocking/async eager GPU GEMM/GEMV latency + queued throughput
 zig build bench-gpu-formats   # packed CPU vs eager GPU f16/Q4_K/Q5_K/Q6_K/Q8_0 LLM-linear latency + queued throughput
 zig build bench-q5kmoe         # Q5_K MoE-expert matmul: per-row vs 4-row lane-packed col-outer (bench/q5kmoe.zig)
+zig build bench-q8gemv         # q8_0 skinny-m decode GEMV: per-row vs x4 interleaved vs lane-packed LHS (bench/q8gemv.zig)
 zig build bench-ternary        # TQ2_0 ternary matmul: hot sdot/vpdpbusd tiles vs x4 column-interleaved pack (interleaved A/B decision pair) vs cold table path, mul-free f32 path, Q4_K, dense f32 (bench/ternary.zig)
 zig build bench-membw          # measured DRAM read-bandwidth ceiling, single-thread + all-core — the roofline denominator for weight-stream GB/s (bench/membw.zig)
 zig build bench-attention-backward  # grouped causal attention backward (bench/attention_backward.zig)
@@ -74,117 +75,68 @@ zig build bench-einsum         # einsum vs hand-written dot/permute contraction 
 zig build bench-backward-diamond  # serial vs manual-parallel independent GEMM VJPs
 ```
 
-Build options (consumed at comptime via `build_options`):
+`zig build --help` lists every step; runner CLIs live in `docs/RUNNING-MODELS.md` and the per-example `examples/<name>/README.md`.
+
+Build options (consumed at comptime via `build_options`; the full table with defaults and constraints is the reference's toolchain chapter, `docs/reference/02-toolchain-build-and-project-wiring.md`):
 
 - `-Dbackend=native|scalar` — `native` (default) = Zig SIMD + optional BLAS; `scalar` = reference.
 - `-Dblas=none|accelerate|openblas|mkl|blis|nvpl|blas` — CBLAS provider for GEMM. Default `accelerate`
-  on macOS, `none` elsewhere. `none` keeps the native backend on its pure Zig vector kernels.
-- `-Dblas-threads=N` — pin vendor BLAS threads (`0` = provider default).
+  on macOS, auto-detected/`none` elsewhere; `none` keeps the pure Zig vector kernels.
+  `-Dblas-threads=N` pins vendor BLAS threads (`0` = provider default).
 - `-Dmax-threads=N` — comptime worker-team ceiling *and* runtime default thread count (1–64,
   default 8 = M1 Max P-cores; `src/parallel.zig`). `FUCINA_MAX_THREADS` still only lowers it at
-  runtime (works on static/non-libc Linux too, via `/proc/self/environ`) — many-core servers
-  must raise the ceiling at build time.
-- `-Dgpu=none|metal|cuda` — GPU GEMM offload. **metal** (macOS): big f32 GEMMs (cold single-op gate 2^32
-  m·n·k work, `FUCINA_GPU_MIN_WORK` override, `FUCINA_GPU=0` kill switch) run on the GPU via the
-  vendored MLX steel kernel, and the Gemma/Diffusion MoE expert FFN runs as grouped
-  dequant-in-kernel Q6_K/Q8_0 GEMMs (vendored ggml mul_mm; `FUCINA_GPU_MIN_WORK_QMOE` work gate +
-  `FUCINA_GPU_QMOE_MIN_FILL` tile-occupancy gate (default 50% — small-m expert batches whose
-  32-row tiles would run mostly empty stay on CPU; 0 = old behavior), raw-block CPU fallback —
-  gpu builds keep ONE raw expert representation instead of the x4 packs). **Dense quantized
-  linears** (Q4_K/Q6_K/Q8_0, and ternary TQ2_0 — e.g. the qwen3/gemma prefill projections and PTQTP plane matmuls) also offload via the same
-  `gemmQuantNtAsync` dequant-in-kernel GEMM (`weights.linearSeq` → `ExecContext.denseQuantMatmulGpu`,
-  per-format `FUCINA_GPU_MIN_WORK_DENSE_Q4/Q6/Q8/TQ2` gates against the CPU packed-kernel fallback,
-  stable RHS residency, ~+33% pp on 0.6B-Q4_K);
-  decode (m=1, below the gate) and training (grad path) stay on CPU.
-  On both providers, eligible **dense f32, f16, and provider-supported stable quantized** commands submit eagerly
-  to persistent provider lanes and synchronize only at a CPU visibility boundary; pending CUDA outputs
-  pass their device pointer directly to dependent GEMMs. CUDA registers pooled host allocations once
-  and overlaps upload/compute/download; resident ordinary GEMM uses `FUCINA_GPU_MIN_WORK_RESIDENT`
-  (default 2^27). Resident f32 `m≤8` uses the separate
-  `FUCINA_GPU_MIN_WORK_GEMV` gate (default 2^24), and resident CUDA f16 uses
-  `FUCINA_GPU_MIN_WORK_F16_RESIDENT` (default 2^20). This is completion tracking, not a graph; see
-  `docs/GPU-OFFLOAD.md`.
-  **cuda** (Linux/NVIDIA): no CUDA SDK at build time — dlopen'd
-  cuBLAS + vendored PTX kernels; cross-compiles from macOS with `-Dtarget=x86_64-linux-gnu`.
-  Covers big f32 GEMMs (strict FP32; `FUCINA_GPU_TF32=1` opts into TF32 tensor cores,
-  `FUCINA_GPU_MIN_WORK_TRANSIENT` floors non-resident operands), f16 NT GEMM, dense quantized
-  Q4_K/Q5_K/Q6_K/Q8_0 prefill (Q5_K is CUDA-only; adaptive N32/N64 f16-input/f32-accumulate tensor-core kernels;
-  underfilled dense grids use on-stream split-K/reduction, disabled with
-  `FUCINA_GPU_QUANT_SPLIT_K=0`; scalar fallback with `FUCINA_GPU_QUANT_MMA=0`) + the grouped MoE expert FFN (same tile-table
-  protocol and gates as metal; stable RHS bytes are adopted into a managed-memory registry — one PCIe crossing per
-  weight per process), and opt-in quantized decode (`FUCINA_GPU_DECODE=1`, m≤8, resident weights
-  only; Q5_K uses GEMV for m<4 and tiled MMA for m=4..8, with a measured work gate).
-  `FUCINA_GPU_VRAM_BUDGET` bounds residency;
-  `FUCINA_GPU_KERNELS=src` NVRTC-recompiles the vendored kernels (dev loop;
-  `tools/gen_cuda_ptx.sh` regenerates the committed PTX through the same NVRTC frontend). `zig build cuda-check` is the
-  compile-only bit-rot leg (fucina + models test roots and the NVRTC PTX generator for x86_64-linux-gnu).
-- `-Dvector-scan=bool` — vectorize the scan kernels (`cumsum`/`cumprod` + cumsum's reverse VJP
-  pass; default `false` = the documented serial-per-row scans). On: non-last-axis scans vectorize
-  across independent columns (bitwise identical to serial); last-axis scans use an in-register
-  prefix scan — still bitwise deterministic for any thread count, but the accumulation order
-  differs from the serial default (the sum-SIMD-lanes rounding class; exact for integer data).
+  runtime — many-core servers must raise the ceiling at build time.
+- `-Dgpu=none|metal|cuda` — GPU GEMM offload. **metal** (macOS): big f32/f16 GEMMs, dense
+  quantized prefill linears (Q4_K/Q6_K/Q8_0, ternary TQ2_0), and the grouped quantized MoE expert
+  FFN, behind measured work gates. **cuda** (Linux/NVIDIA; no CUDA SDK at build time — dlopen'd
+  cuBLAS + vendored PTX; cross-compiles with `-Dtarget=x86_64-linux-gnu`): the same surface plus
+  Q5_K, exec-tier attention forward, and opt-in quantized decode (`FUCINA_GPU_DECODE=1`). Decode
+  below the gates and training stay on CPU. Every `FUCINA_GPU_*` gate and default is tabled in
+  the reference's runtime-environment section; design and measurements in `docs/GPU-OFFLOAD.md`.
+- `-Dvector-scan=bool` — vectorize the scan kernels (default `false` = serial-per-row scans).
 - Standard `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall` and `-Dtarget=...`.
 - **CPU targeting: native by default.** With no `-Dtarget`, Zig targets the compiling machine's
-  exact CPU (full detected feature set, like `-march=native`), and the kernels' comptime feature
-  gates (`src/backend/quant/common.zig:13-31`) compile in the matching arms — NEON/sdot on Apple
-  Silicon, AVX2/AVX-VNNI on modern x86, smmla on I8MM-class ARM servers, portable vectors
-  elsewhere; unused arms are compiled out entirely (no runtime dispatch). Cross-compiling with
-  `-Dtarget=...` drops to that architecture's BASELINE unless `-Dcpu=...` names a model
-  (`x86_64_v3`, `alderlake`, `znver4`, `neoverse_v1`, …) — a bare `-Dtarget` binary silently
-  loses the fast kernels. Build on the machine that will run it, or pin `-Dcpu` to match it.
+  exact CPU and the kernels' comptime feature gates compile in the matching arms (NEON/sdot,
+  AVX2/AVX-VNNI, smmla, portable vectors); unused arms are compiled out (no runtime dispatch).
+  Cross-compiling with `-Dtarget=...` drops to that architecture's BASELINE unless `-Dcpu=...`
+  names a model — a bare `-Dtarget` binary silently loses the fast kernels. Build on the machine
+  that will run it, or pin `-Dcpu` to match it.
 
 ## Repo map
 
-| Path | Role |
-| --- | --- |
-| `src/fucina.zig` | Public facade (the `fucina` module root). |
-| `src/tensor.zig` | Raw internal tensor (shape/stride/offset, rank ≤ 8) + `AxisRange` (an axis's absolute origin + length — Fortran's array lower bound as a value; the rope tables take one instead of a materialized position array). |
-| `src/tag_ops.zig`, `src/tags.zig` | Tag-semantics op library over raw tensors + comptime rank/axis-tag metaprogramming (no tagged tensor type). |
-| `src/exec.zig` | `ExecContext`, the one runtime type: declares the substrate fields (allocator, backend, buffer pool, worker team, exec-scope stack, MoE decode scratch), carries every op as an alias line into its `src/exec/` module (`pub const add = exec_elementwise.add;`, grouped by domain banner), and re-exports the option/result types. Exec scopes live here too (openExecScope/closeExecScope: implicit ownership of training intermediates). |
-| `src/exec/` | The eager-runtime implementation. `runtime.zig` = the substrate functions of `ExecContext` (lifecycle, worker team, exec-scope stack, tensor allocation primitives, `replace`), each taking `*ExecContext`; domain modules take an explicit `*ExecContext` too (never `self: anytype`) and import `exec.zig` for the type, the one root-anchored import cycle `arch-check` permits; `buffer_pool.zig` = the reusable transient-buffer pool (see `docs/MEMORY-MODEL.md`); domain modules (`attention`, `matmul`, `quant_matmul`, `moe`, `norm`, `rope`, `softmax`, `loss`, `stats`, `topk`, `reduce`, `gather_scatter`, `conv`, `pool`, `convert`, `elementwise`, `shape`, + the `row_ops` kernel leaf); `moe_chain.zig` = shared batched-MoE scheduling leaf (expert-grouped route plan, phase-chain machinery, chunk helpers, profile timers) consumed by `exec/moe.zig` and — via the `ExecContext.moe_chain` re-export — by the gemma MoE engines. |
-| `src/store/` | The `store` band (below `exec`, above `backend`): disk-streamed block stores. `expert_store.zig` = disk-backed MoE expert store (pinned set + per-layer LRU + pread readahead; out-of-core experts for models larger than RAM), public as `fucina.expert_store`. |
-| `src/backend.zig`, `src/backend/` | Final numeric kernels (`interface.zig` = the kernel set by name + the comptime `conform` check; `native.zig` and `cpu.zig` each export `kernels`, pool-taking kernels take `pc: ParallelConfig` first; `ops.zig`, `packed.zig`; `vector.zig` and `quant.zig` expose their children as modules (`vector.gemm.X`, `quant.q4_k.X`; `quant.zig` also forwards the interleaved-pack block layouts and the RHS container types, each carrying `pub const dtype`, and owns the W8A8 kernel and the per-dtype row dispatch; `backend.zig` holds `PackedRhsFor(dt)`, the one dtype-to-packed-container map); `vector/gemm_blocked.zig` = BLIS-style blocked packed f32 GEMM for the no-BLAS path; `quant/` also holds the f32→quantized row ENCODERS — Q4_K/Q5_K/Q6_K/TQ2_0 + legacy, byte-exact ggml parity, `quantizeRowForDType` dispatch; `quant/ternary.zig` = the hot TQ2_0 ternary {-1,0,+1} kernels — int8 sdot/vpdpbusd flagship + mul-free f32 path + b1.58 absmean encoder, see `docs/TERNARY.md`). |
-| `src/x86dot_check.zig` | Standalone cross-ISA parity checker for the int8 dot primitives + Q4_K/Q8_0/TQ2_0 dot kernels (cross-substrate validation vehicle — native, translated, emulated, and x86-hardware runs; per-arm execution-coverage table + build matrix in its header). |
-| `src/storage.zig` | Refcounted owned storage. |
-| `src/accelerator.zig` | Backend-neutral lifetime tokens for already-submitted eager GPU work and storage-lifetime mapping resources (completion tracking only; no compute graph). |
-| `src/dtype.zig` | Scalar + block-quantized dtype definitions: `DType` is the one identity of every storage format; every GGML block struct and the comptime `block_formats` registry (block struct + elements per block per dtype) live here. |
-| `src/parallel.zig`, `src/thread.zig` | Thread pool + parallel-chunk helpers. |
-| `src/gguf.zig` | GGUF parser + writer (`Writer`: byte-verbatim metadata passthrough, llama.cpp-exact offsets/padding — a 449 MiB verbatim re-emit is byte-identical; `encodeF32` = the writer-side quantize seam onto the `quant/` encoders). |
-| `src/fpenv.zig` | IEEE floating-point environment: rounding/underflow inquiry + scoped `Guard`, accrued exception flags + nesting `Probe`, `assertDefault`. Inquiry-first (aarch64 `FPCR`/`FPSR`, x86_64 `MXCSR`; unsupported targets return null and no-op), libc-free, off every hot path. `ExecContext.checkFloatEnvironment` is the determinism guard against a vendor BLAS leaving flush-to-zero on. |
-| `src/rng.zig` | Repo-owned deterministic RNG: splitmix64, counter-based `at(seed, i)`, uniform/gaussian/kaiming/normal fills. The (seed→values) mapping is a checkpoint contract (APOLLO projections, dropout masks). |
-| `src/ag.zig`, `src/ag/` | Autograd: `tensor.zig` (facade), `backward.zig` (VJPs), `core.zig` (scheduling), `checkpoint.zig` (activation checkpointing — recompute-in-backward, `checkpoint`/`checkpointWithContext`). |
-| `src/optim.zig` | Optimizers (SGD/AdamW/Muon/APOLLO), grad clipping, LR schedule, OptimizerSet (param groups), checkpoint save/load (positional FZT1 + named/dtype-aware safetensors state dicts, name-matched optimizer state v3, `addParamNamed`; native frames FZAD/FZA3/FZM3/FZP3/FZS3/FZO3). Golden-parity-tested vs the torch references. |
-| `src/training_checkpoint.zig` | Canonical training checkpoint directory helper: clean `model.safetensors`/`adapters.safetensors`, native `optimizer.fucina`, and JSON `trainer_state.json` commit sentinel. The state codec is generic over the caller's struct; the LLM trainers' concrete state is `fucina_models.train.trainer_state.TrainerState`. |
-| `src/lora.zig` | LoRA adapters over frozen weights: `Adapter(in_tag, out_tag)`, kaiming-A/zero-B init, delta/apply, named persistence, f32/f16 merge. |
-| `src/es.zig` | Evolution strategies at scale (gradient-free ES-at-scale, arXiv:2509.24372): seed-regenerated noise (vectorized fast-gaussian contract; opt-in antithetic pairs, centered-rank shaping, anchored weight decay) over f32/f16/bf16 params (facade tensors or a whole `ParamRegistry`, frozen entries included), in-place perturb/restore + member-parallel replicas, z-scored or centered-rank (Salimans-style) update, chunk-parallel deterministic kernels; on `-Dgpu=cuda`, resident params perturb/update on the device via bitwise-identical kernels (kernels.cu). Goldens: `tools/gen_es_goldens.py`; reference cross-check: `tools/check_es_parity.py` (refs/es-at-scale). Also hosts the ternary-native strategy: packed TQ2_0 genomes (sparse trit-flip perturbations, EGGROLL-style top-K vote-and-threshold one-bin updates, `es_trits` RNG domain) so training state == the int8 inference model — see `docs/TERNARY.md`. See `docs/TRAINING.md` §13. |
-| `src/param_registry.zig` | `ParamRegistry` — comptime-reflective named parameter registry over the tagged facade (borrows tensors; names are checkpoint field paths; bridges `OptimizerSet` + the state-dict layer). Used by `examples/spirals/main.zig` and both LLM trainers. |
-| `src/ptqtp.zig` | PTQTP trit-plane PTQ (arXiv:2509.16989, implemented from the paper's formulas): data-free `W ≈ α₁T₁ + α₂T₂` per 256-column group via alternating adaptive-λ ridge regression + exhaustive trit search (pinned tie-break order = deterministic + symmetric-init breaker); packs each plane as a standalone valid TQ2_0 tensor (per-block fp16 `d` = the group scale → inference is two stock ternary matmuls + add), `reconstructReference` = arbitrary-G fidelity path. LLM seam: `LinearWeight.toPtqtp` / qwen3 `Model.decoratePtqtp`. See `docs/PTQTP.md`. |
-| `src/state_dict.zig`, `src/safetensors.zig` | Neutral named-tensor state-dict serialization (`LoadOptions.aliases` = name remapping) over the Hugging Face safetensors reader/writer. GGUF stays a separate LLM interop codec. |
-| `src/bench_raw.zig` | Internal raw-surface module for `bench/` (wired as the `bench_raw` import in `build.zig`; not part of the public facade). |
-| `src/models.zig`, `src/models/` | LLM/ASR module root. **Model families grouped in `models/<family>/`, exposed as namespaces** by `src/models.zig`: `models.qwen3.{model,train}`, `models.qwen35.{model,chat,serving}`, `models.gemma.{model,train,moe}`, `models.diffusion_gemma.model`, `models.deepseek2.model`, `models.glm4moe.model`, `models.deepseek4.{model,serving}`, `models.inkling.{model,mmproj,chat,serving}`, `models.parakeet.{decoder,loader,encoder,…}`, `models.text.speculative.{core,mtp,sam_index,recycling,cascade,constrained}`, and the research tier under one namespace: `models.research.{subq,engram,shine,shine_train,kimi3}` (subq installs through `qwen3.runner.AttentionOverride`, engram through the qwen3 trainer's `residual_hook`; SHINE fleets serve through `models.qwen3.shine_serving`). **Band-level contracts stay flat in `src/models/`; the modality-agnostic text runtime lives in `src/models/text/`, training helpers in `src/models/train/`, research files in `src/models/research/`**: `decoder.zig` (the autoregressive decoder contract: `Caps` + comptime `assertDecoder(Model)` — `Cache` with `len()`/`reset()`/`deinit()` (+`truncate` iff `caps.rewind`), `initCache`, `forwardStep` returning last-row `[1, vocab]` logits, `forwardStepAllLogits` iff rewind, `forwardStepBatch` iff batch; every generic layer asserts it; kimi3 stays outside), `registry.zig` (the architecture registry: GGUF `general.architecture` to family `Family` decl; `serving.open` dispatches over it, `familyFor` is the comptime lookup), `generate.zig` (the reference generation loop over the contract: `generate`/`generateOutcome` + `TokenSink`; the qwen35/inkling engines and `gemma.Model.generate` call it), `kv_cache.zig` (f16 default + opt-in q8_0 — the capacity option, see `docs/BENCHMARK.md`; `truncate` = the speculative rewind), `kv_persist.zig` (crash-safe append-only KV-cache sidecar — conversations reopen warm), `ptqtp_gguf.zig` (PTQTP plane persistence: `<name>.ptqtp0/1/2` writer + pair-detecting loader), `tokenizer.zig` (byte-level BPE + faithful qwen2 pretokenizer — token-ID-exact vs llama-tokenize), `spm_tokenizer.zig` (gemma SPM), `sampler.zig` (llama.cpp-compatible pipeline + the `LogitProcessor` hook), `logit_processor.zig` (pluggable pre-sampling logit transform: process/commit/reset + optional structural hooks — the constrained-decoding seam, speculative-safe by the every-sample-is-committed argument), `llguidance.zig` (grammar/JSON-schema token masking over the vendored llguidance engine, `-Dllguidance=true`; stub otherwise; `Constraint.clone` = the per-stream primitive), `weights.zig` (incl. resident-bf16 arm), `gguf_meta.zig` (flat GGUF loader glue: `metaInt`/`metaFloat`(+`Opt`) with `ZeroPolicy` + comptime-generic `parallelLoadLayers`; qwen3/qwen35/gemma4 use it, parakeet/omnivoice keep their parity-bound variants), `chat.zig` (genuinely generic `Conversation(Model, Tok)` chat/REPL engine over any decoder-contract family with `caps.rewind` — qwen3 AND gemma4; `Options.speculation` wires the speculative decoder, `extra_stop_ids`/`stop_sequences`; `stop_sequences` compose with speculation (the turn gate scans committed text; the init errors are `SpeculationWithBatch`/`SpeculationWithReuse`); `sendBatch` = lockstep batch-N decode over N sibling conversations via `Model.forwardStepBatch`, speculation excluded, per-stream `logit_processor`s enforced distinct; `Options.logit_processor` = per-turn-reset constrained decoding on every path), `data.zig` (SFT dataset/dataloader: `SftText` JSONL/static pairs, `encodePair` template+tokenize+shift+mask, deterministic `Loader` — the `(seed, epoch) → permutation` mapping is a golden-pinned checkpoint contract; tokenizer is duck-typed so BPE and SPM both fit), `cartridge.zig` (Cartridges, arXiv 2506.06266: trained KV-prefix corpus compression — per-layer post-RoPE K/V rows with a frozen attention sink, teacher top-k distillation loss, safetensors persistence, `writeToCache` serving; see `docs/CARTRIDGES.md`), `qwen3/runner.zig` (the descriptor runner — the qwen3-family decoder and the glm4moe trunk run on it; recorded-golden gates in `qwen3/runner_tests.zig`; docs/RUNNER.md), `text/serving.zig` + `text/serving/` (the serving band: the `Backend` contract in `text/serving/contract.zig`; the HTTP transport in `text/serving/{http,scheduler,emitter,openai,anthropic,toolcall}.zig`; the generic `GgufChatBackend` engine in `text/serving/gguf_chat.zig`; and `serving.open` in `text/serving/open.zig`: GGUF in, ready `Backend` out, dispatched through the registry — the `Conversation`-hosted set (qwen3/qwen3moe/gemma4) shares one generic engine box, the engine-hosted set (qwen35/qwen35moe/inkling/deepseek4) routes to the family `serving.zig` adapters. `examples/lmserve` is the CLI front end and keeps only the diffusion-gemma and nanochat backends; the band's tests ride the models test root), `unicode_categories.zig`. Training Trainers: `qwen3/train.zig`, `gemma/train.zig` (param plumbing via `ParamRegistry`; `lossExt` = reduction/scale knobs for gradient accumulation, qwen3 adds `forwardHidden`/`lossInjected` — truncated-forward and injected-embedding seams for representation experiments; exercised by the `research/nla` branch). `build.zig` only references the `src/models.zig` root. |
-| `src/models/text/speculative/` | Speculative decoding subsystem (`models.text.speculative.*`): `core.zig` (`DraftSource` vtable, `SpeculativeDecoder` — one lossless verify path for greedy AND sampled, `CostGate` never-a-loss auto-off), `cascade.zig` (`SpeculationIndex` cascade: conversation SAM + injectable frozen refs (`addReference`, RAG seam) + recycling fallback), `sam_index.zig` (online suffix automaton, ~110 B/token), `recycling.zig` (Token-Recycling adjacency matrix), `constrained.zig` (`ConstrainedSource`: grammar-forced spans draft themselves, invalid drafts pruned pre-verify — see `docs/CONSTRAINED-DECODING.md`). See `docs/SPECULATIVE.md`. |
-| `src/models/diffusion_gemma/model.zig` | DiffusionGemma (`diffusion-gemma`): block text-diffusion on the gemma4 backbone — causal encode + bidirectional canvas forwards over one weight set, sparse self-conditioning, entropy-bound sampler, block-AR generate. Parity harness targets llama.cpp PR 24423. |
-| `src/backend/metal.zig`, `src/backend/metal/` | `-Dgpu=metal` GPU GEMM provider: Zig host (lazy init, work-threshold gates, device-owned weight storage) + ObjC shim (`shim.m`) + vendored MLX steel kernel (`mlx_gemm.metal`, f32/f16) + vendored ggml `kernel_mul_mm` (`ggml_mul_mm.metal`, dequant-in-kernel Q6_K/Q8_0 with a CPU-built grouped tile table — the MoE prefill path); f32/f16 gates sit in front of the BLAS arms in `native.zig`; the quantized grouped MoE entry is `batchRawGpu` in `src/exec/moe_gu.zig` (dispatched from `batchRaw`, reached through the `ExecContext.moeGu*` facade; the gemma family's tagged wrappers live in `src/models/gemma/moe.zig`); the dense-quant arm goes through `ExecContext.denseQuantMatmulGpu` (`src/exec.zig` → `src/exec/quant_matmul.zig`). |
-| `src/backend/gpu.zig`, `src/backend/cuda.zig`, `src/backend/cuda/` | `gpu.zig` = comptime provider selector (`gpu_impl` resolves to metal.zig or cuda.zig; dead arm never analyzed). `cuda.zig` = `-Dgpu=cuda` provider (Linux/NVIDIA): same contract/decl surface as metal.zig — f32/f16 GEMM via cuBLAS, adaptive tensor-core quantized dense/grouped-MoE GEMM (underfilled dense grids use graphless on-stream split-K/reduction; scalar fallback) + decode GEMV + fused prefill attention via the vendored kernels (`cuda/kernels.cu` → committed `cuda/kernels.ptx`, driver JIT, NVRTC dev fallback; regen: `tools/gen_cuda_ptx.sh`), managed-memory weight residency with a stable-RHS adoption cache; dlopen host binding in `cuda/api.zig` (function-pointer prototypes via `std.DynLib`, soname ladders, zero CUDA SDK at build). |
-| `src/models/text/unicode_categories.zig` | Generated \p{L}/\p{N}/\s tables matching llama.cpp's unicode-data (regen: `tools/gen_unicode_categories.py`) — token-ID-exact pretokenizer parity. |
-| `tools/export_gguf.zig` | `zig build export-gguf`: GGUF re-emit / transcode (`--dtype f16/bf16/f32/q8_0/q4_k/q5_k/q6_k/verbatim`; `--experts-dtype` = experts-only override for `*_exps.weight` tensors, may requantize a quantized source via `gguf.decodeF32`) + LoRA-adapter merge into dense weights (`--adapters`, safetensors → `blk.*`) + shard-streaming PTQTP quantization (`--ptqtp[=K]`, tensor-at-a-time incl. per-expert-slice 3D MoE stacks via `ptqtp_gguf.quantizeMoeStack`; `--dry-run` plan; docs/PTQTP.md). |
-| `examples/` | one directory per example rooted at `main.zig`: `smoke/`, `qwen3/` (incl. `--spec`/`--spec-ref`/`--spec-bench` speculative decoding + `--tokenize` parity oracle), `gemma4/` (chat/REPL on the generic `Conversation`, incl. `--spec`), `qwen35/`, `diffusion_gemma/`, `parakeet/` (ASR CLI over the `models.parakeet` family), `spirals/` (training end-to-end), `finetune/` (LoRA SFT on a Qwen3 GGUF end-to-end; `--verify-grads` = the real-model gradient-evidence audit), `es_finetune/` (its gradient-free ES twin: same data/checkpoint plumbing, `--mode lora|full`, `--reward rule|nll|acc`), `es_spirals/` (two-spirals FROM SCRATCH by ES — the gradient-free from-random-init acceptance demo, self-verifying, member-parallel replica evaluation). |
-| `examples/omnivoice/main.zig`, `examples/omnivoice/` | OmniVoice port: MaskGIT non-autoregressive TTS (k2-fsa/OmniVoice via omnivoice.cpp) — Qwen3-0.6B backbone with bidirectional attention + additive 0/1 bias, hybrid 8-codebook audio embedding, Higgs Audio v2 codec (HuBERT + DAC + RVQ), PyTorch-CUDA-aligned Philox, torchaudio-exact resampler, pydub-parity postproc. Voice cloning / voice design / auto voice, single-shot + chunked. Parity: byte-exact tokens + RVQ codes vs the C++ reference (F32), audio cosine ≥ 0.99999; 2.3–32.7× faster on CPU (M1 Max). Tests run under `zig build test` (parity suites gated by `OMNIVOICE_PARITY`). |
-| `examples/locate_anything/main.zig`, `examples/locate_anything/` | LocateAnything-3B port (open-vocabulary detection / visual-grounding VLM, via mudler/locate-anything.cpp): MoonViT tower + MLP projector + Qwen2.5-3B LM + MTP parallel box decoding, entirely on stock tensor ops — interleaved 2D RoPE through a hand-filled `RopeTable`, bidirectional grouped attention (+ the additive-bias arm for the MTP block-diffusion mask), resident f32 KV, `LinearWeight` linears (BLAS/Metal/CUDA dispatch unchanged); PIL-exact bicubic preproc, pure-Zig PNG IO, reference-exact special-token BPE over `models.text.tokenizer`, verbatim-scalar MTP decode heuristics, byte-compatible detections JSON. Parity: `compare` exit-code gates vs reference dumps regenerable with `tools/ref-patches/la_dump.cpp` (token-ID-exact tokenizer/prompt, byte-exact preproc, tight-f32 tower/logits, exact slow/hybrid/fast streams). |
-| `examples/facedetect/main.zig`, `examples/facedetect/` | face-detect.cpp port: the buffalo_l pack (SCRFD det_10g detector + ArcFace R50 recognizer + genderage + MiniFASNet anti-spoof) plus 2d106/1k3d68 dense landmarks — channel-last conv2d/pool2d/prelu/channelAffine over the public facade, load-once Model structs (weights dequant/repack/BN-fold once, forwards are pure compute), an app-level compiled replay (`graph.zig`) for the interpreter-driven nets, cv2-exact letterbox and umeyama align. Parity: byte-identical detect/analyze JSON vs the reference CLI, embed cosine 0.999999, anti-spoof real_prob exact, landmarks ≤0.03px (goldens + regeneration recipe in `examples/facedetect/goldens/README.md`). Tests run under `zig build test`. |
-| `examples/nanochat/main.zig`, `examples/nanochat/` | nanochat port (karpathy/nanochat): the full CPU pipeline — rustbpe-equivalent BPE tokenizer training, GPT pretraining (Muon+AdamW, the MuonAdamW variant: Polar-Express orthogonalization + NorMuon variance reduction + cautious WD, reusing `fucina.optim.AdamW` for the Adam groups), SFT, bits-per-byte eval, and a chat CLI with a calculator tool over a KV-cached decode path. Entirely example-local over the public facade (no new core ops): half-split RoPE (inverse-built table), grouped causal attention, `crossEntropyExt`, gather/scatter embeddings, relu² MLP, tanh softcap. Parity vs the Python reference (CPU fp32): tokenizer encode token-ID-exact + trainer byte-identical to rustbpe, dataloader batches byte-identical, forward per-layer ≤1e-5, optimizer-step + loss-trace within a drift budget, greedy decode token-exact vs a trained reference checkpoint (goldens + regen recipe in `examples/nanochat/goldens/README.md`). `NANOCHAT_PARITY`-gated suites run under `zig build test`. |
-| `examples/nam/main.zig`, `examples/nam/` | Neural Amp Modeler port: `.nam` reader/writer with upstream-exact weight ordering, streaming WaveNet/LSTM/ConvNet/Linear engines (golden parity vs NeuralAmpModelerCore render), classic-recipe trainer over the core `causalConv1d` op, lossless GGUF interchange, vendored-miniaudio live device I/O, CoreMIDI control of the live knobs (`midi.zig`/`midi_shim.c` — hot-plug needs the runloop pump in the shim). Tests run under `zig build test`. |
-| `bench/` | Microbenchmarks (`mlp`, `backend`, `f16gemm`, `gemm`, `gpu_dispatch`, `gpu_formats`, `q5kmoe`, `attention_backward`, `facade`, `einsum`, `backward_diamond`, `optim`, `ce`, `scatter`) + shared helpers (`alloc.zig`, `timer.zig`). |
-| `refs/` (untracked, by convention) | Optional local clones of the upstream reference repos (llama.cpp, omnivoice.cpp, parakeet.cpp, NeuralAmpModelerCore, …) plus locally captured parity goldens (e.g. `refs/omnivoice-research/goldens/`, consumed by the env-gated parity suites, which skip cleanly when absent). Source comments and `docs/BENCHMARK.md` cite `refs/<repo>/<file>:<line>` into these clones as parity provenance; `tools/fetch_refs.sh` clones every reference at the snapshot's pinned commit (`--build` also builds llama.cpp CPU-only). Nothing in the default build or test run depends on them. |
+| Path | Role | Detail |
+| --- | --- | --- |
+| `src/fucina.zig` | public facade, the `fucina` module root | reference ch 1 |
+| `src/tensor.zig`, `src/storage.zig`, `src/dtype.zig` | raw tensor + refcounted storage + dtype/block registry | reference ch 8 |
+| `src/tag_ops.zig`, `src/tags.zig` | tag-semantics op library + comptime axis-tag metaprogramming | reference ch 7 |
+| `src/exec.zig`, `src/exec/` | `ExecContext` eager runtime: ops, buffer pool, scopes | reference ch 6; `docs/MEMORY-MODEL.md` |
+| `src/store/` | disk-streamed block stores (`expert_store` = out-of-core MoE experts) | reference ch 13; `docs/PTQTP.md` |
+| `src/backend.zig`, `src/backend/` | final numeric kernels: native/scalar providers, encoders | reference ch 9-10; `docs/TERNARY.md` |
+| `src/backend/metal.zig`, `src/backend/metal/` | Metal GPU GEMM provider (vendored MLX + ggml kernels) | `docs/GPU-OFFLOAD.md` |
+| `src/backend/gpu.zig`, `src/backend/cuda.zig`, `src/backend/cuda/` | provider selector + CUDA provider | `docs/GPU-OFFLOAD.md` |
+| `src/accelerator.zig` | lifetime tokens for submitted eager GPU work (completion tracking only) | `docs/GPU-OFFLOAD.md` |
+| `src/parallel.zig`, `src/thread.zig` | thread pool + parallel-chunk helpers | reference ch 9 |
+| `src/gguf.zig`, `src/state_dict.zig`, `src/safetensors.zig` | GGUF parser/writer; named state dicts | reference ch 12 |
+| `src/fpenv.zig`, `src/rng.zig` | IEEE float-environment guard; deterministic counter-based RNG (checkpoint contract) | reference ch 6 |
+| `src/ag.zig`, `src/ag/` | autograd: tensor facade, VJPs, scheduling, activation checkpointing | reference ch 3-5 |
+| `src/optim.zig`, `src/optim/` | SGD/AdamW/Muon/APOLLO, clipping, schedules, param groups, checkpoint frames | `docs/TRAINING.md` |
+| `src/training_checkpoint.zig`, `src/lora.zig`, `src/param_registry.zig` | checkpoint dirs, LoRA adapters, named params | `docs/TRAINING.md` |
+| `src/es.zig` | evolution strategies at scale + the ternary-native strategy | `docs/TRAINING.md` §13; `docs/TERNARY.md` |
+| `src/ptqtp.zig` | PTQTP trit-plane PTQ solver (K ∈ {1,2,3}) | `docs/PTQTP.md` |
+| `src/models.zig`, `src/models/` | model band: families, text runtime, research tier | reference ch 13-14; `docs/ARCHITECTURE.md` |
+| `src/models/text/speculative/` | speculative-decoding subsystem (SAM/recycling/MTP/constrained cascade) | `docs/SPECULATIVE.md` |
+| `tools/export_gguf.zig` | GGUF re-emit/transcode, LoRA merge, shard-streaming PTQTP quantizer | `docs/PTQTP.md`; reference ch 12 |
+| `examples/` | one directory per example rooted at `main.zig`; each README owns its CLI | `docs/RUNNING-MODELS.md` |
+| `examples/omnivoice/` | OmniVoice MaskGIT TTS port (voice clone/design; byte-exact parity) | `examples/omnivoice/README.md` |
+| `examples/locate_anything/` | LocateAnything-3B open-vocabulary detection VLM port | `examples/locate_anything/README.md` |
+| `examples/facedetect/` | buffalo_l face pipeline port (detect/recognize/analyze) | `examples/facedetect/README.md` |
+| `examples/nanochat/` | nanochat port: BPE training, pretraining, SFT, eval, chat on CPU | `examples/nanochat/README.md` |
+| `examples/nam/` | Neural Amp Modeler port: `.nam` engines, training, live audio/MIDI | `examples/nam/README.md` |
+| `bench/`, `src/bench_raw.zig` | microbenchmarks + their internal raw-surface module | `docs/BENCHMARK.md` |
+| `refs/` (untracked) | reference-repo clones + parity goldens (`tools/fetch_refs.sh`) | `docs/PORTING.md`; `docs/BENCHMARK.md` |
 
-**Placement policy (ports and families).** Engines intended as reusable `src/models` families —
-anything other src/models consumers or the chat/session layer should import — go in
-`src/models/<family>/` (parakeet is the precedent). Single-purpose parity ports and their DSP/IO
-plumbing stay example-local in `examples/<name>/` (nam, omnivoice — the parity suites pin their
-layout). Family-specific kernel orchestration lives in `src/models/<family>/` over the
-`fucina.internal` seam (e.g. the gemma MoE engines in `src/models/gemma/moe.zig`), never inside the
-generic exec runtime. Audio-IO helpers get promoted to a shared home once a second consumer
-appears; until then reuse across examples is explicit in `build.zig`.
+**Placement policy** (reusable family vs example-local port, kernel orchestration, shared audio
+helpers): `docs/DEVELOPMENT.md` §1.8.
 
 ## House rules (repo-specific)
 
@@ -237,22 +189,5 @@ trained on older Zig:
 
 ## Doc index
 
-- `docs/ARCHITECTURE.md` — the current Zig architecture from the actual source layout. Start here for structure.
-- `docs/REFERENCE.md` — the detailed API reference: the full public surface with exact semantics (ownership, errors, defaults, thread-safety) and machine-verified example snippets for every important feature. Start here to *use* the library.
-- `docs/RUNNING-MODELS.md` — model/example index: the verified weight-download table with license notes (weights are not bundled) plus the shared cross-runner machinery (MoE expert streaming, native MTP drafting, constrained decoding, GPU offload, global thread/BLAS knobs). Per-example getting-started guides live next to each entry file (e.g. `examples/qwen3/README.md`).
-- `docs/LMSERVER.md` — the lmserve example: OpenAI chat-completions + stateless responses mapping tables (honored/rejected/ignored), the accept-concurrently/generate-sequentially architecture, streaming contracts (SSE chunk + semantic-event skeletons), constrained-output plumbing, the per-model Backend matrix.
-- `docs/BENCHMARK.md` — benchmark protocol for the Qwen GGUF runner, plus dated measurement snapshots/addenda. Read before making perf claims.
-- `docs/GPU-OFFLOAD.md` — graphless eager GPU completion design: persistent queues/streams, storage fences/resources, transfer/device-buffer reuse, sync rules, gates, and Metal/CUDA measurements.
-- `docs/MEMORY-MODEL.md` — why transient memory uses per-tensor `defer deinit` + `BufferPool` (not an arena); rationale, file:line evidence, the optional "frame" helper, and sharp edges.
-- `docs/TRAINING.md` — training guide: tensor-lifetime rules, exec scopes, optimizers/param groups/LR schedules/clipping, gradient accumulation, cross-entropy options, dropout + the deterministic-RNG contract, gradient checkpointing, checkpoint directory contracts, LoRA + Qwen3 GGUF fine-tuning, gradient verification, the fine-tune→merge→quantize→serve export loop, bf16 policy, bench numbers, evolution strategies (gradient-free ES-at-scale, §13).
-- `docs/DEVELOPMENT.md` — the development method: the design invariants (with enforcement and violation smells), the check-before-you-build capability inventory, the per-task template table, the gate matrix, and the delivery/reporting loop. Start here before writing new code.
-- `docs/PORTING.md` — the porting method: oracle-first staging, the tiered tolerance policy, the LLM parity ladder, two-way interop proof, perf-after-parity ratchet, new-ISA discipline.
-- `docs/RUNNER.md` — the descriptor runner: Descriptor/Model, the two block styles, recorded-golden correctness status, per-family status (the qwen3 family and the glm4moe trunk run on it).
-- `docs/SPECULATIVE.md` — design record: lossless draft-model-free speculative decoding (DraftSource vtable → SpeculationIndex cascade → SpeculativeDecoder), the losslessness proof obligations, verify economics + CostGate, SAM/recycling design, RAG injection, bench results with caveats.
-- `docs/CONSTRAINED-DECODING.md` — design record: grammar/JSON-schema constrained decoding — the `LogitProcessor` seam on the shared sampler, the vendored llguidance engine + tokenizer bridge, why speculation composes without rollback, grammar-driven drafting (`ConstrainedSource`), `Constraint.clone` multi-stream, adjudications.
-- `docs/CARTRIDGES.md` — design record: trained KV-prefix corpus compression (Cartridges, arXiv 2506.06266) — reference-pinned semantics (post-RoPE rows, sink freeze, teacher top-k distillation), the qwen3 trainer seams, in-process self-study, serving via KvCache preload, the prefill-equivalence gate (bitwise on Qwen3-0.6B), follow-ups incl. Cartridges-at-Scale.
-- `docs/TERNARY.md` — design record: TQ2_0 ternary {-1,0,+1} weights as a first-class citizen — the mul-free int8 flagship + f32 kernels, b1.58 encoders, STE training op, ternary-native ES (training = inference), GGUF interop, bench numbers.
-- `docs/PTQTP.md` — design record: PTQTP dual trit-plane post-training quantization (arXiv:2509.16989) over the TQ2_0 substrate — the alternating ridge/search solver, the G=256 packing identity and measured deltas, the `LinearWeight.toPtqtp` decoration seam, spirals + Qwen3-0.6B results, deferred GGUF pair persistence.
-- `docs/THIRD-PARTY-NOTICES.md` — provenance and licenses of the vendored third-party code.
-- `README.md` — overview, build, scope.
-- `CONTRIBUTING.md` — the contribution bar: human-owned PRs, the two regression tracks (correctness + speed), reporting requirements, provenance rules.
+The doc index is `docs/README.md` (enforced by `zig build doc-check`); the API reference is
+`docs/reference/`, and `docs/ARCHITECTURE.md` is the structural entry point.

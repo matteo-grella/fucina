@@ -5,7 +5,7 @@ Design record for `src/models/research/engram.zig` (public as `models.research.e
 Fucina's port of DeepSeek's Engram
 (arXiv 2601.07372; semantics reference `deepseek-ai/Engram`
 `engram_demo_v1.py`, pinned in `tools/fetch_refs.sh`). API surface:
-REFERENCE.md §13.11. The qwen3 trainer hosts the graft through its
+[§13.11](reference/13-the-model-stack-fucina_models.md#1311-engram-srcmodelsresearchengramzig). The qwen3 trainer hosts the graft through its
 type-erased `ForwardOptions.residual_hook` seam; `ResidualGraft` is the
 adapter.
 
@@ -57,7 +57,7 @@ attention needs the KV — Engram needs only the tokens.
    wrapped mixes stay in `[0, prime)`. Fucina implements this twice and
    pins them bit-equal: `hashInto` (host loop, the serving fast path) and
    `hashTensor` (integer tensor ops: wrapping `mul`, `bitXor`, `mod`,
-   broadcast `add` — the ops added for this port, REFERENCE §4.19).
+   broadcast `add` — the ops added for this port, [§4.19](reference/04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)).
 5. **Retrieval.** One concatenated `[Σ primes, head_dim]` table per
    layer; row indices carry per-head offsets, so retrieval is a single
    differentiable `gather` (scatter-add adjoint = the embedding
@@ -77,8 +77,8 @@ attention needs the KV — Engram needs only the tokens.
 
 ## What landed
 
-- **Core ops added for the port** (all general-purpose, REFERENCE §4.4 /
-  §4.16 / §4.19): integer `rem`/`mod` (pairing `divTrunc`/`divFloor`),
+- **Core ops added for the port** (all general-purpose, [§4.4](reference/04-tensor-operations.md#44-unary-ops-srcagtensorzig-srcbackendopszig) /
+  [§4.16](reference/04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig) / [§4.19](reference/04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)): integer `rem`/`mod` (pairing `divTrunc`/`divFloor`),
   bitwise `bitAnd`/`bitOr`/`bitXor`, one-sided `clampMin`/`clampMax`, and
   a `dilation` parameter through the whole `causalDepthwiseConv1d` chain
   (scalar + SIMD forward and both backwards, streaming-state validation

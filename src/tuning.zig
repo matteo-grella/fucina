@@ -55,7 +55,7 @@ pub const EnvIntParse = enum {
 
 /// The entire runtime tuning surface as one struct. Field defaults are the
 /// measured route defaults; provenance for the GPU crossovers lives on the
-/// field docs below and in docs/REFERENCE.md section 2.6.
+/// field docs below and in docs/reference/02-toolchain-build-and-project-wiring.md section 2.6.
 pub const Table = struct {
     /// Winograd conv2d route. Default follows the GEMM provider: on for
     /// `-Dblas=none` builds (the pure-Zig GEMM gains ~1.7-1.9x from the
@@ -149,7 +149,7 @@ pub const Table = struct {
 
     /// GPU offload policy, read by the active `-Dgpu` provider at its
     /// one-time configuration. Fields only one provider consults are
-    /// ignored by the other; docs/REFERENCE.md section 2.6 carries the
+    /// ignored by the other; docs/reference/02-toolchain-build-and-project-wiring.md section 2.6 carries the
     /// per-provider annotations.
     pub const Gpu = struct {
         /// Integer leaves under `gpu` accept 0: a zero work floor always
@@ -191,7 +191,7 @@ pub const Table = struct {
 
         /// Offload work floors in m*n*k units (attention: q*kv*heads*d).
         /// Defaults are the active provider's measured crossovers; the
-        /// measurement notes live in docs/REFERENCE.md section 2.6 and the
+        /// measurement notes live in docs/reference/02-toolchain-build-and-project-wiring.md section 2.6 and the
         /// provider modules.
         pub const MinWork = struct {
             /// Base f32 GEMM gate. Metal 2^32 (cold single-op crossover vs

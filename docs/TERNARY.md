@@ -215,7 +215,7 @@ arms bitwise identical to the scalar reference (`dotQ2_0RowQ8_0`). Prefill
 contiguous C — the same dequant-to-BLAS split llama.cpp's BLAS backend makes
 for quantized prefill), while decode stays on the int8 path. It is the
 weight format of Ternary-Bonsai-27B (a ternarized Qwen3.6-27B on the
-`qwen35` hybrid arch; REFERENCE.md §14.3): embeddings, attention, MLP and
+`qwen35` hybrid arch; [§14.3](reference/14-model-families-and-example-applications.md#143-qwen35--gated-deltanet-hybrid-srcmodelsqwen35modelzig)): embeddings, attention, MLP and
 LM head all `.q2_0`, logit-parity-validated against the PrismML llama.cpp
 fork. STE training and ternary-native ES remain TQ2_0-only.
 

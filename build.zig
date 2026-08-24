@@ -275,7 +275,7 @@ pub fn build(b: *std.Build) void {
     const doc_check_step = b.step("doc-check", "Verify doc-index references exist and README's fetch pin matches build.zig.zon's version");
     doc_check_step.dependOn(&doc_check_cmd.step);
 
-    // REFERENCE.md snippet gate: extract every runnable ```zig snippet (a
+    // Reference snippet gate: extract every runnable ```zig snippet (a
     // block with a column-0 `test` decl; `<!-- snippet: helper/skip -->`
     // markers documented in tools/gen_snippet_tests.zig) into a generated
     // test root and run it against the real fucina/fucina_models modules, so a
@@ -290,7 +290,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const snippet_gen_run = b.addRunArtifact(snippet_gen_exe);
-    snippet_gen_run.addFileArg(b.path("docs/REFERENCE.md"));
+    snippet_gen_run.addDirectoryArg(b.path("docs/reference"));
     const snippet_dir = snippet_gen_run.addOutputDirectoryArg("snippets");
     const snippet_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -306,7 +306,7 @@ pub fn build(b: *std.Build) void {
     configureLlguidance(snippet_tests, llguidance_dep);
 
     const run_snippet_tests = b.addRunArtifact(snippet_tests);
-    const snippet_check_step = b.step("snippet-check", "Extract and run every runnable docs/REFERENCE.md snippet against the real modules");
+    const snippet_check_step = b.step("snippet-check", "Extract and run every runnable docs/reference snippet against the real modules");
     snippet_check_step.dependOn(&run_snippet_tests.step);
 
     // Cross-ISA parity vehicle for the int8 dot primitives + Q4_K/Q8_0 dot

@@ -60,7 +60,7 @@ type at `src/exec/buffer_pool.zig:47`). It is:
 
 The recycle invariant is asserted by a dedicated unit test: after `first.deinit()`,
 the next same-size op returns `second.buffer == first_buffer`
-(`src/exec_tests.zig:120-140`).
+(`src/exec_tests.zig:113-131`).
 
 ### What is and isn't pooled
 
@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:976/:1071`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec.zig:397`). An arena frees
+   (which frees the old buffer each layer, `src/exec/runtime.zig:569`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
@@ -149,7 +149,7 @@ substantive axes (in addition to the view/KV constraint in §3):
 2. **It destroys cache locality.** Bump allocation returns a fresh address per
    op; the pool returns the *same* address for same-sized successive
    allocations, keeping the hot working buffer warm in L1/L2. Address reuse is
-   the asserted behavior (`src/exec_tests.zig:120-140`) and directly serves the
+   the asserted behavior (`src/exec_tests.zig:113-131`) and directly serves the
    "match/beat llama.cpp on CPU" North Star.
 3. **It cannot express refcounted views / KV aliasing** — see §3.
 4. **It is impossible for training** — activations must outlive the forward for

@@ -1,12 +1,12 @@
-//! REFERENCE.md snippet-test generator (`zig build snippet-check`).
+//! Reference snippet-test generator (`zig build snippet-check`).
 //!
-//! The doc's runnable examples are ```zig fenced blocks containing a
-//! column-0 `test` declaration. This tool extracts every such block into a
-//! standalone test file under an output directory plus a `root.zig` that
-//! forwards them all; the build compiles that root against the real
-//! `fucina`/`fucina_models` modules and runs it, so a doc snippet that stops
-//! compiling or asserting fails the build — the doc-check counterpart for
-//! snippet rot.
+//! The reference's runnable examples are ```zig fenced blocks containing a
+//! column-0 `test` declaration. This tool scans every chapter file under
+//! `docs/reference/` and extracts every such block into a standalone test
+//! file under an output directory plus a `root.zig` that forwards them all;
+//! the build compiles that root against the real `fucina`/`fucina_models`
+//! modules and runs it, so a doc snippet that stops compiling or asserting
+//! fails the build — the doc-check counterpart for snippet rot.
 //!
 //! Conventions (rendered-invisible HTML comment markers in the doc):
 //!
@@ -16,11 +16,11 @@
 //! - `<!-- snippet: helper -->` on the line before a ```zig fence marks a
 //!   non-test block (an Op/Spec/fn definition the prose introduces) that
 //!   later snippets reference. Helpers accumulate and are prepended to
-//!   every following test file until the next `## ` chapter heading.
+//!   every following test file in the same chapter file.
 //! - `<!-- snippet: skip -->` on the line before a fence excludes a
 //!   test-shaped block that cannot run hermetically (model assets, env).
 //!
-//! Usage: gen_snippet_tests <REFERENCE.md path> <output dir>
+//! Usage: gen_snippet_tests <docs/reference dir> <output dir>
 
 const std = @import("std");
 
@@ -44,17 +44,69 @@ pub fn main(init: std.process.Init) !void {
         var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
         const stderr = &stderr_writer.interface;
         defer stderr.flush() catch {};
-        try stderr.print("usage: gen_snippet_tests <REFERENCE.md> <output dir>\n", .{});
+        try stderr.print("usage: gen_snippet_tests <docs/reference dir> <output dir>\n", .{});
         return error.BadUsage;
     }
-    const doc_path = args[1];
+    const dir_path = args[1];
     const out_path = args[2];
 
-    const contents = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, allocator, .limited(16 * 1024 * 1024));
+    var names: std.ArrayList([]const u8) = .empty;
+    {
+        var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (std.mem.indexOfScalar(u8, entry.path, '/') != null) continue; // top level only
+            if (!std.mem.endsWith(u8, entry.path, ".md")) continue;
+            try names.append(allocator, try allocator.dupe(u8, entry.path));
+        }
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    if (names.items.len == 0) return error.NoReferenceChapters;
+
     try std.Io.Dir.cwd().createDirPath(io, out_path);
 
-    var helpers: std.ArrayList(Block) = .empty;
     var emitted: std.ArrayList([]const u8) = .empty;
+    for (names.items) |name| {
+        const doc_path = try std.fs.path.join(allocator, &.{ dir_path, name });
+        try extractFile(allocator, io, doc_path, name, out_path, &emitted);
+    }
+
+    var root: std.ArrayList(u8) = .empty;
+    try root.appendSlice(allocator, "//! Generated snippet-test root; one import per runnable doc snippet.\ntest {\n");
+    for (emitted.items) |name| {
+        const import_line = try std.fmt.allocPrint(allocator, "    _ = @import(\"{s}\");\n", .{name});
+        try root.appendSlice(allocator, import_line);
+    }
+    try root.appendSlice(allocator, "}\n");
+    try writeOut(io, allocator, out_path, "root.zig", root.items);
+
+    var stdout_buffer: [256]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
+    try stdout.print("snippet-gen: {d} runnable snippets extracted from {d} files under {s}\n", .{ emitted.items.len, names.items.len, dir_path });
+}
+
+/// Extract one chapter file. Helper scope is the file (each chapter is one
+/// file, so this is the old one-file-per-chapter scope unchanged).
+fn extractFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    doc_path: []const u8,
+    doc_name: []const u8,
+    out_path: []const u8,
+    emitted: *std.ArrayList([]const u8),
+) !void {
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, doc_path, allocator, .limited(16 * 1024 * 1024));
+
+    var helpers: std.ArrayList(Block) = .empty;
 
     var pending_marker: Marker = .none;
     var in_fence = false;
@@ -67,11 +119,7 @@ pub fn main(init: std.process.Init) !void {
     while (lines.next()) |line| {
         line_no += 1;
         if (!in_fence) {
-            if (std.mem.startsWith(u8, line, "## ")) {
-                // Chapter boundary: helper scope ends.
-                helpers.clearRetainingCapacity();
-                pending_marker = .none;
-            } else if (std.mem.startsWith(u8, line, "<!-- snippet: helper -->")) {
+            if (std.mem.startsWith(u8, line, "<!-- snippet: helper -->")) {
                 pending_marker = .helper;
             } else if (std.mem.startsWith(u8, line, "<!-- snippet: skip -->")) {
                 pending_marker = .skip;
@@ -95,7 +143,9 @@ pub fn main(init: std.process.Init) !void {
                 .skip => {},
                 .helper => try helpers.append(allocator, .{ .line = block_start_line, .text = text }),
                 .none => if (is_test) {
-                    const name = try std.fmt.allocPrint(allocator, "s_{d:0>5}.zig", .{block_start_line});
+                    // Chapter files carry a unique NN- prefix, so prefixing
+                    // the file name keeps emitted names collision-free.
+                    const name = try std.fmt.allocPrint(allocator, "s_{s}_{d:0>5}.zig", .{ doc_name[0..2], block_start_line });
                     var file_body: std.ArrayList(u8) = .empty;
                     const head = try std.fmt.allocPrint(allocator, "//! {s}:{d}\n", .{ doc_path, block_start_line });
                     try file_body.appendSlice(allocator, head);
@@ -124,21 +174,6 @@ pub fn main(init: std.process.Init) !void {
         try block.appendSlice(allocator, line);
         try block.append(allocator, '\n');
     }
-
-    var root: std.ArrayList(u8) = .empty;
-    try root.appendSlice(allocator, "//! Generated snippet-test root; one import per runnable doc snippet.\ntest {\n");
-    for (emitted.items) |name| {
-        const import_line = try std.fmt.allocPrint(allocator, "    _ = @import(\"{s}\");\n", .{name});
-        try root.appendSlice(allocator, import_line);
-    }
-    try root.appendSlice(allocator, "}\n");
-    try writeOut(io, allocator, out_path, "root.zig", root.items);
-
-    var stdout_buffer: [256]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch {};
-    try stdout.print("snippet-gen: {d} runnable snippets extracted from {s}\n", .{ emitted.items.len, doc_path });
 }
 
 const Marker = enum { none, helper, skip };
@@ -160,8 +195,8 @@ fn writeOut(io: std.Io, allocator: std.mem.Allocator, dir: []const u8, name: []c
 }
 
 /// A block is runnable iff it declares a column-0 NAMED `test "..."` (a
-/// bare `test {` stanza is the §2.7 forwarding-pattern illustration, not a
-/// runnable example).
+/// bare `test {` stanza is the test-forwarding illustration in the
+/// toolchain chapter, not a runnable example).
 fn hasTopLevelTest(text: []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {

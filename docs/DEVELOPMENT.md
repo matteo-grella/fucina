@@ -5,7 +5,7 @@ The working method for new development on this codebase — features, kernels,
 model families, training machinery — written for the next contributor,
 human- or agent-driven. `AGENTS.md` is the entry point (toolchain, commands,
 repo map, house rules); [PORTING.md](PORTING.md) is the method for ports
-specifically; [REFERENCE.md](REFERENCE.md) is the API contract. This file is
+specifically; the [reference](reference/00-index.md) is the API contract. This file is
 the connective tissue: the invariants a change must respect, what already
 exists so you don't rebuild it, which existing code to start from, and the
 delivery loop that takes a change from idea to merged.
@@ -143,25 +143,25 @@ instead.
 
 The most common failure mode of a capable contributor on this codebase is
 rebuilding something that exists. Search this table first; the § pointers go
-into [REFERENCE.md](REFERENCE.md), whose snippets are machine-verified.
+into the [reference](reference/00-index.md), whose snippets are machine-verified.
 
 | You need… | It exists as… | Where |
 | --- | --- | --- |
-| A contraction (matmul, batched, multi-index) | `einsum` — THE contraction engine; `dot` is its special case. Don't hand-roll permute+matmul chains. | §4.8–4.9 |
-| A new pointwise op with autograd | `elementalUnary`/`elementalBinary` — supply scalar fwd/bwd fns, get a SIMD-chunked parallel op with a VJP. | §4.4 |
-| Indexing / slicing / functional updates | `select`, `slice`, `sliceStep`, `indexSelect`, `gather`, `setSlice`, `setRows`, `indexAdd`, `scatterAdd`, `maskedScatter`, `where`, `oneHot` | §3.7, §4.17 |
-| Reductions, scans | SIMD-promoted sum/mean/max/min/prod/logsumexp; `cumsum`/`cumprod` (+ `-Dvector-scan`) | §4.7 |
-| Attention | `groupedAttention`: causal/bidirectional, sliding window, additive bias, sinks, ALiBi-style `max_bias`, f32/f16/q8 KV, saved-stats backward | §4.13 |
-| RoPE | interleaved/half/tail-aligned modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | §4.12 |
-| Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropy` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | §4.10–4.11, §4.15 |
-| Vision / conv | channel-last conv2d (im2col GEMM + Winograd), conv1d/causal/transpose, pool2d, prelu, channelAffine, upsample, zeroPad2d — all with autograd | §4.14 |
-| MoE | `routerTopK`, `moeExpertFfn`/`Batch`, `MoeRhs` packed containers, `moe_chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | §4.16, §4.18, §13.2 |
-| Autograd machinery | seeded backward (`backwardWithGrad`), `noGrad`, activation checkpointing, `customVjp`, `gradcheck`; VJP inventory in §5.8 | §5 |
-| Training | SGD/AdamW/Adam/Muon/APOLLO (torch-golden-parity), `OptimizerSet` param groups, LR schedules, clipping, `ParamRegistry`, LoRA adapters, ES (incl. ternary-native), 16-bit leaves with f32 grads + optimizer masters | §11 |
-| Quantized weights | hot packed kernels (Q4_K/Q5_K/Q6_K/Q8_0/TQ2_0 + 2-bit expert tier), cold decode (IQ*, FP4…), byte-exact ggml encoders, PTQTP trit-planes, fake-quant round trips (FP8/FP4 microscaling, Hadamard, f16) | §10 |
-| Persistence | GGUF read/write/transcode (byte-verbatim re-emit), safetensors, named state dicts with alias remapping, training-checkpoint directories, `export-gguf` (incl. LoRA merge) | §12 |
-| LLM plumbing | `LinearWeight` (dispatch to BLAS/Metal/CUDA/quant kernels is *inside* — never hand-roll a linear), `gguf_meta` readers, KV cache (f16/q8_0) + crash-safe persistence, BPE + SPM tokenizers, sampler + `LogitProcessor` + llguidance constrained decoding, generic `Conversation` chat engine (+ `sendBatch`), speculative decoding cascade + grammar-constrained drafting, native MTP | §13 |
-| Parallelism / infra | worker team + `parallelChunks` (this *is* the parallel-loop contract), `BufferPool`, `RhsLifetime` RHS caching, deterministic RNG, GPU offload gates | §6, §9 |
+| A contraction (matmul, batched, multi-index) | `einsum` — THE contraction engine; `dot` is its special case. Don't hand-roll permute+matmul chains. | [§4.8](reference/04-tensor-operations.md#48-dot-tag-directed-contraction-srcagtensorzig-srctag_opszig)–4.9 |
+| A new pointwise op with autograd | `elementalUnary`/`elementalBinary` — supply scalar fwd/bwd fns, get a SIMD-chunked parallel op with a VJP. | [§4.4](reference/04-tensor-operations.md#44-unary-ops-srcagtensorzig-srcbackendopszig) |
+| Indexing / slicing / functional updates | `select`, `slice`, `sliceStep`, `indexSelect`, `gather`, `setSlice`, `setRows`, `indexAdd`, `scatterAdd`, `maskedScatter`, `where`, `oneHot` | [§3.7](reference/03-tensors-types-construction-and-data-access.md#37-views-and-structural-ops-srcagtensorzig-srctag_opszig-srcexecgather_scatterzig), [§4.17](reference/04-tensor-operations.md#417-indexing-assembly-and-functional-updates-srcagtensorzig) |
+| Reductions, scans | SIMD-promoted sum/mean/max/min/prod/logsumexp; `cumsum`/`cumprod` (+ `-Dvector-scan`) | [§4.7](reference/04-tensor-operations.md#47-reductions-and-scans-srcagtensorzig) |
+| Attention | `groupedAttention`: causal/bidirectional, sliding window, additive bias, sinks, ALiBi-style `max_bias`, f32/f16/q8 KV, saved-stats backward | [§4.13](reference/04-tensor-operations.md#413-attention-srcagtensorzig) |
+| RoPE | interleaved/half/tail-aligned modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | [§4.12](reference/04-tensor-operations.md#412-rotary-position-embedding-srcagtensorzig-srcexecropezig) |
+| Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropy` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | [§4.10](reference/04-tensor-operations.md#410-softmax-family-srcagtensorzig-srcexecsoftmaxzig)–4.11, [§4.15](reference/04-tensor-operations.md#415-losses-and-similarity-srcagtensorzig-srcexeclosszig) |
+| Vision / conv | channel-last conv2d (im2col GEMM + Winograd), conv1d/causal/transpose, pool2d, prelu, channelAffine, upsample, zeroPad2d — all with autograd | [§4.14](reference/04-tensor-operations.md#414-convolution-and-channel-last-vision-ops-srcagtensorzig) |
+| MoE | `routerTopK`, `moeExpertFfn`/`Batch`, `MoeRhs` packed containers, `moe_chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | [§4.16](reference/04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig), [§4.18](reference/04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig), [§13.2](reference/13-the-model-stack-fucina_models.md#132-weight-loading-srcweightszig) |
+| Autograd machinery | seeded backward (`backwardWithGrad`), `noGrad`, activation checkpointing, `customVjp`, `gradcheck`; VJP inventory in [§5.8](reference/05-automatic-differentiation.md#58-vjp-coverage-inventory-srcagbackwardzig) | [§5](reference/05-automatic-differentiation.md) |
+| Training | SGD/AdamW/Adam/Muon/APOLLO (torch-golden-parity), `OptimizerSet` param groups, LR schedules, clipping, `ParamRegistry`, LoRA adapters, ES (incl. ternary-native), 16-bit leaves with f32 grads + optimizer masters | [§11](reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md) |
+| Quantized weights | hot packed kernels (Q4_K/Q5_K/Q6_K/Q8_0/TQ2_0 + 2-bit expert tier), cold decode (IQ*, FP4…), byte-exact ggml encoders, PTQTP trit-planes, fake-quant round trips (FP8/FP4 microscaling, Hadamard, f16) | [§10](reference/10-quantization.md) |
+| Persistence | GGUF read/write/transcode (byte-verbatim re-emit), safetensors, named state dicts with alias remapping, training-checkpoint directories, `export-gguf` (incl. LoRA merge) | [§12](reference/12-model-io-gguf-and-safetensors.md) |
+| LLM plumbing | `LinearWeight` (dispatch to BLAS/Metal/CUDA/quant kernels is *inside* — never hand-roll a linear), `gguf_meta` readers, KV cache (f16/q8_0) + crash-safe persistence, BPE + SPM tokenizers, sampler + `LogitProcessor` + llguidance constrained decoding, generic `Conversation` chat engine (+ `sendBatch`), speculative decoding cascade + grammar-constrained drafting, native MTP | [§13](reference/13-the-model-stack-fucina_models.md) |
+| Parallelism / infra | worker team + `parallelChunks` (this *is* the parallel-loop contract), `BufferPool`, `RhsLifetime` RHS caching, deterministic RNG, GPU offload gates | [§6](reference/06-the-execution-runtime-execcontext-and-the-memory-model.md), [§9](reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md) |
 
 If a capability is genuinely missing, check the design records first —
 [SPECULATIVE.md](SPECULATIVE.md), [CONSTRAINED-DECODING.md](CONSTRAINED-DECODING.md),
@@ -213,15 +213,15 @@ GEMM sweep; a kernel change needs both tracks, always.
 
 | Gate | What it proves | Run when |
 | --- | --- | --- |
-| `zig build test` | nine test roots, native backend, no assets needed | always |
+| `zig build test` | every test root, native backend, no assets needed (§7.1) | always |
 | `zig build test-fucina -Dbackend=scalar` | native agrees with the reference backend on the kernel/spec surface (the fucina root; model-golden forwards are native-only by design) | `src/backend/` or `src/exec/` changed — once, on final code |
 | `zig build test -Dblas=none` | pure-Zig kernels unbroken | anything numeric near GEMM dispatch |
 | `zig build arch-check` | layering intact (zero SCCs) | new files / imports |
-| `zig build doc-check` | AGENTS.md doc index resolves | doc adds/moves |
-| `zig build snippet-check` | every runnable REFERENCE.md snippet still compiles and passes | any REFERENCE.md edit; any public-API change |
+| `zig build doc-check` | the doc index (`docs/README.md`) matches the docs-nav set; intra-doc links, anchors, and `src/<file>.zig:<line>` citations resolve; README's fetch pin matches the manifest | doc adds/moves/edits |
+| `zig build snippet-check` | every runnable reference snippet still compiles and passes (§7.2) | any docs/reference edit; any public-API change |
 | `zig build x86dot-check` | cross-ISA int8/quant dot parity + compile-only ISA legs | quant kernel / dot-arm changes |
 | `zig build cuda-check` | CUDA provider still compiles (GPU-less machines) | exec/backend surface changes on GPU-adjacent code |
-| `zig build bench-check` | every bench main still compiles | bench/ or op-signature changes |
+| `zig build bench-check` | every bench main still compiles (`addBench` registers each bench into the gate, so a new bench cannot land outside it) | bench/ or op-signature changes |
 | Family parity oracles (`--tokenize`, logit parity, `--compare` batteries) | model behavior unchanged | anything touching a family |
 | `tools/bench_gate.py` / `tools/opbench_gate.py` | speed did not regress (paired, median, CV-guarded) | any kernel/perf/hot-path change |
 
@@ -254,16 +254,15 @@ profile-confirm the hot path is armed.
 
 ### 4.4 Docs are part of the change
 
-A public-API change updates [REFERENCE.md](REFERENCE.md) — and its snippets
-are tests (`zig build snippet-check` extracts every fenced block with a
-column-0 `test "..."` and runs it against the real modules). The authoring
-contract is REFERENCE.md §2.7: implicit prelude (`std`/`fucina`/`models`/
-`optim`), `<!-- snippet: helper -->` for prose-introduced definitions,
-`<!-- snippet: skip -->` only for genuinely non-hermetic blocks; opt-in
-feature snippets stay runnable behind their comptime-flag guard. New docs
-get a row in `AGENTS.md`'s doc index (doc-check verifies it). Write docs as
-timeless reference — what exists and how it behaves; no dates (benchmark
-snapshots excepted), no development narrative.
+A public-API change updates the [reference](reference/00-index.md), one
+chapter file per chapter under `docs/reference/`, and its snippets are
+tests (`zig build snippet-check`; the authoring contract is §7.2). A new doc gets
+a `<!-- docs-nav: ... -->` header (the sidebar placement
+`tools/gen_docs_site.zig` reads) and a row in [docs/README.md](README.md),
+the doc index; `zig build doc-check` verifies the index and the nav set
+stay in sync. Write docs as timeless reference — what exists and how it
+behaves; no dates (benchmark snapshots excepted), no development
+narrative.
 
 Tests follow the sibling convention: behavior in `<name>_tests.zig`, a
 forwarding `test { _ = @import("<name>_tests.zig"); }` stanza in the
@@ -316,3 +315,117 @@ summarized in the CHANGELOG: **stable** modules (`tensor`, `ag`, `exec`,
 `gguf`, `weights`, the serving contract) always get a CHANGELOG rewrite;
 **experimental** modules (`es`, `ptqtp`, `speculative`, research features
 under `models/`) may change with a CHANGELOG entry only.
+
+CHANGELOG entries describe consumer-observable changes: public spellings,
+build options, environment variables, on-disk formats, behavior. Internal
+layout changes (file moves, module splits, private renames) stay in
+`git log`; when a release contains many, the changelog carries at most one
+short "Internal reorganization" paragraph naming the areas.
+
+## 7. Test layout, doc snippets, and CI
+
+### 7.1 Test organization
+
+Tests live in **sibling `*_tests.zig` files** next to the production file
+they cover: `exec.zig` ↔ `exec_tests.zig`,
+`src/models/text/tokenizer.zig` ↔ `src/models/text/tokenizer_tests.zig`,
+and so on. The production file pulls its sibling in with a forwarding
+stanza, so analyzing the production file analyzes its tests:
+
+```zig
+test {
+    _ = @import("exec_tests.zig");
+}
+```
+
+Module roots forward everything: `src/fucina.zig` ends in a `test` block
+referencing every submodule (`_ = dtype; _ = exec; …`), and `src/models.zig`
+does the same for every family and helper, so one `addTest` per root
+reaches the whole tree. `zig build arch-check` enforces the forwarding: a
+sibling test file that no non-test file imports fails the gate, so a
+forgotten stanza cannot silently drop a test file from `zig build test`.
+
+`zig build test` runs every test root, each compiled as its own test binary
+with the same option set as the corresponding executable: `src/fucina.zig`
+(the core, with `build_options`), `src/models.zig` (the LLM/ASR stack,
+imports `fucina`), and the example roots wired in `build.zig` (lmserve,
+nam, parakeet, omnivoice, locate_anything, facedetect, voiceagent,
+nanochat), each also reachable alone through its solo step (`test-fucina`,
+`test-models`, `test-<example>`).
+
+Every root passes with no model assets present. Suites that need external
+material skip themselves cleanly rather than fail: the OmniVoice parity
+suites gate on `OMNIVOICE_PARITY`
+([§2.6](reference/02-toolchain-build-and-project-wiring.md#26-runtime-environment-variables)); asset-dependent tests
+(facedetect goldens, the GGUF re-emit byte-identity test, tokenizer-parity
+fixtures, NAM training goldens) translate `error.FileNotFound` into
+`error.SkipZigTest`; GPU-dependent tests (`src/models/gemma/moe_tests.zig`)
+skip unless the build has a GPU provider *and* a device is actually
+present. Tests for **opt-in build features** follow the same discipline
+through the feature's comptime flag: every
+`src/models/text/llguidance_tests.zig` case is guarded on the flag — the
+enabled-path cases open with
+`if (!models.text.llguidance.enabled) return error.SkipZigTest;`, and one
+disabled-build case inverts the guard to assert `error.LlguidanceNotEnabled`
+— so the same test root compiles and passes under any flag combination and
+gains coverage — never failures — when the flag is on.
+Per `CONTRIBUTING.md`, numeric changes must additionally be green under
+`-Dbackend=scalar` and `-Dblas=none` — the scalar backend is the reference,
+and native must agree with it.
+
+### 7.2 Doc snippets are tests too
+
+`zig build snippet-check` extracts every runnable ```zig block from the
+reference chapters under `docs/reference/` — any fenced block containing a
+column-0 named `test "..."` declaration — into a generated test root and
+runs it against the real `fucina`/`fucina_models` modules with the build's
+option set (`tools/gen_snippet_tests.zig`). Authoring contract: snippets
+assume an implicit prelude (`std`, `fucina`, `models = @import("fucina_models")`,
+`optim = fucina.optim`; entries a snippet declares itself are not
+re-emitted); a `<!-- snippet: helper -->` comment on the line before a
+non-test fence marks a definition block (an Op/Spec/fn the prose
+introduces) prepended to every later snippet in the same chapter file; a
+`<!-- snippet: skip -->` comment excludes a test-shaped block that cannot
+run hermetically. Illustrative fragments (signature blocks, bare `test {`
+stanzas, asset-dependent `fn` examples) are ignored automatically. A
+snippet for an opt-in build feature stays RUNNABLE, not skip-marked: it
+opens with the feature's comptime-flag guard (e.g.
+`if (!models.text.llguidance.enabled) return error.SkipZigTest;`), so
+`snippet-check` compiles it under every flag combination and executes it
+exactly when the enabling `-D` flag is passed.
+
+### 7.3 Continuous integration (`.github/workflows/ci.yml`)
+
+CI runs on pushes to `main` and on every pull request, on a two-OS matrix
+(`fail-fast: false`): `ubuntu-latest` (x86-64) and `macos-15` (arm64 —
+pinned rather than `-latest`, bumped deliberately). Zig 0.16.0 is installed
+via `mlugg/setup-zig@v2`. Steps, in order:
+
+1. `zig build test` — native backend (Accelerate on macOS, no BLAS on Linux,
+   per the `-Dblas` default);
+2. `zig build` — all executables compile;
+3. `zig build bench-check` — the bench-check set compiles (bench mains are
+   reachable only through their run steps, so nothing else in the
+   build graph exercises them);
+4. `zig build arch-check` — import-graph gate;
+5. `zig build doc-check` — doc index, link, and citation gate;
+6. `zig build snippet-check` — runnable-snippet gate (§7.2);
+7. `zig build x86dot-check` — dot-kernel parity on the host ISA (x86 on
+   ubuntu, NEON/sdot on macOS) plus the compile-only bit-rot legs;
+8. `zig build test -Dbackend=scalar` — ubuntu only (the reference backend);
+9. `zig build test -Dblas=none` — macOS only (pure-Zig native kernels,
+   complementing the Accelerate run in step 1);
+10. `zig build test -Dllguidance=true` + `snippet-check -Dllguidance=true` —
+    ubuntu only (the runner image ships cargo): un-skips the flag-gated
+    llguidance tests and snippets (§7.2), keeping the extern ABI, the cargo
+    build, and the Rust-staticlib link from bit-rotting behind a green
+    default build — and continuously proving the Linux link of that
+    staticlib.
+
+Between the matrix and the conditional legs, every backend combination that
+can run on stock CI hardware is covered: native+BLAS, native without BLAS,
+and scalar, on both ISAs' unit-test surface, plus the opt-in llguidance
+feature on Linux. The CUDA GPU provider is
+covered by the compile-only `cuda-check` leg locally (not in CI); CPU dot
+ISA arms that CI cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered
+by the compile-only legs and attestation records in `src/x86dot_check.zig`.

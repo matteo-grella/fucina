@@ -55,7 +55,7 @@ const Rng = struct {
 /// argmax (engine.py sample_next_token temperature==0 branch); temp>0 → keep the
 /// top-k logits, softmax(vals/temp), then a multinomial draw. Must run inside an
 /// open exec scope (the topK values arm is a scope-owned borrow); the i64 index
-/// tensors are CALLER-owned even under the scope (REFERENCE §6.3) and are
+/// tensors are CALLER-owned even under the scope (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md) and are
 /// released here.
 fn sampleToken(
     ctx: *ExecContext,

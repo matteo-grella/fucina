@@ -7,7 +7,8 @@ is source-agnostic), measure teacher-forced NLL/perplexity on a text file
 trit-planes in place, measure NLL again on the same tokens, and finish with
 a greedy completion plus decode timing. One process, one model load, direct
 deltas. Method: [docs/PTQTP.md](../../docs/PTQTP.md); tuned per-size
-recipes: [docs/PTQTP-RECIPE.md](../../docs/PTQTP-RECIPE.md).
+recipes: the Recipe section of
+[docs/PTQTP.md](../../docs/PTQTP.md#recipe-quantize-a-model-and-run-it-resident-or-streamed).
 
 ## Getting the weights
 
@@ -25,8 +26,8 @@ If your source only ships bf16 and you want f16, transcode locally:
 ## CLI
 
 ```sh
-zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf --nll docs/REFERENCE.md
-zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_M.gguf --nll docs/REFERENCE.md
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-f16.gguf --nll README.md
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_M.gguf --nll README.md
 zig build ptqtp-qwen3 -- models/Qwen3-0.6B-f16.gguf --planes 0   # undecorated baseline only
 zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-1.7B-BF16.gguf --planes 3 --save models/qwen3-1.7b-ptqtp-k3.gguf
 ```
@@ -54,7 +55,7 @@ and any plain-text file serves as the NLL text — a tracked repo file avoids
 extra downloads:
 
 ```sh
-zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --nll docs/REFERENCE.md
+zig build ptqtp-qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --nll README.md
 ```
 
 Output, in order: a `loaded …` line (layers, hidden size, vocab, load

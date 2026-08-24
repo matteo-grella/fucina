@@ -3,7 +3,7 @@
 [llguidance](https://github.com/guidance-ai/llguidance) is the constrained-
 decoding engine behind Fucina's grammar/JSON-schema token masking
 (`llm.llguidance`, enabled with `-Dllguidance=true` — see
-[REFERENCE.md](../../docs/REFERENCE.md)). It is a Rust library; this
+[the reference](../../docs/reference/13-the-model-stack-fucina_models.md)). It is a Rust library; this
 directory vendors its two crates so the build needs no clone of the upstream
 repository.
 

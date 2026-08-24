@@ -77,7 +77,7 @@ services.
 
 | Piece | Location |
 |---|---|
-| Cartridge type, distillation loss, targets builder, persistence, serving write | `src/models/text/cartridge.zig` (§13.10 in `docs/REFERENCE.md`) |
+| Cartridge type, distillation loss, targets builder, persistence, serving write | `src/models/text/cartridge.zig` ([§13.10](reference/13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig)) |
 | Training seams: `ForwardOptions.{cartridge, capture}`, `Trainer.{initCartridge, captureKv, distillLoss, evalLogitsExt, evalLogitsRows}`, (offset, len)-keyed rope tables | `src/models/qwen3/train.zig` |
 | gemma4 training seams (same surface; SWA windows, dual-theta + rope-factor tables, MoE layers, per-layer heterogeneous KV geometry via `Cartridge.initFromRowsVaried`; composed distill tail — soft-capped/quantized heads have no fused route) | `src/models/gemma/train.zig` |
 | CLI: `--equiv` gate, self-study training, `--load`/`--ask` serving | `examples/cartridge/main.zig` (`zig build cartridge`) |

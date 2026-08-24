@@ -205,7 +205,7 @@ persisted `GradState.grad` (`src/ag/core.zig`, `accGradOwnedReady`), leaf
 grads live *outside* exec scopes, `step()` consumes them non-destructively,
 and `zeroGrad()` is the only clear. Accumulation is one backward per fresh
 graph — a repeat over the *same* retained graph fails with
-`error.BackwardAlreadyRun` (docs/REFERENCE.md §5.2). A batch of N sequences is therefore N
+`error.BackwardAlreadyRun` ([§5.2](reference/05-automatic-differentiation.md#52-running-backward-srcagcorezig)). A batch of N sequences is therefore N
 micro-batch loss+backward passes and ONE optimizer step — the raw-loop recipe
 (what `zig build finetune -- --accum-steps N` runs; the LLM trainers' `loss`
 is single-sequence, so accumulation IS their batching mechanism):
@@ -290,7 +290,7 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
 The row kernels (softmax fwd/bwd, CE fwd/bwd) are SIMD (ggml-style `vexpf`
 range reduction in `src/backend/vector/primitives.zig`) and parallel over
 rows. Determinism: each row writes its loss to a per-row buffer and the
-`.mean`/`.sum` reduction is ONE serial sum in row order (`src/exec/loss.zig:73-74`),
+`.mean`/`.sum` reduction is ONE serial sum in row order (`src/exec/loss.zig:138-139`),
 so the loss is bitwise stable across thread counts. Measured (M1 Max,
 ReleaseFast, `zig build bench-ce`): CE forward at 1024x151936 354.5 ms →
 ~18 ms, backward 426 ms → ~22 ms (~19-20x); softmax 13-21x across shapes.
@@ -649,7 +649,7 @@ and gradients here never narrow. The optimizer step is likewise all-f32
 owns, so updates below 16-bit resolution accumulate instead of rounding
 away, and the master is narrowed back into the param storage after each
 step. Optimizer v5 frames persist the masters for bit-exact resume
-(REFERENCE.md §11.5).
+([§11.5](reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#115-optimizer-state-persistence-fzt1-snapshots-vs-named-state-dicts-srcoptimzig)).
 
 **Two training patterns.**
 
@@ -665,7 +665,7 @@ step. Optimizer v5 frames persist the masters for bit-exact resume
   identity on the f32 gradient. This is the same math with the master on
   the user's side; prefer the leaf pattern, which halves parameter memory.
 
-Every OTHER typed forward op (the §4.19 surface) is no-grad by design and
+Every OTHER typed forward op (the [§4.19](reference/04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig) surface) is no-grad by design and
 rejects a grad-requiring operand with `error.UnsupportedGradient` — a graph
 is never silently dropped. In a trained path, widen with `to(.f32)` first.
 
@@ -681,8 +681,8 @@ The house policy matches torch AMP's lists: contractions may take 16-bit
 weights (the mixed `dot`/`einsum` paths); losses, softmax-ext/attention,
 and affine norms stay f32 (the typed facade steers this — those entries
 are compile errors or f32-only); reductions on 16-bit inputs already
-return f32 (§8.3). Inference-only paths may run the full 16-bit forward
-surface (§4.19), which computes through f32 and rounds once per op.
+return f32 ([§8.3](reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)). Inference-only paths may run the full 16-bit forward
+surface ([§4.19](reference/04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)), which computes through f32 and rounds once per op.
 
 **Frozen-weight mixed precision** (unchanged, and composes with the
 above): `dot` against a CONSTANT f16/bf16/quantized RHS routes gradients to

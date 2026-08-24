@@ -92,7 +92,7 @@ pub fn Ops(comptime Self: type) type {
         /// `class_tag` — which must be the last axis, like `routerTopK` —
         /// replaced by `out_tag` in the result. Rank 1 or 2 (the torch
         /// surface). Draw `(row, s)` reads the deterministic counter-based
-        /// stream at `(seed, row·num_samples + s)` (§6.8), so results are
+        /// stream at `(seed, row·num_samples + s)` (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md), so results are
         /// reproducible and independent of any batching; pass a fresh seed
         /// per call. Rows must hold finite weights `>= 0` with a positive
         /// sum (`InvalidShape` otherwise; NaN/inf rejected). Without

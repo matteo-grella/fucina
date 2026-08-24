@@ -636,7 +636,7 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
 
     // The completed pass consumed the graph: interior states retain their
     // accumulated gradients, so re-running over the same graph would compound
-    // them (one backward per graph, §5.2 in docs/REFERENCE.md). Failed passes
+    // them (one backward per graph; see docs/reference/05-automatic-differentiation.md). Failed passes
     // stay unmarked and re-runnable; leaf outputs have no graph to consume.
     for (outputs) |output| {
         if (output.grad_fn != null) output.backward_done = true;

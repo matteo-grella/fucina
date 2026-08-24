@@ -8,7 +8,7 @@ eager runtime and LLM inference engine whose distinctive mechanisms are **named 
 once), the **matmul-only GPU offload** (Metal/CUDA at the op seam), the **validated model
 families** (llama.cpp parity + benchmarks), and **gradient-free neuroevolution** — with the
 code-line-highlight treatment from the videos. All code and claims are taken from the repo's
-`README.md`, `docs/REFERENCE.md`, `docs/MEMORY-MODEL.md`, and `docs/GPU-OFFLOAD.md`.
+`README.md`, `docs/reference/`, `docs/MEMORY-MODEL.md`, and `docs/GPU-OFFLOAD.md`.
 
 ## Files (self-contained, no build step)
 

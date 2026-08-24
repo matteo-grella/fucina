@@ -213,7 +213,7 @@ test "public Tensor rand randn uniform normal bernoulli ride the seed stream" {
     const rng_mod = @import("../../rng.zig");
 
     const M = Tensor(.{ .row, .col });
-    // Same seed → identical tensor (the §6.8 checkpoint contract);
+    // Same seed → identical tensor (the RNG checkpoint contract, see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md);
     // different seed → different values. Constructors are no-grad consts.
     var ua = try M.rand(&ctx, .{ 4, 8 }, 42);
     defer ua.deinit();

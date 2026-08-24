@@ -90,7 +90,7 @@ pub const training_checkpoint = training_checkpoint_mod;
 
 /// THE public tensor: comptime-tagged axes, eager forward, tape-recorded
 /// autograd. `Tensor(.{ .seq, .embed })` names a distinct type; methods
-/// live on it, documented in docs/REFERENCE.md.
+/// live on it, documented in docs/reference/.
 pub const Tensor = ag.Tensor;
 // Deliberately NO public `RawTensor` root export. Raw f32 tensors are an INTERNAL
 // runtime/backend detail, not a stable public API — the no-grad `Tensor` facade
@@ -259,7 +259,7 @@ pub const simd = struct {
     pub const tanhVec = vector_primitives.tanhVec;
 };
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
-/// Hadamard rotation, f16 round trip) over host slices (§10.10).
+/// Hadamard rotation, f16 round trip) over host slices (see docs/reference/10-quantization.md).
 pub const fakequant = exec.fakequant;
 
 /// Internal surface for sibling modules such as `fucina_models` that need exact

@@ -120,7 +120,7 @@ The HTTP server is documented in
 | `--alpha F` | 16 | LoRA alpha (pass the same value to the merge) |
 | `--seq-max N` | 256 | token cap per encoded training pair |
 | `--checkpoint-layers` | off | activation checkpointing (TRAINING.md §7) |
-| `--no-widen-frozen` | off | frozen base stays on the quant kernels instead of cached f32 copies — the memory pick for big quantized bases; on GPU builds the quant GEMMs may still offload (REFERENCE §10.2) |
+| `--no-widen-frozen` | off | frozen base stays on the quant kernels instead of cached f32 copies — the memory pick for big quantized bases; on GPU builds the quant GEMMs may still offload ([§10.2](../../docs/reference/10-quantization.md#102-the-block-quantized-public-tensor-srcagtensorzig)) |
 | `--no-sample` | off | skip the held-prompt BEFORE/AFTER generations (benchmark mode: each sampled token re-runs a full cache-less trainer forward) |
 | `--threads N` | performance cores | fork-join team size; the default avoids parking chunks on efficiency cores |
 | `--accum-steps N` | 1 | gradient-accumulation window, exact token-weighted (§4) |
