@@ -1553,7 +1553,7 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
 /// GPU/managed access is unavailable, the registry is full, or the allocation
 /// would exceed FUCINA_GPU_VRAM_BUDGET — callers fall back to host bytes +
 /// `.transient`, exactly the Metal OOM path.
-// --- Evolution-strategies device arm (fucina.es) ----------------------------
+// --- Flat-parameter device arm (seeded-noise algebra; consumer: fucina.es) --
 //
 // Runs perturb/update/anchored-decay directly on RESIDENT parameters so the
 // population loop never migrates managed pages to the CPU. The kernels
@@ -1562,7 +1562,7 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
 // the caller keeps its CPU path (non-resident bytes, missing kernels, or a
 // GPU-less process).
 
-pub const EsDType = gpu_provider.EsDType;
+pub const FlatDType = gpu_provider.FlatDType;
 
 fn esDevicePtr(ctx: *Ctx, bytes: []const u8) ?api.CUdeviceptr {
     // Never adopt: the ES arm must write the caller's live storage, not a
@@ -1576,7 +1576,7 @@ fn esLaunchGrid(work_items: u64) c_uint {
     return @intCast(@min(blocks, 4096));
 }
 
-pub fn esPerturb(dt: EsDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usize) bool {
+pub fn flatPerturb(dt: FlatDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usize) bool {
     ensureConfig();
     const ctx = context() orelse return false;
     dispatch_lock.lock();
@@ -1604,7 +1604,7 @@ pub fn esPerturb(dt: EsDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usi
 var dev_es_seeds: DeviceBuf = .{};
 var dev_es_coeffs: DeviceBuf = .{};
 
-pub fn esUpdate(dt: EsDType, bytes: []u8, stream_seeds: []const u64, coeffs: []const f32, scale: f32, n: usize) bool {
+pub fn flatWeightedUpdate(dt: FlatDType, bytes: []u8, stream_seeds: []const u64, coeffs: []const f32, scale: f32, n: usize) bool {
     ensureConfig();
     if (stream_seeds.len != coeffs.len or stream_seeds.len == 0) return false;
     if (stream_seeds.len > std.math.maxInt(u32)) return false;
@@ -1640,7 +1640,7 @@ pub fn esUpdate(dt: EsDType, bytes: []u8, stream_seeds: []const u64, coeffs: []c
     return true;
 }
 
-pub fn esAnchor(dt: EsDType, bytes: []u8, anchor: []const u8, decay_step: f32, is_l1: bool, n: usize) bool {
+pub fn flatAnchorDecay(dt: FlatDType, bytes: []u8, anchor: []const u8, decay_step: f32, is_l1: bool, n: usize) bool {
     ensureConfig();
     if (anchor.len != bytes.len) return false;
     const ctx = context() orelse return false;

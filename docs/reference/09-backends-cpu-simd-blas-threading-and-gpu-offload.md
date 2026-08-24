@@ -691,7 +691,7 @@ What does **not** offload on Metal, per current tree: **quantized** decode GEMV
 (`shouldUseGpuQuantDecode` is hard-`false`; resident dense-f32 GEMV is separate),
 attention (`shouldUseGpuAttn`/`attnPrefillF16` return
 `false`; the CPU tiled kernel runs), and the ES parameter-update device arm
-(`esPerturb`/`esUpdate`/`esAnchor` are stubs returning `false` — on unified
+(`flatPerturb`/`flatWeightedUpdate`/`flatAnchorDecay` are stubs returning `false` — on unified
 memory the CPU kernels already mutate the shared pages the GPU reads
 zero-copy). Quantized matmuls reached from *trainable* autograd inputs pass
 `allow_gpu = false` (`QuantizedMatmulOptions`), keeping the training path on
@@ -765,7 +765,7 @@ direct asynchronous DMA. What offloads:
   `FUCINA_GPU_MIN_WORK_DECODE_Q5`: 1×4096² stays on CPU, while the measured
   1×6144×4096 and rows 2–8 cross to CUDA. The global decode arm remains
   opt-in even though a Q5_K_M 32-token greedy CPU/CUDA oracle matched exactly.
-- **ES device arm** (`esPerturb`, `esUpdate`, `esAnchor`): seeded
+- **ES device arm** (`flatPerturb`, `flatWeightedUpdate`, `flatAnchorDecay`): seeded
   perturbation/update/anchor kernels for evolution-strategies training ([§11](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md))
   that write the caller's live resident storage (never an adopted snapshot)
   and reproduce the CPU noise contract bitwise.

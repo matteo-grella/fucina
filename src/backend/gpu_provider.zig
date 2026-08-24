@@ -48,7 +48,7 @@ pub const QMoeStage = struct {
 };
 
 /// Element type for the ES device kernels (perturb/update/anchor).
-pub const EsDType = enum(usize) { f16 = 0, f32 = 1 };
+pub const FlatDType = enum(usize) { f16 = 0, f32 = 1 };
 
 /// Capability flags every provider declares. `enabled` says the provider
 /// is the selected one; the rest gate per-arm support and MUST agree with
@@ -77,7 +77,7 @@ const shared_types = [_]struct { name: []const u8, T: type }{
     .{ .name = "Orient", .T = Orient },
     .{ .name = "QMMTile", .T = QMMTile },
     .{ .name = "QMoeStage", .T = QMoeStage },
-    .{ .name = "EsDType", .T = EsDType },
+    .{ .name = "FlatDType", .T = FlatDType },
 };
 
 /// Process-global serialization for the two staging-panel protocols. Both
@@ -193,10 +193,12 @@ fn signatures(comptime P: type) []const Signature {
         .{ .name = "allocResidentBytes", .params = &.{usize}, .ret = ?[]u8 },
         .{ .name = "freeResidentBytes", .params = &.{[]const u8}, .ret = void },
 
-        // Evolution-strategies device kernels over flat parameter bytes.
-        .{ .name = "esPerturb", .params = &.{ EsDType, []u8, u64, f32, usize }, .ret = bool },
-        .{ .name = "esUpdate", .params = &.{ EsDType, []u8, []const u64, []const f32, f32, usize }, .ret = bool },
-        .{ .name = "esAnchor", .params = &.{ EsDType, []u8, []const u8, f32, bool, usize }, .ret = bool },
+        // Flat-parameter device kernels: seed-regenerated noise algebra over
+        // a flat byte slice (perturb, z-scored weighted update, anchor
+        // decay). Consumer-neutral contract; fucina.es is the consumer today.
+        .{ .name = "flatPerturb", .params = &.{ FlatDType, []u8, u64, f32, usize }, .ret = bool },
+        .{ .name = "flatWeightedUpdate", .params = &.{ FlatDType, []u8, []const u64, []const f32, f32, usize }, .ret = bool },
+        .{ .name = "flatAnchorDecay", .params = &.{ FlatDType, []u8, []const u8, f32, bool, usize }, .ret = bool },
     };
 }
 

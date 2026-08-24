@@ -1287,7 +1287,7 @@ fn validateFacadePtr(comptime P: type) type {
 
 /// The GPU provider's ES dtype tag for a comptime DType (f16/f32 only —
 /// bf16 has no device arm and stays on the CPU kernels).
-fn esGpuDType(comptime dt: DType) ?backend_mod.gpu_impl.EsDType {
+fn esGpuDType(comptime dt: DType) ?backend_mod.gpu_impl.FlatDType {
     return switch (dt) {
         .f16 => .f16,
         .f32 => .f32,
@@ -1329,7 +1329,7 @@ fn perturbSlot(
     // cache fills truthfully.
     if (comptime backend_mod.gpu_impl.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (cache == null and backend_mod.gpu_impl.esPerturb(gpu_dt, std.mem.sliceAsBytes(data), stream_seed, scaled, data.len)) {
+            if (cache == null and backend_mod.gpu_impl.flatPerturb(gpu_dt, std.mem.sliceAsBytes(data), stream_seed, scaled, data.len)) {
                 return;
             }
         }
@@ -1412,7 +1412,7 @@ fn updateSlot(
 ) void {
     if (comptime backend_mod.gpu_impl.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (cache == null and backend_mod.gpu_impl.esUpdate(gpu_dt, std.mem.sliceAsBytes(data), stream_seeds, coeffs, scale, data.len)) {
+            if (cache == null and backend_mod.gpu_impl.flatWeightedUpdate(gpu_dt, std.mem.sliceAsBytes(data), stream_seeds, coeffs, scale, data.len)) {
                 return;
             }
         }
@@ -1480,7 +1480,7 @@ fn anchorSlot(
 ) void {
     if (comptime backend_mod.gpu_impl.enabled) {
         if (comptime esGpuDType(dt)) |gpu_dt| {
-            if (backend_mod.gpu_impl.esAnchor(gpu_dt, std.mem.sliceAsBytes(data), std.mem.sliceAsBytes(anchor), decay_step, decay == .l1, data.len)) {
+            if (backend_mod.gpu_impl.flatAnchorDecay(gpu_dt, std.mem.sliceAsBytes(data), std.mem.sliceAsBytes(anchor), decay_step, decay == .l1, data.len)) {
                 return;
             }
         }

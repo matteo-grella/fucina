@@ -1339,12 +1339,12 @@ pub fn gemmQuantNtAsync(
 /// (~45 µs/MB measured — tens of ms per dispatch on the MoE expert tensors).
 /// Null when the GPU is unavailable or the bounded wrap-cache cannot register
 /// another resident buffer.
-/// ES device arm (see cuda.zig): not needed on unified memory — the CPU
-/// kernels already mutate shared pages the GPU reads zero-copy — so the
-/// stubs report "not handled" and callers keep their CPU path.
-pub const EsDType = gpu_provider.EsDType;
+/// Flat-parameter device arm (see cuda.zig): not needed on unified memory —
+/// the CPU kernels already mutate shared pages the GPU reads zero-copy — so
+/// the stubs report "not handled" and callers keep their CPU path.
+pub const FlatDType = gpu_provider.FlatDType;
 
-pub fn esPerturb(dt: EsDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usize) bool {
+pub fn flatPerturb(dt: FlatDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usize) bool {
     _ = dt;
     _ = bytes;
     _ = stream_seed;
@@ -1353,7 +1353,7 @@ pub fn esPerturb(dt: EsDType, bytes: []u8, stream_seed: u64, scaled: f32, n: usi
     return false;
 }
 
-pub fn esUpdate(dt: EsDType, bytes: []u8, stream_seeds: []const u64, coeffs: []const f32, scale: f32, n: usize) bool {
+pub fn flatWeightedUpdate(dt: FlatDType, bytes: []u8, stream_seeds: []const u64, coeffs: []const f32, scale: f32, n: usize) bool {
     _ = dt;
     _ = bytes;
     _ = stream_seeds;
@@ -1363,7 +1363,7 @@ pub fn esUpdate(dt: EsDType, bytes: []u8, stream_seeds: []const u64, coeffs: []c
     return false;
 }
 
-pub fn esAnchor(dt: EsDType, bytes: []u8, anchor: []const u8, decay_step: f32, is_l1: bool, n: usize) bool {
+pub fn flatAnchorDecay(dt: FlatDType, bytes: []u8, anchor: []const u8, decay_step: f32, is_l1: bool, n: usize) bool {
     _ = dt;
     _ = bytes;
     _ = anchor;

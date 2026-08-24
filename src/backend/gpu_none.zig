@@ -26,7 +26,7 @@ pub const has_attention_fwd = false;
 pub const Orient = gpu_provider.Orient;
 pub const QMMTile = gpu_provider.QMMTile;
 pub const QMoeStage = gpu_provider.QMoeStage;
-pub const EsDType = gpu_provider.EsDType;
+pub const FlatDType = gpu_provider.FlatDType;
 
 // The staging-panel locks exist for interface conformance; nothing stages.
 pub var f16_lock: thread.Mutex = .{};
@@ -175,12 +175,12 @@ pub fn allocResidentBytes(_: usize) ?[]u8 {
 pub fn freeResidentBytes(_: []const u8) void {}
 
 // Evolution-strategies device kernels: never handled.
-pub fn esPerturb(_: EsDType, _: []u8, _: u64, _: f32, _: usize) bool {
+pub fn flatPerturb(_: FlatDType, _: []u8, _: u64, _: f32, _: usize) bool {
     return false;
 }
-pub fn esUpdate(_: EsDType, _: []u8, _: []const u64, _: []const f32, _: f32, _: usize) bool {
+pub fn flatWeightedUpdate(_: FlatDType, _: []u8, _: []const u64, _: []const f32, _: f32, _: usize) bool {
     return false;
 }
-pub fn esAnchor(_: EsDType, _: []u8, _: []const u8, _: f32, _: bool, _: usize) bool {
+pub fn flatAnchorDecay(_: FlatDType, _: []u8, _: []const u8, _: f32, _: bool, _: usize) bool {
     return false;
 }
