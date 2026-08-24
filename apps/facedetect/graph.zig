@@ -405,7 +405,7 @@ pub const Compiled = struct {
                 const x = try act(vals, n.ins[0]);
                 var xr = try x.reshape(&.{ 1, x.len() }); // [1,in]
                 defer xr.deinit();
-                var y = try ctx.matmul(.f32, &xr, &p.w); // [1,out]
+                var y = try ctx.matmul(.f32, .plain, &xr, &p.w); // [1,out]
                 if (p.b) |*b| {
                     errdefer y.deinit();
                     try ctx.addAxisVectorInPlace(2, null, &y, b.dataConst(), 1);

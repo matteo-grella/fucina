@@ -238,7 +238,7 @@ fn benchLinearCe(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, st
     const row_stats = try allocator.alloc(f32, 2 * rows);
     defer allocator.free(row_stats);
 
-    var logits = try ctx.matmulTransB(&x, &w);
+    var logits = try ctx.matmul(.f32, .trans_b, &x, &w);
     defer logits.deinit();
     var loss = try ctx.crossEntropyLoss(2, &logits, 1, labels, .{ .row_stats = row_stats });
     loss.deinit();
@@ -248,18 +248,18 @@ fn benchLinearCe(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, st
     for (0..2) |_| {
         var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
-        var dx = try ctx.matmul(.f32, &dlogits, &w);
+        var dx = try ctx.matmul(.f32, .plain, &dlogits, &w);
         dx.deinit();
-        var dw = try ctx.matmulTransA(&dlogits, &x);
+        var dw = try ctx.matmul(.f32, .trans_a, &dlogits, &x);
         dw.deinit();
     }
     var timer = try Timer.start(io);
     for (0..iters) |_| {
         var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
-        var dx = try ctx.matmul(.f32, &dlogits, &w);
+        var dx = try ctx.matmul(.f32, .plain, &dlogits, &w);
         dx.deinit();
-        var dw = try ctx.matmulTransA(&dlogits, &x);
+        var dw = try ctx.matmul(.f32, .trans_a, &dlogits, &x);
         dw.deinit();
     }
     const composed_ns = timer.read() / iters;

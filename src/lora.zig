@@ -266,7 +266,7 @@ pub fn Adapter(comptime in_tag: Tag, comptime out_tag: Tag) type {
         /// always contiguous (fresh buffers, updated in place), so the raw
         /// matmul applies directly.
         fn addScaledDeltaW(self: *const Self, ctx: *ExecContext, w_data: []f32) !void {
-            var ba = try ctx.matmul(.f32, self.b.asRawTensor(), self.a.asRawTensor());
+            var ba = try ctx.matmul(.f32, .plain, self.b.asRawTensor(), self.a.asRawTensor());
             defer ba.deinit();
             const ba_data = ba.dataConst();
             std.debug.assert(w_data.len == ba_data.len);

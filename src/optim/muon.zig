@@ -387,12 +387,12 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
     for (x.data()) |*value| value.* *= inv_norm;
 
     for (0..steps) |_| {
-        var gram = try ctx.matmulTransB(&x, &x);
+        var gram = try ctx.matmul(.f32, .trans_b, &x, &x);
         defer gram.deinit();
-        var quad = try ctx.matmul(.f32, &gram, &gram);
+        var quad = try ctx.matmul(.f32, .plain, &gram, &gram);
         defer quad.deinit();
         for (quad.data(), gram.dataConst()) |*qi, gi| qi.* = ns_coeff_b * gi + ns_coeff_c * qi.*;
-        var bx = try ctx.matmul(.f32, &quad, &x);
+        var bx = try ctx.matmul(.f32, .plain, &quad, &x);
         errdefer bx.deinit();
         for (bx.data(), x.dataConst()) |*oi, xi| oi.* = ns_coeff_a * xi + oi.*;
         x.deinit();

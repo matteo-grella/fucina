@@ -57,15 +57,15 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = if (comptime trans_b)
-                    try ctx.matmul(.f32, gy, &self.right)
+                    try ctx.matmul(.f32, .plain, gy, &self.right)
                 else
-                    try ctx.matmulTransB(gy, &self.right);
+                    try ctx.matmul(.f32, .trans_b, gy, &self.right);
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
                 out[1] = if (comptime trans_b)
-                    try ctx.matmulTransA(gy, &self.left)
+                    try ctx.matmul(.f32, .trans_a, gy, &self.left)
                 else
-                    try ctx.matmulTransA(&self.left, gy);
+                    try ctx.matmul(.f32, .trans_a, &self.left, gy);
             }
         }
 
@@ -108,9 +108,9 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var full = switch (kind) {
-                    .plain => try ctx.bmmTransB(gy, &self.right),
-                    .trans_a => try ctx.bmmTransB(&self.right, gy),
-                    .trans_b => try ctx.bmm(gy, &self.right),
+                    .plain => try ctx.bmm(.f32, .trans_b, gy, &self.right),
+                    .trans_a => try ctx.bmm(.f32, .trans_b, &self.right, gy),
+                    .trans_b => try ctx.bmm(.f32, .plain, gy, &self.right),
                 };
                 defer full.deinit();
                 out[0] = try ctx.reduceBroadcast(&full, self.left.shape.slice());
@@ -118,9 +118,9 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
 
             if (needs_grad.len > 1 and needs_grad[1]) {
                 var full = switch (kind) {
-                    .plain => try ctx.bmmTransA(&self.left, gy),
-                    .trans_a => try ctx.bmm(&self.left, gy),
-                    .trans_b => try ctx.bmmTransA(gy, &self.left),
+                    .plain => try ctx.bmm(.f32, .trans_a, &self.left, gy),
+                    .trans_a => try ctx.bmm(.f32, .plain, &self.left, gy),
+                    .trans_b => try ctx.bmm(.f32, .trans_a, gy, &self.left),
                 };
                 defer full.deinit();
                 out[1] = try ctx.reduceBroadcast(&full, self.right.shape.slice());
@@ -230,13 +230,13 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
         }
 
         fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, right_tags, &self.right_value, left_recover_tags);
+            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &self.right_value, left_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
         }
 
         fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, left_tags, &self.left_value, right_recover_tags);
+            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value, right_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
         }
@@ -368,11 +368,11 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
         }
 
         fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            out.* = try tag_ops.taggedEinsum(base_tags, gy, ctx, right_tags, &self.right_value, left_tags);
+            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, right_tags, &self.right_value, left_tags);
         }
 
         fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            out.* = try tag_ops.taggedEinsum(base_tags, gy, ctx, left_tags, &self.left_value, right_tags);
+            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, left_tags, &self.left_value, right_tags);
         }
 
         fn runAddDotBackwardRightBranch(ptr: *anyopaque) void {
@@ -476,12 +476,12 @@ pub fn ConstRhsEinsumBackward(
 
                 // dL/dleft is itself a contraction (einsum closure); axes the
                 // forward summed away come back as a broadcast.
-                var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, right_tags, &right_f32, left_recover_tags);
+                var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &right_f32, left_recover_tags);
                 defer grad.deinit();
                 out[0] = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
             }
             if (needs_grad.len > 1 and needs_grad[1]) {
-                var grad = try tag_ops.taggedEinsum(out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
+                var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
                 defer grad.deinit();
                 out[1] = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
             }
@@ -575,7 +575,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
                 for (0..n) |row| {
                     try backend_quant.cold.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
                 }
-                var dx = try ctx.matmul(.f32, &gy2d, &right_f32);
+                var dx = try ctx.matmul(.f32, .plain, &gy2d, &right_f32);
                 errdefer dx.deinit();
                 if (!std.mem.eql(usize, dx.shape.slice(), self.left_shape[0..])) {
                     const reshaped = try dx.reshape(self.left_shape[0..]);
@@ -586,7 +586,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             }
 
             if (needs_grad.len > 1 and needs_grad[1]) {
-                out[1] = try ctx.matmulTransA(&gy2d, &self.left);
+                out[1] = try ctx.matmul(.f32, .trans_a, &gy2d, &self.left);
             }
         }
 

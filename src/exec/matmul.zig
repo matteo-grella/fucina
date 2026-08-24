@@ -279,17 +279,7 @@ pub fn dot(
     return out;
 }
 
-/// `a[k,m]ᵀ @ b[k,n]` without materializing the transpose.
-pub fn matmulTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return matmul2DDispatch(self, .trans_a, a, b);
-}
-
-/// `a[m,k] @ b[n,k]ᵀ` without materializing the transpose.
-pub fn matmulTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return matmul2DDispatch(self, .trans_b, a, b);
-}
-
-pub fn matmul2DDispatch(self: *ExecContext, comptime kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
+fn matmul2DF32(self: *ExecContext, comptime kind: MatmulKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(kind, a, b);
 
     var aa = try self.prepareContiguous(.f32, a);
@@ -311,7 +301,8 @@ pub fn matmul2DDispatch(self: *ExecContext, comptime kind: MatmulKind, a: *const
 /// buffer and the accumulate GEMM (BLAS beta=1, or the vector accumulate
 /// kernels) adds the product in place — the addmm/residual pattern with no
 /// intermediate product tensor and no separate elementwise add pass.
-pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
+/// `base + a @ b` in one accumulating GEMM (the addmm form, f32).
+pub fn matmulAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *const Tensor) !Tensor {
     const info = try analyzeMatmul2D(.plain, a, b);
     const basev = try base.rankView(2);
     if (basev.dim(0) != info.m or basev.dim(1) != info.n) return tensor.TensorError.ShapeMismatch;
@@ -329,15 +320,30 @@ pub fn matmul2DAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base:
 }
 
 /// Strict 2-D `a[m,k] @ b[k,n]`.
+/// Rank-2 matmul over `kind` (`.plain` a·b, `.trans_a` aᵀ·b, `.trans_b`
+/// a·bᵀ). f32 runs the dense GEMM; a typed `.plain` runs the typed GEMM
+/// (f32 accumulation, `outputDType(.matmul, dtype)` store); every other
+/// typed case follows the `.widened` policy.
 pub fn matmul(
     self: *ExecContext,
     comptime dtype: DType,
+    comptime kind: MatmulKind,
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
-    if (comptime dtype == .f32) return matmul2DDispatch(self, .plain, a, b);
+    if (comptime dtype == .f32) return matmul2DF32(self, kind, a, b);
     comptime ensureForwardFloatMath(dtype);
     const output_dtype = comptime dtype_mod.outputDType(.matmul, dtype);
+    if (comptime kind != .plain) {
+        const compute = comptime ExecContext.widenedCompute(dtype, "matmul");
+        var aa = try self.prepareAs(dtype, compute, a);
+        defer aa.deinit();
+        var bb = try self.prepareAs(dtype, compute, b);
+        defer bb.deinit();
+        var out = try matmul2DF32(self, kind, aa.tensor(), bb.tensor());
+        errdefer out.deinit();
+        return self.storeAs(compute, output_dtype, out);
+    }
 
     const info = try analyzeMatmul2D(.plain, a, b);
 
@@ -481,8 +487,11 @@ fn matmulTransB2DViaShadow(
 /// LLM shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
 /// cached widened copy is unsound when 16-bit weights are trained in
 /// place, which is why the shadow arm below is opt-in.
-pub fn matmulTransB2DWithHalfRhs(self: *ExecContext, comptime dtype: DType, a: *const Tensor, b: *const tensor.TensorOf(dtype)) !Tensor {
-    comptime if (dtype != .f16 and dtype != .bf16) @compileError("matmulTransB2DWithHalfRhs: the RHS dtype must be .f16 or .bf16");
+/// The mixed-precision GEMM `a[m,k] · b[n,k]ᵀ` with an f32 `a` and a
+/// 16-bit `b` (the weight layout): the kernels widen in register and
+/// accumulate in f32; the result is f32.
+pub fn matmulHalfRhs(self: *ExecContext, comptime dtype: DType, a: *const Tensor, b: *const tensor.TensorOf(dtype)) !Tensor {
+    comptime if (dtype != .f16 and dtype != .bf16) @compileError("matmulHalfRhs: the RHS dtype must be .f16 or .bf16");
     const av = try a.rankView(2);
     const bv = try b.rankView(2);
     const m = av.dim(0);
@@ -531,27 +540,27 @@ pub fn matmulTransB2DWithHalfRhs(self: *ExecContext, comptime dtype: DType, a: *
 /// General multi-axis broadcast never materializes expanded tensors; the
 /// runtime computes per-output-batch source offsets and preserves the exact
 /// and shared-operand fast paths. Strict 2-D inputs must use matmul/matmul2D.
-pub fn bmm(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return bmmDispatch(self, .plain, a, b);
+/// Batched matmul over the leading (broadcast) axes and `kind`. One f32
+/// kernel set; 16-bit inputs follow the `.widened` policy.
+pub fn bmm(
+    self: *ExecContext,
+    comptime dtype: DType,
+    comptime kind: BmmKind,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)) {
+    if (comptime dtype == .f32) return bmmF32(self, kind, a, b);
+    const compute = comptime ExecContext.widenedCompute(dtype, "bmm");
+    var aa = try self.prepareAs(dtype, compute, a);
+    defer aa.deinit();
+    var bb = try self.prepareAs(dtype, compute, b);
+    defer bb.deinit();
+    var out = try bmmF32(self, kind, aa.tensor(), bb.tensor());
+    errdefer out.deinit();
+    return self.storeAs(compute, comptime dtype_mod.outputDType(.matmul, dtype), out);
 }
 
-/// Batched matmul with implicit transpose of the per-batch A:
-///   a=[..., K, M] @ b=[..., K, N] -> [..., M, N]
-/// Used by autograd to compute dB = A^T @ dY in batched form. Shares the
-/// dispatch logic with bmm.
-pub fn bmmTransA(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return bmmDispatch(self, .trans_a, a, b);
-}
-
-/// Batched matmul with implicit transpose of the per-batch B:
-///   a=[..., M, K] @ b=[..., N, K] -> [..., M, N]
-/// Used by autograd to compute dA = dY @ B^T in batched form. The shared-B
-/// fast path (broadcast RHS) also applies here.
-pub fn bmmTransB(self: *ExecContext, a: *const Tensor, b: *const Tensor) !Tensor {
-    return bmmDispatch(self, .trans_b, a, b);
-}
-
-pub fn bmmDispatch(self: *ExecContext, comptime kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
+fn bmmF32(self: *ExecContext, comptime kind: BmmKind, a: *const Tensor, b: *const Tensor) !Tensor {
     const info = try analyzeBmm(kind, a, b);
 
     var out_buf: [tensor.max_rank]usize = undefined;

@@ -863,7 +863,7 @@ fn runRawMatmulTransB(m: usize, k: usize, n: usize, iterations: usize) !Result {
     fillPattern(&b, 16);
 
     for (0..4) |_| {
-        var y = try ctx.matmulTransB(&a, &b);
+        var y = try ctx.matmul(.f32, .trans_b, &a, &b);
         y.deinit();
     }
 
@@ -871,7 +871,7 @@ fn runRawMatmulTransB(m: usize, k: usize, n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.matmulTransB(&a, &b);
+        var y = try ctx.matmul(.f32, .trans_b, &a, &b);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

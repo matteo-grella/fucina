@@ -922,9 +922,9 @@ fn bmm3(ctx: *ExecContext, kind: BmmKind, a: []f32, ash: [3]usize, b: []f32, bsh
     var bt = try ctx.fromBorrowedSlice(.f32, bsh, b);
     defer bt.deinit();
     var rt = switch (kind) {
-        .plain => try ctx.bmm(&at, &bt),
-        .trans_a => try ctx.bmmTransA(&at, &bt),
-        .trans_b => try ctx.bmmTransB(&at, &bt),
+        .plain => try ctx.bmm(.f32, .plain, &at, &bt),
+        .trans_a => try ctx.bmm(.f32, .trans_a, &at, &bt),
+        .trans_b => try ctx.bmm(.f32, .trans_b, &at, &bt),
     };
     defer rt.deinit();
     std.debug.assert(rt.len() == osh[0] * osh[1] * osh[2]);

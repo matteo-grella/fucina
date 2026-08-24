@@ -615,8 +615,8 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
                     self.pad,
                 );
                 defer gcol.deinit();
-                if (need_input) out[0] = try ctx.matmul(.f32, &gcol, &self.weight_value);
-                if (need_weight) out[1] = try ctx.matmulTransA(&gcol, &self.input_value);
+                if (need_input) out[0] = try ctx.matmul(.f32, .plain, &gcol, &self.weight_value);
+                if (need_weight) out[1] = try ctx.matmul(.f32, .trans_a, &gcol, &self.input_value);
             }
             if (need_bias) out[2] = try ctx.sumAxis(.f32, 2, gy, 0);
         }

@@ -165,7 +165,7 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case, co
 }
 
 fn mlpInference(ctx: *ExecContext, base: *const Base, comptime bias_mode: BiasMode) !Tensor {
-    var h = try ctx.matmul(.f32, &base.x, &base.w1);
+    var h = try ctx.matmul(.f32, .plain, &base.x, &base.w1);
     errdefer h.deinit();
 
     switch (bias_mode) {
@@ -180,7 +180,7 @@ fn mlpInference(ctx: *ExecContext, base: *const Base, comptime bias_mode: BiasMo
     try ctx.elementwiseInPlace(.mul, &h, &base.gate);
     defer h.deinit();
 
-    var y = try ctx.matmul(.f32, &h, &base.w2);
+    var y = try ctx.matmul(.f32, .plain, &h, &base.w2);
     errdefer y.deinit();
     switch (bias_mode) {
         .full_bias => try ctx.elementwiseInPlace(.add, &y, &base.b2_full),

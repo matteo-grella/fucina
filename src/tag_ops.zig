@@ -114,14 +114,15 @@ pub fn gatedPointwise(
 /// (batch ++ left free ++ right free). Validates contract/batch dims before
 /// computing; kernel selection is the einsum lowering's.
 pub fn taggedDot(
+    comptime tensor_dtype: DType,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const RawTensor,
+    right: *const tensor_mod.TensorOf(tensor_dtype),
     comptime contract_tag: Tag,
-) !RawTensor {
-    return taggedEinsum(left_tags, left, ctx, right_tags, right, comptime dotResultTags(left_tags, right_tags, contract_tag));
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
+    return taggedEinsum(tensor_dtype, left_tags, left, ctx, right_tags, right, comptime dotResultTags(left_tags, right_tags, contract_tag));
 }
 
 /// Multi-index tagged contraction (einsum). `out_tags` is the whole equation:
@@ -141,6 +142,28 @@ pub fn taggedDot(
 /// order that interleaves the batch/left-free/right-free groups costs one
 /// extra output materialization — prefer group-nested output orders.
 pub fn taggedEinsum(
+    comptime tensor_dtype: DType,
+    comptime left_tags: anytype,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
+    ctx: *ExecContext,
+    comptime right_tags: anytype,
+    right: *const tensor_mod.TensorOf(tensor_dtype),
+    comptime out_tags: anytype,
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
+    if (comptime tensor_dtype == .f32) return taggedEinsumF32(left_tags, left, ctx, right_tags, right, out_tags);
+    // The f32 lowering behind the `.widened` policy: both operands widen
+    // once, the result narrows once (the matmul output dtype).
+    const compute = comptime ExecContext.widenedCompute(tensor_dtype, "einsum");
+    var ll = try ctx.prepareAs(tensor_dtype, compute, left);
+    defer ll.deinit();
+    var rr = try ctx.prepareAs(tensor_dtype, compute, right);
+    defer rr.deinit();
+    var value = try taggedEinsumF32(left_tags, ll.tensor(), ctx, right_tags, rr.tensor(), out_tags);
+    errdefer value.deinit();
+    return ctx.storeAs(compute, comptime dtype_mod.outputDType(.matmul, tensor_dtype), value);
+}
+
+fn taggedEinsumF32(
     comptime left_tags: anytype,
     left: *const RawTensor,
     ctx: *ExecContext,
@@ -637,9 +660,9 @@ fn einsumGenericGemm(
             defer xm.deinit();
             var ym = if (trans_b) try y_ready.reshape(&.{ n, k }) else try y_ready.reshape(&.{ k, n });
             defer ym.deinit();
-            if (trans_a) break :blk try ctx.matmulTransA(&xm, &ym);
-            if (trans_b) break :blk try ctx.matmulTransB(&xm, &ym);
-            break :blk try ctx.matmul(.f32, &xm, &ym);
+            if (trans_a) break :blk try ctx.matmul(.f32, .trans_a, &xm, &ym);
+            if (trans_b) break :blk try ctx.matmul(.f32, .trans_b, &xm, &ym);
+            break :blk try ctx.matmul(.f32, .plain, &xm, &ym);
         }
         // The batch group collapses into ONE bmm axis, so any batch count
         // the operands can represent is lowerable (no rank-cap on batch).
@@ -649,9 +672,9 @@ fn einsumGenericGemm(
         defer xb.deinit();
         var yb = try y_ready.reshape(&.{ batches, if (trans_b) n else k, if (trans_b) k else n });
         defer yb.deinit();
-        if (trans_a) break :blk try ctx.bmmTransA(&xb, &yb);
-        if (trans_b) break :blk try ctx.bmmTransB(&xb, &yb);
-        break :blk try ctx.bmm(&xb, &yb);
+        if (trans_a) break :blk try ctx.bmm(.f32, .trans_a, &xb, &yb);
+        if (trans_b) break :blk try ctx.bmm(.f32, .trans_b, &xb, &yb);
+        break :blk try ctx.bmm(.f32, .plain, &xb, &yb);
     };
     errdefer value.deinit();
 

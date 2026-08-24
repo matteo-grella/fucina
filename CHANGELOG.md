@@ -286,6 +286,19 @@ this point; earlier history is `git log`.
   (`compare`, `logicalAnd`/`Or`/`Xor`/`Not`, `isnan`/`isinf`/`isfinite`)
   is served to the f16/bf16 branch by the shared elementwise mixin;
   `typed/widened.zig` keeps `einsum` only.
+- Matmul seam, `ExecContext`: `matmul(dtype, kind, a, b)` replaces
+  `matmul(dtype, a, b)`, `matmulTransA`, `matmulTransB` and
+  `matmul2DDispatch`; `bmm(dtype, kind, a, b)` replaces `bmm`, `bmmTransA`,
+  `bmmTransB` and `bmmDispatch`; `matmulAdd` was `matmul2DAdd`;
+  `matmulHalfRhs(dtype, a, b)` was `matmulTransB2DWithHalfRhs`. Rewrites:
+  `matmulTransB(&a, &b)` is `matmul(.f32, .trans_b, &a, &b)`, `bmm(&a, &b)`
+  is `bmm(.f32, .plain, &a, &b)`. The typed plain `matmul` runs the typed
+  GEMM as before; the other typed kinds and typed `bmm` follow the
+  `.widened` policy. `tag_ops.taggedEinsum`/`taggedDot` take the dtype
+  first and apply the same policy (16-bit operands widen once, the result
+  narrows to the matmul output dtype). On the facade `matmul` and `einsum`
+  are served to the f16/bf16 branch by the shared matmul mixin;
+  `src/ag/tensor/typed/widened.zig` is gone.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

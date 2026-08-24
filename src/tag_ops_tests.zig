@@ -274,7 +274,7 @@ test "tag library: dot follows matrix multiplication tag ordering" {
         if (result.len != 1 or result[0] != .out) @compileError("unexpected dot result tags");
     }
 
-    var y = try taggedDot(.{ .out, .d }, &weight, &ctx, .{.d}, &input, .d);
+    var y = try taggedDot(.f32, .{ .out, .d }, &weight, &ctx, .{.d}, &input, .d);
     defer y.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{2}, y.shape.slice());
@@ -299,7 +299,7 @@ test "tag library: dot treats shared non-contracted tags as batch axes" {
         }
     }
 
-    var c = try taggedDot(.{ .batch, .m, .k }, &a, &ctx, .{ .batch, .k, .n }, &b, .k);
+    var c = try taggedDot(.f32, .{ .batch, .m, .k }, &a, &ctx, .{ .batch, .k, .n }, &b, .k);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2 }, c.shape.slice());
@@ -317,7 +317,7 @@ test "tag library: dot contracts by tag regardless of physical axis order" {
     var b = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 7, 9, 11, 8, 10, 12 });
     defer b.deinit();
 
-    var c = try taggedDot(.{ .m, .k }, &a, &ctx, .{ .n, .k }, &b, .k);
+    var c = try taggedDot(.f32, .{ .m, .k }, &a, &ctx, .{ .n, .k }, &b, .k);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, c.shape.slice());
@@ -335,7 +335,7 @@ test "tag library: dot lowers transposed 2D layouts through matmul variants" {
     var b = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer b.deinit();
 
-    var c = try taggedDot(.{ .k, .m }, &a, &ctx, .{ .k, .n }, &b, .k);
+    var c = try taggedDot(.f32, .{ .k, .m }, &a, &ctx, .{ .k, .n }, &b, .k);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, c.shape.slice());
@@ -358,7 +358,7 @@ test "tag library: vector dot returns a scalar tensor" {
         if (result.len != 0) @compileError("vector dot should produce scalar tags");
     }
 
-    var y = try taggedDot(.{.d}, &a, &ctx, .{.d}, &b, .d);
+    var y = try taggedDot(.f32, .{.d}, &a, &ctx, .{.d}, &b, .d);
     defer y.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{1}, y.shape.slice());
@@ -376,7 +376,7 @@ test "tag library: dot rejects mismatched contract dimensions" {
     var b = try ctx.fromSlice(.f32, .{2}, &.{ 7, 8 });
     defer b.deinit();
 
-    try std.testing.expectError(TensorError.ShapeMismatch, taggedDot(.{ .out, .d }, &a, &ctx, .{.d}, &b, .d));
+    try std.testing.expectError(TensorError.ShapeMismatch, taggedDot(.f32, .{ .out, .d }, &a, &ctx, .{.d}, &b, .d));
 }
 
 // ---- taggedEinsum ----
@@ -407,7 +407,7 @@ fn expectEinsumMatchesNaive(
     r: *const tensor_mod.Tensor,
     comptime out_tags: anytype,
 ) !void {
-    var got = try taggedEinsum(l_tags, l, ctx, r_tags, r, out_tags);
+    var got = try taggedEinsum(.f32, l_tags, l, ctx, r_tags, r, out_tags);
     defer got.deinit();
 
     const all = comptime tags_mod.unionTags(l_tags, r_tags);
@@ -593,9 +593,9 @@ test "einsum: strided operand views take the generic path and stay exact" {
     defer b_view.deinit();
     try std.testing.expect(!b_view.isContiguous());
 
-    var from_view = try taggedEinsum(.{ .m, .k }, &a, &ctx, .{ .k, .n }, &b_view, .{ .m, .n });
+    var from_view = try taggedEinsum(.f32, .{ .m, .k }, &a, &ctx, .{ .k, .n }, &b_view, .{ .m, .n });
     defer from_view.deinit();
-    var from_orig = try taggedEinsum(.{ .m, .k }, &a, &ctx, .{ .n, .k }, &b, .{ .m, .n });
+    var from_orig = try taggedEinsum(.f32, .{ .m, .k }, &a, &ctx, .{ .n, .k }, &b, .{ .m, .n });
     defer from_orig.deinit();
 
     try std.testing.expectEqualSlices(f32, from_orig.dataConst(), from_view.dataConst());
@@ -658,9 +658,9 @@ test "einsum: rejects mismatched shared dimensions" {
     defer b.deinit();
 
     // Contract dim mismatch.
-    try std.testing.expectError(TensorError.ShapeMismatch, taggedEinsum(.{ .m, .k }, &a, &ctx, .{ .k, .n }, &b, .{ .m, .n }));
+    try std.testing.expectError(TensorError.ShapeMismatch, taggedEinsum(.f32, .{ .m, .k }, &a, &ctx, .{ .k, .n }, &b, .{ .m, .n }));
     // Batch dim mismatch.
-    try std.testing.expectError(TensorError.ShapeMismatch, taggedEinsum(.{ .b, .k }, &a, &ctx, .{ .b, .n }, &b, .{ .b, .k, .n }));
+    try std.testing.expectError(TensorError.ShapeMismatch, taggedEinsum(.f32, .{ .b, .k }, &a, &ctx, .{ .b, .n }, &b, .{ .b, .k, .n }));
 }
 
 fn einsumSweepCase(
@@ -773,9 +773,9 @@ test "einsum: strided-view sweep — permuted operands agree with their contiguo
     defer b_kj.deinit();
     try std.testing.expect(!b_kj.isContiguous());
 
-    var from_view = try taggedEinsum(.{ .i, .k }, &a, &ctx, .{ .k, .j }, &b_kj, .{ .i, .j });
+    var from_view = try taggedEinsum(.f32, .{ .i, .k }, &a, &ctx, .{ .k, .j }, &b_kj, .{ .i, .j });
     defer from_view.deinit();
-    var from_orig = try taggedEinsum(.{ .i, .k }, &a, &ctx, .{ .j, .k }, &b, .{ .i, .j });
+    var from_orig = try taggedEinsum(.f32, .{ .i, .k }, &a, &ctx, .{ .j, .k }, &b, .{ .i, .j });
     defer from_orig.deinit();
     try std.testing.expectEqualSlices(f32, from_orig.dataConst(), from_view.dataConst());
 
@@ -789,9 +789,9 @@ test "einsum: strided-view sweep — permuted operands agree with their contiguo
     var k_perm = try alignTensorTo(.f32, .{ .b, .j, .d }, &k, .{ .d, .b, .j });
     defer k_perm.deinit();
 
-    var v1 = try taggedEinsum(.{ .i, .b, .d }, &q_perm, &ctx, .{ .d, .b, .j }, &k_perm, .{ .b, .i, .j });
+    var v1 = try taggedEinsum(.f32, .{ .i, .b, .d }, &q_perm, &ctx, .{ .d, .b, .j }, &k_perm, .{ .b, .i, .j });
     defer v1.deinit();
-    var v2 = try taggedEinsum(.{ .b, .i, .d }, &q, &ctx, .{ .b, .j, .d }, &k, .{ .b, .i, .j });
+    var v2 = try taggedEinsum(.f32, .{ .b, .i, .d }, &q, &ctx, .{ .b, .j, .d }, &k, .{ .b, .i, .j });
     defer v2.deinit();
     try std.testing.expectEqualSlices(f32, v2.dataConst(), v1.dataConst());
 }

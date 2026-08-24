@@ -466,7 +466,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                     defer left_matrix.deinit();
                     var right_matrix = try right_batched.viewWithStridesOffset(&.{ k, n }, &.{ n, 1 }, batch * right_batch_len);
                     defer right_matrix.deinit();
-                    var product = try ctx.matmul(tensor_dtype, &left_matrix, &right_matrix);
+                    var product = try ctx.matmul(tensor_dtype, .plain, &left_matrix, &right_matrix);
                     defer product.deinit();
                     @memcpy(out.data()[batch * out_batch_len ..][0..out_batch_len], product.dataConst());
                 }
@@ -477,7 +477,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             defer left_matrix.deinit();
             var right_matrix = try right_ready.reshape(&.{ k, n });
             defer right_matrix.deinit();
-            var matmul = try ctx.matmul(tensor_dtype, &left_matrix, &right_matrix);
+            var matmul = try ctx.matmul(tensor_dtype, .plain, &left_matrix, &right_matrix);
             errdefer matmul.deinit();
 
             if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
@@ -574,7 +574,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), k });
                 defer right_matrix.deinit();
 
-                var matmul = try ctx.matmulTransB2DWithHalfRhs(rhs_dtype, &left_matrix, &right_matrix);
+                var matmul = try ctx.matmulHalfRhs(rhs_dtype, &left_matrix, &right_matrix);
                 errdefer matmul.deinit();
 
                 if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;

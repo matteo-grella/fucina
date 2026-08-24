@@ -658,9 +658,10 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
         pub const layerNorm = norm_ops.layerNorm;
 
-        // ---- widened forward math (f16/bf16 only: einsum, whose exec lowering is still f32-only) ----
-        const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
-        pub const einsum = widened_ops.einsum;
+        // ---- matmul: the shared float mixin (typed GEMM for the plain kind, the widened policy otherwise; constants here) ----
+        const matmul_ops = @import("tensor/float/matmul.zig").Ops(Self);
+        pub const matmul = matmul_ops.matmul;
+        pub const einsum = matmul_ops.einsum;
 
         comptime {
             assertAliased(Self, common, &.{});
@@ -671,7 +672,8 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             assertAliased(Self, creation_ops, &.{ "randint", "randperm", "bandMask" });
             // Float comparison comes from the shared elementwise mixin (math_ops.compare is the exact integer one).
             assertAliased(Self, math_ops, &.{"compare"});
-            assertAliased(Self, widened_ops, &.{});
+            // `dot` and the packed/ternary dots keep their typed and f32 forms (math_ops.dot, the inline packRhs).
+            assertAliased(Self, matmul_ops, &.{ "dot", "addDot", "dotTernarySte", "dotPacked", "packRhs", "rmsNormMulDotPacked", "splitSwiGluDotPacked", "gegluQuantDotPacked" });
             assertAliased(Self, softmax_ops, &.{});
             // groupNorm, the fused rms-norm+rope kernel and the vector norms stay f32-only.
             assertAliased(Self, norm_ops, &.{ "groupNorm", "rmsNormMulRopeHalfPrepared", "l2Normalize", "norm", "normAll", "cosineSimilarity" });

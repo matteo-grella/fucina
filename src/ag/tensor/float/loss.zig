@@ -87,7 +87,7 @@ pub fn Ops(comptime Self: type) type {
             const wants_grad = self.requiresGrad() or weight_ptr.requiresGrad();
             const row_stats = try rowStatsAlloc(ctx, wants_grad, labels.len);
             defer if (row_stats) |stats| ctx.allocator.free(stats);
-            var logits = try ctx.matmulTransB(self.asRawTensor(), weight_ptr.asRawTensor());
+            var logits = try ctx.matmul(.f32, .trans_b, self.asRawTensor(), weight_ptr.asRawTensor());
             defer logits.deinit();
             var stats_options = options;
             stats_options.row_stats = row_stats;

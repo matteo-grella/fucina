@@ -287,9 +287,9 @@ pub const Apollo = struct {
         }
 
         var r_t = if (tall)
-            try ctx.matmulTransB(grad, &slot.proj.?) // (rows, rank)
+            try ctx.matmul(.f32, .trans_b, grad, &slot.proj.?) // (rows, rank)
         else
-            try ctx.matmulTransA(&slot.proj.?, grad); // (rank, cols)
+            try ctx.matmul(.f32, .trans_a, &slot.proj.?, grad); // (rank, cols)
         defer r_t.deinit();
         const r_data = r_t.dataConst();
 

@@ -303,7 +303,7 @@ fn conv2dImpl(
         var weight_2d = try ww.tensor().viewWithStrides(&.{ cout, cin }, &.{ cin, 1 });
         defer weight_2d.deinit();
 
-        var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &input_2d, &weight_2d);
+        var out_2d = try exec_matmul.matmul(ctx, .f32, .trans_b, &input_2d, &weight_2d);
         errdefer out_2d.deinit();
         if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, null, &out_2d, b, 1);
         if (fused_relu) reluInPlace(ctx, &out_2d);
@@ -391,7 +391,7 @@ fn conv2dImpl(
         });
         var weight_2d = try ww.tensor().viewWithStrides(&.{ cout, ksz }, &.{ ksz, 1 });
         defer weight_2d.deinit();
-        var out_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &col, &weight_2d);
+        var out_2d = try exec_matmul.matmul(ctx, .f32, .trans_b, &col, &weight_2d);
         col.deinit();
         errdefer out_2d.deinit();
         if (bias_slice) |b| try exec_elementwise.addAxisVectorInPlace(ctx, 2, null, &out_2d, b, 1);
@@ -594,7 +594,7 @@ fn winogradConv(ctx: *ExecContext, comptime kind: WinoKind, input: *const Tensor
     var m_n: usize = 0;
     errdefer for (m_t[0..m_n]) |*t| t.deinit();
     for (0..planes) |e| {
-        m_t[e] = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &v_t[e], &u_src[e]);
+        m_t[e] = try exec_matmul.matmul(ctx, .f32, .trans_b, &v_t[e], &u_src[e]);
         m_n = e + 1;
     }
     for (u_t[0..u_n]) |*t| t.deinit();
@@ -646,7 +646,7 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
             // the input VJP is one GEMM too: gx = gy · w.
             var w_2d = try ww.tensor().viewWithStrides(&.{ cout, cin }, &.{ cin, 1 });
             defer w_2d.deinit();
-            var gx_2d = try exec_matmul.matmul2DDispatch(ctx, .plain, &gy_2d, &w_2d);
+            var gx_2d = try exec_matmul.matmul(ctx, .f32, .plain, &gy_2d, &w_2d);
             errdefer gx_2d.deinit();
             var gx_3d = try gx_2d.viewWithStrides(&.{ in_h, in_w, cin }, &.{ in_w * cin, cin, 1 });
             errdefer gx_3d.deinit();
@@ -659,7 +659,7 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
         const ksz = kh * kw * cin;
         var w_2d = try ww.tensor().viewWithStrides(&.{ cout, ksz }, &.{ ksz, 1 });
         defer w_2d.deinit();
-        var gcol = try exec_matmul.matmul2DDispatch(ctx, .plain, &gy_2d, &w_2d);
+        var gcol = try exec_matmul.matmul(ctx, .f32, .plain, &gy_2d, &w_2d);
         defer gcol.deinit();
         var out = try ctx.empty(.f32, .{ in_h, in_w, cin });
         errdefer out.deinit();
@@ -705,7 +705,7 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
             // 1x1 s1 p0: gw = gyᵀ · in, one trans-A GEMM.
             var in_2d = try ii.tensor().viewWithStrides(&.{ h * w, cin }, &.{ cin, 1 });
             defer in_2d.deinit();
-            var gw_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_a, &gy_2d, &in_2d);
+            var gw_2d = try exec_matmul.matmul(ctx, .f32, .trans_a, &gy_2d, &in_2d);
             errdefer gw_2d.deinit();
             var gw_4d = try gw_2d.viewWithStrides(&.{ cout, 1, 1, cin }, &.{ cin, cin, cin, 1 });
             errdefer gw_4d.deinit();
@@ -722,7 +722,7 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
         defer col.deinit();
         ctx.enableNativeVectorPoolForWork(npos * ksz, parallel.vector_elementwise_len_threshold);
         kernels.im2colInto(ctx.pc(), &col, ii.tensor(), conv2dDimsFor(h, w, cin, oh, ow, cout, kh, kw, stride, pad, groups));
-        var gw_2d = try exec_matmul.matmul2DDispatch(ctx, .trans_a, &gy_2d, &col);
+        var gw_2d = try exec_matmul.matmul(ctx, .f32, .trans_a, &gy_2d, &col);
         errdefer gw_2d.deinit();
         var gw_4d = try gw_2d.viewWithStrides(&.{ cout, kh, kw, cin }, &.{ ksz, kw * cin, cin, 1 });
         errdefer gw_4d.deinit();
@@ -943,7 +943,7 @@ pub fn convTranspose1d(
         bias_slice = bb.?.tensor().dataConst();
     }
 
-    var col = try exec_matmul.matmul2DDispatch(ctx, .trans_b, input, weight2);
+    var col = try exec_matmul.matmul(ctx, .f32, .trans_b, input, weight2);
     defer col.deinit();
 
     var out = try col2im1d(ctx, &col, out_channels, taps, stride, pad, output_pad);

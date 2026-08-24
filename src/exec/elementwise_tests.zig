@@ -355,7 +355,7 @@ test "exec context runs typed float forward math kernels" {
     defer dot64.deinit();
     try std.testing.expectEqual(@as(f64, 300), dot64.dataConst()[0]);
 
-    var matmul64 = try ctx.matmul(.f64, &a, &b);
+    var matmul64 = try ctx.matmul(.f64, .plain, &a, &b);
     defer matmul64.deinit();
     try std.testing.expectEqualSlices(f64, &.{ 70, 100, 150, 220 }, matmul64.dataConst());
 
@@ -379,7 +379,7 @@ test "exec context runs typed float forward math kernels" {
     defer hleft.deinit();
     var hright = try ctx.fromSlice(.f16, .{ 3, 2 }, &.{ 7, 8, 9, 10, 11, 12 });
     defer hright.deinit();
-    var hproduct = try ctx.matmul(.f16, &hleft, &hright);
+    var hproduct = try ctx.matmul(.f16, .plain, &hleft, &hright);
     defer hproduct.deinit();
     try std.testing.expectEqualSlices(f16, &.{ 58, 64, 139, 154 }, hproduct.dataConst());
 
@@ -411,7 +411,7 @@ test "exec context runs typed float forward math kernels" {
         dtype_mod.f32ToBf16(12),
     });
     defer right.deinit();
-    var product = try ctx.matmul(.bf16, &left, &right);
+    var product = try ctx.matmul(.bf16, .plain, &left, &right);
     defer product.deinit();
     try std.testing.expectEqual(@as(f32, 58), dtype_mod.bf16ToF32(product.dataConst()[0]));
     try std.testing.expectEqual(@as(f32, 154), dtype_mod.bf16ToF32(product.dataConst()[3]));

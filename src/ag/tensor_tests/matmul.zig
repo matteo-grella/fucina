@@ -616,7 +616,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer b.deinit();
     var got_nn = try a.matmul(&ctx, b, .plain, .{ .m, .n });
     defer got_nn.deinit();
-    var want_nn = try ctx.matmul(.f32, a.asRawTensor(), b.asRawTensor());
+    var want_nn = try ctx.matmul(.f32, .plain, a.asRawTensor(), b.asRawTensor());
     defer want_nn.deinit();
     try std.testing.expectEqualSlices(f32, want_nn.dataConst(), got_nn.asRawTensor().dataConst());
 
@@ -625,7 +625,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer bt.deinit();
     var got_tb = try a.matmul(&ctx, bt, .trans_b, .{ .m, .n });
     defer got_tb.deinit();
-    var want_tb = try ctx.matmulTransB(a.asRawTensor(), bt.asRawTensor());
+    var want_tb = try ctx.matmul(.f32, .trans_b, a.asRawTensor(), bt.asRawTensor());
     defer want_tb.deinit();
     try std.testing.expectEqualSlices(f32, want_tb.dataConst(), got_tb.asRawTensor().dataConst());
 
@@ -636,7 +636,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer bb.deinit();
     var got_bmm = try ba.matmul(&ctx, bb, .plain, .{ .batch, .m, .n });
     defer got_bmm.deinit();
-    var want_bmm = try ctx.bmm(ba.asRawTensor(), bb.asRawTensor());
+    var want_bmm = try ctx.bmm(.f32, .plain, ba.asRawTensor(), bb.asRawTensor());
     defer want_bmm.deinit();
     try std.testing.expectEqualSlices(f32, want_bmm.dataConst(), got_bmm.asRawTensor().dataConst());
 
@@ -645,7 +645,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer bta.deinit();
     var got_ta = try bta.matmul(&ctx, bb, .trans_a, .{ .batch, .m, .n });
     defer got_ta.deinit();
-    var want_ta = try ctx.bmmTransA(bta.asRawTensor(), bb.asRawTensor());
+    var want_ta = try ctx.bmm(.f32, .trans_a, bta.asRawTensor(), bb.asRawTensor());
     defer want_ta.deinit();
     try std.testing.expectEqualSlices(f32, want_ta.dataConst(), got_ta.asRawTensor().dataConst());
 
@@ -654,7 +654,7 @@ test "public Tensor no-grad matmul wrappers match the ctx kernels" {
     defer btb.deinit();
     var got_tbb = try ba.matmul(&ctx, btb, .trans_b, .{ .batch, .m, .n });
     defer got_tbb.deinit();
-    var want_tbb = try ctx.bmmTransB(ba.asRawTensor(), btb.asRawTensor());
+    var want_tbb = try ctx.bmm(.f32, .trans_b, ba.asRawTensor(), btb.asRawTensor());
     defer want_tbb.deinit();
     try std.testing.expectEqualSlices(f32, want_tbb.dataConst(), got_tbb.asRawTensor().dataConst());
 }

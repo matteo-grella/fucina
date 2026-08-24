@@ -392,7 +392,7 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                         .label_smoothing = label_smoothing,
                     };
                     // Fresh logits per case: the fused VJP consumes them.
-                    var logits = try ctx.matmulTransB(&x, &w);
+                    var logits = try ctx.matmul(.f32, .trans_b, &x, &w);
                     defer logits.deinit();
                     var stats_options = options;
                     stats_options.row_stats = row_stats;
@@ -412,9 +412,9 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
                         .{ .scale = 0.75 };
                     var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, stats_options, up);
                     defer dlogits.deinit();
-                    var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
+                    var dx_ref = try ctx.matmul(.f32, .plain, &dlogits, &w);
                     defer dx_ref.deinit();
-                    var dw_ref = try ctx.matmulTransA(&dlogits, &x);
+                    var dw_ref = try ctx.matmul(.f32, .trans_a, &dlogits, &x);
                     defer dw_ref.deinit();
 
                     var grads = try ctx.linearCrossEntropyBackwardUpstream(&x, &w, &logits, labels, options, &gy, row_stats, true, true);
@@ -430,7 +430,7 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         // Shared logits buffer: the VJP falls back to a fresh gradient
         // tensor with identical values and leaves the logits intact.
         for (labels) |*label| label.* = random.uintLessThan(usize, class_count);
-        var logits = try ctx.matmulTransB(&x, &w);
+        var logits = try ctx.matmul(.f32, .trans_b, &x, &w);
         defer logits.deinit();
         var keeper = try logits.cloneView();
         defer keeper.deinit();
@@ -442,7 +442,7 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         defer gy.deinit();
         var dlogits = try ctx.crossEntropyBackward(2, &logits, 1, labels, .{ .row_stats = row_stats }, .{ .scale = 1 });
         defer dlogits.deinit();
-        var dx_ref = try ctx.matmul(.f32, &dlogits, &w);
+        var dx_ref = try ctx.matmul(.f32, .plain, &dlogits, &w);
         defer dx_ref.deinit();
         var grads = try ctx.linearCrossEntropyBackwardUpstream(&x, &w, &logits, labels, .{}, &gy, row_stats, true, true);
         defer grads.deinit();
@@ -450,12 +450,12 @@ test "exec fused linear cross-entropy backward matches the composed two-GEMM pat
         try std.testing.expectEqualSlices(f32, dx_ref.dataConst(), grads.dx.?.dataConst());
 
         // Partial needs: only the requested gradients are produced.
-        var logits2 = try ctx.matmulTransB(&x, &w);
+        var logits2 = try ctx.matmul(.f32, .trans_b, &x, &w);
         defer logits2.deinit();
         var only_x = try ctx.linearCrossEntropyBackwardUpstream(&x, &w, &logits2, labels, .{}, &gy, row_stats, true, false);
         defer only_x.deinit();
         try std.testing.expect(only_x.dx != null and only_x.dweight == null);
-        var logits3 = try ctx.matmulTransB(&x, &w);
+        var logits3 = try ctx.matmul(.f32, .trans_b, &x, &w);
         defer logits3.deinit();
         var only_w = try ctx.linearCrossEntropyBackwardUpstream(&x, &w, &logits3, labels, .{}, &gy, row_stats, false, true);
         defer only_w.deinit();

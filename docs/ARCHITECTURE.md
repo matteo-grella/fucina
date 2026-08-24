@@ -244,8 +244,7 @@ Autograd:
   norm, ...; f32 differentiable, and the ops whose exec entry takes a
   dtype are aliased on the 16-bit branch as constants), and the
   typed-branch mixins in `src/ag/tensor/typed/` (`creation.zig`, `math.zig`
-  for the typed reductions and casts, `int.zig`, and the f16/bf16
-  `widened.zig` `einsum`, whose exec lowering is still f32-only);
+  for the typed reductions, casts and the typed `dot`, `int.zig`);
   `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),

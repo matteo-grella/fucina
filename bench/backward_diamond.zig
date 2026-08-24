@@ -157,9 +157,9 @@ const BranchOutputs = struct {
 };
 
 fn runBranch(ctx: *ExecContext, x: *const Tensor, w: *const Tensor, gy: *const Tensor) !BranchOutputs {
-    var dx = try ctx.matmulTransB(gy, w);
+    var dx = try ctx.matmul(.f32, .trans_b, gy, w);
     errdefer dx.deinit();
-    var dw = try ctx.matmulTransA(x, gy);
+    var dw = try ctx.matmul(.f32, .trans_a, x, gy);
     errdefer dw.deinit();
     return .{ .dx = dx, .dw = dw };
 }

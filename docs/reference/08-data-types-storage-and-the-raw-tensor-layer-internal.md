@@ -212,7 +212,8 @@ Three rules fall out of the table:
   unary family, `leakyRelu`, `clamp`, the scalar ops, `where`/`maskedFill`,
   `gated`/`splitGated`, float `max`/`min`, `compare`/`compareScalar`,
   `softmax`/`logSoftmax`/`logsumexp`, the scans,
-  `prod`/`varAxis`/`argmax`/`maxAxis`/`minAxis`, `rmsNorm`/`layerNorm`). Their exec entries take the storage dtype and
+  `prod`/`varAxis`/`argmax`/`maxAxis`/`minAxis`, `rmsNorm`/`layerNorm`,
+  `bmm`, the non-plain `matmul` kinds and the `einsum` lowering). Their exec entries take the storage dtype and
   apply the policy themselves: `ctx.prepareAs(dtype, compute, x)` widens on
   entry, `ctx.storeAs(compute, dtype, value)` narrows once on store
   ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)); the reductions among them return the reduction output

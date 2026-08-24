@@ -51,6 +51,12 @@ pub fn Ops(comptime Self: type) type {
         const packedRhsType = ag_tensor.packedRhsType;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
+        const dtype = Self.dtype;
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+        const finishOrConstant = plumbing.finishOrConstant;
+        const matmul_dtype = dtype_mod.outputDType(.matmul, dtype);
         const finishNoGrad = plumbing.finishNoGrad;
         const adoptIntoScope = plumbing.adoptIntoScope;
         const finishWithBackward = plumbing.finishWithBackward;
@@ -71,28 +77,23 @@ pub fn Ops(comptime Self: type) type {
         /// grads; unlike `dot` there is no materialize fallback — the
         /// operands' storage order IS the kernel layout. (Distinct from the
         /// strictly-2-D-plain `ExecContext.matmul` at the exec layer.)
-        pub fn matmul(self: *const Self, ctx: *ExecContext, other: anytype, comptime kind: exec_mod.MatmulKind, comptime out_tags: anytype) !Tensor(out_tags) {
+        pub fn matmul(self: *const Self, ctx: *ExecContext, other: anytype, comptime kind: exec_mod.MatmulKind, comptime out_tags: anytype) !Tensor(.{ .dtype = matmul_dtype, .tags = out_tags }) {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             const other_rank = comptime TensorObject(@TypeOf(other)).axis_tags.len;
+            comptime {
+                if (TensorObject(@TypeOf(other)).dtype != dtype) @compileError("matmul requires matching dtypes; cast explicitly (dot takes a 16-bit or quantized RHS)");
+            }
             if (comptime (tag_rank == 2 and other_rank == 2)) {
                 comptime if (kind == .trans_a) {
                     @compileError("matmul: rank-2 .trans_a has no backward record — use `dot` (its tag algebra reaches the 2-D trans-A kernel)");
                 };
-                var value = try switch (comptime kind) {
-                    .plain => ctx.matmul(.f32, self.asRawTensor(), other_ptr.asRawTensor()),
-                    .trans_b => ctx.matmulTransB(self.asRawTensor(), other_ptr.asRawTensor()),
-                    .trans_a => unreachable, // rejected above
-                };
+                var value = try ctx.matmul(dtype, kind, self.asRawTensor(), other_ptr.asRawTensor());
                 errdefer value.deinit();
-                return finishOp(out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), Matmul2DBackward(kind == .trans_b), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                return finishOrConstant(differentiable, matmul_dtype, out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), Matmul2DBackward(kind == .trans_b), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
-            var value = try switch (comptime kind) {
-                .plain => ctx.bmm(self.asRawTensor(), other_ptr.asRawTensor()),
-                .trans_a => ctx.bmmTransA(self.asRawTensor(), other_ptr.asRawTensor()),
-                .trans_b => ctx.bmmTransB(self.asRawTensor(), other_ptr.asRawTensor()),
-            };
+            var value = try ctx.bmm(dtype, kind, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishOp(out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), BmmBackward(kind), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+            return finishOrConstant(differentiable, matmul_dtype, out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), BmmBackward(kind), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
         }
 
         // --- Axis bias-add + scaled residual-add (no-grad) -------------------
@@ -133,7 +134,7 @@ pub fn Ops(comptime Self: type) type {
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
-            var value = try tag_ops.taggedDot(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+            var value = try tag_ops.taggedDot(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), DotBackward(tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
         }
@@ -168,7 +169,7 @@ pub fn Ops(comptime Self: type) type {
             }
             const a_ptr = tensorObjectPtrFrom(@TypeOf(a), &a);
             const b_ptr = tensorObjectPtrFrom(@TypeOf(b), &b);
-            var value = try ctx.matmul2DAdd(a_ptr.asRawTensor(), b_ptr.asRawTensor(), self.asRawTensor());
+            var value = try ctx.matmulAdd(a_ptr.asRawTensor(), b_ptr.asRawTensor(), self.asRawTensor());
             errdefer value.deinit();
             const wants_grad = self.requiresGrad() or a_ptr.requiresGrad() or b_ptr.requiresGrad();
             return finishOp(tags, ctx, value, wants_grad, AddDotBackward(tags, left_tags, right_tags, contract_tag), .{ ctx.allocator, self.grad_state, a_ptr.grad_state, b_ptr.grad_state, a_ptr.asRawTensor(), b_ptr.asRawTensor() });
@@ -188,7 +189,7 @@ pub fn Ops(comptime Self: type) type {
         /// backward); a constant 16-bit RHS routes gradient to `self` only,
         /// while a grad-requiring 16-bit RHS variable also receives its own
         /// f32 gradient. Quantized RHS stays dot-only.
-        pub fn einsum(self: *const Self, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(normalizeTags(out_tags)) {
+        pub fn einsum(self: *const Self, ctx: *ExecContext, other: anytype, comptime out_tags: anytype) !Tensor(.{ .dtype = matmul_dtype, .tags = normalizeTags(out_tags) }) {
             const Other = TensorObject(@TypeOf(other));
             comptime {
                 if (dtype_mod.isBlockQuantized(Other.dtype))
@@ -199,6 +200,14 @@ pub fn Ops(comptime Self: type) type {
             const other_tags = Other.axis_tags;
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             const result_tags = comptime normalizeTags(out_tags);
+            if (comptime !differentiable) {
+                // The 16-bit branch: same-dtype operands through the widened
+                // f32 lowering, a constant of the matmul output dtype.
+                comptime if (Other.dtype != dtype) @compileError("einsum on a 16-bit tensor requires a same-dtype RHS; cast explicitly");
+                var value = try tag_ops.taggedEinsum(dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
+                errdefer value.deinit();
+                return finishOrConstant(false, matmul_dtype, result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), void, .{});
+            }
             if (comptime (Other.dtype == .f16 or Other.dtype == .bf16)) {
                 // Mixed-precision RHS: widen once per call and run the f32
                 // lowering. A constant RHS routes gradient to `self` only; a
@@ -206,11 +215,11 @@ pub fn Ops(comptime Self: type) type {
                 // gradient (gradients are always f32).
                 var right_f32 = try ctx.cast(Other.dtype, .f32, other_ptr.asRawTensor());
                 defer right_f32.deinit();
-                var value = try tag_ops.taggedEinsum(tags, self.asRawTensor(), ctx, other_tags, &right_f32, result_tags);
+                var value = try tag_ops.taggedEinsum(.f32, tags, self.asRawTensor(), ctx, other_tags, &right_f32, result_tags);
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsEinsumBackward(Other.dtype, tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
             }
-            var value = try tag_ops.taggedEinsum(tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
+            var value = try tag_ops.taggedEinsum(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
             errdefer value.deinit();
             return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), EinsumBackward(tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
         }

@@ -485,7 +485,7 @@ pub const Model = struct {
         defer final_mix.deinit();
         var final_normed = try ctx.rmsNorm(.f32, 2, &final_mix, 1, cfg.rms_norm_eps, .{ .weight = &self.final_norm });
         defer final_normed.deinit();
-        return ctx.matmulTransB(&final_normed, &self.lm_head);
+        return ctx.matmul(.f32, .trans_b, &final_normed, &self.lm_head);
     }
 
     /// The cross-layer attention-residual mixture: per token, softmax over
@@ -545,11 +545,11 @@ pub const Model = struct {
         var v = try self.convProj(ctx, h, &w.v_proj, &w.v_conv);
         defer v.deinit();
 
-        var f_low = try ctx.matmulTransB(h, &w.f_a);
+        var f_low = try ctx.matmul(.f32, .trans_b, h, &w.f_a);
         defer f_low.deinit();
-        var g_raw = try ctx.matmulTransB(&f_low, &w.f_b);
+        var g_raw = try ctx.matmul(.f32, .trans_b, &f_low, &w.f_b);
         defer g_raw.deinit();
-        var beta_raw = try ctx.matmulTransB(h, &w.b_proj);
+        var beta_raw = try ctx.matmul(.f32, .trans_b, h, &w.b_proj);
         defer beta_raw.deinit();
 
         var q3 = try q.reshape(&.{ seq, heads, head_dim });
@@ -567,7 +567,7 @@ pub const Model = struct {
         // o_norm: per-head RMSNorm(o)·weight × sigmoid(full-rank gate).
         var o_normed = try ctx.rmsNorm(.f32, 3, &result.o, 2, cfg.rms_norm_eps, .{ .weight = &w.o_norm });
         defer o_normed.deinit();
-        var gate = try ctx.matmulTransB(h, &w.g_proj);
+        var gate = try ctx.matmul(.f32, .trans_b, h, &w.g_proj);
         defer gate.deinit();
         var gate3 = try gate.reshape(&.{ seq, heads, head_dim });
         defer gate3.deinit();
@@ -577,12 +577,12 @@ pub const Model = struct {
         defer gated.deinit();
         var flat = try gated.reshape(&.{ seq, heads * head_dim });
         defer flat.deinit();
-        return ctx.matmulTransB(&flat, &w.o_proj);
+        return ctx.matmul(.f32, .trans_b, &flat, &w.o_proj);
     }
 
     fn convProj(self: *const Model, ctx: *ExecContext, h: *const Tensor, proj: *const Tensor, conv: *const Tensor) !Tensor {
         _ = self;
-        var projected = try ctx.matmulTransB(h, proj);
+        var projected = try ctx.matmul(.f32, .trans_b, h, proj);
         defer projected.deinit();
         var convolved = try ctx.causalDepthwiseConv1d(2, &projected, conv, 0, 1, 1, null);
         defer convolved.deinit();
@@ -605,14 +605,14 @@ pub const Model = struct {
         const seq = h.dataConst().len / cfg.hidden_size;
         const allocator = self.allocator;
 
-        var q_low = try ctx.matmulTransB(h, &w.q_a);
+        var q_low = try ctx.matmul(.f32, .trans_b, h, &w.q_a);
         defer q_low.deinit();
         var q_low_n = try ctx.rmsNorm(.f32, 2, &q_low, 1, cfg.rms_norm_eps, .{ .weight = &w.q_a_norm });
         defer q_low_n.deinit();
-        var q_full = try ctx.matmulTransB(&q_low_n, &w.q_b);
+        var q_full = try ctx.matmul(.f32, .trans_b, &q_low_n, &w.q_b);
         defer q_full.deinit();
 
-        var ckv = try ctx.matmulTransB(h, &w.kv_a);
+        var ckv = try ctx.matmul(.f32, .trans_b, h, &w.kv_a);
         defer ckv.deinit();
         const ckv_data = ckv.dataConst();
 
@@ -628,7 +628,7 @@ pub const Model = struct {
         }
         var kv_low_n = try ctx.rmsNorm(.f32, 2, &kv_low, 1, cfg.rms_norm_eps, .{ .weight = &w.kv_a_norm });
         defer kv_low_n.deinit();
-        var kv_full = try ctx.matmulTransB(&kv_low_n, &w.kv_b);
+        var kv_full = try ctx.matmul(.f32, .trans_b, &kv_low_n, &w.kv_b);
         defer kv_full.deinit();
 
         // Attention per head, eager causal softmax, scale q_dim^-1/2.
@@ -671,24 +671,24 @@ pub const Model = struct {
             }
         }
 
-        var gate = try ctx.matmulTransB(h, &w.g_proj);
+        var gate = try ctx.matmul(.f32, .trans_b, h, &w.g_proj);
         defer gate.deinit();
         var gate_sig = try ctx.unary(.f32, .sigmoid, &gate);
         defer gate_sig.deinit();
         var gated = try ctx.elementwise(.f32, .mul, &attn, &gate_sig);
         defer gated.deinit();
-        return ctx.matmulTransB(&gated, &w.o_proj);
+        return ctx.matmul(.f32, .trans_b, &gated, &w.o_proj);
     }
 
     fn denseMlp(self: *const Model, ctx: *ExecContext, h: *const Tensor, w: *const DenseMlp) !Tensor {
         _ = self;
-        var gate = try ctx.matmulTransB(h, &w.gate);
+        var gate = try ctx.matmul(.f32, .trans_b, h, &w.gate);
         defer gate.deinit();
-        var up = try ctx.matmulTransB(h, &w.up);
+        var up = try ctx.matmul(.f32, .trans_b, h, &w.up);
         defer up.deinit();
         var act = try ctx.gated(.f32, 2, .situ, &up, &gate);
         defer act.deinit();
-        return ctx.matmulTransB(&act, &w.down);
+        return ctx.matmul(.f32, .trans_b, &act, &w.down);
     }
 
     /// DeepSeek-V3-style sigmoid router (bias-corrected choice, uncorrected
@@ -701,11 +701,11 @@ pub const Model = struct {
         const seq = h.dataConst().len / cfg.hidden_size;
         const allocator = self.allocator;
 
-        var logits = try ctx.matmulTransB(h, &w.gate_weight);
+        var logits = try ctx.matmul(.f32, .trans_b, h, &w.gate_weight);
         defer logits.deinit();
         const logits_data = logits.dataConst();
 
-        var lat = try ctx.matmulTransB(h, &w.down_proj);
+        var lat = try ctx.matmul(.f32, .trans_b, h, &w.down_proj);
         defer lat.deinit();
 
         // Every expert over the full latent sequence (8 tiny matmuls beat
@@ -719,13 +719,13 @@ pub const Model = struct {
             allocator.free(expert_outs);
         }
         for (expert_outs, w.experts) |*out, *expert| {
-            var gate = try ctx.matmulTransB(&lat, &expert.w1);
+            var gate = try ctx.matmul(.f32, .trans_b, &lat, &expert.w1);
             defer gate.deinit();
-            var up = try ctx.matmulTransB(&lat, &expert.w3);
+            var up = try ctx.matmul(.f32, .trans_b, &lat, &expert.w3);
             defer up.deinit();
             var act = try ctx.gated(.f32, 2, .situ, &up, &gate);
             defer act.deinit();
-            out.* = try ctx.matmulTransB(&act, &expert.w2);
+            out.* = try ctx.matmul(.f32, .trans_b, &act, &expert.w2);
             built += 1;
         }
 
@@ -765,7 +765,7 @@ pub const Model = struct {
 
         var routed_n = try ctx.rmsNorm(.f32, 2, &routed, 1, cfg.rms_norm_eps, .{ .weight = &w.latent_norm });
         defer routed_n.deinit();
-        var up_out = try ctx.matmulTransB(&routed_n, &w.up_proj);
+        var up_out = try ctx.matmul(.f32, .trans_b, &routed_n, &w.up_proj);
         defer up_out.deinit();
 
         var shared_out = try self.denseMlp(ctx, h, &w.shared);

@@ -5,7 +5,7 @@
 //! the f32 branch. A mixin over the tensor struct; aliased back onto it in
 //! ../../tensor.zig, where each branch picks the entries its dtype has a
 //! kernel for (integer `div` is explicit `divTrunc`/`divFloor` in int.zig;
-//! float `maximum`/`minimum` and `compare` widen through widened.zig).
+//! float `maximum`/`minimum` and `compare` come from ../elementwise.zig).
 
 const tensor_mod = @import("../../../tensor.zig");
 const dtype_mod = @import("../../../dtype.zig");

@@ -472,14 +472,10 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const dot = exec_matmul.dot;
     pub const matmul = exec_matmul.matmul;
-    pub const matmul2DAdd = exec_matmul.matmul2DAdd;
-    pub const packDenseMatmulRhs = exec_matmul.packDenseMatmulRhs;
-    pub const matmulTransA = exec_matmul.matmulTransA;
-    pub const matmulTransB = exec_matmul.matmulTransB;
-    pub const matmulTransB2DWithHalfRhs = exec_matmul.matmulTransB2DWithHalfRhs;
+    pub const matmulAdd = exec_matmul.matmulAdd;
+    pub const matmulHalfRhs = exec_matmul.matmulHalfRhs;
     pub const bmm = exec_matmul.bmm;
-    pub const bmmTransA = exec_matmul.bmmTransA;
-    pub const bmmTransB = exec_matmul.bmmTransB;
+    pub const packDenseMatmulRhs = exec_matmul.packDenseMatmulRhs;
 
     // ----------------------------------------------------------------------
     // quantized matmul: dense, packed and fused arms (exec/quant_matmul.zig)

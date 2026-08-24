@@ -538,9 +538,9 @@ pub fn linearCrossEntropyBackwardUpstream(
 
     var dx: ?Tensor = null;
     errdefer if (dx) |*value| value.deinit();
-    if (need_x) dx = try exec_matmul.matmul2DDispatch(ctx, .plain, dl, weight);
+    if (need_x) dx = try exec_matmul.matmul(ctx, .f32, .plain, dl, weight);
     var dweight: ?Tensor = null;
-    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(ctx, .trans_a, dl, x);
+    if (need_weight) dweight = try exec_matmul.matmul(ctx, .f32, .trans_a, dl, x);
     return .{ .dx = dx, .dweight = dweight };
 }
 
@@ -659,7 +659,7 @@ pub fn linearDistillLossStats(
     for (sel_rows, 0..) |row, j| {
         @memcpy(x_sel_data[j * in_dim ..][0..in_dim], x_data[row * in_dim ..][0..in_dim]);
     }
-    var logits = try exec_matmul.matmul2DDispatch(ctx, .trans_b, &x_sel, weight);
+    var logits = try exec_matmul.matmul(ctx, .f32, .trans_b, &x_sel, weight);
     errdefer logits.deinit();
 
     const row_stats = try ctx.allocator.alloc(f32, 2 * sel_rows.len);
@@ -776,7 +776,7 @@ pub fn linearDistillBackwardUpstream(
     var dx: ?Tensor = null;
     errdefer if (dx) |*value| value.deinit();
     if (need_x) {
-        var dx_sel = try exec_matmul.matmul2DDispatch(ctx, .plain, dl, weight);
+        var dx_sel = try exec_matmul.matmul(ctx, .f32, .plain, dl, weight);
         defer dx_sel.deinit();
         var full = try ctx.empty(.f32, .{ row_count, in_dim });
         errdefer full.deinit();
@@ -789,7 +789,7 @@ pub fn linearDistillBackwardUpstream(
         dx = full;
     }
     var dweight: ?Tensor = null;
-    if (need_weight) dweight = try exec_matmul.matmul2DDispatch(ctx, .trans_a, dl, x_sel);
+    if (need_weight) dweight = try exec_matmul.matmul(ctx, .f32, .trans_a, dl, x_sel);
     return .{ .dx = dx, .dweight = dweight };
 }
 
