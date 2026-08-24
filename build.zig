@@ -154,6 +154,13 @@ pub fn build(b: *std.Build) void {
     });
     nanochat_module.addImport("fucina", module);
     nanochat_module.addImport("fucina_models", models_module);
+    const cartridge_common_module = b.createModule(.{
+        .root_source_file = b.path("apps/cartridge/common.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cartridge_common_module.addImport("fucina", module);
+    cartridge_common_module.addImport("fucina_models", models_module);
 
     const tool_ctx: ToolCtx = .{ .target = target, .optimize = optimize, .module = module, .models_module = models_module, .blas_kind = blas_kind, .gpu_kind = gpu_kind };
 
@@ -199,8 +206,10 @@ pub fn build(b: *std.Build) void {
     _ = addTarget(b, tool_ctx, .{ .step = "locate-anything", .desc = "LocateAnything-3B open-vocabulary detection from GGUF: detect/info, parity oracles, bench", .exe = "fucina-locate-anything", .root = "apps/locate_anything/main.zig", .models = true });
     _ = addTarget(b, tool_ctx, .{ .step = "finetune", .desc = "LoRA fine-tune Qwen3 GGUF on a tiny built-in SFT dataset", .exe = "fucina-finetune", .root = "apps/finetune/main.zig", .models = true });
     _ = addTarget(b, tool_ctx, .{ .step = "shine-train", .desc = "Train the SHINE hypernetwork (LoRA or cartridge readout) over a frozen qwen3 base", .exe = "fucina-shine-train", .root = "examples/shine_train/main.zig", .models = true });
-    _ = addTarget(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "apps/cartridge/main.zig", .models = true });
-    _ = addTarget(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "apps/cartridge_fleet/main.zig", .models = true });
+    const cartridge_app = addTarget(b, tool_ctx, .{ .step = "cartridge", .desc = "Train/serve a corpus as a trained KV prefix on a Qwen3 GGUF (arXiv 2506.06266)", .exe = "fucina-cartridge", .root = "apps/cartridge/main.zig", .models = true });
+    cartridge_app.exe.root_module.addImport("cartridge_common", cartridge_common_module);
+    const cartridge_fleet_app = addTarget(b, tool_ctx, .{ .step = "cartridge-fleet", .desc = "Per-document cartridge fleets: mixed-visibility training, RAM/disk budget manager, cosine cartridge-RAG (arXiv 2606.04557)", .exe = "fucina-cartridge-fleet", .root = "apps/cartridge_fleet/main.zig", .models = true });
+    cartridge_fleet_app.exe.root_module.addImport("cartridge_common", cartridge_common_module);
     _ = addTarget(b, tool_ctx, .{ .step = "engram", .desc = "Graft conditional n-gram memory onto a frozen Qwen3 GGUF and train it (arXiv 2601.07372)", .exe = "fucina-engram", .root = "examples/engram/main.zig", .models = true });
     _ = addTarget(b, tool_ctx, .{ .step = "es-finetune", .desc = "Evolution-strategies fine-tune Qwen3 GGUF (gradient-free; --mode lora|full, --reward rule|nll|acc)", .exe = "fucina-es-finetune", .root = "apps/es_finetune/main.zig", .models = true });
     _ = addTarget(b, tool_ctx, .{ .step = "es-spirals", .desc = "Train the two-spirals MLP FROM SCRATCH with evolution strategies (gradient-free; self-verifying)", .exe = "fucina-es-spirals", .root = "examples/es_spirals/main.zig", .models = false });

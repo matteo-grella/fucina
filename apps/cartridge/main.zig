@@ -28,6 +28,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const models = @import("fucina_models");
+const common = @import("cartridge_common");
 
 const optim = fucina.optim;
 const cartridge = models.text.cartridge;
@@ -39,54 +40,10 @@ const default_save = "/tmp/fucina-cartridge.safetensors";
 /// are the only parameters.
 const Trainer = models.qwen3.train.Trainer(.{ .q = false, .v = false });
 
-// ChatML blocks (Qwen3). The assistant opener carries the empty think block
-// the non-thinking chat template emits, so generations answer directly.
-/// Chat-template strings the serving/self-study prompt builders splice
-/// (runtime values so one engine serves several architectures).
-const Tpl = struct {
-    sys_open: []const u8,
-    user_open: []const u8,
-    asst_open: []const u8,
-    block_close: []const u8,
-    stop_marker: []const u8,
-};
-
-const qwen3_tpl = Tpl{
-    .sys_open = "<|im_start|>system\n",
-    .user_open = "<|im_start|>user\n",
-    .asst_open = "<|im_start|>assistant\n<think>\n\n</think>\n\n",
-    .block_close = "<|im_end|>\n",
-    .stop_marker = "<|im_end|>",
-};
-
-// Gemma 4's `<|turn>` format (src/models/chat.zig Template.gemma4, thinking
-// primed off).
-const gemma4_tpl = Tpl{
-    .sys_open = "<bos><|turn>system\n",
-    .user_open = "<|turn>user\n",
-    .asst_open = "<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
-    .block_close = "<turn|>\n",
-    .stop_marker = "<turn|>",
-};
-
-/// Duck-typed per-model KV-cache construction: uniform-geometry models
-/// (qwen3) size from config, per-layer-geometry models (gemma4) from geom.
-fn makeCache(ctx: *fucina.ExecContext, model: anytype, capacity: usize) !models.text.kv_cache.KvCache {
-    const M = @TypeOf(model.*);
-    if (comptime @hasField(M, "geom")) {
-        return models.text.kv_cache.KvCache.initPerLayer(ctx, model.geom.kv_heads, model.geom.head_dim, capacity);
-    }
-    const cfg = model.config;
-    return models.text.kv_cache.KvCache.init(ctx, cfg.num_layers, cfg.num_key_value_heads, cfg.head_dim, capacity);
-}
-
 const sys_open = "<|im_start|>system\n";
 const user_open = "<|im_start|>user\n";
 const asst_open = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 const block_close = "<|im_end|>\n";
-
-/// Reference synthesizers/self_study.py SYSTEM_PROMPT_TEMPLATE.
-const system_prompt_template = "\nYou are in a conversation about the following user information.\n\n<info>\n{s}\n</info>";
 
 /// The five seed-prompt types of paper Appendix C.1 (texts from the
 /// reference's data/resources.py registry) plus two additions — `mechanism`
@@ -322,7 +279,7 @@ fn appendCorpusFile(
     const block = try std.fmt.allocPrint(allocator, "\n\n# Document: {s}\n\n{s}", .{ path, content });
     defer allocator.free(block);
     try text.appendSlice(allocator, block);
-    const block_ids = try encodeUsize(allocator, tokenizer, block);
+    const block_ids = try common.encodeUsize(allocator, tokenizer, block);
     defer allocator.free(block_ids);
     try ids.appendSlice(allocator, block_ids);
 }
@@ -344,47 +301,47 @@ pub fn main(init: std.process.Init) !void {
     var arg_i: usize = 1;
     while (arg_i < args.len) : (arg_i += 1) {
         const arg = args[arg_i];
-        if (try parseFlagStr(args, &arg_i, "--model")) |v| {
+        if (try common.parseFlagStr(args, &arg_i, "--model")) |v| {
             opts.model_path = v;
-        } else if (try parseFlagStr(args, &arg_i, "--corpus")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--corpus")) |v| {
             try corpus_paths.append(allocator, v);
-        } else if (try parseFlagStr(args, &arg_i, "--save")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--save")) |v| {
             opts.save_path = v;
-        } else if (try parseFlagStr(args, &arg_i, "--load")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--load")) |v| {
             opts.load_path = v;
-        } else if (try parseFlagStr(args, &arg_i, "--ask")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--ask")) |v| {
             opts.ask = v;
-        } else if (try parseFlagInt(args, &arg_i, "--p")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--p")) |v| {
             opts.p = v;
-        } else if (try parseFlagInt(args, &arg_i, "--frozen")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--frozen")) |v| {
             opts.frozen_prefix = v;
-        } else if (try parseFlagInt(args, &arg_i, "--suffix-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--suffix-max")) |v| {
             opts.suffix_max = v;
-        } else if (try parseFlagInt(args, &arg_i, "--steps")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--steps")) |v| {
             opts.steps = v;
-        } else if (try parseFlagInt(args, &arg_i, "--accum")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--accum")) |v| {
             opts.accum = v;
-        } else if (try parseFlagInt(args, &arg_i, "--chunk-min")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--chunk-min")) |v| {
             opts.chunk_min = v;
-        } else if (try parseFlagInt(args, &arg_i, "--chunk-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--chunk-max")) |v| {
             opts.chunk_max = v;
-        } else if (try parseFlagInt(args, &arg_i, "--top-k")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--top-k")) |v| {
             opts.top_k = v;
-        } else if (try parseFlagInt(args, &arg_i, "--max-q")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--max-q")) |v| {
             opts.max_q = v;
-        } else if (try parseFlagInt(args, &arg_i, "--max-a")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--max-a")) |v| {
             opts.max_a = v;
-        } else if (try parseFlagInt(args, &arg_i, "--seed")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--seed")) |v| {
             opts.seed = v;
-        } else if (try parseFlagF32(args, &arg_i, "--lr")) |v| {
+        } else if (try common.parseFlagF32(args, &arg_i, "--lr")) |v| {
             opts.lr = v;
-        } else if (try parseFlagInt(args, &arg_i, "--icl-max")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--icl-max")) |v| {
             opts.icl_max = v;
-        } else if (try parseFlagInt(args, &arg_i, "--gen-batch")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--gen-batch")) |v| {
             opts.gen_batch = v;
-        } else if (try parseFlagInt(args, &arg_i, "--save-every")) |v| {
+        } else if (try common.parseFlagInt(args, &arg_i, "--save-every")) |v| {
             opts.save_every = v;
-        } else if (try parseFlagStr(args, &arg_i, "--resume")) |v| {
+        } else if (try common.parseFlagStr(args, &arg_i, "--resume")) |v| {
             opts.resume_path = v;
         } else if (std.mem.eql(u8, arg, "--checkpoint")) {
             opts.checkpoint = true;
@@ -476,12 +433,12 @@ pub fn main(init: std.process.Init) !void {
         var cart = try cartridge.Cartridge.initFromStateDict(&ctx, allocator, mapped.bytes);
         defer cart.deinit();
         try stdout.print("cartridge loaded from {s}: p = {d} ({d} layers)\n", .{ path, cart.p, cart.layers.len });
-        return runServe(&ctx, io, stdout, allocator, &model, &tokenizer, qwen3_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
+        return runServe(&ctx, io, stdout, allocator, &model, &tokenizer, common.qwen3_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
     }
 
     const c = if (corpus) |*c| c else return error.MissingCorpusPath;
     if (c.ids.len < opts.chunk_min + 2 or c.ids.len < opts.p + 2) return error.CorpusTooShort;
-    return runSelfStudy(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, qwen3_tpl, true, c, opts);
+    return runSelfStudy(&ctx, io, stdout, allocator, &model, &tokenizer, &trainer, common.qwen3_tpl, true, c, opts);
 }
 
 /// Serve mode: greedy answers to `ask` behind the cartridge, bare, and (when
@@ -494,7 +451,7 @@ fn runServe(
     allocator: std.mem.Allocator,
     model: anytype,
     tokenizer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     cart: *const cartridge.Cartridge,
     ask: []const u8,
     corpus: ?*const Corpus,
@@ -518,13 +475,13 @@ fn runServe(
                 try stdout.print("--spec-serve needs a draft reference: train with --draft-ref or pass --corpus\n", .{});
                 return error.MissingDraftReference;
             });
-        const t_build = nowNs(io);
+        const t_build = common.nowNs(io);
         serve_index = try models.text.speculative.cascade.SpeculationIndex.init(allocator, cfg.vocab_size);
         try serve_index.?.addReference(tokens);
         try stdout.print("draft automaton over {d} {s} tokens built in {d:.0} ms\n", .{
             tokens.len,
             if (cart.draft_reference != null) "embedded corpus" else "--corpus",
-            seconds(nowNs(io) - t_build) * 1000,
+            common.seconds(common.nowNs(io) - t_build) * 1000,
         });
     }
 
@@ -532,14 +489,14 @@ fn runServe(
     // exact layout the cartridge was trained at. With --spec-serve the
     // corpus drafts the answer (single stream: no batch to trade away).
     {
-        var cache = try makeCache(ctx, model, cart.p + prompt_len_guess + opts.max_a + 16);
+        var cache = try common.makeCache(ctx, model, cart.p + prompt_len_guess + opts.max_a + 16);
         defer cache.deinit();
         try cart.writeToCache(ctx, &cache);
-        const t0 = nowNs(io);
+        const t0 = common.nowNs(io);
         var answer: []u8 = undefined;
         var produced: usize = 0;
         if (serve_index) |*index| {
-            const prompt_ids = try encodeUsize(allocator, tokenizer, prompt);
+            const prompt_ids = try common.encodeUsize(allocator, tokenizer, prompt);
             defer allocator.free(prompt_ids);
             const outs = try generateIdsSpecBatch(ctx, allocator, model, (&cache)[0..1], &.{prompt_ids}, opts.max_a, stop_id, &.{index});
             defer {
@@ -547,17 +504,17 @@ fn runServe(
                 allocator.free(outs);
             }
             produced = outs[0].len;
-            answer = try cleanGenerated(allocator, tokenizer, outs[0]);
+            answer = try common.cleanGenerated(allocator, tokenizer, outs[0]);
         } else {
-            const prompt_ids = try encodeUsize(allocator, tokenizer, prompt);
+            const prompt_ids = try common.encodeUsize(allocator, tokenizer, prompt);
             defer allocator.free(prompt_ids);
             const ids = try generateIds(ctx, allocator, model, &cache, prompt_ids, opts.max_a, stop_id, .{});
             defer allocator.free(ids);
             produced = ids.len;
-            answer = try cleanGenerated(allocator, tokenizer, ids);
+            answer = try common.cleanGenerated(allocator, tokenizer, ids);
         }
         defer allocator.free(answer);
-        const secs = seconds(nowNs(io) - t0);
+        const secs = common.seconds(common.nowNs(io) - t0);
         // No-op unless FUCINA_GPU_TRACE=1: per-dtype GPU dispatch counters
         // for the answer just produced.
         fucina.internal.gpu.traceDump();
@@ -573,7 +530,7 @@ fn runServe(
 
     // Bare model: no context at all.
     {
-        var cache = try makeCache(ctx, model, prompt_len_guess + opts.max_a);
+        var cache = try common.makeCache(ctx, model, prompt_len_guess + opts.max_a);
         defer cache.deinit();
         const answer = try generateText(ctx, allocator, model, tokenizer, &cache, prompt, opts.max_a, stop_id, .{});
         defer allocator.free(answer);
@@ -586,19 +543,19 @@ fn runServe(
     if (corpus) |c| {
         const truncated = c.ids.len > opts.icl_max;
         const icl_text = if (truncated) blk: {
-            break :blk try decodeUsize(allocator, tokenizer, c.ids[0..opts.icl_max]);
+            break :blk try common.decodeUsize(allocator, tokenizer, c.ids[0..opts.icl_max]);
         } else try allocator.dupe(u8, c.text);
         defer allocator.free(icl_text);
 
-        const icl_prompt = try std.fmt.allocPrint(allocator, "{s}" ++ system_prompt_template ++ "{s}{s}", .{ tpl.sys_open, icl_text, tpl.block_close, prompt });
+        const icl_prompt = try std.fmt.allocPrint(allocator, "{s}" ++ common.system_prompt_template ++ "{s}{s}", .{ tpl.sys_open, icl_text, tpl.block_close, prompt });
         defer allocator.free(icl_prompt);
-        const icl_ids = try encodeUsize(allocator, tokenizer, icl_prompt);
+        const icl_ids = try common.encodeUsize(allocator, tokenizer, icl_prompt);
         defer allocator.free(icl_ids);
-        var cache = try makeCache(ctx, model, icl_ids.len + opts.max_a + 16);
+        var cache = try common.makeCache(ctx, model, icl_ids.len + opts.max_a + 16);
         defer cache.deinit();
         const ids = try generateIds(ctx, allocator, model, &cache, icl_ids, opts.max_a, stop_id, .{});
         defer allocator.free(ids);
-        const text_out = try decodeUsize(allocator, tokenizer, ids);
+        const text_out = try common.decodeUsize(allocator, tokenizer, ids);
         defer allocator.free(text_out);
         if (truncated) {
             try stdout.print("\n[ICL, {d} KV rows — {d}x the cartridge; corpus TRUNCATED from {d} tokens]\n{s}\n", .{
@@ -617,33 +574,6 @@ fn runServe(
 // Self-study training (default mode)
 // ---------------------------------------------------------------------------
 
-/// One synthesized conversation, ready for a distillation micro-step:
-/// `student_ids` is the packed seed-free conversation (user question +
-/// assistant answer) and `builder` holds the teacher's sparse top-k targets
-/// for the answer tokens.
-const Convo = struct {
-    /// Seed-free packed element: user(question) + assistant(answer).
-    student_ids: []usize,
-    /// The same behind the real chunk: system(chunk) + student_ids.
-    teacher_ids: []usize,
-    /// Student index of the first supervised (answer) token.
-    first_answer: usize,
-    /// Supervised token count (turn close included when B stopped).
-    answer_len: usize,
-    question: []u8,
-    /// Teacher top-k targets at STUDENT-LOCAL positions (offset by the
-    /// segment start when packing conversations into one row).
-    builder: cartridge.TargetsBuilder,
-
-    fn deinit(self: *Convo, allocator: std.mem.Allocator) void {
-        allocator.free(self.student_ids);
-        allocator.free(self.teacher_ids);
-        allocator.free(self.question);
-        self.builder.deinit();
-        self.* = undefined;
-    }
-};
-
 fn runSelfStudy(
     ctx: *fucina.ExecContext,
     io: std.Io,
@@ -652,7 +582,7 @@ fn runSelfStudy(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     comptime supports_packing: bool,
     corpus: *const Corpus,
     opts_in: Options,
@@ -677,7 +607,7 @@ fn runSelfStudy(
     var caches_inited: usize = 0;
     defer for (caches[0..caches_inited]) |*c| c.deinit();
     for (caches) |*c| {
-        c.* = try makeCache(ctx, model, capacity);
+        c.* = try common.makeCache(ctx, model, capacity);
         caches_inited += 1;
     }
 
@@ -723,7 +653,7 @@ fn runSelfStudy(
     // Held-out conversation: synthesized once, never trained on — its loss
     // is the generalization signal (falling held loss = the cartridge is
     // learning the corpus, not one conversation).
-    var held: [1]Convo = undefined;
+    var held: [1]common.Convo = undefined;
     try synthesizeGroup(ctx, allocator, model, tokenizer, trainer, tpl, supports_packing, caches[0..1], corpus, rand, opts, stop_id, &held);
     defer held[0].deinit(allocator);
     trainer.freeTransientRope();
@@ -735,16 +665,16 @@ fn runSelfStudy(
     // The generation queue: refilled gen_batch conversations at a time (one
     // lockstep decode group + one packed teacher pass), consumed --accum at
     // a time by the optimizer steps.
-    const pending = try allocator.alloc(Convo, gen_batch);
+    const pending = try allocator.alloc(common.Convo, gen_batch);
     defer allocator.free(pending);
     var pending_at: usize = 0;
     var pending_n: usize = 0;
     defer for (pending[pending_at..pending_n]) |*convo| convo.deinit(allocator);
 
     var trained_tokens: usize = 0;
-    const train_start = nowNs(io);
+    const train_start = common.nowNs(io);
     for (0..opts.steps) |step_i| {
-        const step_start = nowNs(io);
+        const step_start = common.nowNs(io);
         if (pending_at == pending_n) {
             // Never synthesize more than the remaining steps will consume.
             const need = @min(gen_batch, (opts.steps - step_i) * opts.accum);
@@ -815,7 +745,7 @@ fn runSelfStudy(
         opt.zeroGrad();
         trainer.freeTransientRope();
         try stdout.print("step {d:>3}/{d}: distill loss {d:.4} ({d} answer tokens so far, {d:.1} s)\n", .{
-            step_i + 1, opts.steps, step_loss, trained_tokens, seconds(nowNs(io) - step_start),
+            step_i + 1, opts.steps, step_loss, trained_tokens, common.seconds(common.nowNs(io) - step_start),
         });
         try stdout.flush();
         if (opts.save_every != 0 and (step_i + 1) % opts.save_every == 0 and step_i + 1 != opts.steps) {
@@ -824,7 +754,7 @@ fn runSelfStudy(
             try stdout.flush();
         }
     }
-    const train_s = seconds(nowNs(io) - train_start);
+    const train_s = common.seconds(common.nowNs(io) - train_start);
     const convos = opts.steps * opts.accum;
     try stdout.print("self-study: {d} conversations, {d} supervised answer tokens, {d:.1} min ({d:.1} s/conversation)\n", .{
         convos, trained_tokens, train_s / 60.0, train_s / @as(f64, @floatFromInt(convos)),
@@ -844,7 +774,7 @@ fn saveCartridge(cart: *cartridge.Cartridge, writer: *std.Io.Writer) anyerror!vo
 /// Held-out / reporting loss: same objective as the training step, no
 /// backward (the fresh scope discards the graph; the step-counter advance is
 /// harmless with dropout off).
-fn distillEval(ctx: *fucina.ExecContext, trainer: anytype, cart: *const cartridge.Cartridge, convo: *const Convo) !f32 {
+fn distillEval(ctx: *fucina.ExecContext, trainer: anytype, cart: *const cartridge.Cartridge, convo: *const common.Convo) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     var loss = try trainer.distillLoss(ctx, convo.student_ids, cart, convo.builder.targets(), null, .{});
@@ -864,14 +794,14 @@ fn synthesizeGroup(
     model: anytype,
     tokenizer: anytype,
     trainer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     comptime supports_packing: bool,
     caches: []models.text.kv_cache.KvCache,
     corpus: *const Corpus,
     rand: std.Random,
     opts: Options,
     stop_id: ?usize,
-    out: []Convo,
+    out: []common.Convo,
 ) !void {
     const n = out.len;
     std.debug.assert(n > 0 and caches.len >= n);
@@ -891,21 +821,21 @@ fn synthesizeGroup(
         const chunk_max = @min(opts.chunk_max, corpus.ids.len);
         const chunk_len = rand.intRangeAtMost(usize, @min(opts.chunk_min, chunk_max), chunk_max);
         const chunk_start = rand.intRangeAtMost(usize, 0, corpus.ids.len - chunk_len);
-        const chunk_body = try decodeUsize(arena, tokenizer, corpus.ids[chunk_start..][0..chunk_len]);
+        const chunk_body = try common.decodeUsize(arena, tokenizer, corpus.ids[chunk_start..][0..chunk_len]);
         const chunk_text = try std.fmt.allocPrint(
             arena,
             "Below is an excerpt from {s}. It is part of a larger corpus of documents.\n\n{s}",
             .{ corpus.fileOf(chunk_start), chunk_body },
         );
-        sys_texts[i] = try std.fmt.allocPrint(arena, sys_open ++ system_prompt_template ++ block_close, .{chunk_text});
+        sys_texts[i] = try std.fmt.allocPrint(arena, sys_open ++ common.system_prompt_template ++ block_close, .{chunk_text});
         const seed_prompt = seed_prompts[rand.intRangeLessThan(usize, 0, seed_prompts.len)];
         const a_prompt = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}", .{ sys_texts[i], tpl.user_open, seed_prompt, tpl.block_close, tpl.asst_open });
-        a_prompts[i] = try encodeUsize(arena, tokenizer, a_prompt);
+        a_prompts[i] = try common.encodeUsize(arena, tokenizer, a_prompt);
         a_cfgs[i] = .{ .temperature = 0.6, .seed = rand.int(u64) };
     }
 
     // Bot A: one chat message per conversation (thinking off).
-    const a_outs = try generateIdsBatch(ctx, arena, model, caches[0..n], a_prompts, opts.max_q, stop_id, a_cfgs);
+    const a_outs = try common.generateIdsBatch(ctx, arena, model, caches[0..n], a_prompts, opts.max_q, stop_id, a_cfgs);
 
     // Bot B: greedy answers WITH each chunk in context.
     const b_prompts = try arena.alloc([]const usize, n);
@@ -913,11 +843,11 @@ fn synthesizeGroup(
     const convo_prefix_ids = try arena.alloc([]usize, n);
     const questions = try arena.alloc([]const u8, n);
     for (0..n) |i| {
-        questions[i] = try cleanGenerated(arena, tokenizer, a_outs[i]);
+        questions[i] = try common.cleanGenerated(arena, tokenizer, a_outs[i]);
         const convo_prefix = try std.fmt.allocPrint(arena, "{s}{s}{s}{s}", .{ tpl.user_open, questions[i], tpl.block_close, tpl.asst_open });
-        convo_prefix_ids[i] = try encodeUsize(arena, tokenizer, convo_prefix);
+        convo_prefix_ids[i] = try common.encodeUsize(arena, tokenizer, convo_prefix);
         const b_prompt = try std.mem.concat(arena, u8, &.{ sys_texts[i], convo_prefix });
-        b_prompts[i] = try encodeUsize(arena, tokenizer, b_prompt);
+        b_prompts[i] = try common.encodeUsize(arena, tokenizer, b_prompt);
         b_cfgs[i] = .{};
     }
     const b_outs = if (opts.spec_b)
@@ -928,7 +858,7 @@ fn synthesizeGroup(
         blk: {
             for (0..n) |i| caches[i].reset();
             break :blk try generateIdsSpecBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, null);
-        } else try generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
+        } else try common.generateIdsBatch(ctx, arena, model, caches[0..n], b_prompts, opts.max_a, stop_id, b_cfgs);
 
     // Assemble the per-conversation elements (owned by `allocator`).
     var built: usize = 0;
@@ -941,7 +871,7 @@ fn synthesizeGroup(
         // cartridge must also learn WHEN to stop answering.
         const stopped = answer_gen.len < opts.max_a and stop_id != null;
         const answer_len = answer_gen.len + @intFromBool(stopped);
-        const sys_ids = try encodeUsize(arena, tokenizer, sys_texts[i]);
+        const sys_ids = try common.encodeUsize(arena, tokenizer, sys_texts[i]);
 
         const prefix_len = convo_prefix_ids[i].len;
         const student_ids = try allocator.alloc(usize, prefix_len + answer_len);
@@ -978,7 +908,7 @@ fn teacherTargets(
     arena: std.mem.Allocator,
     trainer: anytype,
     comptime supports_packing: bool,
-    group: []Convo,
+    group: []common.Convo,
     opts: Options,
 ) !void {
     var total_len: usize = 0;
@@ -1272,92 +1202,6 @@ fn generateIdsSpecBatch(
     return outs;
 }
 
-/// Batched lockstep generation: per-stream prefill, then ONE
-/// `forwardStepBatch` weight pass per token across every still-active
-/// stream (finished streams retire from the batch, so late stoppers never
-/// pay for early ones). Caches are reset here; the stop token is dropped
-/// from the returned ids; results live on `allocator`.
-fn generateIdsBatch(
-    ctx: *fucina.ExecContext,
-    allocator: std.mem.Allocator,
-    model: anytype,
-    caches: []models.text.kv_cache.KvCache,
-    prompts: []const []const usize,
-    max_new: usize,
-    stop_id: ?usize,
-    cfgs: []const models.text.sampler.Config,
-) ![][]usize {
-    const n = prompts.len;
-    std.debug.assert(n > 0 and caches.len >= n and cfgs.len == n and max_new > 0);
-
-    const outs = try allocator.alloc([]usize, n);
-    errdefer allocator.free(outs);
-    var built: usize = 0;
-    errdefer for (outs[0..built]) |buf| allocator.free(buf);
-    for (outs) |*buf| {
-        buf.* = try allocator.alloc(usize, max_new);
-        built += 1;
-    }
-
-    const samplers = try allocator.alloc(models.text.sampler.Sampler, n);
-    defer allocator.free(samplers);
-    const lens = try allocator.alloc(usize, n);
-    defer allocator.free(lens);
-    const active = try allocator.alloc(usize, n);
-    defer allocator.free(active);
-    const batch_caches = try allocator.alloc(*models.text.kv_cache.KvCache, n);
-    defer allocator.free(batch_caches);
-    const batch_tokens = try allocator.alloc(usize, n);
-    defer allocator.free(batch_tokens);
-
-    var n_active: usize = 0;
-    for (0..n) |i| {
-        if (prompts[i].len + max_new > caches[i].capacity) return error.PromptTooLong;
-        caches[i].reset();
-        samplers[i] = models.text.sampler.Sampler.init(cfgs[i]);
-        lens[i] = 0;
-        var logits = try model.forwardStep(ctx, &caches[i], prompts[i], 0);
-        defer logits.deinit();
-        const next = try samplers[i].next(ctx, &logits, outs[i][0..0]);
-        if (stop_id != null and next == stop_id.?) continue;
-        outs[i][0] = next;
-        lens[i] = 1;
-        if (max_new > 1) {
-            active[n_active] = i;
-            n_active += 1;
-        }
-    }
-
-    while (n_active > 0) {
-        for (0..n_active) |j| {
-            const i = active[j];
-            batch_caches[j] = &caches[i];
-            batch_tokens[j] = outs[i][lens[i] - 1];
-        }
-        var logits = try model.forwardStepBatch(ctx, batch_caches[0..n_active], batch_tokens[0..n_active]);
-        defer logits.deinit();
-
-        var kept: usize = 0;
-        for (0..n_active) |j| {
-            const i = active[j];
-            var row = try logits.narrow(ctx, .seq, j, 1);
-            defer row.deinit();
-            const next = try samplers[i].next(ctx, &row, outs[i][0..lens[i]]);
-            if (stop_id != null and next == stop_id.?) continue;
-            outs[i][lens[i]] = next;
-            lens[i] += 1;
-            if (lens[i] < max_new) {
-                active[kept] = i;
-                kept += 1;
-            }
-        }
-        n_active = kept;
-    }
-
-    for (outs, lens) |*buf, len| buf.* = try allocator.realloc(buf.*, len);
-    return outs;
-}
-
 /// Generate up to `max_new` tokens after `prompt_ids` through the inference
 /// path, prefilling at the cache's CURRENT position (reset it first for a
 /// fresh conversation; leave a preloaded cartridge prefix in place to serve
@@ -1405,28 +1249,11 @@ fn generateText(
     stop_id: ?usize,
     sampler_cfg: models.text.sampler.Config,
 ) ![]u8 {
-    const prompt_ids = try encodeUsize(allocator, tokenizer, prompt);
+    const prompt_ids = try common.encodeUsize(allocator, tokenizer, prompt);
     defer allocator.free(prompt_ids);
     const ids = try generateIds(ctx, allocator, model, cache, prompt_ids, max_new, stop_id, sampler_cfg);
     defer allocator.free(ids);
-    return cleanGenerated(allocator, tokenizer, ids);
-}
-
-/// Decode + trim a generation, dropping any leading think block/marker
-/// (small models occasionally re-emit them despite the empty think block
-/// in the assistant opener).
-fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
-    const text = try decodeUsize(allocator, tokenizer, ids);
-    defer allocator.free(text);
-    var content = std.mem.trim(u8, text, " \t\r\n");
-    if (std.mem.startsWith(u8, content, "<think>")) {
-        if (std.mem.indexOf(u8, content, "</think>")) |end| content = content[end + "</think>".len ..];
-    } else if (std.mem.startsWith(u8, content, "</think>")) {
-        content = content["</think>".len..];
-    }
-    content = std.mem.trim(u8, content, " \t\r\n");
-    if (content.len == 0) return error.EmptyGeneration;
-    return allocator.dupe(u8, content);
+    return common.cleanGenerated(allocator, tokenizer, ids);
 }
 
 /// The initialization token sequence: the corpus opening as a system block,
@@ -1435,17 +1262,17 @@ fn cleanGenerated(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const
 fn systemInitTokens(
     allocator: std.mem.Allocator,
     tokenizer: anytype,
-    tpl: Tpl,
+    tpl: common.Tpl,
     corpus_text: []const u8,
     p: usize,
 ) ![]usize {
-    const close_ids = try encodeUsize(allocator, tokenizer, tpl.block_close);
+    const close_ids = try common.encodeUsize(allocator, tokenizer, tpl.block_close);
     defer allocator.free(close_ids);
     if (p < close_ids.len + 8) return error.CartridgeTooSmall;
 
-    const sys_text = try std.fmt.allocPrint(allocator, "{s}" ++ system_prompt_template ++ "{s}", .{ tpl.sys_open, corpus_text, tpl.block_close });
+    const sys_text = try std.fmt.allocPrint(allocator, "{s}" ++ common.system_prompt_template ++ "{s}", .{ tpl.sys_open, corpus_text, tpl.block_close });
     defer allocator.free(sys_text);
-    const sys_ids = try encodeUsize(allocator, tokenizer, sys_text);
+    const sys_ids = try common.encodeUsize(allocator, tokenizer, sys_text);
     defer allocator.free(sys_ids);
     if (sys_ids.len <= p) return allocator.dupe(usize, sys_ids);
 
@@ -1474,16 +1301,16 @@ fn runEquiv(
     const full = corpus[0 .. p + suffix_len];
     const suffix = full[p..];
 
-    const t0 = nowNs(io);
+    const t0 = common.nowNs(io);
     var teacher = try trainer.evalLogitsExt(ctx, full, .{});
     defer teacher.deinit();
-    const t1 = nowNs(io);
+    const t1 = common.nowNs(io);
     var cart = try trainer.initCartridge(ctx, full[0..p], opts.frozen_prefix);
     defer cart.deinit();
-    const t2 = nowNs(io);
+    const t2 = common.nowNs(io);
     var student = try trainer.evalLogitsExt(ctx, suffix, .{ .cartridge = &cart });
     defer student.deinit();
-    const t3 = nowNs(io);
+    const t3 = common.nowNs(io);
 
     const vocab = trainer.model.config.vocab_size;
     const teacher_rows = (try teacher.dataConst())[p * vocab ..];
@@ -1514,7 +1341,7 @@ fn runEquiv(
     );
     try stdout.print(
         "timings: teacher prefill {d:.2} s, capture+init {d:.2} s, cartridge eval {d:.2} s\n",
-        .{ seconds(t1 - t0), seconds(t2 - t1), seconds(t3 - t2) },
+        .{ common.seconds(t1 - t0), common.seconds(t2 - t1), common.seconds(t3 - t2) },
     );
     if (greedy_match != suffix_len) return error.EquivalenceGreedyMismatch;
     try stdout.print("PASS: untrained corpus-init cartridge is behaviorally identical to the real prefill\n", .{});
@@ -1557,7 +1384,7 @@ fn runGemma(
         var corpus: ?Corpus = null;
         defer if (corpus) |*c| c.deinit();
         if (corpus_paths.len > 0) corpus = try buildCorpus(allocator, io, &spm, corpus_paths);
-        return runServe(ctx, io, stdout, allocator, &model, &spm, gemma4_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
+        return runServe(ctx, io, stdout, allocator, &model, &spm, common.gemma4_tpl, &cart, ask, if (corpus) |*c| c else null, opts);
     }
 
     if (corpus_paths.len == 0) return error.MissingCorpusPath;
@@ -1568,7 +1395,7 @@ fn runGemma(
         defer corpus.deinit();
         try stdout.print("corpus: {d} files, {d} tokens\n", .{ corpus.files.len, corpus.ids.len });
         if (corpus.ids.len < opts.chunk_min + 2 or corpus.ids.len < opts.p + 2) return error.CorpusTooShort;
-        return runSelfStudy(ctx, io, stdout, allocator, &model, &spm, &trainer, gemma4_tpl, false, &corpus, opts);
+        return runSelfStudy(ctx, io, stdout, allocator, &model, &spm, &trainer, common.gemma4_tpl, false, &corpus, opts);
     }
     try stdout.print("model: {s} (gemma4, {d} layers, hidden {d})\n", .{ opts.model_path, config.num_layers, config.hidden_size });
 
@@ -1616,52 +1443,4 @@ fn runGemma(
         },
         else => return err,
     };
-}
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-fn encodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, text: []const u8) ![]usize {
-    const ids32 = try tokenizer.encode(allocator, text);
-    defer allocator.free(ids32);
-    const out = try allocator.alloc(usize, ids32.len);
-    for (out, ids32) |*dst, id| dst.* = id;
-    return out;
-}
-
-fn decodeUsize(allocator: std.mem.Allocator, tokenizer: anytype, ids: []const usize) ![]u8 {
-    const ids32 = try allocator.alloc(u32, ids.len);
-    defer allocator.free(ids32);
-    for (ids32, ids) |*dst, id| dst.* = @intCast(id);
-    return tokenizer.decode(allocator, ids32);
-}
-
-fn parseFlagStr(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?[]const u8 {
-    const arg = args[arg_i.*];
-    if (std.mem.eql(u8, arg, flag)) {
-        arg_i.* += 1;
-        if (arg_i.* >= args.len) return error.MissingFlagValue;
-        return args[arg_i.*];
-    }
-    if (std.mem.startsWith(u8, arg, flag ++ "=")) return arg[flag.len + 1 ..];
-    return null;
-}
-
-fn parseFlagInt(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?usize {
-    const text = (try parseFlagStr(args, arg_i, flag)) orelse return null;
-    return try std.fmt.parseInt(usize, text, 10);
-}
-
-fn parseFlagF32(args: []const []const u8, arg_i: *usize, comptime flag: []const u8) !?f32 {
-    const text = (try parseFlagStr(args, arg_i, flag)) orelse return null;
-    return try std.fmt.parseFloat(f32, text);
-}
-
-fn nowNs(io: std.Io) i128 {
-    return std.Io.Clock.real.now(io).nanoseconds;
-}
-
-fn seconds(ns: i128) f64 {
-    return @as(f64, @floatFromInt(ns)) / 1e9;
 }
