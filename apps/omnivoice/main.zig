@@ -311,7 +311,7 @@ fn runTts(
     }
 
     // The LM loads in every mode.
-    const lm_load0 = nowNs(io);
+    const lm_load0 = pipeline.nowNs(io);
     var lm_file = try fucina.gguf.File.loadMmap(allocator, io, model);
     defer lm_file.deinit();
     var ctx: fucina.ExecContext = undefined;
@@ -319,7 +319,7 @@ fn runTts(
     defer ctx.deinit();
     var lm_model = try lm.loadModel(&ctx, &lm_file);
     defer lm_model.deinit();
-    try logLoad(log, "base LM", &lm_file, nowNs(io) - lm_load0);
+    try logLoad(log, "base LM", &lm_file, pipeline.nowNs(io) - lm_load0);
 
     if (llm_test_in) |in_path| {
         return runLlmTest(allocator, io, stdout, &ctx, &lm_model, in_path, out_path.?);
@@ -383,7 +383,7 @@ fn runTts(
 
     // Full synthesis: codec (+ encoder only when a raw reference needs
     // encoding), optional reference triple, one buffered synthesize.
-    const codec_load0 = nowNs(io);
+    const codec_load0 = pipeline.nowNs(io);
     var codec_file = try fucina.gguf.File.loadMmap(allocator, io, codec_path.?);
     defer codec_file.deinit();
     var cdc = try codec.Codec.load(&ctx, &codec_file);
@@ -391,7 +391,7 @@ fn runTts(
     var enc: ?codec.Encoder = null;
     defer if (enc) |*e| e.deinit();
     if (ref_wav_path != null) enc = try codec.Encoder.load(&ctx, &codec_file);
-    try logLoad(log, "codec", &codec_file, nowNs(io) - codec_load0);
+    try logLoad(log, "codec", &codec_file, pipeline.nowNs(io) - codec_load0);
 
     var ref_text: []u8 = try allocator.alloc(u8, 0);
     defer allocator.free(ref_text);
@@ -599,10 +599,10 @@ const ProgressPrinter = struct {
     fn onStep(ctx: ?*anyopaque, step: usize, num_steps: usize, demasked: usize, total: usize) void {
         const self: *ProgressPrinter = @ptrCast(@alignCast(ctx.?));
         // A new generation begins whenever the step counter restarts.
-        if (self.last_step == 0 or step <= self.last_step) self.start_ns = nowNs(self.io);
+        if (self.last_step == 0 or step <= self.last_step) self.start_ns = pipeline.nowNs(self.io);
         self.last_step = step;
         const done = demasked >= total;
-        const elapsed = @as(f64, @floatFromInt(nowNs(self.io) - self.start_ns)) / 1e9;
+        const elapsed = @as(f64, @floatFromInt(pipeline.nowNs(self.io) - self.start_ns)) / 1e9;
         if (self.tty) {
             std.debug.print("\r[MaskGIT] step {d}/{d} · demasked {d}/{d} · {d:.1}s{s}", .{
                 step, num_steps, demasked, total, elapsed, if (done) "\n" else @as([]const u8, ""),
@@ -1054,16 +1054,16 @@ fn runCodec(
         return runCodecEncode(allocator, io, stdout, &ctx, &file, input, out_path, dump_dir);
     }
 
-    const load_start = nowNs(io);
+    const load_start = pipeline.nowNs(io);
     var cdc = try codec.Codec.load(&ctx, &file);
     defer cdc.deinit();
-    const load_ns: u64 = @intCast(nowNs(io) - load_start);
+    const load_ns: u64 = @intCast(pipeline.nowNs(io) - load_start);
 
     const codes = try rvq_file.readFile(allocator, io, input, codec.n_codebooks);
     defer allocator.free(codes);
     const t = codes.len / codec.n_codebooks;
 
-    const decode_start = nowNs(io);
+    const decode_start = pipeline.nowNs(io);
     var decoded = try rvq.decode(&ctx, &cdc.rvq, codes, t);
     defer decoded.deinit();
 
@@ -1076,7 +1076,7 @@ fn runCodec(
 
     const audio = try dac.decodeForward(&ctx, allocator, &cdc.dac, &dac_in, taps_ptr);
     defer allocator.free(audio);
-    const decode_ns: u64 = @intCast(nowNs(io) - decode_start);
+    const decode_ns: u64 = @intCast(pipeline.nowNs(io) - decode_start);
 
     const wav_path = out_path orelse try swapExtension(allocator, input, ".wav");
     defer if (out_path == null) allocator.free(wav_path);
@@ -1122,13 +1122,13 @@ fn runCodecEncode(
 ) !void {
     // Encode never touches the DAC decoder: load only the RVQ decode side
     // (codebooks + project_out + fc2) next to the encoder weights.
-    const load_start = nowNs(io);
+    const load_start = pipeline.nowNs(io);
     const config = try codec.parseConfig(file);
     var rvq_dec = try codec.loadRvqDecoder(ctx, file, config);
     defer rvq_dec.deinit(allocator);
     var enc = try codec.Encoder.load(ctx, file);
     defer enc.deinit();
-    const load_ns: u64 = @intCast(nowNs(io) - load_start);
+    const load_ns: u64 = @intCast(pipeline.nowNs(io) - load_start);
 
     var samples = try wav.readMono(io, allocator, input, @intCast(config.sample_rate));
     defer allocator.free(samples);
@@ -1143,10 +1143,10 @@ fn runCodecEncode(
     defer taps.deinit();
     const taps_ptr: ?*rvq.EncodeTaps = if (dump_dir != null) &taps else null;
 
-    const encode_start = nowNs(io);
+    const encode_start = pipeline.nowNs(io);
     const codes = try rvq.encode(ctx, allocator, config, &rvq_dec, &enc, samples[0..n_aligned], taps_ptr);
     defer allocator.free(codes);
-    const encode_ns: u64 = @intCast(nowNs(io) - encode_start);
+    const encode_ns: u64 = @intCast(pipeline.nowNs(io) - encode_start);
 
     const rvq_path = out_path orelse try swapExtension(allocator, input, ".rvq");
     defer if (out_path == null) allocator.free(rvq_path);
@@ -1188,10 +1188,6 @@ fn runCodecEncode(
         try writeRawF32(io, allocator, dir, "fuc_encode_embed.raw", taps.embed.?.data);
         try stdout.print("stage dumps written to {s}\n", .{dir});
     }
-}
-
-fn nowNs(io: std.Io) i96 {
-    return std.Io.Clock.awake.now(io).nanoseconds;
 }
 
 /// `foo.rvq` → `foo<new_ext>` (like the reference: swap the extension,

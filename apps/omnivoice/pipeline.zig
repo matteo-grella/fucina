@@ -376,7 +376,7 @@ fn dumpOutputAudio(io: std.Io, dir: []const u8, audio: []const f32) !void {
     try dump.writeFile(io, path, &shape, audio);
 }
 
-fn nowNs(io: std.Io) i96 {
+pub fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.awake.now(io).nanoseconds;
 }
 
