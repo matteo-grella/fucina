@@ -2060,21 +2060,25 @@ that tier live at generation boundaries.
   `split`, `merge`, `flatten`, `reshape`, `flip`, `roll`, `stack`, ...).
   Pointwise and `dot` keep the input dtype;
   reductions widen f16/bf16 results to f32 ([§4.7](04-tensor-operations.md#47-reductions-and-scans-srcagtensorzig), [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)).
-- **f16 / bf16 only — the widened forward set.** Ops with no native typed
-  kernel lower to widen → f32 kernel → narrow-once (f32 arithmetic and
-  accumulation with a single final round, the [§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig) policy; on f64 they are
-  a compile error — f64 math must not round through f32). Shape-preserving
-  ops keep the input dtype: the unary family (`unary(op)` and every named
-  alias listed in [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)), `leakyRelu`, `clamp`, `addScalar`, `subScalar`,
-  `powScalar`, `maximum`, `minimum`, `gated`/`glu`/`swiglu`/`geglu`,
-  `softmax` and `layerNorm` (plain `.{}` options only — cast to f32 for
-  the ext/affine paths), `logSoftmax`, `rmsNorm`, `rmsNormMul` (same-dtype
-  weight), `cumsum`, `cumprod`, `where`/`maskedFill` (`.bool` or
-  same-dtype masks), `compare` (`.bool` result), `pad`, and `einsum`
-  (same-dtype operands, f32 GEMM
-  lowering — the typed `dot` contract). The widened reductions `max`,
-  `min`, `prod`, `variance`, `logsumexp` return **f32** like the native
-  typed `sum`/`mean` ([§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)); `argmax` returns i64 ([§4.16](04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig)).
+- **f16 / bf16 only — the ops with an f32 kernel.** These run widen → f32
+  kernel → narrow-once (f32 arithmetic and accumulation with a single final
+  round, the `widened` class of the [§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig) policy; on f64 they are
+  a compile error — f64 math must not round through f32). The elementwise
+  family is one mixin shared with the f32 branch (`src/ag/tensor/elementwise.zig`):
+  its exec entries take the storage dtype and apply the policy themselves,
+  so the 16-bit branches get the same methods with the same shapes and
+  keep the input dtype: the unary family (`unary(op)` and every named
+  alias listed in [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)), `leakyRelu`, `clamp`/`clampMin`/`clampMax`,
+  `addScalar`, `subScalar`, `powScalar`, `log1p`, `maximum`, `minimum`,
+  `gated`/`glu`/`swiglu`/`geglu`/`situ`, `splitGated`, `where`/`maskedFill`
+  (`.bool` or float masks). The remaining widened ops still widen at the
+  facade (`src/ag/tensor/typed/widened.zig`): `softmax` and `layerNorm`
+  (plain `.{}` options only — cast to f32 for the ext/affine paths),
+  `logSoftmax`, `rmsNorm`, `rmsNormMul` (same-dtype weight), `cumsum`,
+  `cumprod`, `compare` (`.bool` result), `pad`, and `einsum` (same-dtype
+  operands, f32 GEMM lowering — the typed `dot` contract). The widened
+  reductions `max`, `min`, `prod`, `variance`, `logsumexp` return **f32**
+  like the native typed `sum`/`mean` ([§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)); `argmax` returns i64 ([§4.16](04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig)).
 - **Block-quantized** (q8_0, q4_k, ...): no arithmetic — `to(.f32)`
   (dequantize), `getRows` ([§4.17](04-tensor-operations.md#417-indexing-assembly-and-functional-updates-srcagtensorzig)), row-axis `concat`, `packRhs` /
   `packRhsAs` ([§4.9](04-tensor-operations.md#49-explicit-matmul-ternary-ste-and-packed-rhs-gemms-srcagtensorzig)), and constructors/views ([§3](03-tensors-types-construction-and-data-access.md), [§10](10-quantization.md)). Their main math
@@ -2108,7 +2112,8 @@ world are `to` ([§3.8](03-tensors-types-construction-and-data-access.md#38-cast
 `to(.f32)` for everything else in a trained path.
 
 Because the widened ops run the identical f32 kernels and round once on
-store, their results are bit-identical to "cast up, run the f32 op, cast
+store (in the exec entry for the elementwise family, at the facade for the
+rest), their results are bit-identical to "cast up, run the f32 op, cast
 down" — pinned by parity tests in `src/ag/tensor_tests/`:
 
 ```zig

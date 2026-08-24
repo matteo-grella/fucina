@@ -234,7 +234,7 @@ pub fn Ops(comptime Self: type) type {
             const add_axis = comptime axis(tag);
             var scattered = try ctx.scatterAdd(tag_rank, update.asRawTensor(), self.shape(), add_axis, indices);
             defer scattered.deinit();
-            var value = try ctx.elementwise(.add, self.asRawTensor(), &scattered);
+            var value = try ctx.elementwise(.f32, .add, self.asRawTensor(), &scattered);
             errdefer value.deinit();
             return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), IndexAddBackward(tags, add_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
         }

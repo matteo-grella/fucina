@@ -462,8 +462,21 @@ pub fn tailBroadcastInfo(x: *const Tensor) ?TailBroadcastInfo {
 /// Runtime-rank elementwise binary op: dispatches over `a.shape.len` onto
 /// the same rank-monomorphized kernels the comptime-rank spellings
 /// (`add`/`sub`/`mul`/`div`/`max`/`min`) reach directly.
-pub fn elementwise(ctx: *ExecContext, comptime op: ElementwiseOp, a: *const Tensor, b: *const Tensor) !Tensor {
-    return dispatchRank(elementwiseRankDispatched, a.shape.len, .{ ctx, op, a, b });
+/// Same-shape binary op with the rank resolved at runtime; `add`..`min`
+/// are the comptime-rank entries. Float 16-bit inputs run the typed kernel
+/// (`.pointwise` policy) except `max`/`min`, which have an f32 kernel only
+/// and follow the `.widened` policy.
+pub fn elementwise(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime op: ElementwiseOp,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
+    return switch (a.shape.len) {
+        inline 1...tensor.max_rank => |rank| elementwiseRankTyped(ctx, dtype, rank, op, a, b),
+        else => tensor.TensorError.InvalidShape,
+    };
 }
 
 pub fn add(
@@ -506,8 +519,8 @@ pub fn div(
     return elementwiseRankTyped(ctx, dtype, rank, .div, a, b);
 }
 
-/// Elementwise maximum. `.f32` runs the float kernel; integer dtypes run
-/// the exact integer path; other float dtypes widen through the facade.
+/// Elementwise maximum: the f32 kernel, the exact integer path, or the
+/// `.widened` policy for 16-bit floats (no typed max kernel exists).
 pub fn max(
     ctx: *ExecContext,
     comptime dtype: DType,
@@ -515,10 +528,6 @@ pub fn max(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    if (comptime dtype == .f32) return elementwiseRank(ctx, rank, .max, a, b);
-    comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
-    }
     return elementwiseRankTyped(ctx, dtype, rank, .max, a, b);
 }
 
@@ -530,53 +539,65 @@ pub fn min(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    if (comptime dtype == .f32) return elementwiseRank(ctx, rank, .min, a, b);
-    comptime {
-        if (!dtype_mod.supportsIntMath(dtype)) @compileError("typed maximum/minimum kernels are integer-only (the float facade widens through f32)");
-    }
     return elementwiseRankTyped(ctx, dtype, rank, .min, a, b);
 }
 
-pub fn gated(ctx: *ExecContext, comptime rank: usize, comptime op: GatedOp, a: *const Tensor, b: *const Tensor) !Tensor {
-    const shape = try requireSameRankShape(rank, a, b);
-    var aa = try ctx.prepareContiguous(.f32, a);
+/// Gated product of two same-shape tensors (`op` picks the gate). One f32
+/// kernel; 16-bit inputs follow the `.widened` policy.
+pub fn gated(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime rank: usize,
+    comptime op: GatedOp,
+    a: *const tensor.TensorOf(dtype),
+    b: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "gated");
+    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    var aa = try ctx.prepareAs(dtype, compute, a);
     defer aa.deinit();
-    var bb = try ctx.prepareContiguous(.f32, b);
+    var bb = try ctx.prepareAs(dtype, compute, b);
     defer bb.deinit();
 
     const ap = aa.tensor();
     const bp = bb.tensor();
-    var out = try ctx.empty(.f32, shape);
+    var out = try ctx.empty(compute, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
     kernels.gatedContiguousIntoUnchecked(ctx.pc(), op, &out, ap, bp, ap.len());
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
-pub fn glu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gated(ctx, rank, .glu, a, b);
+/// Split-gated forward: `x` halves along `axis`, one half gates the other.
+/// The gate-half conventions are OPPOSITE (ggml parity): swiglu gates with
+/// the FIRST half (`silu(first) * second`), glu with the SECOND
+/// (`first * sigmoid(second)`). One f32 kernel; 16-bit inputs follow the
+/// `.widened` policy.
+pub fn splitGated(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime rank: usize,
+    comptime op: GatedOp,
+    x: *const tensor.TensorOf(dtype),
+    comptime axis: usize,
+) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "splitGated");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+    var out = try splitGatedF32(ctx, op, rank, xx.tensor(), axis);
+    errdefer out.deinit();
+    return ctx.storeAs(compute, dtype, out);
 }
 
-pub fn swiglu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gated(ctx, rank, .swiglu, a, b);
+/// The compute dtype of a `.widened` op, or a compile error naming the op
+/// when no kernel exists for it (f64 and the non-float dtypes).
+fn widenedCompute(comptime dtype: DType, comptime what: []const u8) DType {
+    const compute = dtype_mod.computeDType(.widened, dtype);
+    if (compute != .f32) @compileError(what ++ ": no " ++ @tagName(dtype) ++ " kernel (f32, f16 and bf16 are supported)");
+    return compute;
 }
 
-pub fn geglu(ctx: *ExecContext, comptime rank: usize, a: *const Tensor, b: *const Tensor) !Tensor {
-    return gated(ctx, rank, .geglu, a, b);
-}
-
-pub fn splitSwiGlu(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return splitGatedImpl(ctx, .swiglu, rank, x, axis);
-}
-
-pub fn splitGlu(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return splitGatedImpl(ctx, .glu, rank, x, axis);
-}
-
-/// One split-gated forward for both conventions. The gate-half conventions
-/// are OPPOSITE (ggml parity): swiglu gates with the FIRST half
-/// (`silu(first) * second`), glu with the SECOND (`first * sigmoid(second)`).
-fn splitGatedImpl(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
+fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
     const Task = switch (op) {
@@ -807,7 +828,7 @@ pub fn takeUnary(ctx: *ExecContext, comptime op: UnaryOp, target: *Tensor) !Tens
         return takeTensor(target);
     }
 
-    var result = try unary(ctx, op, target);
+    var result = try unary(ctx, .f32, op, target);
     errdefer result.deinit();
     return discardTakenInput(target, result);
 }
@@ -849,60 +870,78 @@ pub fn scale(
     return out;
 }
 
-pub fn addScalar(ctx: *ExecContext, x: *const Tensor, scalar_value: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(.f32, x);
+pub fn addScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), scalar_value: f32) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "addScalar");
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |value, *dst| dst.* = value + scalar_value;
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
-pub fn powScalar(ctx: *ExecContext, x: *const Tensor, exponent: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(.f32, x);
+pub fn powScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), exponent: f32) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "powScalar");
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), out.data()) |value, *dst| dst.* = std.math.pow(f32, value, exponent);
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
 /// Elementwise select: `out[i] = cond[i] != 0 ? x[i] : y[i]` (all same shape).
 /// `cond ? x : y` with a `.bool` or float condition (truthiness `!= 0`).
-pub fn where(ctx: *ExecContext, comptime cond_dtype: DType, x: *const Tensor, cond: *const tensor.TensorOf(cond_dtype), y: *const Tensor) !Tensor {
+pub fn where(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime cond_dtype: DType,
+    x: *const tensor.TensorOf(dtype),
+    cond: *const tensor.TensorOf(cond_dtype),
+    y: *const tensor.TensorOf(dtype),
+) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "where");
     if (!std.mem.eql(usize, x.shape.slice(), cond.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    try tensor.requireSameShape(x, y);
-    var xx = try ctx.prepareContiguous(.f32, x);
+    try tensor.requireSameShapeOf(dtype, x, y);
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     var cc = try ctx.prepareContiguous(cond_dtype, cond);
     defer cc.deinit();
-    var yy = try ctx.prepareContiguous(.f32, y);
+    var yy = try ctx.prepareAs(dtype, compute, y);
     defer yy.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), cc.tensor().dataConst(), yy.tensor().dataConst(), out.data()) |xv, cv, yv, *dst| {
         dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) xv else yv;
     }
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
 /// Elementwise masked fill: `out[i] = mask[i] truthy ? value : x[i]`.
-pub fn maskedFill(ctx: *ExecContext, comptime mask_dtype: DType, x: *const Tensor, mask: *const tensor.TensorOf(mask_dtype), value: f32) !Tensor {
+pub fn maskedFill(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime mask_dtype: DType,
+    x: *const tensor.TensorOf(dtype),
+    mask: *const tensor.TensorOf(mask_dtype),
+    value: f32,
+) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "maskedFill");
     if (!std.mem.eql(usize, x.shape.slice(), mask.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    var xx = try ctx.prepareContiguous(.f32, x);
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     var mm = try ctx.prepareContiguous(mask_dtype, mask);
     defer mm.deinit();
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     for (xp.dataConst(), mm.tensor().dataConst(), out.data()) |xv, mv, *dst| {
         dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) value else xv;
     }
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
 /// Elementwise comparison mask: `out[i] = a[i] <op> b[i] ? 1.0 : 0.0`
@@ -1220,84 +1259,32 @@ fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor 
     return out;
 }
 
-pub fn unary(ctx: *ExecContext, comptime op: UnaryOp, x: *const Tensor) !Tensor {
-    var xx = try ctx.prepareContiguous(.f32, x);
+/// Elementwise `op(x)`. One f32 kernel; 16-bit inputs follow the
+/// `.widened` policy.
+pub fn unary(ctx: *ExecContext, comptime dtype: DType, comptime op: UnaryOp, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "unary");
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.unaryContiguousIntoUnchecked(ctx.pc(), op, &out, xp, xp.len());
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
-pub fn relu(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .relu, x);
-}
-
-pub fn leakyRelu(ctx: *ExecContext, x: *const Tensor, negative_slope: f32) !Tensor {
-    var xx = try ctx.prepareContiguous(.f32, x);
+pub fn leakyRelu(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), negative_slope: f32) !tensor.TensorOf(dtype) {
+    const compute = comptime widenedCompute(dtype, "leakyRelu");
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.leakyReluContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), negative_slope);
-    return out;
-}
-
-pub fn exp(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .exp, x);
-}
-
-pub fn sqrt(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .sqrt, x);
-}
-
-pub fn rsqrt(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .rsqrt, x);
-}
-
-pub fn sigmoid(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .sigmoid, x);
-}
-
-pub fn silu(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .silu, x);
-}
-
-pub fn log(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .log, x);
-}
-
-pub fn neg(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .neg, x);
-}
-
-pub fn abs(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .abs, x);
-}
-
-pub fn sin(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .sin, x);
-}
-
-pub fn cos(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .cos, x);
-}
-
-pub fn tanh(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .tanh, x);
-}
-
-pub fn gelu(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .gelu, x);
-}
-
-pub fn quickGelu(ctx: *ExecContext, x: *const Tensor) !Tensor {
-    return unary(ctx, .quick_gelu, x);
+    return ctx.storeAs(compute, dtype, out);
 }
 
 /// Per-channel Snake activation over `[rows, cols]` rows (the DAC codec op):
@@ -1401,18 +1388,19 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
     return .{ .alpha = galpha, .inv_b = ginv_b };
 }
 
-pub fn clamp(ctx: *ExecContext, x: *const Tensor, min_value: f32, max_value: f32) !Tensor {
+pub fn clamp(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), min_value: f32, max_value: f32) !tensor.TensorOf(dtype) {
     if (min_value > max_value) return tensor.TensorError.InvalidShape;
+    const compute = comptime widenedCompute(dtype, "clamp");
 
-    var xx = try ctx.prepareContiguous(.f32, x);
+    var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
 
     const xp = xx.tensor();
-    var out = try ctx.empty(.f32, xp.shape.slice());
+    var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
     kernels.clampContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), min_value, max_value);
-    return out;
+    return ctx.storeAs(compute, dtype, out);
 }
 
 /// Sum-reduce `x` down to `target_shape` (array/tuple or slice), the
@@ -1529,19 +1517,9 @@ pub fn takeElementwise(
         return takeTensor(target);
     }
 
-    var result = try elementwise(ctx, op, target, other);
+    var result = try elementwise(ctx, .f32, op, target, other);
     errdefer result.deinit();
     return discardTakenInput(target, result);
-}
-
-fn elementwiseRankDispatched(
-    comptime rank: usize,
-    ctx: *ExecContext,
-    comptime op: ElementwiseOp,
-    a: *const Tensor,
-    b: *const Tensor,
-) !Tensor {
-    return elementwiseRank(ctx, rank, op, a, b);
 }
 
 fn elementwiseRank(
@@ -1592,6 +1570,17 @@ fn elementwiseRankTyped(
         return out;
     }
     comptime ensureForwardFloatMath(dtype);
+    if (comptime (op == .max or op == .min)) {
+        // No typed max/min kernel: the `.widened` policy.
+        const compute = comptime widenedCompute(dtype, "max/min");
+        var aa = try ctx.prepareAs(dtype, compute, a);
+        defer aa.deinit();
+        var bb = try ctx.prepareAs(dtype, compute, b);
+        defer bb.deinit();
+        var out = try elementwiseRank(ctx, rank, op, aa.tensor(), bb.tensor());
+        errdefer out.deinit();
+        return ctx.storeAs(compute, dtype, out);
+    }
     const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
 
     const shape = try requireSameRankShapeOf(dtype, rank, a, b);

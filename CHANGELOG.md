@@ -241,6 +241,30 @@ this point; earlier history is `git log`.
   `addRowVectorSlice(op, ...)`. The `Tensor` facade (`takeAddNoGrad`,
   `takeScaleNoGrad`, `addAxisVectorInPlace`, `addAxisVectorUnaryInPlace`)
   is unchanged.
+- Dtype policy at the exec seam, elementwise family. `dtype.FloatOp` gains
+  the `widened` class (an f32 kernel only: f16/bf16 widen on entry, the
+  result narrows once on store; f64 stays f64 or is a compile error where
+  no kernel exists), and `ExecContext.prepareAs(dtype, compute, x)` /
+  `storeAs(compute, out, value)` are its two helpers. The elementwise exec
+  entries take the storage dtype and apply the policy themselves:
+  `unary(dtype, op, x)`, `leakyRelu(dtype, x, slope)`, `clamp(dtype, x,
+  lo, hi)`, `addScalar(dtype, x, v)`, `powScalar(dtype, x, e)`,
+  `where(dtype, cond_dtype, x, cond, y)`, `maskedFill(dtype, mask_dtype,
+  x, mask, v)`, `gated(dtype, rank, op, a, b)`, `splitGated(dtype, rank,
+  op, x, axis)`, `elementwise(dtype, op, a, b)`; `max`/`min` on 16-bit
+  floats now run through the same policy instead of a compile error. The
+  op-as-name exec wrappers are gone: `relu`, `exp`, `sqrt`, `rsqrt`,
+  `sigmoid`, `silu`, `log`, `neg`, `abs`, `sin`, `cos`, `tanh`, `gelu`,
+  `quickGelu` are `unary(dtype, .op, x)`; `glu`/`swiglu`/`geglu` are
+  `gated(dtype, rank, .op, a, b)`; `splitSwiGlu`/`splitGlu` are
+  `splitGated(dtype, rank, .swiglu | .glu, x, axis)`.
+  `tag_ops.gatedPointwise` takes the dtype first. On the facade the
+  elementwise mixin is dtype-generic (`src/ag/tensor/elementwise.zig`,
+  moved from `float/`): the f32 methods are unchanged; the f16/bf16 branch
+  now takes the same methods from it (and gains `clampMin`, `clampMax`,
+  `situ`, `splitGated`), the integer branch takes `add`/`sub`/`mul`/
+  `maximum`/`minimum` from it. Results are bitwise what the widened facade
+  computed.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

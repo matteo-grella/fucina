@@ -39,13 +39,13 @@ test "exec context applies unary ops through materialized inputs" {
     var broadcast = try ctx.broadcastTo(&x, .{ 2, 3 });
     defer broadcast.deinit();
 
-    var y = try ctx.unary(.relu, &broadcast);
+    var y = try ctx.unary(.f32, .relu, &broadcast);
     defer y.deinit();
 
     try std.testing.expect(y.isContiguous());
     try std.testing.expectEqualSlices(f32, &.{ 0, 2, 0, 0, 2, 0 }, y.dataConst());
 
-    var z = try ctx.relu(&broadcast);
+    var z = try ctx.unary(.f32, .relu, &broadcast);
     defer z.deinit();
     try std.testing.expectEqualSlices(f32, y.dataConst(), z.dataConst());
 }
@@ -85,16 +85,16 @@ test "exec context applies explicit tail broadcast without materializing the vie
     try std.testing.expect(broadcast.buffer == bias.buffer);
     try std.testing.expectEqual(LayoutClass.tail_broadcast, ctx.classify(&broadcast));
 
-    var y = try ctx.elementwise(.add, &x, &broadcast);
+    var y = try ctx.elementwise(.f32, .add, &x, &broadcast);
     defer y.deinit();
 
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 14, 25, 36 }, y.dataConst());
 
-    var z = try ctx.elementwise(.sub, &x, &broadcast);
+    var z = try ctx.elementwise(.f32, .sub, &x, &broadcast);
     defer z.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -6, -15, -24 }, z.dataConst());
 
-    var m = try ctx.elementwise(.mul, &x, &broadcast);
+    var m = try ctx.elementwise(.f32, .mul, &x, &broadcast);
     defer m.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 10, 40, 90, 40, 100, 180 }, m.dataConst());
 }
@@ -271,7 +271,7 @@ test "exec context rank-specializes elementwise ops above rank four" {
     var b = try ctx.fromSlice(.f32, .{ 1, 1, 1, 2, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer b.deinit();
 
-    var sum = try ctx.elementwise(.add, &a, &b);
+    var sum = try ctx.elementwise(.f32, .add, &a, &b);
     defer sum.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 44, 55, 66 }, sum.dataConst());
 
@@ -312,7 +312,7 @@ test "exec context handles scalar broadcast and non-tail broadcast fallback" {
     var scalar_b = try ctx.broadcastTo(&scalar_value, &.{ 2, 3 });
     defer scalar_b.deinit();
 
-    var y = try ctx.elementwise(.add, &x, &scalar_b);
+    var y = try ctx.elementwise(.f32, .add, &x, &scalar_b);
     defer y.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 11, 12, 13, 14, 15, 16 }, y.dataConst());
 
@@ -324,7 +324,7 @@ test "exec context handles scalar broadcast and non-tail broadcast fallback" {
 
     var zeros = try ctx.zeros(.f32, &.{ 2, 4, 3 });
     defer zeros.deinit();
-    var copied = try ctx.elementwise(.add, &zeros, &middle_b);
+    var copied = try ctx.elementwise(.f32, .add, &zeros, &middle_b);
     defer copied.deinit();
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
@@ -684,17 +684,17 @@ test "exec context applies elu and gelu_erf unary ops" {
     var x = try ctx.fromSlice(.f32, .{4}, &.{ -1.0, 0.0, 1.0, 2.0 });
     defer x.deinit();
 
-    var elu_y = try ctx.unary(.elu, &x);
+    var elu_y = try ctx.unary(.f32, .elu, &x);
     defer elu_y.deinit();
     const elu_want = [_]f32{ -0.6321206, 0.0, 1.0, 2.0 };
     for (elu_want, elu_y.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
 
-    var gelu_y = try ctx.unary(.gelu_erf, &x);
+    var gelu_y = try ctx.unary(.f32, .gelu_erf, &x);
     defer gelu_y.deinit();
     const gelu_want = [_]f32{ -0.15865526, 0.0, 0.8413447, 1.9544997 };
     for (gelu_want, gelu_y.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);
 
-    var erf_y = try ctx.unary(.erf, &x);
+    var erf_y = try ctx.unary(.f32, .erf, &x);
     defer erf_y.deinit();
     const erf_want = [_]f32{ -0.8427008, 0.0, 0.8427008, 0.9953223 };
     for (erf_want, erf_y.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-6);

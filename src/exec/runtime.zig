@@ -551,6 +551,35 @@ pub fn prepareContiguous(
     return .{ .owned = try self.materialize(dtype, x) };
 }
 
+/// `x` as the kernel's compute dtype: a contiguous borrow (or copy) when
+/// the storage dtype is the compute dtype, else one widening cast. The
+/// entry side of the `.widened` dtype policy (`dtype_mod.computeDType`).
+pub fn prepareAs(
+    self: *ExecContext,
+    comptime dtype: DType,
+    comptime compute: DType,
+    x: *const tensor.TensorOf(dtype),
+) !PreparedTensorOf(compute) {
+    if (comptime dtype == compute) return self.prepareContiguous(dtype, x);
+    return .{ .owned = try self.cast(dtype, compute, x) };
+}
+
+/// A compute-dtype result stored as `out`: the value itself when the
+/// dtypes agree, else one narrowing cast (the compute-dtype value is
+/// released). The store side of the `.widened` policy: f32 accumulation,
+/// one final round.
+pub fn storeAs(
+    self: *ExecContext,
+    comptime compute: DType,
+    comptime out: DType,
+    value: tensor.TensorOf(compute),
+) !tensor.TensorOf(out) {
+    if (comptime compute == out) return value;
+    var wide = value;
+    defer wide.deinit();
+    return self.cast(compute, out, &wide);
+}
+
 // ------------------------------------------------------------------
 // Native-backend pool gates: spin up the worker team only once a job
 // crosses the work threshold, and only when the native (non-BLAS)

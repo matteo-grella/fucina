@@ -176,7 +176,7 @@ identically to a brute-force nearest-even search over the decode table.
 ## 8.3 Float compute/output dtype policy (`src/dtype.zig`)
 
 ```zig
-pub const FloatOp = enum { pointwise, reduction, matmul };
+pub const FloatOp = enum { pointwise, widened, reduction, matmul };
 
 pub fn computeDType(comptime op: FloatOp, comptime input_dtype: DType) DType
 pub fn outputDType(comptime op: FloatOp, comptime input_dtype: DType) DType
@@ -194,6 +194,8 @@ integers and `.bool` follow the integer rows in the table:
 | pointwise | `.f32` | `f32` | `.f32` |
 | pointwise | `.f64` | `f64` | `.f64` |
 | pointwise | integers | input dtype (wrapping) | input dtype |
+| widened | `.f16`, `.bf16`, `.f32` | `f32` | input dtype |
+| widened | `.f64` | `f64` (a compile error where no f64 kernel exists) | `.f64` |
 | reduction | `.f16`, `.bf16`, `.f32` | `f32` | **`.f32`** |
 | reduction | `.f64` | `f64` | `.f64` |
 | reduction | integers, `.bool` | `i64` (wrapping) | **`.i64`** |
@@ -206,6 +208,13 @@ Three rules fall out of the table:
   even pointwise ops widen via `bf16ToF32`, compute in `f32`, and narrow
   back with round-to-nearest-even on store (except reductions, which return
   `f32` outright).
+- **`widened` is the class of the ops that have an f32 kernel only** (the
+  unary family, `leakyRelu`, `clamp`, the scalar ops, `where`/`maskedFill`,
+  `gated`/`splitGated`, and float `max`/`min`). Their exec entries take the
+  storage dtype and apply the policy themselves: `ctx.prepareAs(dtype,
+  compute, x)` widens on entry, `ctx.storeAs(compute, dtype, value)` narrows
+  once on store ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)). f32 inputs pay nothing (both are the contiguous
+  borrow and the value itself).
 - **Reductions on 16-bit floats return f32.** Summing `f16`/`bf16` into a
   16-bit result would lose the accumulator's precision, so the widened
   result dtype is kept.

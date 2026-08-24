@@ -88,24 +88,25 @@ pub fn pointwise(
 
 /// Tag-driven broadcasting gated op (`glu`/`swiglu`/`geglu`/...).
 pub fn gatedPointwise(
+    comptime tensor_dtype: DType,
     comptime op: GatedOp,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const RawTensor,
-) !RawTensor {
-    try validateTensorRank(.f32, left_tags, left);
-    try validateTensorRank(.f32, right_tags, right);
+    right: *const tensor_mod.TensorOf(tensor_dtype),
+) !tensor_mod.TensorOf(tensor_dtype) {
+    try validateTensorRank(tensor_dtype, left_tags, left);
+    try validateTensorRank(tensor_dtype, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
-    const result_shape = try broadcastResultShape(.f32, result_tags, left_tags, left, right_tags, right);
+    const result_shape = try broadcastResultShape(tensor_dtype, result_tags, left_tags, left, right_tags, right);
 
-    var left_view = try broadcastTensorTo(.f32, left_tags, left, result_tags, result_shape);
+    var left_view = try broadcastTensorTo(tensor_dtype, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
-    var right_view = try broadcastTensorTo(.f32, right_tags, right, result_tags, result_shape);
+    var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
-    return ctx.gated(rawRank(result_tags.len), op, &left_view, &right_view);
+    return ctx.gated(tensor_dtype, rawRank(result_tags.len), op, &left_view, &right_view);
 }
 
 /// Tag-directed contraction over one named tag: the single-contract-tag

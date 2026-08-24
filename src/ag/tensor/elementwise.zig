@@ -1,16 +1,24 @@
-//! f32 tensor methods: pointwise arithmetic, activations, masks, casts. A mixin over the ag
-//! FloatTensor struct; aliased back onto it in ../../tensor.zig.
+//! Tensor methods over the float dtypes: pointwise arithmetic, activations,
+//! masks, casts. One mixin over the ag tensor structs; aliased back onto the
+//! f32 and 16-bit branches in ../tensor.zig. Every op runs the exec entry on
+//! the stored dtype (the dtype policy in `dtype.zig` decides the compute
+//! dtype); on the f32 branch the result joins the graph, on the 16-bit
+//! branches it is a constant and a grad-requiring operand is rejected with
+//! `error.UnsupportedGradient`. The ops that stay f32-only (in-place
+//! updates, the graph-side casts, dropout, the channel ops, the elemental
+//! escape hatch) are aliased on the f32 branch only.
 
 const std = @import("std");
-const tensor_mod = @import("../../../tensor.zig");
-const dtype_mod = @import("../../../dtype.zig");
-const exec_mod = @import("../../../exec.zig");
-const tags_mod = @import("../../../tags.zig");
-const backward_elementwise = @import("../../backward/elementwise.zig");
-const elemental = @import("../../elemental.zig");
+const tensor_mod = @import("../../tensor.zig");
+const dtype_mod = @import("../../dtype.zig");
+const exec_mod = @import("../../exec.zig");
+const tags_mod = @import("../../tags.zig");
+const backward_elementwise = @import("../backward/elementwise.zig");
+const elemental = @import("../elemental.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const DType = tensor_mod.DType;
+const GradState = @import("../core.zig").GradState;
 const ExecContext = exec_mod.ExecContext;
 const UnaryOp = exec_mod.UnaryOp;
 const GatedOp = exec_mod.GatedOp;
@@ -45,7 +53,7 @@ pub fn Ops(comptime Self: type) type {
         const axis = Self.axis;
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
-        const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const plumbing = @import("plumbing.zig").Mod(ag_tensor);
         const pointwise = plumbing.pointwise;
         const gatedPointwise = plumbing.gatedPointwise;
         const finishOp = plumbing.finishOp;
@@ -53,6 +61,32 @@ pub fn Ops(comptime Self: type) type {
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
         const typedFinishOp = plumbing.typedFinishOp;
+        const dtype = Self.dtype;
+        const RawT = tensor_mod.TensorOf(dtype);
+        /// The f32 branch is the differentiable one; every other dtype takes
+        /// the constant tail.
+        const differentiable = dtype == .f32;
+
+        fn Out(comptime result_tags: anytype) type {
+            return Tensor(.{ .dtype = dtype, .tags = result_tags });
+        }
+
+        /// Shared tail of the dtype-generic ops here (the `views.zig`
+        /// contract): f32 builds the VJP record, a typed result is a
+        /// caller-owned constant and a grad-requiring operand is rejected.
+        /// Consumes `value` on success; on error it stays with the caller.
+        fn finish(
+            comptime result_tags: anytype,
+            ctx: *ExecContext,
+            value: RawT,
+            wants_grad: bool,
+            comptime Backward: type,
+            create_args: anytype,
+        ) !Out(result_tags) {
+            if (comptime differentiable) return finishOp(result_tags, ctx, value, wants_grad, Backward, create_args);
+            if (wants_grad) return error.UnsupportedGradient;
+            return Out(result_tags).fromTensor(ctx, value);
+        }
 
         /// In-place: add the `[axis_dim]` `bias` to every row of `self` along the
         /// last axis `axis_tag`, mutating `self`.
@@ -95,9 +129,9 @@ pub fn Ops(comptime Self: type) type {
                 if (Cond.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Cond.dtype))
                     @compileError("where takes a .bool or float condition; cast integer masks explicitly");
             }
-            var value = try ctx.where(Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
+            var value = try ctx.where(dtype, Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags, Cond.dtype), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
+            return finish(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags, Cond.dtype), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
         }
 
         /// `mask ? value : self` elementwise. `mask` is a same-tagged
@@ -110,9 +144,9 @@ pub fn Ops(comptime Self: type) type {
                 if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
                     @compileError("maskedFill takes a .bool or float mask; cast integer masks explicitly");
             }
-            var v = try ctx.maskedFill(Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
+            var v = try ctx.maskedFill(dtype, Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
             errdefer v.deinit();
-            return finishOp(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags, Mask.dtype), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
+            return finish(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags, Mask.dtype), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
         }
 
         /// Elementwise comparison: a same-tagged `.bool` mask (torch's
@@ -249,26 +283,28 @@ pub fn Ops(comptime Self: type) type {
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
         }
 
-        pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return pointwise(.add, self, ctx, other);
         }
 
-        pub fn sub(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        pub fn sub(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return pointwise(.sub, self, ctx, other);
         }
 
-        pub fn mul(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        pub fn mul(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return pointwise(.mul, self, ctx, other);
         }
 
-        pub fn div(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        pub fn div(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return pointwise(.div, self, ctx, other);
         }
 
-        pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            var value = try ctx.scale(.f32, self.asRawTensor(), scalar_value);
+        /// `self * scalar_value`; the scalar is the dtype's accumulator type
+        /// (f32 for the 16-bit branches).
+        pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
+            var value = try ctx.scale(dtype, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
+            return finish(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
         }
 
         /// Consume `self` and return `self + other`, reusing `self`'s storage
@@ -298,9 +334,9 @@ pub fn Ops(comptime Self: type) type {
 
         /// `self + scalar_value` (elementwise). Differentiable (grad passes through).
         pub fn addScalar(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            var value = try ctx.addScalar(self.asRawTensor(), scalar_value);
+            var value = try ctx.addScalar(dtype, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), AddScalarBackward(tags), .{ ctx.allocator, self.grad_state });
+            return finish(tags, ctx, value, self.requiresGrad(), AddScalarBackward(tags), .{ ctx.allocator, self.grad_state });
         }
 
         /// `self - scalar_value` (= `addScalar(-scalar_value)`).
@@ -309,16 +345,16 @@ pub fn Ops(comptime Self: type) type {
         }
 
         /// `self / scalar_value` (= `scale(1/scalar_value)`).
-        pub fn divScalar(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
+        pub fn divScalar(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
             return self.scale(ctx, 1.0 / scalar_value);
         }
 
         /// `self ^ exponent` (elementwise; defined for positive `self`).
         /// Differentiable: `d/dx x^c = c·x^(c-1)`.
         pub fn powScalar(self: *const Self, ctx: *ExecContext, exponent: f32) !Self {
-            var value = try ctx.powScalar(self.asRawTensor(), exponent);
+            var value = try ctx.powScalar(dtype, self.asRawTensor(), exponent);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), PowScalarBackward(tags), .{ ctx.allocator, self.grad_state, self.asRawTensor(), exponent });
+            return finish(tags, ctx, value, self.requiresGrad(), PowScalarBackward(tags), .{ ctx.allocator, self.grad_state, self.asRawTensor(), exponent });
         }
 
         /// `log(1 + self)` (elementwise). Differentiable: `d/dx = 1/(1+x)`.
@@ -376,7 +412,7 @@ pub fn Ops(comptime Self: type) type {
             ctx: *ExecContext,
             other: anytype,
             comptime op: GatedOp,
-        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        ) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return gatedPointwise(op, self, ctx, other);
         }
 
@@ -384,7 +420,7 @@ pub fn Ops(comptime Self: type) type {
             self: *const Self,
             ctx: *ExecContext,
             other: anytype,
-        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        ) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return self.gated(ctx, other, .glu);
         }
 
@@ -392,7 +428,7 @@ pub fn Ops(comptime Self: type) type {
             self: *const Self,
             ctx: *ExecContext,
             other: anytype,
-        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        ) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return self.gated(ctx, other, .swiglu);
         }
 
@@ -402,7 +438,7 @@ pub fn Ops(comptime Self: type) type {
             self: *const Self,
             ctx: *ExecContext,
             other: anytype,
-        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        ) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return self.gated(ctx, other, .geglu);
         }
 
@@ -415,7 +451,7 @@ pub fn Ops(comptime Self: type) type {
             self: *const Self,
             ctx: *ExecContext,
             other: anytype,
-        ) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        ) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
             return self.gated(ctx, other, .situ);
         }
 
@@ -427,24 +463,19 @@ pub fn Ops(comptime Self: type) type {
         /// the tag on the halved axis — the raw numeric-tag form Parakeet
         /// uses). `.geglu` is a compile error: no split-geglu kernel or
         /// gate-half convention exists.
-        pub fn splitGated(self: *const Self, ctx: *ExecContext, comptime op: GatedOp, comptime tag: Tag, comptime out_tag: Tag) !Tensor(replaceTag(tags, tag, out_tag)) {
+        pub fn splitGated(self: *const Self, ctx: *ExecContext, comptime op: GatedOp, comptime tag: Tag, comptime out_tag: Tag) !Out(replaceTag(tags, tag, out_tag)) {
             const result_tags = replaceTag(tags, tag, out_tag);
             const split_axis = comptime axis(tag);
-            switch (comptime op) {
+            const Backward = switch (comptime op) {
+                .swiglu => SplitSwiGluBackward(tags, split_axis),
+                .glu => SplitGluBackward(tags, split_axis),
                 .swiglu_clamp10 => @compileError("splitGated has no swiglu_clamp10 kernel (inference-only op)"),
-                .swiglu => {
-                    var value = try ctx.splitSwiGlu(tag_rank, self.asRawTensor(), split_axis);
-                    errdefer value.deinit();
-                    return finishOp(result_tags, ctx, value, self.requiresGrad(), SplitSwiGluBackward(tags, split_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor() });
-                },
-                .glu => {
-                    var value = try ctx.splitGlu(tag_rank, self.asRawTensor(), split_axis);
-                    errdefer value.deinit();
-                    return finishOp(result_tags, ctx, value, self.requiresGrad(), SplitGluBackward(tags, split_axis), .{ ctx.allocator, self.grad_state, self.asRawTensor() });
-                },
                 .geglu => @compileError("splitGated: no split-geglu kernel or gate-half convention exists (compose `unary(.gelu_quant)` + `mul`, or use `geglu` on separate halves)"),
                 .situ => @compileError("splitGated: no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
-            }
+            };
+            var value = try ctx.splitGated(dtype, tag_rank, op, self.asRawTensor(), split_axis);
+            errdefer value.deinit();
+            return finish(result_tags, ctx, value, self.requiresGrad(), Backward, .{ ctx.allocator, self.grad_state, self.asRawTensor() });
         }
 
         pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
@@ -493,14 +524,14 @@ pub fn Ops(comptime Self: type) type {
         /// bare `@max` follows). Differentiable in both operands: the
         /// gradient goes to the larger operand, and is split evenly on
         /// exact ties (torch's subgradient).
-        pub fn maximum(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
-            return pointwise(.max, self.*, ctx, other);
+        pub fn maximum(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+            return pointwise(.max, self, ctx, other);
         }
 
         /// Elementwise minimum of two tensors (torch.minimum); see
         /// `maximum` for the NaN, tie-gradient, and kernel-tier notes.
-        pub fn minimum(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
-            return pointwise(.min, self.*, ctx, other);
+        pub fn minimum(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+            return pointwise(.min, self, ctx, other);
         }
 
         /// Elementwise `self ^ other` (torch.pow with a tensor exponent),
@@ -532,15 +563,15 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn relu(self: *const Self, ctx: *ExecContext) !Self {
-            var value = try ctx.relu(self.asRawTensor());
+            var value = try ctx.unary(dtype, .relu, self.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), ReluBackward, .{ ctx.allocator, self.grad_state, &self.value });
+            return finish(tags, ctx, value, self.requiresGrad(), ReluBackward, .{ ctx.allocator, self.grad_state, &self.value });
         }
 
         pub fn leakyRelu(self: *const Self, ctx: *ExecContext, negative_slope: f32) !Self {
-            var value = try ctx.leakyRelu(self.asRawTensor(), negative_slope);
+            var value = try ctx.leakyRelu(dtype, self.asRawTensor(), negative_slope);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), LeakyReluBackward, .{ ctx.allocator, self.grad_state, &self.value, negative_slope });
+            return finish(tags, ctx, value, self.requiresGrad(), LeakyReluBackward, .{ ctx.allocator, self.grad_state, &self.value, negative_slope });
         }
 
         // Differentiable unary family: one decl alias per op, generated from
@@ -603,9 +634,9 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn clamp(self: *const Self, ctx: *ExecContext, min_value: f32, max_value: f32) !Self {
-            var value = try ctx.clamp(self.asRawTensor(), min_value, max_value);
+            var value = try ctx.clamp(dtype, self.asRawTensor(), min_value, max_value);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), ClampBackward, .{ ctx.allocator, self.grad_state, &self.value, min_value, max_value });
+            return finish(tags, ctx, value, self.requiresGrad(), ClampBackward, .{ ctx.allocator, self.grad_state, &self.value, min_value, max_value });
         }
 
         /// One-sided clamp (torch's `clamp_min`): `max(x, min_value)`.
@@ -621,13 +652,13 @@ pub fn Ops(comptime Self: type) type {
         }
 
         fn unaryDifferentiable(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
-            var value = try ctx.unary(op, self.asRawTensor());
+            var value = try ctx.unary(dtype, op, self.asRawTensor());
             errdefer value.deinit();
             // Output-derivative ops (see backward_elementwise.unaryUsesOutput) store the
             // OUTPUT view: their VJP is transcendental-free in t (tanh' = 1-t²)
             // and exact for the value the SIMD forward actually produced.
-            const saved: *const RawTensor = if (comptime unaryUsesOutput(op)) &value else &self.value;
-            return finishOp(tags, ctx, value, self.requiresGrad(), UnaryBackward(op, tags), .{ ctx.allocator, self.grad_state, saved });
+            const saved: *const RawT = if (comptime unaryUsesOutput(op)) &value else &self.value;
+            return finish(tags, ctx, value, self.requiresGrad(), UnaryBackward(op, tags), .{ ctx.allocator, self.grad_state, saved });
         }
     };
 }

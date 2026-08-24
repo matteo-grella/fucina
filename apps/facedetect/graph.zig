@@ -165,15 +165,15 @@ const CNode = struct {
 /// Fold frozen BN stats (raw `[c]` tensors) into (scale, shift):
 /// scale = γ/√(var+ε), shift = β − μ·scale, computed once at compile time.
 fn bnFoldRaw(ctx: *ExecContext, g: *const RawTensor, b: *const RawTensor, m: *const RawTensor, v: *const RawTensor, eps: f32) !struct { scale: RawTensor, shift: RawTensor } {
-    var ve = try ctx.addScalar(v, eps);
+    var ve = try ctx.addScalar(.f32, v, eps);
     defer ve.deinit();
-    var sd = try ctx.sqrt(&ve);
+    var sd = try ctx.unary(.f32, .sqrt, &ve);
     defer sd.deinit();
-    var scale = try ctx.elementwise(.div, g, &sd);
+    var scale = try ctx.elementwise(.f32, .div, g, &sd);
     errdefer scale.deinit();
-    var ms = try ctx.elementwise(.mul, m, &scale);
+    var ms = try ctx.elementwise(.f32, .mul, m, &scale);
     defer ms.deinit();
-    const shift = try ctx.elementwise(.sub, b, &ms);
+    const shift = try ctx.elementwise(.f32, .sub, b, &ms);
     return .{ .scale = scale, .shift = shift };
 }
 
@@ -325,9 +325,9 @@ pub const Compiled = struct {
 
     fn applyBin(ctx: *ExecContext, kind: BinKind, a: *const RawTensor, b: *const RawTensor) !RawTensor {
         return switch (kind) {
-            .add => ctx.elementwise(.add, a, b),
-            .sub => ctx.elementwise(.sub, a, b),
-            .mul => ctx.elementwise(.mul, a, b),
+            .add => ctx.elementwise(.f32, .add, a, b),
+            .sub => ctx.elementwise(.f32, .sub, a, b),
+            .mul => ctx.elementwise(.f32, .mul, a, b),
         };
     }
 
@@ -375,8 +375,8 @@ pub const Compiled = struct {
             .prelu => |*p| {
                 return ctx.preluChannels(try act(vals, n.ins[0]), &p.alpha);
             },
-            .relu => return ctx.relu(try act(vals, n.ins[0])),
-            .sigmoid => return ctx.sigmoid(try act(vals, n.ins[0])),
+            .relu => return ctx.unary(.f32, .relu, try act(vals, n.ins[0])),
+            .sigmoid => return ctx.unary(.f32, .sigmoid, try act(vals, n.ins[0])),
             .bin => |*p| {
                 const a: *const RawTensor = if (p.w[0]) |*w| w else try act(vals, n.ins[0]);
                 const b: *const RawTensor = if (p.w[1]) |*w| w else try act(vals, n.ins[1]);

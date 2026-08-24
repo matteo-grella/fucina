@@ -84,7 +84,7 @@ pub fn PointwiseBackward(
             defer ties.deinit();
             var half_ties = try ctx.scale(.f32, &ties, 0.5);
             defer half_ties.deinit();
-            var weight = try ctx.elementwise(.add, &wins, &half_ties);
+            var weight = try ctx.elementwise(.f32, .add, &wins, &half_ties);
             defer weight.deinit();
             return tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, result_tags, &weight);
         }
@@ -1014,7 +1014,7 @@ pub const ChannelAffineBackward = struct {
             out[0] = try ctx.channelAffine(gy, &self.scale_value, null);
         }
         if (needs_grad.len > 1 and needs_grad[1]) {
-            var prod = try ctx.elementwise(.mul, gy, &self.input_value);
+            var prod = try ctx.elementwise(.f32, .mul, gy, &self.input_value);
             defer prod.deinit();
             out[1] = try ctx.reduceBroadcast(&prod, &.{self.channels});
         }

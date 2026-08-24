@@ -462,7 +462,7 @@ pub const Model = struct {
             var prefix = if (boundary)
                 try attn_out.cloneView()
             else
-                try ctx.elementwise(.add, &x, &attn_out);
+                try ctx.elementwise(.f32, .add, &x, &attn_out);
             errdefer prefix.deinit();
             x.deinit();
 
@@ -476,7 +476,7 @@ pub const Model = struct {
             };
             defer ffn_out.deinit();
 
-            x = try ctx.elementwise(.add, &prefix, &ffn_out);
+            x = try ctx.elementwise(.f32, .add, &prefix, &ffn_out);
             prefix.deinit();
         }
 
@@ -571,9 +571,9 @@ pub const Model = struct {
         defer gate.deinit();
         var gate3 = try gate.reshape(&.{ seq, heads, head_dim });
         defer gate3.deinit();
-        var gate_sig = try ctx.sigmoid(&gate3);
+        var gate_sig = try ctx.unary(.f32, .sigmoid, &gate3);
         defer gate_sig.deinit();
-        var gated = try ctx.elementwise(.mul, &o_normed, &gate_sig);
+        var gated = try ctx.elementwise(.f32, .mul, &o_normed, &gate_sig);
         defer gated.deinit();
         var flat = try gated.reshape(&.{ seq, heads * head_dim });
         defer flat.deinit();
@@ -586,7 +586,7 @@ pub const Model = struct {
         defer projected.deinit();
         var convolved = try ctx.causalDepthwiseConv1d(2, &projected, conv, 0, 1, 1, null);
         defer convolved.deinit();
-        return ctx.unary(.silu, &convolved);
+        return ctx.unary(.f32, .silu, &convolved);
     }
 
     /// Gated MLA without positional encoding: plain causal softmax attention
@@ -673,9 +673,9 @@ pub const Model = struct {
 
         var gate = try ctx.matmulTransB(h, &w.g_proj);
         defer gate.deinit();
-        var gate_sig = try ctx.sigmoid(&gate);
+        var gate_sig = try ctx.unary(.f32, .sigmoid, &gate);
         defer gate_sig.deinit();
-        var gated = try ctx.elementwise(.mul, &attn, &gate_sig);
+        var gated = try ctx.elementwise(.f32, .mul, &attn, &gate_sig);
         defer gated.deinit();
         return ctx.matmulTransB(&gated, &w.o_proj);
     }
@@ -686,7 +686,7 @@ pub const Model = struct {
         defer gate.deinit();
         var up = try ctx.matmulTransB(h, &w.up);
         defer up.deinit();
-        var act = try ctx.gated(2, .situ, &up, &gate);
+        var act = try ctx.gated(.f32, 2, .situ, &up, &gate);
         defer act.deinit();
         return ctx.matmulTransB(&act, &w.down);
     }
@@ -723,7 +723,7 @@ pub const Model = struct {
             defer gate.deinit();
             var up = try ctx.matmulTransB(&lat, &expert.w3);
             defer up.deinit();
-            var act = try ctx.gated(2, .situ, &up, &gate);
+            var act = try ctx.gated(.f32, 2, .situ, &up, &gate);
             defer act.deinit();
             out.* = try ctx.matmulTransB(&act, &expert.w2);
             built += 1;
@@ -770,7 +770,7 @@ pub const Model = struct {
 
         var shared_out = try self.denseMlp(ctx, h, &w.shared);
         defer shared_out.deinit();
-        return ctx.elementwise(.add, &up_out, &shared_out);
+        return ctx.elementwise(.f32, .add, &up_out, &shared_out);
     }
 };
 

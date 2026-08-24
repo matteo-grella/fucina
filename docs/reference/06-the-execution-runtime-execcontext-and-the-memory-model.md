@@ -180,11 +180,11 @@ test "deinit recycles transient buffers through the pool" {
     var a = try ctx.fromSlice(.f32, &.{3}, &.{ 1, 2, 3 });
     defer a.deinit();
 
-    var first = try ctx.elementwise(.add, &a, &a);
+    var first = try ctx.elementwise(.f32, .add, &a, &a);
     const first_ptr = first.dataConst().ptr;
     first.deinit(); // storage returns to the pool free list
 
-    var second = try ctx.elementwise(.add, &a, &a); // same size: the pool hands back the same address
+    var second = try ctx.elementwise(.f32, .add, &a, &a); // same size: the pool hands back the same address
     defer second.deinit();
     try std.testing.expectEqual(first_ptr, second.dataConst().ptr);
 }
@@ -452,6 +452,15 @@ modules; not part of the op surface): `dispatchRange` /
 (`PreparedTensor` is the f32 instantiation) — a borrowed-or-owned union
 whose `deinit` is a no-op on the borrowed arm, so hot paths can
 `defer prepared.deinit()` unconditionally.
+
+The dtype policy has its two helpers next to it: `prepareAs(dtype, compute,
+x)` returns `PreparedTensorOf(compute)`, the contiguous borrow (or copy) when
+the storage dtype is the compute dtype and one widening `cast` otherwise;
+`storeAs(compute, out, value)` returns `TensorOf(out)`, the value itself when
+the dtypes agree and one narrowing cast otherwise (the compute-dtype value is
+released). An exec op whose kernel is f32-only writes its body once against
+these two calls and serves f16/bf16 inputs by `dtype_mod.computeDType(.widened,
+dtype)` ([§8.3](08-data-types-storage-and-the-raw-tensor-layer-internal.md#83-float-computeoutput-dtype-policy-srcdtypezig)).
 
 **The raw op surface and its naming grammar.** Beyond these constructors,
 `ExecContext` carries the full raw op surface — one spelling per op in

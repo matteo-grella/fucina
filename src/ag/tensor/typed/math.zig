@@ -1,8 +1,8 @@
-//! Casts and forward math over the STORED dtype for the typed branches:
-//! the tag-broadcast pointwise family, the native reductions, the typed
-//! `dot`, scalar scaling, and exact integer comparison. Every op is a
+//! Casts and the typed reductions for the typed branches: the native
+//! reductions, the typed `dot`, and exact integer comparison. Every op is a
 //! no-grad constant except `to(.f32)` on a 16-bit leaf (the differentiable
-//! widen). A mixin over the tensor struct; aliased back onto it in
+//! widen). The pointwise family lives in `../elementwise.zig`, shared with
+//! the f32 branch. A mixin over the tensor struct; aliased back onto it in
 //! ../../tensor.zig, where each branch picks the entries its dtype has a
 //! kernel for (integer `div` is explicit `divTrunc`/`divFloor` in int.zig;
 //! float `maximum`/`minimum` and `compare` widen through widened.zig).
@@ -35,10 +35,6 @@ pub fn Ops(comptime Self: type) type {
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
         const requireNoGrad = plumbing.typedRequireNoGrad;
 
-        fn PointwiseOut(comptime Other: type) type {
-            return Tensor(.{ .dtype = dtype_mod.outputDType(.pointwise, dtype), .tags = pointwiseResultTags(tags, Other.axis_tags) });
-        }
-
         fn ReducedOut(comptime result_tags: anytype) type {
             return Tensor(.{ .dtype = dtype_mod.outputDType(.reduction, dtype), .tags = result_tags });
         }
@@ -61,30 +57,6 @@ pub fn Ops(comptime Self: type) type {
                 return plumbing.finishNoGrad(tags, ctx, value);
             }
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
-        }
-
-        pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.add, self, ctx, other);
-        }
-
-        pub fn sub(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.sub, self, ctx, other);
-        }
-
-        pub fn mul(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.mul, self, ctx, other);
-        }
-
-        pub fn div(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.div, self, ctx, other);
-        }
-
-        pub fn maximum(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.max, self, ctx, other);
-        }
-
-        pub fn minimum(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.min, self, ctx, other);
         }
 
         pub fn sum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !ReducedOut(removeTag(tags, tag)) {
@@ -125,17 +97,6 @@ pub fn Ops(comptime Self: type) type {
             return Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, dtype), .tags = result_tags }).fromTensor(ctx, value);
         }
 
-        pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
-            try requireNoGrad(self);
-            var value = try ctx.scale(dtype, self.asRawTensor(), scalar_value);
-            errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
-        }
-
-        pub fn divScalar(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
-            return self.scale(ctx, 1.0 / scalar_value);
-        }
-
         /// Exact comparison on an integer branch: `.bool` result (torch's
         /// comparison dtype); `other` is a same-dtype tensor or an integer
         /// scalar.
@@ -153,22 +114,6 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.compare(dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
             return BoolT.fromTensor(ctx, value);
-        }
-
-        /// Native typed pointwise over the tag-broadcast rule
-        /// (`tag_ops.pointwise` on the stored dtype).
-        fn pointwise(comptime op: PointwiseOp, self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            try requireNoGrad(self);
-            try requireNoGrad(other);
-            const Other = TensorObject(@TypeOf(other));
-            comptime {
-                if (Other.dtype != dtype) @compileError("typed pointwise requires matching dtypes; cast explicitly");
-                if (dtype == .bool) @compileError("bool tensors have no pointwise arithmetic; cast with to() first");
-            }
-            const right = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try tag_ops.pointwise(dtype, op, tags, self.asRawTensor(), ctx, Other.axis_tags, right.asRawTensor());
-            errdefer value.deinit();
-            return PointwiseOut(Other).fromTensor(ctx, value);
         }
 
         fn requireNoOptions(opts: anytype) void {

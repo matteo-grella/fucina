@@ -236,12 +236,15 @@ Autograd:
   alias line per method onto the shared mixins in `src/ag/tensor/`:
   `common.zig` (lifetime, raw access, tag/shape queries, every branch),
   `views.zig` (the dtype-generic views and data movement, every scalar
-  dtype; differentiable on f32), `autograd.zig` (leaves, gradients,
-  backward; f32 and the 16-bit leaves), the f32-only per-domain mixins in
-  `src/ag/tensor/float/` (elementwise, matmul, reduce, shape, ...), and
-  the typed-branch mixins in `src/ag/tensor/typed/` (`creation.zig`,
-  `math.zig` over the stored dtype, `int.zig`, and the f16/bf16
-  `widened.zig` family);
+  dtype; differentiable on f32), `elementwise.zig` (the dtype-generic
+  pointwise family: f32 differentiable, f16/bf16 constants through the
+  `widened` policy, the integer arithmetic subset), `autograd.zig`
+  (leaves, gradients, backward; f32 and the 16-bit leaves), the f32-only
+  per-domain mixins in `src/ag/tensor/float/` (matmul, reduce, shape,
+  norm, ...), and the typed-branch mixins in `src/ag/tensor/typed/`
+  (`creation.zig`, `math.zig` for the typed reductions and casts,
+  `int.zig`, and the f16/bf16 `widened.zig` family for the ops whose exec
+  entry is still f32-only);
   `src/ag/tensor/plumbing.zig`: shared result-finishing and dispatch
   helpers. The `src/ag/tensor/` files never import the facade back — they
   receive it as a comptime parameter (`Self.ag_root` / `Mod(ag_tensor)`),

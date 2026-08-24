@@ -121,11 +121,11 @@ test "exec context reuses released output buffers" {
     var b = try ctx.fromSlice(.f32, &.{3}, &.{ 4, 5, 6 });
     defer b.deinit();
 
-    var first = try ctx.elementwise(.add, &a, &b);
+    var first = try ctx.elementwise(.f32, .add, &a, &b);
     const first_buffer = first.buffer;
     first.deinit();
 
-    var second = try ctx.elementwise(.add, &a, &b);
+    var second = try ctx.elementwise(.f32, .add, &a, &b);
     defer second.deinit();
 
     try std.testing.expect(second.buffer == first_buffer);
@@ -145,7 +145,7 @@ test "exec context wraps borrowed ranked slices without copying" {
     values[3] = 40;
     try std.testing.expectEqual(@as(f32, 40), x.dataConst()[3]);
 
-    var doubled = try ctx.elementwise(.add, &x, &x);
+    var doubled = try ctx.elementwise(.f32, .add, &x, &x);
     defer doubled.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 2, 4, 6, 80 }, doubled.dataConst());
 }
@@ -162,7 +162,7 @@ test "buffer pool reuses bucket-rounded buffers across many small temporaries" {
     defer b.deinit();
 
     for (0..100) |_| {
-        var y = try ctx.elementwise(.add, &a, &b);
+        var y = try ctx.elementwise(.f32, .add, &a, &b);
         try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9 }, y.dataConst());
         y.deinit();
     }

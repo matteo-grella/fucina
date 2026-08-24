@@ -317,7 +317,7 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer g.deinit();
     var gg = try g.splitGated(&ctx, .glu, .d, .d);
     defer gg.deinit();
-    var gg_want = try ctx.splitGlu(2, g.asRawTensor(), 1);
+    var gg_want = try ctx.splitGated(.f32, 2, .glu, g.asRawTensor(), 1);
     defer gg_want.deinit();
     try std.testing.expectEqualSlices(f32, gg_want.dataConst(), gg.asRawTensor().dataConst());
 
@@ -337,12 +337,12 @@ test "public Tensor rank/axis ops match the ctx *AxisRank kernels" {
     defer u.deinit();
     var re = try u.relu(&ctx);
     defer re.deinit();
-    var re_want = try ctx.relu(u.asRawTensor());
+    var re_want = try ctx.unary(.f32, .relu, u.asRawTensor());
     defer re_want.deinit();
     try std.testing.expectEqualSlices(f32, re_want.dataConst(), re.asRawTensor().dataConst());
     var si = try u.silu(&ctx);
     defer si.deinit();
-    var si_want = try ctx.silu(u.asRawTensor());
+    var si_want = try ctx.unary(.f32, .silu, u.asRawTensor());
     defer si_want.deinit();
     for (si_want.dataConst(), si.asRawTensor().dataConst()) |want, got| {
         try std.testing.expectApproxEqAbs(want, got, 1e-6);

@@ -229,7 +229,7 @@ fn runRawSwiglu(n: usize, iterations: usize) !Result {
     fillPattern(&gate, 4);
 
     for (0..4) |_| {
-        var y = try ctx.swiglu(1, &a, &gate);
+        var y = try ctx.gated(.f32, 1, .swiglu, &a, &gate);
         y.deinit();
     }
 
@@ -237,7 +237,7 @@ fn runRawSwiglu(n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.swiglu(1, &a, &gate);
+        var y = try ctx.gated(.f32, 1, .swiglu, &a, &gate);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }
@@ -297,7 +297,7 @@ fn runRawClamp(n: usize, iterations: usize) !Result {
     fillPattern(&x, 11);
 
     for (0..4) |_| {
-        var y = try ctx.clamp(&x, -0.05, 0.05);
+        var y = try ctx.clamp(.f32, &x, -0.05, 0.05);
         y.deinit();
     }
 
@@ -305,7 +305,7 @@ fn runRawClamp(n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.clamp(&x, -0.05, 0.05);
+        var y = try ctx.clamp(.f32, &x, -0.05, 0.05);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

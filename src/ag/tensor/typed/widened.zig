@@ -1,10 +1,14 @@
-//! The widened forward family of the 16-bit branches (f16/bf16): ops with
-//! no native typed kernel. The input widens to f32, the f32 exec kernel
-//! runs, and the result narrows ONCE on store: f32 accumulation with a
-//! single final round, the dtype policy in docs/reference/08, §8.3. f64 is
-//! excluded at comptime (f64 math must stay f64; rounding it through f32
-//! would silently lose precision). Every op is a no-grad constant. A mixin
-//! over the tensor struct; aliased back onto it in ../../tensor.zig.
+//! The widened forward family of the 16-bit branches (f16/bf16): the ops
+//! whose exec entry is still f32-only (softmax, the norms, the scans, the
+//! comparison, pad, einsum, the widened reductions). The input widens to
+//! f32, the f32 exec kernel runs, and the result narrows ONCE on store: f32
+//! accumulation with a single final round, the dtype policy in
+//! docs/reference/08, §8.3. The elementwise family no longer lives here: its
+//! exec entries take the dtype and apply the same policy themselves, so the
+//! 16-bit branches share `../elementwise.zig` with f32. f64 is excluded at
+//! comptime (f64 math must stay f64; rounding it through f32 would silently
+//! lose precision). Every op is a no-grad constant. A mixin over the tensor
+//! struct; aliased back onto it in ../../tensor.zig.
 
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
@@ -75,129 +79,6 @@ pub fn Ops(comptime Self: type) type {
             return Same(result_tags).fromTensor(ctx, value);
         }
 
-        pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
-            var wide = try widen(self, ctx, "unary");
-            defer wide.deinit();
-            var wide_value = try ctx.unary(op, &wide);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        fn Unary(comptime op: UnaryOp) type {
-            return struct {
-                pub fn call(self: *const Self, ctx: *ExecContext) !Self {
-                    return self.unary(ctx, op);
-                }
-            };
-        }
-
-        pub const relu = Unary(.relu).call;
-        pub const exp = Unary(.exp).call;
-        pub const sqrt = Unary(.sqrt).call;
-        pub const rsqrt = Unary(.rsqrt).call;
-        pub const sigmoid = Unary(.sigmoid).call;
-        pub const silu = Unary(.silu).call;
-        pub const log = Unary(.log).call;
-        pub const log1p = Unary(.log1p).call;
-        pub const neg = Unary(.neg).call;
-        pub const abs = Unary(.abs).call;
-        pub const sin = Unary(.sin).call;
-        pub const cos = Unary(.cos).call;
-        pub const tanh = Unary(.tanh).call;
-        pub const fastTanh = Unary(.fast_tanh).call;
-        pub const softcap30 = Unary(.softcap_30).call;
-        pub const softcap15 = Unary(.softcap_15).call;
-        pub const gelu = Unary(.gelu).call;
-        pub const quickGelu = Unary(.quick_gelu).call;
-        pub const elu = Unary(.elu).call;
-        pub const geluErf = Unary(.gelu_erf).call;
-        pub const erf = Unary(.erf).call;
-        pub const floor = Unary(.floor).call;
-        pub const ceil = Unary(.ceil).call;
-        pub const round = Unary(.round).call;
-        pub const sign = Unary(.sign).call;
-        pub const reciprocal = Unary(.reciprocal).call;
-
-        pub fn leakyRelu(self: *const Self, ctx: *ExecContext, negative_slope: f32) !Self {
-            var wide = try widen(self, ctx, "leakyRelu");
-            defer wide.deinit();
-            var wide_value = try ctx.leakyRelu(&wide, negative_slope);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        pub fn clamp(self: *const Self, ctx: *ExecContext, min_value: f32, max_value: f32) !Self {
-            var wide = try widen(self, ctx, "clamp");
-            defer wide.deinit();
-            var wide_value = try ctx.clamp(&wide, min_value, max_value);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        pub fn addScalar(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            var wide = try widen(self, ctx, "addScalar");
-            defer wide.deinit();
-            var wide_value = try ctx.addScalar(&wide, scalar_value);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        pub fn subScalar(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            return self.addScalar(ctx, -scalar_value);
-        }
-
-        pub fn powScalar(self: *const Self, ctx: *ExecContext, exponent: f32) !Self {
-            var wide = try widen(self, ctx, "powScalar");
-            defer wide.deinit();
-            var wide_value = try ctx.powScalar(&wide, exponent);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        /// Widened binary pointwise (`maximum`/`minimum`): both operands
-        /// widen, the f32 tag-broadcast kernel runs, the result narrows.
-        fn pointwise(comptime op: PointwiseOp, self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            const Other = TensorObject(@TypeOf(other));
-            var wide_left = try widen(self, ctx, "maximum/minimum");
-            defer wide_left.deinit();
-            var wide_right = try widenOther(other, ctx, "pointwise");
-            defer wide_right.deinit();
-            var wide_value = try tag_ops.pointwise(.f32, op, tags, &wide_left, ctx, Other.axis_tags, &wide_right);
-            defer wide_value.deinit();
-            return narrow(pointwiseResultTags(tags, Other.axis_tags), ctx, &wide_value);
-        }
-
-        pub fn maximum(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.max, self, ctx, other);
-        }
-
-        pub fn minimum(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return pointwise(.min, self, ctx, other);
-        }
-
-        pub fn gated(self: *const Self, ctx: *ExecContext, other: anytype, comptime op: GatedOp) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            const Other = TensorObject(@TypeOf(other));
-            var wide_left = try widen(self, ctx, "gated");
-            defer wide_left.deinit();
-            var wide_right = try widenOther(other, ctx, "gated");
-            defer wide_right.deinit();
-            var wide_value = try tag_ops.gatedPointwise(op, tags, &wide_left, ctx, Other.axis_tags, &wide_right);
-            defer wide_value.deinit();
-            return narrow(pointwiseResultTags(tags, Other.axis_tags), ctx, &wide_value);
-        }
-
-        pub fn glu(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return self.gated(ctx, other, .glu);
-        }
-
-        pub fn swiglu(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return self.gated(ctx, other, .swiglu);
-        }
-
-        pub fn geglu(self: *const Self, ctx: *ExecContext, other: anytype) !PointwiseOut(TensorObject(@TypeOf(other))) {
-            return self.gated(ctx, other, .geglu);
-        }
-
         pub fn softmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag, options: anytype) !Self {
             comptime requirePlainOptions(options, "typed softmax supports only plain .{} options; cast to f32 for the ext path (mask/sinks/causal/scale)");
             var wide = try widen(self, ctx, "softmax");
@@ -254,30 +135,6 @@ pub fn Ops(comptime Self: type) type {
             var wide = try widen(self, ctx, "cumprod");
             defer wide.deinit();
             var wide_value = try ctx.cumprod(tag_rank, &wide, Self.axis(tag));
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        pub fn where(self: *const Self, ctx: *ExecContext, cond: anytype, other: anytype) !Self {
-            const Cond = TensorObject(@TypeOf(cond));
-            comptime if (Cond.dtype != .bool and Cond.dtype != dtype) @compileError("typed where takes a .bool or same-dtype condition; cast explicitly");
-            const cond_ptr = tensorObjectPtrFrom(@TypeOf(cond), &cond);
-            var wide = try widen(self, ctx, "where");
-            defer wide.deinit();
-            var wide_other = try widenOther(other, ctx, "where");
-            defer wide_other.deinit();
-            var wide_value = try ctx.where(Cond.dtype, &wide, cond_ptr.asRawTensor(), &wide_other);
-            defer wide_value.deinit();
-            return narrow(tags, ctx, &wide_value);
-        }
-
-        pub fn maskedFill(self: *const Self, ctx: *ExecContext, mask: anytype, value: f32) !Self {
-            const Mask = TensorObject(@TypeOf(mask));
-            comptime if (Mask.dtype != .bool and Mask.dtype != dtype) @compileError("typed maskedFill takes a .bool or same-dtype mask; cast explicitly");
-            const mask_ptr = tensorObjectPtrFrom(@TypeOf(mask), &mask);
-            var wide = try widen(self, ctx, "maskedFill");
-            defer wide.deinit();
-            var wide_value = try ctx.maskedFill(Mask.dtype, &wide, mask_ptr.asRawTensor(), value);
             defer wide_value.deinit();
             return narrow(tags, ctx, &wide_value);
         }

@@ -48,8 +48,13 @@ pub const DType = enum {
     nvfp4,
 };
 
+/// The op classes the dtype policy distinguishes. `pointwise` ops have a
+/// kernel per float dtype; `widened` ops have an f32 kernel only (and f64
+/// where written), so 16-bit inputs widen and the result narrows once on
+/// store: f32 accumulation with a single final round.
 pub const FloatOp = enum {
     pointwise,
+    widened,
     reduction,
     matmul,
 };
@@ -526,7 +531,7 @@ pub fn computeDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
     // Integer/bool policy: pointwise math runs in the input dtype
     // (wrapping two's complement); reductions accumulate in i64.
     if (isScalarIntegerOrBool(input_dtype)) return switch (op) {
-        .pointwise, .matmul => input_dtype,
+        .pointwise, .widened, .matmul => input_dtype,
         .reduction => .i64,
     };
     if (!supportsForwardFloatMath(input_dtype)) return input_dtype;
@@ -535,7 +540,7 @@ pub fn computeDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
             .bf16 => .f32,
             else => input_dtype,
         },
-        .reduction, .matmul => switch (input_dtype) {
+        .widened, .reduction, .matmul => switch (input_dtype) {
             .f16, .bf16, .f32 => .f32,
             .f64 => .f64,
             else => unreachable,
@@ -547,12 +552,12 @@ pub fn outputDType(comptime op: FloatOp, comptime input_dtype: DType) DType {
     // Integer/bool reductions RETURN i64 (torch's integer-sum dtype);
     // pointwise keeps the input dtype.
     if (isScalarIntegerOrBool(input_dtype)) return switch (op) {
-        .pointwise, .matmul => input_dtype,
+        .pointwise, .widened, .matmul => input_dtype,
         .reduction => .i64,
     };
     if (!supportsForwardFloatMath(input_dtype)) return input_dtype;
     return switch (op) {
-        .pointwise, .matmul => input_dtype,
+        .pointwise, .widened, .matmul => input_dtype,
         .reduction => switch (input_dtype) {
             .f16, .bf16 => .f32,
             .f32 => .f32,

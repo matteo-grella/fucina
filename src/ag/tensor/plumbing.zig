@@ -47,7 +47,34 @@ pub fn Mod(comptime ag_tensor: type) type {
     return struct {
         const Tensor = ag_tensor.Tensor;
 
-        pub fn pointwise(comptime op: PointwiseOp, self: anytype, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        /// The result of a binary op between `Left` and `Right`: the tag
+        /// broadcast rule over the left operand's dtype (the operands must
+        /// share it; cast explicitly).
+        fn BinaryOut(comptime Left: type, comptime Right: type) type {
+            const left_dtype = TensorObject(Left).dtype;
+            if (TensorObject(Right).dtype != left_dtype) @compileError("pointwise operands must share a dtype; cast explicitly with to()");
+            if (left_dtype == .bool) @compileError("bool tensors have no pointwise arithmetic; cast with to() first");
+            return Tensor(.{ .dtype = left_dtype, .tags = pointwiseResultTags(TensorObject(Left).axis_tags, TensorObject(Right).axis_tags) });
+        }
+
+        /// The dtype-generic tail of a binary op: f32 builds the VJP
+        /// record; a typed result is a caller-owned constant and a
+        /// grad-requiring operand is rejected.
+        /// The operand's gradient state, null on the branches without one.
+        fn gradStateOf(t: anytype) ?*GradState {
+            if (comptime @hasField(@TypeOf(t.*), "grad_state")) return t.grad_state;
+            return null;
+        }
+
+        fn finishBinary(comptime OutT: type, ctx: *ExecContext, value: anytype, wants_grad: bool, comptime Backward: type, create_args: anytype) !OutT {
+            if (comptime OutT.dtype == .f32) return finishOp(OutT.axis_tags, ctx, value, wants_grad, Backward, create_args);
+            if (wants_grad) return error.UnsupportedGradient;
+            return OutT.fromTensor(ctx, value);
+        }
+
+        pub fn pointwise(comptime op: PointwiseOp, self: anytype, ctx: *ExecContext, other: anytype) !BinaryOut(@TypeOf(self), @TypeOf(other)) {
+            const OutT = BinaryOut(@TypeOf(self), @TypeOf(other));
+            const dtype = OutT.dtype;
             const SelfTensor = TensorObject(@TypeOf(self));
             const left_tags = SelfTensor.axis_tags;
             const Other = TensorObject(@TypeOf(other));
@@ -57,29 +84,32 @@ pub fn Mod(comptime ag_tensor: type) type {
             const result_tags = pointwiseResultTags(left_tags, right_tags);
             const left_tensor = left.asRawTensor();
             const right_tensor = right.asRawTensor();
-            _ = try pointwiseShape(.f32, result_tags, left_tags, left_tensor, right_tags, right_tensor);
+            _ = try pointwiseShape(dtype, result_tags, left_tags, left_tensor, right_tags, right_tensor);
+            const wants_grad = left.requiresGrad() or right.requiresGrad();
 
             if (comptime tagsEqual(left_tags, right_tags)) {
                 if (std.mem.eql(usize, left_tensor.shape.slice(), right_tensor.shape.slice())) {
                     var value = switch (op) {
-                        .add => try ctx.add(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .sub => try ctx.sub(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .mul => try ctx.mul(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .div => try ctx.div(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .max => try ctx.max(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .min => try ctx.min(.f32, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .add => try ctx.add(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .sub => try ctx.sub(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .mul => try ctx.mul(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .div => try ctx.div(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .max => try ctx.max(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
+                        .min => try ctx.min(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
                     };
                     errdefer value.deinit();
-                    return finishOp(result_tags, ctx, value, left.requiresGrad() or right.requiresGrad(), PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, left.grad_state, right.grad_state, left_tensor, right_tensor });
+                    return finishBinary(OutT, ctx, value, wants_grad, PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor });
                 }
             }
 
-            var value = try tag_ops.pointwise(.f32, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
+            var value = try tag_ops.pointwise(dtype, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, left.requiresGrad() or right.requiresGrad(), PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, left.grad_state, right.grad_state, left_tensor, right_tensor });
+            return finishBinary(OutT, ctx, value, wants_grad, PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor });
         }
 
-        pub fn gatedPointwise(comptime op: GatedOp, self: anytype, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(TensorObject(@TypeOf(self)).axis_tags, TensorObject(@TypeOf(other)).axis_tags)) {
+        pub fn gatedPointwise(comptime op: GatedOp, self: anytype, ctx: *ExecContext, other: anytype) !BinaryOut(@TypeOf(self), @TypeOf(other)) {
+            const OutT = BinaryOut(@TypeOf(self), @TypeOf(other));
+            const dtype = OutT.dtype;
             const SelfTensor = TensorObject(@TypeOf(self));
             const left_tags = SelfTensor.axis_tags;
             const Other = TensorObject(@TypeOf(other));
@@ -89,19 +119,20 @@ pub fn Mod(comptime ag_tensor: type) type {
             const result_tags = pointwiseResultTags(left_tags, right_tags);
             const left_tensor = left.asRawTensor();
             const right_tensor = right.asRawTensor();
-            _ = try pointwiseShape(.f32, result_tags, left_tags, left_tensor, right_tags, right_tensor);
+            _ = try pointwiseShape(dtype, result_tags, left_tags, left_tensor, right_tags, right_tensor);
+            const wants_grad = left.requiresGrad() or right.requiresGrad();
 
             if (comptime tagsEqual(left_tags, right_tags)) {
                 if (std.mem.eql(usize, left_tensor.shape.slice(), right_tensor.shape.slice())) {
-                    var value = try ctx.gated(rawRank(result_tags.len), op, left_tensor, right_tensor);
+                    var value = try ctx.gated(dtype, rawRank(result_tags.len), op, left_tensor, right_tensor);
                     errdefer value.deinit();
-                    return finishOp(result_tags, ctx, value, left.requiresGrad() or right.requiresGrad(), GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, left.grad_state, right.grad_state, left_tensor, right_tensor, &value });
+                    return finishBinary(OutT, ctx, value, wants_grad, GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor, &value });
                 }
             }
 
-            var value = try tag_ops.gatedPointwise(op, left_tags, left_tensor, ctx, right_tags, right_tensor);
+            var value = try tag_ops.gatedPointwise(dtype, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, left.requiresGrad() or right.requiresGrad(), GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, left.grad_state, right.grad_state, left_tensor, right_tensor, &value });
+            return finishBinary(OutT, ctx, value, wants_grad, GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor, &value });
         }
 
         /// Per-position {max, sum_exp} buffer for the stats-saving forwards

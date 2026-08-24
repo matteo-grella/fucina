@@ -97,7 +97,7 @@ fn benchAxis(
 
     timer.reset();
     for (0..iterations) |_| {
-        var zeroed = try ctx.maskedFill(.bool, &x, &drop, 0);
+        var zeroed = try ctx.maskedFill(.f32, .bool, &x, &drop, 0);
         var out = try ctx.sumAxis(.f32, 2, &zeroed, axis);
         out.deinit();
         zeroed.deinit();

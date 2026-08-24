@@ -116,6 +116,17 @@ fn assertAliased(comptime Self: type, comptime Mixin: type, comptime except: []c
     }
 }
 
+/// The named `pub` decls of `Mixin` are aliased on `Self`: the positive
+/// form for a branch that takes a small subset of a mixin.
+fn assertAliasedSubset(comptime Self: type, comptime Mixin: type, comptime names: []const []const u8) void {
+    comptime {
+        for (names) |name| {
+            if (!@hasDecl(Mixin, name)) @compileError(@typeName(Mixin) ++ " has no decl " ++ name);
+            if (!@hasDecl(Self, name)) @compileError(@typeName(Self) ++ " does not alias " ++ @typeName(Mixin) ++ "." ++ name);
+        }
+    }
+}
+
 /// The differentiable f32 branch.
 fn FloatTensor(comptime tags: anytype) type {
     comptime validateSpecTags(tags);
@@ -239,7 +250,7 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const gegluQuantDotPacked = matmul_ops.gegluQuantDotPacked;
 
         // ---- elementwise: pointwise arithmetic, activations, masks, casts ----
-        const elementwise_ops = @import("tensor/float/elementwise.zig").Ops(Self);
+        const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
         pub const addAxisVectorInPlace = elementwise_ops.addAxisVectorInPlace;
         pub const addAxisVectorUnaryInPlace = elementwise_ops.addAxisVectorUnaryInPlace;
         pub const addScaledInPlace = elementwise_ops.addScaledInPlace;
@@ -558,57 +569,66 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         // ---- math over the stored dtype (every typed float dtype) ----
         const math_ops = @import("tensor/typed/math.zig").Ops(Self);
         pub const to = math_ops.to;
-        pub const add = math_ops.add;
-        pub const sub = math_ops.sub;
-        pub const mul = math_ops.mul;
-        pub const div = math_ops.div;
         pub const sum = math_ops.sum;
         pub const mean = math_ops.mean;
         pub const sumAll = math_ops.sumAll;
         pub const dot = math_ops.dot;
-        pub const scale = math_ops.scale;
-        pub const divScalar = math_ops.divScalar;
+
+        // ---- elementwise: the shared float mixin (f32 kernels or typed kernels per the dtype policy; constants here) ----
+        const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
+        pub const add = elementwise_ops.add;
+        pub const sub = elementwise_ops.sub;
+        pub const mul = elementwise_ops.mul;
+        pub const div = elementwise_ops.div;
+        pub const scale = elementwise_ops.scale;
+        pub const divScalar = elementwise_ops.divScalar;
+        pub const addScalar = elementwise_ops.addScalar;
+        pub const subScalar = elementwise_ops.subScalar;
+        pub const powScalar = elementwise_ops.powScalar;
+        pub const maximum = elementwise_ops.maximum;
+        pub const minimum = elementwise_ops.minimum;
+        pub const where = elementwise_ops.where;
+        pub const maskedFill = elementwise_ops.maskedFill;
+        pub const gated = elementwise_ops.gated;
+        pub const glu = elementwise_ops.glu;
+        pub const swiglu = elementwise_ops.swiglu;
+        pub const geglu = elementwise_ops.geglu;
+        pub const situ = elementwise_ops.situ;
+        pub const splitGated = elementwise_ops.splitGated;
+        pub const unary = elementwise_ops.unary;
+        pub const relu = elementwise_ops.relu;
+        pub const leakyRelu = elementwise_ops.leakyRelu;
+        pub const exp = elementwise_ops.exp;
+        pub const sqrt = elementwise_ops.sqrt;
+        pub const rsqrt = elementwise_ops.rsqrt;
+        pub const sigmoid = elementwise_ops.sigmoid;
+        pub const silu = elementwise_ops.silu;
+        pub const log = elementwise_ops.log;
+        pub const log1p = elementwise_ops.log1p;
+        pub const neg = elementwise_ops.neg;
+        pub const abs = elementwise_ops.abs;
+        pub const sin = elementwise_ops.sin;
+        pub const cos = elementwise_ops.cos;
+        pub const tanh = elementwise_ops.tanh;
+        pub const fastTanh = elementwise_ops.fastTanh;
+        pub const softcap30 = elementwise_ops.softcap30;
+        pub const softcap15 = elementwise_ops.softcap15;
+        pub const gelu = elementwise_ops.gelu;
+        pub const quickGelu = elementwise_ops.quickGelu;
+        pub const elu = elementwise_ops.elu;
+        pub const geluErf = elementwise_ops.geluErf;
+        pub const erf = elementwise_ops.erf;
+        pub const floor = elementwise_ops.floor;
+        pub const ceil = elementwise_ops.ceil;
+        pub const round = elementwise_ops.round;
+        pub const sign = elementwise_ops.sign;
+        pub const reciprocal = elementwise_ops.reciprocal;
+        pub const clamp = elementwise_ops.clamp;
+        pub const clampMin = elementwise_ops.clampMin;
+        pub const clampMax = elementwise_ops.clampMax;
 
         // ---- widened forward math (f16/bf16 only: f32 compute, one final round) ----
         const widened_ops = @import("tensor/typed/widened.zig").Ops(Self);
-        pub const unary = widened_ops.unary;
-        pub const relu = widened_ops.relu;
-        pub const exp = widened_ops.exp;
-        pub const sqrt = widened_ops.sqrt;
-        pub const rsqrt = widened_ops.rsqrt;
-        pub const sigmoid = widened_ops.sigmoid;
-        pub const silu = widened_ops.silu;
-        pub const log = widened_ops.log;
-        pub const log1p = widened_ops.log1p;
-        pub const neg = widened_ops.neg;
-        pub const abs = widened_ops.abs;
-        pub const sin = widened_ops.sin;
-        pub const cos = widened_ops.cos;
-        pub const tanh = widened_ops.tanh;
-        pub const fastTanh = widened_ops.fastTanh;
-        pub const softcap30 = widened_ops.softcap30;
-        pub const softcap15 = widened_ops.softcap15;
-        pub const gelu = widened_ops.gelu;
-        pub const quickGelu = widened_ops.quickGelu;
-        pub const elu = widened_ops.elu;
-        pub const geluErf = widened_ops.geluErf;
-        pub const erf = widened_ops.erf;
-        pub const floor = widened_ops.floor;
-        pub const ceil = widened_ops.ceil;
-        pub const round = widened_ops.round;
-        pub const sign = widened_ops.sign;
-        pub const reciprocal = widened_ops.reciprocal;
-        pub const leakyRelu = widened_ops.leakyRelu;
-        pub const clamp = widened_ops.clamp;
-        pub const addScalar = widened_ops.addScalar;
-        pub const subScalar = widened_ops.subScalar;
-        pub const powScalar = widened_ops.powScalar;
-        pub const maximum = widened_ops.maximum;
-        pub const minimum = widened_ops.minimum;
-        pub const gated = widened_ops.gated;
-        pub const glu = widened_ops.glu;
-        pub const swiglu = widened_ops.swiglu;
-        pub const geglu = widened_ops.geglu;
         pub const softmax = widened_ops.softmax;
         pub const logSoftmax = widened_ops.logSoftmax;
         pub const rmsNorm = widened_ops.rmsNorm;
@@ -616,8 +636,6 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const layerNorm = widened_ops.layerNorm;
         pub const cumsum = widened_ops.cumsum;
         pub const cumprod = widened_ops.cumprod;
-        pub const where = widened_ops.where;
-        pub const maskedFill = widened_ops.maskedFill;
         pub const compare = widened_ops.compare;
         pub const pad = widened_ops.pad;
         pub const einsum = widened_ops.einsum;
@@ -640,6 +658,11 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             // Float comparison widens through f32 (widened.compare).
             assertAliased(Self, math_ops, &.{"compare"});
             assertAliased(Self, widened_ops, &.{});
+            // The rest of the elementwise mixin is f32-only: in-place updates on
+            // f32 storage, the graph-side cast and consuming ops, dropout, the
+            // channel ops, the elemental escape hatch and its `pow`, and the
+            // comparison family (`compare` widens through f32 here).
+            assertAliased(Self, elementwise_ops, &.{ "addAxisVectorInPlace", "addAxisVectorUnaryInPlace", "addScaledInPlace", "biasAdd", "compare", "logicalAnd", "logicalOr", "logicalXor", "logicalNot", "isnan", "isinf", "isfinite", "prelu", "channelAffine", "to", "takeAddNoGrad", "takeScaleNoGrad", "dropout", "snake", "elementalUnary", "elementalBinary", "pow" });
         }
     };
 }
@@ -730,14 +753,17 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         // the counting `sum`/`sumAll` apply. ----
         const math_ops = @import("tensor/typed/math.zig").Ops(Self);
         pub const to = math_ops.to;
-        pub const add = math_ops.add;
-        pub const sub = math_ops.sub;
-        pub const mul = math_ops.mul;
-        pub const maximum = math_ops.maximum;
-        pub const minimum = math_ops.minimum;
         pub const sum = math_ops.sum;
         pub const sumAll = math_ops.sumAll;
         pub const compare = math_ops.compare;
+        // The integer arithmetic subset of the shared elementwise mixin
+        // (wrapping two's complement; `div` is explicit, see intDiv).
+        const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
+        pub const add = elementwise_ops.add;
+        pub const sub = elementwise_ops.sub;
+        pub const mul = elementwise_ops.mul;
+        pub const maximum = elementwise_ops.maximum;
+        pub const minimum = elementwise_ops.minimum;
         const int_ops = @import("tensor/typed/int.zig").Ops(Self);
         pub const divTrunc = int_ops.divTrunc;
         pub const divFloor = int_ops.divFloor;
@@ -759,7 +785,8 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
             assertAliased(Self, creation_ops, &.{});
             // Integer division is explicit (divTrunc/divFloor); mean, dot, and
             // scaling are float ops.
-            assertAliased(Self, math_ops, &.{ "div", "mean", "dot", "scale", "divScalar" });
+            assertAliased(Self, math_ops, &.{ "mean", "dot" });
+            assertAliasedSubset(Self, elementwise_ops, &.{ "add", "sub", "mul", "maximum", "minimum" });
             assertAliased(Self, int_ops, &.{});
         }
     };
