@@ -1,6 +1,6 @@
 # shine-train — train the SHINE hypernetwork (LoRA or cartridge readout)
 
-Zig-native training for the SHINE generator ([§13.12](../../docs/reference/13-the-model-stack-fucina_models.md#1312-shine-srcmodelsqwen3shinezig)) over a
+Zig-native training for the SHINE generator ([§13.12](../../docs/reference/13-the-model-stack-fucina_models.md#1312-shine-srcmodelsresearchshineshinezig)) over a
 frozen dense qwen3 base: the Meta-LoRA, the M2P metanetwork, and the
 positional embeddings learn to compile a context into generated
 parameters. `--rows N` trains the **cartridge readout** (context -> a

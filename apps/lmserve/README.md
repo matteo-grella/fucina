@@ -256,7 +256,7 @@ knowledge with zero prompt tokens
 - `--shine-fleet DIR` serves a per-document SHINE adapter fleet (from
   `zig build qwen3 -- <base> --shine <shine.gguf> --shine-docs DOCS
   --shine-fleet-build DIR`;
-  [§13.12](../../docs/reference/13-the-model-stack-fucina_models.md#1312-shine-srcmodelsqwen3shinezig)): each request's user
+  [§13.12](../../docs/reference/13-the-model-stack-fucina_models.md#1312-shine-srcmodelsresearchshineshinezig)): each request's user
   messages pick ONE document via the same cosine index (`--rag-chunks`
   scanned) and that document's saved adapter decodes the reply. The
   knowledge rides in the adapter weights: zero context tokens, zero
