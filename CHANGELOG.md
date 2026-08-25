@@ -322,6 +322,14 @@ this point; earlier history is `git log`.
   from 24.7 GB to 23.6 GB with the step time unchanged. Same freelist
   semantics (a block serves its own class only, nothing is released
   before `deinit`).
+- Autograd releases an interior gradient as soon as the node's own backward
+  has consumed it (`GradState.pass_output` marks the outputs a pass was
+  asked for; their gradients and the leaves' stay). The backward pass no
+  longer holds a second copy of the forward until the exec scope closes:
+  on the Qwen3-0.6B Q8_0 LoRA step at 1280 tokens the maximum resident
+  memory goes from 23.6 GB to 15.6 GB with identical losses and the step
+  time unchanged. Reading an interior gradient after `backward` now
+  requires passing that tensor as an output of the pass.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

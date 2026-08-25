@@ -274,15 +274,21 @@ in-flight tasks, and returns that error. Re-runnability restores
 failure remain accumulated — call `zeroGrad` on the leaves before retrying
 if exact values matter.
 
-**One backward per graph.** Gradients accumulate in every `GradState` they
-touch, including interior op results, and a completed pass leaves them
-there. Re-running over the *same* retained graph would therefore compound:
-interior states would receive new contributions on top of their previous
-gradients, which then flow downstream multiplied (two passes over
-`loss = sum(x·x)` would yield `3·(2x)`, not `2·(2x)`). A completed pass
-therefore marks its outputs consumed, and a repeated
-`backward`/`backwardWithGrad` over them fails with
-`error.BackwardAlreadyRun` before any scheduling state is installed —
+**Interior gradients live only as long as they are needed.** Gradients
+accumulate in every `GradState` they touch, but an interior result's
+gradient is released as soon as that result's own backward has consumed
+it: the backward pass holds a moving window of gradients, not a second copy
+of the forward (on the Qwen3-0.6B LoRA step at 1280 tokens this is the
+difference between a 23.6 GB and a 15.6 GB peak). What a completed pass
+leaves behind are the gradients of its leaves (for the optimizer) and of
+the outputs it was asked for (`backward` over several outputs keeps each
+output's gradient readable, including an output that is interior to
+another). To read any other interior gradient, pass that tensor as an
+additional output.
+
+**One backward per graph.** A completed pass marks its outputs consumed,
+and a repeated `backward`/`backwardWithGrad` over them fails with
+`error.BackwardAlreadyRun` before any scheduling state is installed;
 `zeroGrad` resets gradients, not the consumed graph. Only a *completed*
 pass consumes: the failed-seeding retry above stays re-runnable, and a leaf
 output (a bare variable) has no graph to consume and is never marked. The

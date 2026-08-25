@@ -165,6 +165,11 @@ pub const GradState = struct {
     /// consume. Touched only on the thread driving the pass, never from
     /// pool tasks, so it needs no synchronization.
     backward_done: bool = false,
+    /// Set on the outputs a backward pass was asked for. Their gradients
+    /// are results and stay readable after the pass; every other interior
+    /// gradient is released as soon as its own backward has consumed it
+    /// (leaves have no backward and keep theirs for the optimizer).
+    pass_output: bool = false,
 
     pub fn leaf(allocator: Allocator) !*GradState {
         const self = try allocator.create(GradState);
@@ -418,6 +423,12 @@ pub const GradState = struct {
             }
         }
 
+        // An interior gradient has no consumer once this node's backward
+        // has run: release it here instead of at scope close, so the
+        // backward's memory is a moving window rather than a second copy
+        // of the forward. Pass outputs keep theirs (they are results).
+        if (!self.pass_output) self.zeroGrad();
+
         engine.scheduleReadyBatch(ready[0..ready_len]);
         if (first_error) |err| return err;
         if (missing_backward_gradient) return AgError.MissingBackwardGradient;
@@ -621,6 +632,7 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
         if (output.backward_done) return AgError.BackwardAlreadyRun;
         seed.* = try output.prepareOutputSeed(ctx, output_value);
     }
+    for (outputs) |output| output.pass_output = true;
 
     for (outputs) |output| {
         output.prepareBackwardPass();
