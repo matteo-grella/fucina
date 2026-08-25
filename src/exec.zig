@@ -53,6 +53,7 @@ pub const LayoutClass = enum {
 
 pub const UnaryOp = backend_ops.UnaryOp;
 pub const GatedOp = backend_ops.GatedOp;
+pub const Gated = backend_ops.Gated;
 pub const ElementwiseOp = backend_ops.ElementwiseOp;
 pub const CompareOp = backend_ops.CompareOp;
 

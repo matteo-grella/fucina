@@ -403,11 +403,6 @@ pub inline fn gatedActivationVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
         .glu => sigmoidVec(value),
         .swiglu => value * sigmoidVec(value),
         .geglu => @as(Vf32, @splat(0.5)) * value * (@as(Vf32, @splat(1)) + tanhVec(geluTanhArgVec(value))),
-        .swiglu_clamp10 => blk: {
-            const ten: Vf32 = @splat(10);
-            const g = @min(value, ten);
-            break :blk g * sigmoidVec(g);
-        },
         .situ => @as(Vf32, @splat(4)) * tanhVec(value * @as(Vf32, @splat(0.25))) * sigmoidVec(value),
     };
 }
@@ -416,10 +411,6 @@ pub inline fn gatedActivationVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
 /// transform (identity for the classic ops).
 pub inline fn gatedSourceVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
     return switch (op) {
-        .swiglu_clamp10 => blk: {
-            const ten: Vf32 = @splat(10);
-            break :blk @min(@max(value, -ten), ten);
-        },
         .situ => @as(Vf32, @splat(25)) * tanhVec(value * @as(Vf32, @splat(0.04))),
         else => value,
     };

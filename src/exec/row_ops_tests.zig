@@ -197,12 +197,12 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
             s.* = (p * 5) % n_expert;
             w.* = 0.25 + 0.01 * @as(f32, @floatFromInt(p % 13));
         }
-        var batch_out = try ctx.moeExpertFfnBatch(&mx, &gate, &up, &down, &selected, &weights, top_k, out_pe, .swiglu, null, null);
+        var batch_out = try ctx.moeExpertFfnBatch(&mx, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
         defer batch_out.deinit();
         for (0..seq) |t| {
             var row = try ctx.fromSlice(.f32, .{ 1, hidden }, mx_vals[t * hidden ..][0..hidden]);
             defer row.deinit();
-            var row_out = try ctx.moeExpertFfn(&row, &gate, &up, &down, selected[t * top_k ..][0..top_k], weights[t * top_k ..][0..top_k], out_pe, .swiglu, null, null);
+            var row_out = try ctx.moeExpertFfn(&row, &gate, &up, &down, selected[t * top_k ..][0..top_k], weights[t * top_k ..][0..top_k], out_pe, .{ .op = .swiglu }, null, null);
             defer row_out.deinit();
             try std.testing.expectEqualSlices(f32, row_out.dataConst(), batch_out.dataConst()[t * hidden ..][0..hidden]);
         }

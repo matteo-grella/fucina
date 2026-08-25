@@ -88,10 +88,6 @@ pub const GatedOp = enum {
     // GeGLU: the gated activation is GELU (tanh approximation) instead of SiLU.
     // Used by Gemma's GeGLU FFN/MoE; `geglu(up, gate) = up * gelu(gate)`.
     geglu,
-    // DeepSeek V4's clamped SwiGLU: gate is clamped to <= +10 before SiLU and
-    // up is clamped to [-10, 10] before the multiply (the model's
-    // swiglu_clamp_exp metadata; validated == 10 at load).
-    swiglu_clamp10,
     // Kimi K3's SiTU: the gate activation is 4·tanh(g/4)·sigmoid(g) (a
     // soft-bounded SiLU, beta = 4) and the up input is soft-clamped to
     // 25·tanh(u/25) (linear beta = 25) before the multiply.
@@ -146,23 +142,31 @@ pub inline fn gatedActivationScalar(comptime op: GatedOp, value: f32) f32 {
         .glu => sigmoidScalar(value),
         .swiglu => value * sigmoidScalar(value),
         .geglu => geluScalar(value),
-        .swiglu_clamp10 => blk: {
-            const g = @min(value, 10.0);
-            break :blk g * sigmoidScalar(g);
-        },
         .situ => 4.0 * std.math.tanh(value * 0.25) * sigmoidScalar(value),
     };
 }
 
 /// The `up`-side transform of a gated pair: identity for the classic ops,
-/// the hard clamp for `swiglu_clamp10`, the 25·tanh(u/25) soft clamp for
-/// `situ`.
+/// the 25·tanh(u/25) soft clamp for `situ`.
 pub inline fn gatedSourceScalar(comptime op: GatedOp, up: f32) f32 {
     return switch (op) {
-        .swiglu_clamp10 => @min(@max(up, -10.0), 10.0),
         .situ => 25.0 * std.math.tanh(up * 0.04),
         else => up,
     };
+}
+
+/// A gated activation with its parameter: `op` names the function, `clamp`
+/// (when set) bounds both operands before it, the gate to `<= clamp` and
+/// the up input to `[-clamp, clamp]` (DeepSeek V4's clamped SwiGLU is
+/// `.{ .op = .swiglu, .clamp = 10 }`).
+pub const Gated = struct {
+    op: GatedOp,
+    clamp: ?f32 = null,
+};
+
+/// `gatedPairScalar` with the operands clamped first.
+pub inline fn gatedPairClamped(comptime op: GatedOp, gate: f32, up: f32, clamp: f32) f32 {
+    return gatedSourceScalar(op, @min(@max(up, -clamp), clamp)) * gatedActivationScalar(op, @min(gate, clamp));
 }
 
 /// The full gated pair: `gatedSourceScalar(up) * gatedActivationScalar(gate)`

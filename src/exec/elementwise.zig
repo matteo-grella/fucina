@@ -596,7 +596,6 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
         .swiglu => SplitSwiGluTask,
         .glu => SplitGluTask,
         .geglu => @compileError("no split-geglu row kernel or gate-half convention exists"),
-        .swiglu_clamp10 => @compileError("no split kernel for swiglu_clamp10 (inference-only MoE op)"),
         .situ => @compileError("no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
     };
     const runTask = switch (op) {

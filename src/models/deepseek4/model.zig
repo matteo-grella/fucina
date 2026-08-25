@@ -2432,7 +2432,7 @@ fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: [
         @import("../qwen3/model.zig").applyExpertTopP(selected, routing, used, self.moe_expert_top_p);
 
     if (prof_decode) t_router = profNowNs();
-    var routed = try weights.moeGatedFfnSeq(ctx, &x_norm, &layer.moe.gate, &layer.moe.up, &layer.moe.down, selected, routing, used, cfg.expert_ffn_size, .swiglu_clamp10, null, null);
+    var routed = try weights.moeGatedFfnSeq(ctx, &x_norm, &layer.moe.gate, &layer.moe.up, &layer.moe.down, selected, routing, used, cfg.expert_ffn_size, .{ .op = .swiglu, .clamp = 10.0 }, null, null);
     defer routed.deinit();
     if (prof_decode) t_routed = profNowNs();
 

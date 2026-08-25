@@ -242,6 +242,7 @@ pub const MoeRhs = exec.ExecContext.MoeRhs;
 pub const MoeBatchProfile = exec.MoeBatchProfile;
 /// Gated-activation selector for the fused gate/up FFN kernels (silu/gelu variants).
 pub const GatedOp = exec.GatedOp;
+pub const Gated = exec.Gated;
 /// Disk-backed MoE expert streaming: the store, its cache tiers, and the ProjSpec plumbing.
 pub const expert_store = @import("store/expert_store.zig");
 /// The streaming MoE expert store (LRU RAM cache over disk-resident expert blocks).

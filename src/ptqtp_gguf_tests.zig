@@ -847,9 +847,9 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
     defer x.deinit();
     const pairs = [2]usize{ 0, 2 };
     const routing = [_]f32{ 0.7, 0.3 };
-    var want = try ctx.moeExpertFfn(&x, &sib_rhs, &sib_rhs, &sib_rhs, &pairs, &routing, t_out, .swiglu, null, null);
+    var want = try ctx.moeExpertFfn(&x, &sib_rhs, &sib_rhs, &sib_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
     defer want.deinit();
-    var got = try ctx.moeExpertFfn(&x, &fx4_rhs, &fx4_rhs, &fx4_rhs, &pairs, &routing, t_out, .swiglu, null, null);
+    var got = try ctx.moeExpertFfn(&x, &fx4_rhs, &fx4_rhs, &fx4_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
     defer got.deinit();
     try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
 }

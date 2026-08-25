@@ -216,7 +216,7 @@ against: `ElementwiseOp` (`add, sub, mul, div, max, min`), `UnaryOp` (`relu,
 exp, sqrt, rsqrt, sigmoid, silu, log, log1p, softplus, neg, abs, sin, cos,
 tanh, fast_tanh, gelu, quick_gelu, gelu_quant, elu,
 gelu_erf, floor, ceil, round, sign, reciprocal`), `GatedOp` (`glu, swiglu,
-geglu, swiglu_clamp10, situ` — `situ` is Kimi K3's SiTU: the gate
+geglu, situ` — `situ` is Kimi K3's SiTU: the gate
 activation is `4·tanh(g/4)·sigmoid(g)`, a soft-bounded SiLU, and the up
 input is soft-clamped to `25·tanh(u/25)` before the multiply), and
 `CompareOp` (`eq, ne, lt, le, gt, ge` — exec-level only, no

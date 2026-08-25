@@ -359,13 +359,14 @@ Both operands are broadcast to the result shape as views, then the
 rank-matched ExecContext kernel runs (`add`/`sub`/`mul`/`div`/`max`/`min`
 with an explicit `.f32`,
 or `gated` for `gatedPointwise`). `GatedOp` ([§4](04-tensor-operations.md)) is
-`enum { glu, swiglu, geglu, swiglu_clamp10, situ }`; every member computes
+`enum { glu, swiglu, geglu, situ }`; every member computes
 an `up`-side transform of `left` times a gate activation of `right`
 (`gatedSourceScalar` × `gatedActivationScalar`, `src/backend/ops.zig` —
 the source transform is the identity for the classic ops):
-`left * σ(right)`, `left * silu(right)`, `left * gelu(right)`,
-`clamp(left, ±10) * silu(min(right, 10))` for `.swiglu_clamp10` ([§4.5](04-tensor-operations.md#45-gated-activations-srcagtensorzig)'s
-full clamped SwiGLU — the same pair the fused MoE kernels apply, [§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)),
+`left * σ(right)`, `left * silu(right)`, `left * gelu(right)`; the MoE
+entries take an `exec.Gated{ .op, .clamp }` whose optional clamp bounds both
+operands first (`clamp(left, ±c) * silu(min(right, c))`, DeepSeek V4's
+clamped SwiGLU at `c = 10`; [§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)),
 and `25·tanh(left/25) * 4·tanh(right/4)·σ(right)` for `.situ` (Kimi K3's
 SiTU: a soft-bounded SiLU gate over a soft-clamped up input). The output
 is always a newly materialized contiguous tensor in result-tag order.

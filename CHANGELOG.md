@@ -338,6 +338,12 @@ this point; earlier history is `git log`.
   `softcap15` are gone: `x.softcap30(ctx)` is `x.softcap(ctx, 30)`. The
   forward is bitwise what the constant kernels computed; Gemma's
   `final_logit_softcapping` now reaches the fused kernel at any cap.
+- The MoE entries (`moeExpertFfn`, `moeExpertFfnBatch`,
+  `weights.moeGatedFfnSeq`) take the activation with its parameter,
+  `exec.Gated{ .op, .clamp }`, and `GatedOp.swiglu_clamp10` is gone:
+  DeepSeek V4's clamped SwiGLU is `.{ .op = .swiglu, .clamp = 10 }`, the
+  plain `.swiglu` argument is `.{ .op = .swiglu }`. Same numerics (the
+  clamp is the same `min`/`clamp` pair the member computed).
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

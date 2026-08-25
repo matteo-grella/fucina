@@ -215,7 +215,7 @@ test "moe batched ffn: phased chain output is deterministic across identical run
     const first = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(first);
     for (0..8) |run| {
-        var out = try ctx.moeExpertFfnBatch(&x, &gate, &up, &down, &selected, &weights, top_k, out_pe, .swiglu, null, null);
+        var out = try ctx.moeExpertFfnBatch(&x, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
         defer out.deinit();
         if (run == 0) {
             @memcpy(first, out.dataConst());

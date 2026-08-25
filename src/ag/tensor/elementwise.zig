@@ -473,7 +473,6 @@ pub fn Ops(comptime Self: type) type {
             const Backward = switch (comptime op) {
                 .swiglu => SplitSwiGluBackward(tags, split_axis),
                 .glu => SplitGluBackward(tags, split_axis),
-                .swiglu_clamp10 => @compileError("splitGated has no swiglu_clamp10 kernel (inference-only op)"),
                 .geglu => @compileError("splitGated: no split-geglu kernel or gate-half convention exists (compose `unary(.gelu_quant)` + `mul`, or use `geglu` on separate halves)"),
                 .situ => @compileError("splitGated: no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
             };

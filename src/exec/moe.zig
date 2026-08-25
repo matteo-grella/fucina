@@ -16,6 +16,18 @@ const thread = @import("../thread.zig");
 
 const Allocator = std.mem.Allocator;
 const GatedOp = backend_ops.GatedOp;
+const Gated = backend_ops.Gated;
+
+/// `g[i] = gated(gate[i], up[i])` over the activation's function and clamp.
+fn gatedPairs(gated: Gated, g: []f32, gate: []const f32, up: []const f32) void {
+    switch (gated.op) {
+        inline else => |op| if (gated.clamp) |clamp| {
+            for (g, gate, up) |*dst, gate_v, up_v| dst.* = backend_ops.gatedPairClamped(op, gate_v, up_v, clamp);
+        } else {
+            for (g, gate, up) |*dst, gate_v, up_v| dst.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
+        },
+    }
+}
 const Tensor = tensor.Tensor;
 
 // Shared batched-MoE scheduling scaffolding (exec/moe_chain.zig), also
@@ -769,7 +781,7 @@ const MoeExpertTask = struct {
     qg: []dtype_mod.BlockQ8_K,
     qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
-    gated_op: GatedOp,
+    gated: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     gate_up_ns: i64,
@@ -786,11 +798,7 @@ fn runMoeExpertTask(task: *const MoeExpertTask) void {
 
     // Gated activation: g = up * act(gate). `inline else` specializes the loop per op.
     const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    switch (task.gated_op) {
-        inline else => |op| for (task.g_buf, task.gate_buf, task.up_buf) |*g, gate_v, up_v| {
-            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
-        },
-    }
+    gatedPairs(task.gated, task.g_buf, task.gate_buf, task.up_buf);
     const requant_ok = if (task.down.wantsQ8_0Lhs())
         backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(task.qg8, task.g_buf)
     else
@@ -825,7 +833,7 @@ const MoeDecodeChainState = struct {
     qg: []dtype_mod.BlockQ8_K,
     qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
-    gated_op: GatedOp,
+    gated: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     remaining_gate_up: std.atomic.Value(u32),
@@ -852,11 +860,7 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
 
             if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
                 const swiglu_requant_start = moeBatchProfileStart(state.profile_enabled, state.io);
-                switch (state.gated_op) {
-                    inline else => |op| for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
-                        g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
-                    },
-                }
+                gatedPairs(state.gated, state.g_buf, state.gate_buf, state.up_buf);
                 if (state.down.wantsQ8_0Lhs())
                     backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(state.qg8, state.g_buf)
                 else
@@ -900,7 +904,7 @@ const MoeDecodeChainBuild = struct {
     outs: []f32,
     blocks_per_g: usize,
     blocks_per_g8: usize,
-    act: GatedOp,
+    act: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     gate_split: usize,
@@ -930,7 +934,7 @@ const MoeDecodeChainBuild = struct {
             .qg = b.qg[j * b.blocks_per_g ..][0..b.blocks_per_g],
             .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
             .out = b.outs[j * b.hidden ..][0..b.hidden],
-            .gated_op = b.act,
+            .gated = b.act,
             .profile_enabled = b.profile_enabled,
             .io = b.io,
             .remaining_gate_up = .init(2),
@@ -962,7 +966,7 @@ const MoeDecodeChainBuild = struct {
             .qg = b.qg[j * b.blocks_per_g ..][0..b.blocks_per_g],
             .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
             .out = b.outs[j * b.hidden ..][0..b.hidden],
-            .gated_op = b.act,
+            .gated = b.act,
             .profile_enabled = b.profile_enabled,
             .io = b.io,
             .gate_up_ns = 0,
@@ -1031,7 +1035,7 @@ pub fn moeExpertFfn(
     selected: []const usize,
     weights: []const f32,
     out_pe: usize,
-    act: GatedOp,
+    act: Gated,
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
@@ -1211,7 +1215,7 @@ const MoeBatchTask = struct {
     qg: []dtype_mod.BlockQ8_K,
     qg8: []dtype_mod.BlockQ8_0 = &.{},
     down_buf: []f32,
-    gated_op: GatedOp,
+    gated: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     gather_quant_ns: i128,
@@ -1264,11 +1268,7 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
 
     const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
-    switch (task.gated_op) {
-        inline else => |op| for (g_out, gate_out, up_out) |*g, gate_v, up_v| {
-            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
-        },
-    }
+    gatedPairs(task.gated, g_out, gate_out, up_out);
     for (0..m) |i| {
         const quant_err = if (q8_lhs)
             qm.q8k.quantizeRowQ8_0Into(task.qg8[(base + i) * bpc_g ..][0..bpc_g], g_out[i * out_pe ..][0..out_pe])
@@ -1417,7 +1417,7 @@ const MoeBatchSwiGluTask = struct {
     blocks_per_g: usize,
     row_start: usize,
     m: usize,
-    gated_op: GatedOp,
+    gated: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     swiglu_requant_ns: i128,
@@ -1434,11 +1434,7 @@ fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
     const gate_out = task.gate_buf[base * out_pe ..][0 .. m * out_pe];
     const up_out = task.up_buf[base * out_pe ..][0 .. m * out_pe];
     const g_out = task.g_buf[base * out_pe ..][0 .. m * out_pe];
-    switch (task.gated_op) {
-        inline else => |op| for (g_out, gate_out, up_out) |*g, gate_v, up_v| {
-            g.* = backend_ops.gatedPairScalar(op, gate_v, up_v);
-        },
-    }
+    gatedPairs(task.gated, g_out, gate_out, up_out);
     for (0..m) |i| {
         const quant_err = if (task.qg8.len != 0)
             qm.q8k.quantizeRowQ8_0Into(task.qg8[(base + i) * task.blocks_per_g ..][0..task.blocks_per_g], g_out[i * out_pe ..][0..out_pe])
@@ -1498,7 +1494,7 @@ fn runMoeBatchPhased(
     group_offset: []const usize,
     qx_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
     qg_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
-    act: GatedOp,
+    act: Gated,
     profile_enabled: bool,
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
@@ -1587,7 +1583,7 @@ fn runMoeBatchPhased(
             .blocks_per_g = blocks_per_g,
             .row_start = offset[e],
             .m = count[e],
-            .gated_op = act,
+            .gated = act,
             .profile_enabled = profile_enabled,
             .io = io,
             .swiglu_requant_ns = 0,
@@ -1761,7 +1757,7 @@ pub fn moeExpertFfnBatch(
     weights: []const f32,
     top_k: usize,
     out_pe: usize,
-    act: GatedOp,
+    act: Gated,
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
@@ -1913,7 +1909,7 @@ pub fn moeExpertFfnBatch(
                 .qg = qg,
                 .qg8 = qg8,
                 .down_buf = down_buf,
-                .gated_op = act,
+                .gated = act,
                 .profile_enabled = profile_enabled,
                 .io = io,
                 .gather_quant_ns = 0,

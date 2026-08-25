@@ -327,7 +327,7 @@ pub fn splitGated(self, ctx, comptime op: GatedOp, comptime tag: Tag, comptime o
     !Tensor(replaceTag(tags, tag, out_tag))
 ```
 
-`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .swiglu_clamp10, .situ }`. The
+`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .situ }`. The
 two-operand form computes `self * act(other)` — the **second** operand is
 the gate — with the same tag-broadcast rule as [§4.2](04-tensor-operations.md#42-pointwise-binary-ops-and-tag-driven-broadcasting-srcagtensorzig-srctag_opszig): `glu` =
 `self·sigmoid(other)`, `swiglu` = `self·silu(other)`, `geglu` =
@@ -336,11 +336,12 @@ K3's SiTU) is the one member that also transforms the up side:
 `25·tanh(self/25) · 4·tanh(other/4)·sigmoid(other)` — a soft-bounded SiLU
 gate (beta 4) on a soft-clamped up input (linear beta 25).
 `glu`/`swiglu`/`geglu`/`situ` are direct aliases of `gated(..., op)`.
-Differentiable in both operands. `.swiglu_clamp10` (DeepSeek V4's clamped
-SwiGLU: the gate is `min(gate, 10)` before SiLU, `up` is clamped to
-`[-10, 10]`) is inference-only — it has no backward and no split kernel,
-so `gated` and `splitGated` reject it at compile time; it exists for the
-MoE entries ([§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)).
+Differentiable in both operands. The MoE entries ([§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)) take the
+activation with its parameter, `exec.Gated{ .op, .clamp }`: with `clamp`
+set, the gate is `min(gate, clamp)` before the activation and `up` is
+clamped to `[-clamp, clamp]` (DeepSeek V4's clamped SwiGLU is
+`.{ .op = .swiglu, .clamp = 10 }`); `gated` and `splitGated` take the
+function only.
 
 `splitGated` halves axis `tag` and gates one half with the other in a single
 fused kernel; the gate-half conventions differ deliberately (ggml parity):

@@ -394,16 +394,17 @@ Alongside the enum: `leakyRelu(ctx, negative_slope)` and
 determinism story in miniature.
 
 **Gated activations** are the modern FFN's shape (docs/REFERENCE.md §4.5).
-`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .swiglu_clamp10 }`; the
+`exec.GatedOp` is `{ .glu, .swiglu, .geglu, .situ }`; the
 two-operand form computes `self · act(other)` — the **second** operand is
 the gate — so `up.swiglu(&ctx, &gate)` is `up · silu(gate)`. `splitGated`
 fuses the common storage trick where the up- and gate-projections are one
 concatenated tensor halved along an axis, and even the gate-half
 conventions are pinned deliberately (`.swiglu` gates with the *first* half,
 `.glu` with the *second*, matching ggml) — another parity decision made
-once, in the library, instead of per port. `.swiglu_clamp10` (DeepSeek V4's
-clamped SwiGLU) is inference-only and exists for the MoE entries; `gated`
-and `splitGated` reject it at compile time.
+once, in the library, instead of per port. The MoE entries take the
+activation with its parameter, `exec.Gated{ .op, .clamp }` (DeepSeek V4's
+clamped SwiGLU is `.{ .op = .swiglu, .clamp = 10 }`); the clamp is a value,
+not a fifth member of the enum.
 
 > **ML note** — Why gates? A plain FFN computes `W2·act(W1·x)`. A *gated*
 > FFN computes `W2·(act(Wg·x) ⊙ (Wu·x))` — one projection decides "how

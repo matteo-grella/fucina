@@ -20,7 +20,7 @@ const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
 const MoeRhs = exec_mod.ExecContext.MoeRhs;
 const MoeBatchProfile = exec_mod.MoeBatchProfile;
-const GatedOp = exec_mod.GatedOp;
+const Gated = exec_mod.Gated;
 const ExpertStore = expert_store.ExpertStore;
 const Error = common.Error;
 const backend_quant = common.backend_quant;
@@ -377,7 +377,7 @@ pub fn moeSwiGluFfnSeq(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor(.{ .seq, .embed }) {
-    return moeGatedFfnSeq(ctx, input, gate, up, down, selected, routing_weights, top_k, out_pe, .swiglu, io, profile);
+    return moeGatedFfnSeq(ctx, input, gate, up, down, selected, routing_weights, top_k, out_pe, .{ .op = .swiglu }, io, profile);
 }
 
 /// As `moeSwiGluFfnSeq`, with the gated activation chosen by the caller
@@ -392,7 +392,7 @@ pub fn moeGatedFfnSeq(
     routing_weights: []const f32,
     top_k: usize,
     out_pe: usize,
-    act: GatedOp,
+    act: Gated,
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor(.{ .seq, .embed }) {
