@@ -94,11 +94,13 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
   nothing — the scope already owns the prefix, so user model code needs no
   errdefer chains at all.
 - Back the context with `fucina.CachingAllocator` for training loops: the
-  per-step tensor churn then recycles warm blocks through power-of-two
-  freelists instead of paying the general-purpose allocator's mmap/madvise
-  and first-touch page faults every step (`apps/finetune` wires it).
-  Cached memory holds at
-  the high-water mark of live large blocks until `deinit`.
+  per-step tensor churn then recycles warm blocks through size-class
+  freelists (four classes per octave from 64 KB, so rounding wastes at most
+  19% of a block) instead of paying the general-purpose allocator's
+  mmap/madvise and first-touch page faults every step (`apps/finetune`
+  wires it). Cached memory holds at the high-water mark of live large
+  blocks until `deinit`; a block serves only its own class, so workloads
+  with widely varying shapes hoard more than fixed-shape training steps.
 - Adoption is wired into the op tails themselves (`finishOp` in
   `src/ag/tensor.zig`), covering both differentiable results and no-grad
   f32 results (eval on constants, the `values` arms, the packed-RHS fast

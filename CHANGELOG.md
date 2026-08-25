@@ -315,6 +315,13 @@ this point; earlier history is `git log`.
   `denseQuantMatmulGpuSharedInputBatch`); `null` means the caller's CPU
   path runs. `fucina.internal.gpu` reads the same seam; the provider
   contract (`gpu_provider.zig`) and the provider files are unchanged.
+- `CachingAllocator` uses four size classes per octave (geometric steps of
+  2^(1/4) from 64 KB) instead of powers of two. On the Qwen3-0.6B Q8_0
+  LoRA step at 1280 tokens the class rounding was 7.7 GB of a 28 GB
+  class-accounted peak and is 2.1 GB now; maximum resident memory went
+  from 24.7 GB to 23.6 GB with the step time unchanged. Same freelist
+  semantics (a block serves its own class only, nothing is released
+  before `deinit`).
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,
