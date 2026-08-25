@@ -437,7 +437,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             var logits_full = try x.dot(ctx, &self.lm_head, .d); // [.seq, padded_vocab]
             var logits = try logits_full.narrow(ctx, .vocab, 0, self.cfg.vocab_size);
             try rec(trace, "logits_pre_softcap", &logits);
-            var capped = try logits.softcap15(ctx);
+            var capped = try logits.softcap(ctx, 15);
             try rec(trace, "logits_post_softcap", &capped);
             return capped;
         }
@@ -684,7 +684,7 @@ pub fn ModelOf(comptime dtype: fucina.DType) type {
             }
             x = try x.rmsNorm(ctx, .d, rms_eps);
             var logits = try (try x.dot(ctx, &self.lm_head, .d)).narrow(ctx, .vocab, 0, cfg.vocab_size);
-            return logits.softcap15(ctx);
+            return logits.softcap(ctx, 15);
         }
 
         /// Mean cross-entropy over this single sequence's non-ignored targets

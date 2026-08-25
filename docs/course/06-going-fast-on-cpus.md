@@ -357,7 +357,7 @@ pub inline fn vexpf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
 
 Hex float literals (`0x1.715476p+0` is log₂e to f32 precision), a `@bitCast` from float lanes to integer lanes so the result's exponent field can be built by a shift, and a final NaN-propagation step via `@select(f32, x != x, x, result)` — NaN is the only value that differs from itself, so `x != x` is a per-lane NaN detector. Every softmax in every transformer this library runs goes through these dozen lines.
 
-The unary-op family generalizes the pattern with comptime dispatch: `vecUnary(comptime op: ops.UnaryOp, z, x)` switches over a comptime enum (`src/backend/ops.zig` — 27 members, `relu` through `reciprocal`, several carrying their provenance as doc comments: `gelu_quant` reproduces ggml's f16-LUT GELU bit-for-bit for llama.cpp parity; `softcap_15` comes from nanochat). One dispatch function, N ops, zero runtime branching — the `switch` on a comptime parameter melts into a direct call per instantiation.
+The unary-op family generalizes the pattern with comptime dispatch: `vecUnary(comptime op: ops.UnaryOp, z, x)` switches over a comptime enum (`src/backend/ops.zig` — 26 members, `relu` through `reciprocal`, several carrying their provenance as doc comments: `gelu_quant` reproduces ggml's f16-LUT GELU bit-for-bit for llama.cpp parity; `elu` matches `ggml_vec_elu_f32`). Ops with a parameter (`leakyRelu`, `clamp`, `softcap`) are separate kernel entries, not enum members: a constant folded into a member name would be a model's constant living in the kernel table. One dispatch function, N ops, zero runtime branching — the `switch` on a comptime parameter melts into a direct call per instantiation.
 
 ## 6.6 GEMM: the op that pays the bills
 

@@ -366,6 +366,19 @@ pub fn leakyReluContiguousIntoUnchecked(
     primitives.vecLeakyRelu(z, x, negative_slope);
 }
 
+pub fn softcapContiguousIntoUnchecked(
+    pc: ParallelConfig,
+    out: *Tensor,
+    a: *const Tensor,
+    len: usize,
+    cap: f32,
+) void {
+    const x = contiguousDataConst(a, len);
+    const z = contiguousData(out, len);
+    if (maybeParallelSoftcap(pc, z, x, cap)) return;
+    primitives.vecSoftcap(z, x, cap);
+}
+
 pub fn clampContiguousIntoUnchecked(
     pc: ParallelConfig,
     out: *Tensor,
@@ -484,6 +497,14 @@ const LeakyReluTask = struct {
     z: []f32,
     x: []const f32,
     negative_slope: f32,
+    start: usize,
+    end: usize,
+};
+
+const SoftcapTask = struct {
+    z: []f32,
+    x: []const f32,
+    cap: f32,
     start: usize,
     end: usize,
 };
@@ -615,6 +636,21 @@ fn maybeParallelLeakyRelu(pc: ParallelConfig, z: []f32, x: []const f32, negative
         tasks[ti] = .{ .z = z, .x = x, .negative_slope = negative_slope, .start = start, .end = end };
     }
     pool.parallelChunks(LeakyReluTask, tasks[0..thread_count], runLeakyReluTask);
+    return true;
+}
+
+fn maybeParallelSoftcap(pc: ParallelConfig, z: []f32, x: []const f32, cap: f32) bool {
+    const pool = pc.pool orelse return false;
+    const thread_count = elementwiseThreadCount(z.len);
+    if (thread_count == 1) return false;
+
+    var tasks: [parallel.vector_max_threads]SoftcapTask = undefined;
+    for (0..thread_count) |ti| {
+        const start = ti * z.len / thread_count;
+        const end = (ti + 1) * z.len / thread_count;
+        tasks[ti] = .{ .z = z, .x = x, .cap = cap, .start = start, .end = end };
+    }
+    pool.parallelChunks(SoftcapTask, tasks[0..thread_count], runSoftcapTask);
     return true;
 }
 
@@ -798,6 +834,10 @@ fn runUnaryTask(task: *const UnaryTask) void {
 
 fn runLeakyReluTask(task: *const LeakyReluTask) void {
     primitives.vecLeakyRelu(task.z[task.start..task.end], task.x[task.start..task.end], task.negative_slope);
+}
+
+fn runSoftcapTask(task: *const SoftcapTask) void {
+    primitives.vecSoftcap(task.z[task.start..task.end], task.x[task.start..task.end], task.cap);
 }
 
 fn runClampTask(task: *const ClampTask) void {

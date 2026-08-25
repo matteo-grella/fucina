@@ -21,16 +21,16 @@ test "public non-f32 float Tensor exposes forward math at comptime" {
     inline for (.{ DType.bf16, DType.f16, DType.f64 }) |float_dtype| {
         const T = Tensor(.{ .dtype = float_dtype, .tags = .{ .batch, .d } });
         const expected = .{
-            "to",        "add",        "sub",        "mul",       "div",        "sum",        "mean",      "sumAll",
-            "dot",       "split",      "merge",      "flatten",   "reshape",    "sliceStep",  "flip",      "roll",
-            "stack",     "repeatAxis", "scale",      "divScalar", "unary",      "relu",       "exp",       "sqrt",
-            "rsqrt",     "sigmoid",    "silu",       "log",       "log1p",      "neg",        "abs",       "sin",
-            "cos",       "tanh",       "fastTanh",   "softcap30", "softcap15",  "gelu",       "quickGelu", "elu",
-            "geluErf",   "floor",      "ceil",       "round",     "sign",       "reciprocal", "leakyRelu", "clamp",
-            "addScalar", "subScalar",  "powScalar",  "maximum",   "minimum",    "gated",      "glu",       "swiglu",
-            "geglu",     "softmax",    "logSoftmax", "rmsNorm",   "rmsNormMul", "layerNorm",  "cumsum",    "cumprod",
-            "where",     "maskedFill", "compare",    "pad",       "max",        "min",        "argmax",    "prod",
-            "variance",  "logsumexp",  "einsum",
+            "to",         "add",        "sub",      "mul",        "div",        "sum",       "mean",    "sumAll",
+            "dot",        "split",      "merge",    "flatten",    "reshape",    "sliceStep", "flip",    "roll",
+            "stack",      "repeatAxis", "scale",    "divScalar",  "unary",      "relu",      "exp",     "sqrt",
+            "rsqrt",      "sigmoid",    "silu",     "log",        "log1p",      "neg",       "abs",     "sin",
+            "cos",        "tanh",       "fastTanh", "softcap",    "gelu",       "quickGelu", "elu",     "geluErf",
+            "floor",      "ceil",       "round",    "sign",       "reciprocal", "leakyRelu", "clamp",   "addScalar",
+            "subScalar",  "powScalar",  "maximum",  "minimum",    "gated",      "glu",       "swiglu",  "geglu",
+            "softmax",    "logSoftmax", "rmsNorm",  "rmsNormMul", "layerNorm",  "cumsum",    "cumprod", "where",
+            "maskedFill", "compare",    "pad",      "max",        "min",        "argmax",    "prod",    "variance",
+            "logsumexp",  "einsum",
         };
         inline for (expected) |decl_name| {
             if (!@hasDecl(T, decl_name)) @compileError("non-f32 float Tensor missing forward operation: " ++ decl_name);
@@ -262,10 +262,9 @@ test "typed float widened unary family matches the narrowed f32 reference" {
         defer x_t.deinit();
 
         const unary_names = .{
-            "relu",      "exp",     "sqrt",  "rsqrt", "sigmoid", "silu",     "log",        "log1p",
-            "neg",       "abs",     "sin",   "cos",   "tanh",    "fastTanh", "gelu",       "quickGelu",
-            "elu",       "geluErf", "floor", "ceil",  "round",   "sign",     "reciprocal", "softcap30",
-            "softcap15",
+            "relu", "exp",     "sqrt",  "rsqrt", "sigmoid", "silu",     "log",        "log1p",
+            "neg",  "abs",     "sin",   "cos",   "tanh",    "fastTanh", "gelu",       "quickGelu",
+            "elu",  "geluErf", "floor", "ceil",  "round",   "sign",     "reciprocal",
         };
         inline for (unary_names) |name| {
             var got = try @field(@TypeOf(x_t), name)(&x_t, &ctx);
@@ -279,6 +278,14 @@ test "typed float widened unary family matches the narrowed f32 reference" {
 
         // The generic entry, the parameterized pointwise ops, and the
         // scalar variants take the same widen -> f32 -> narrow route.
+        var capped_t = try x_t.softcap(&ctx, 30);
+        defer capped_t.deinit();
+        var capped_ref32 = try x32.softcap(&ctx, 30);
+        defer capped_ref32.deinit();
+        var capped_ref = try capped_ref32.to(&ctx, float_dtype);
+        defer capped_ref.deinit();
+        try std.testing.expectEqualSlices(Scalar, capped_ref.asRawTensor().dataConst(), capped_t.asRawTensor().dataConst());
+
         var via_unary = try x_t.unary(&ctx, .silu);
         defer via_unary.deinit();
         var silu_ref32 = try x32.silu(&ctx);

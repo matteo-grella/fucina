@@ -133,6 +133,7 @@ pub const kernels = struct {
     pub const groupedCausalConv1dBackwardWeightInto = vector.conv.groupedCausalConv1dBackwardWeightInto;
     pub const unaryContiguousIntoUnchecked = vector.elementwise.unaryContiguousIntoUnchecked;
     pub const leakyReluContiguousIntoUnchecked = vector.elementwise.leakyReluContiguousIntoUnchecked;
+    pub const softcapContiguousIntoUnchecked = vector.elementwise.softcapContiguousIntoUnchecked;
     pub const clampContiguousIntoUnchecked = vector.elementwise.clampContiguousIntoUnchecked;
     pub const gatedContiguousIntoUnchecked = vector.elementwise.gatedContiguousIntoUnchecked;
     pub const sumInto = vector.elementwise.sumInto;

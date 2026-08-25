@@ -302,6 +302,7 @@ pub const ExecContext = struct {
     pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
     pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
     pub const leakyRelu = exec_elementwise.leakyRelu;
+    pub const softcap = exec_elementwise.softcap;
     pub const clamp = exec_elementwise.clamp;
     pub const reduceBroadcast = exec_elementwise.reduceBroadcast;
 

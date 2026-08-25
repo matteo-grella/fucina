@@ -73,6 +73,7 @@ pub const names = [_][]const u8{
     "groupedCausalConv1dBackwardWeightInto",
     "unaryContiguousIntoUnchecked",
     "leakyReluContiguousIntoUnchecked",
+    "softcapContiguousIntoUnchecked",
     "clampContiguousIntoUnchecked",
     "gatedContiguousIntoUnchecked",
     "sumInto",

@@ -57,10 +57,6 @@ pub const UnaryOp = enum {
     fast_tanh,
     gelu,
     quick_gelu,
-    softcap_30,
-    // nanochat's logit softcap (gpt.py:515): 15·tanh(x/15) as a single
-    // fused elementwise pass.
-    softcap_15,
     // ggml's GGML_GELU_FP16 gelu: the input is rounded to f16, the tanh-approx
     // gelu is evaluated, the result is rounded to f16 (a 16-bit LUT in ggml),
     // with hard clamps y=0 for x<=-10 and y=x for x>=10. Used to match llama.cpp
@@ -121,8 +117,6 @@ pub inline fn unaryScalar(comptime op: UnaryOp, value: f32) f32 {
         .fast_tanh => fastTanhScalar(value),
         .gelu => geluScalar(value),
         .quick_gelu => quickGeluScalar(value),
-        .softcap_30 => 30.0 * std.math.tanh(value * (1.0 / 30.0)),
-        .softcap_15 => 15.0 * std.math.tanh(value * (1.0 / 15.0)),
         .gelu_quant => geluQuantScalar(value),
         .elu => if (value > 0) value else std.math.expm1(value),
         .gelu_erf => 0.5 * value * (1 + erff(value * 0.70710678118654752440084436210484)),

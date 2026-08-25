@@ -543,8 +543,8 @@ softcapping applies to every row), `forwardStepBatch`/`forwardStepBatchSpans`
 `Error.PleUnsupported`), `generate` + `GenerateOptions`,
 `ForwardProfile`. Only f16 caches are accepted (`requireF16KvCache` returns
 `Error.UnsupportedKvCacheDtype` for q8_0). Final logits are softcapped when
-`final_logit_softcapping != 0` (a fused `softcap30` kernel serves the
-model's actual 30.0 value). The remaining public symbols are loader/forward
+`final_logit_softcapping != 0` (the fused `softcap(cap)` kernel at the
+file's value). The remaining public symbols are loader/forward
 plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
 `metaInt`/`metaIntOpt`/`metaFloat`/`metaFloatOpt`, `LayerGeometry`,
 `deriveGeometry`, `MoeFfn`, `PerLayerInject`,

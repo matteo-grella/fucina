@@ -85,6 +85,7 @@ pub const kernels = struct {
     pub const groupedCausalConv1dBackwardWeightInto = cpu.groupedCausalConv1dBackwardWeightInto;
     pub const unaryContiguousIntoUnchecked = cpu.unaryContiguousIntoUnchecked;
     pub const leakyReluContiguousIntoUnchecked = cpu.leakyReluContiguousIntoUnchecked;
+    pub const softcapContiguousIntoUnchecked = cpu.softcapContiguousIntoUnchecked;
     pub const clampContiguousIntoUnchecked = cpu.clampContiguousIntoUnchecked;
     pub const gatedContiguousIntoUnchecked = cpu.gatedContiguousIntoUnchecked;
     pub const sumInto = cpu.sumInto;
@@ -1009,6 +1010,21 @@ pub fn leakyReluContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     for (z, x) |*dst, value| dst.* = if (value >= 0) value else value * negative_slope;
+}
+
+/// `cap * tanh(x / cap)`: the logit softcap.
+pub fn softcapContiguousIntoUnchecked(
+    pc: ParallelConfig,
+    out: *Tensor,
+    a: *const Tensor,
+    len: usize,
+    cap: f32,
+) void {
+    _ = pc;
+    const x = contiguousDataConst(a, len);
+    const z = contiguousData(out, len);
+    const inv = 1.0 / cap;
+    for (z, x) |*dst, value| dst.* = cap * std.math.tanh(value * inv);
 }
 
 pub fn clampContiguousIntoUnchecked(

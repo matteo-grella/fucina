@@ -330,6 +330,14 @@ this point; earlier history is `git log`.
   memory goes from 23.6 GB to 15.6 GB with identical losses and the step
   time unchanged. Reading an interior gradient after `backward` now
   requires passing that tensor as an output of the pass.
+- The logit softcap takes its cap as a parameter: `Tensor.softcap(ctx, cap)`
+  and `ExecContext.softcap(dtype, x, cap)` over one kernel entry
+  (`softcapContiguousIntoUnchecked`), with an output-form VJP
+  (`1 - (y/cap)^2`). The model constants `UnaryOp.softcap_30` (Gemma) and
+  `UnaryOp.softcap_15` (nanochat) and the facade aliases `softcap30`/
+  `softcap15` are gone: `x.softcap30(ctx)` is `x.softcap(ctx, 30)`. The
+  forward is bitwise what the constant kernels computed; Gemma's
+  `final_logit_softcapping` now reaches the fused kernel at any cap.
 - `Tensor(spec)`: one set of shared method mixins behind the four branches.
   Views and data movement (`materialize`, `contiguous`, `detach`,
   `withTags`, `viewWithStrides`, `alignTo`, `permuteTo`, `transpose`,

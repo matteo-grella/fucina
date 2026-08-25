@@ -214,7 +214,7 @@ stride_h, stride_w, pad_h, pad_w`), `PoolKind = enum { avg, max, sum }`, and
 `src/backend/ops.zig` defines the shared op vocabulary both backends compile
 against: `ElementwiseOp` (`add, sub, mul, div, max, min`), `UnaryOp` (`relu,
 exp, sqrt, rsqrt, sigmoid, silu, log, log1p, softplus, neg, abs, sin, cos,
-tanh, fast_tanh, gelu, quick_gelu, softcap_30, softcap_15, gelu_quant, elu,
+tanh, fast_tanh, gelu, quick_gelu, gelu_quant, elu,
 gelu_erf, floor, ceil, round, sign, reciprocal`), `GatedOp` (`glu, swiglu,
 geglu, swiglu_clamp10, situ` — `situ` is Kimi K3's SiTU: the gate
 activation is `4·tanh(g/4)·sigmoid(g)`, a soft-bounded SiLU, and the up

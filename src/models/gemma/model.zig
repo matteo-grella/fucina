@@ -490,22 +490,13 @@ pub const Layer = struct {
     }
 };
 
-/// Final-logit softcapping tail shared by every logits exit: the fused
-/// cap == 30 kernel when it applies, else the generic scale/tanh/scale.
-/// Consumes `*logits`; a zero cap returns it unchanged.
+/// Final-logit softcapping tail shared by every logits exit (one fused
+/// `softcap(cap)` pass). Consumes `*logits`; a zero cap returns it unchanged.
 fn applyFinalSoftcap(ctx: *ExecContext, sc: f32, logits: *fucina.Tensor(.{ .seq, .vocab })) !fucina.Tensor(.{ .seq, .vocab }) {
     if (sc == 0) return logits.*;
-    if (sc == 30.0) {
-        const out = try logits.softcap30(ctx);
-        logits.deinit();
-        return out;
-    }
-    var down = try logits.scale(ctx, 1.0 / sc);
+    const out = try logits.softcap(ctx, sc);
     logits.deinit();
-    defer down.deinit();
-    var t = try down.tanh(ctx);
-    defer t.deinit();
-    return t.scale(ctx, sc);
+    return out;
 }
 
 pub const Model = struct {

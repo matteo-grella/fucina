@@ -238,6 +238,20 @@ pub inline fn vecAddUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32, y:
     while (i < z.len) : (i += 1) z[i] = ops.unaryScalar(op, x[i] + y[i]);
 }
 
+/// `cap * tanh(x / cap)`: the logit softcap, with the vector tanh on the
+/// lanes and libm on the tail.
+pub inline fn vecSoftcap(z: []f32, x: []const f32, cap: f32) void {
+    const inv = 1.0 / cap;
+    const cap_v: Vf32 = @splat(cap);
+    const inv_v: Vf32 = @splat(inv);
+    var i: usize = 0;
+    while (i + vector_len <= z.len) : (i += vector_len) {
+        const xv: Vf32 = x[i..][0..vector_len].*;
+        z[i..][0..vector_len].* = cap_v * tanhVec(xv * inv_v);
+    }
+    while (i < z.len) : (i += 1) z[i] = cap * std.math.tanh(x[i] * inv);
+}
+
 pub inline fn vecLeakyRelu(z: []f32, x: []const f32, negative_slope: f32) void {
     const zero: Vf32 = @splat(0);
     const slope: Vf32 = @splat(negative_slope);
@@ -317,8 +331,6 @@ pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
         .fast_tanh => fastTanhVec(value),
         .gelu => @as(Vf32, @splat(0.5)) * value * (@as(Vf32, @splat(1)) + tanhVec(geluTanhArgVec(value))),
         .quick_gelu => value * sigmoidVec(@as(Vf32, @splat(1.702)) * value),
-        .softcap_30 => @as(Vf32, @splat(30.0)) * tanhVec(value * @as(Vf32, @splat(1.0 / 30.0))),
-        .softcap_15 => @as(Vf32, @splat(15.0)) * tanhVec(value * @as(Vf32, @splat(1.0 / 15.0))),
         .gelu_quant => geluQuantVec(value),
         .elu => perLaneUnary(.elu, value),
         .gelu_erf => perLaneUnary(.gelu_erf, value),

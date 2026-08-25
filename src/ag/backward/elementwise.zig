@@ -202,6 +202,51 @@ pub const ReluBackward = struct {
     pub const vtable = core.recordVTable(Self);
 };
 
+/// VJP of `softcap(cap)`: `y = cap * tanh(x / cap)`, so `dy/dx = 1 - (y/cap)^2`
+/// from the OUTPUT (transcendental-free, and exact for the value the forward
+/// produced, the `tanh` convention).
+pub const SoftcapBackward = struct {
+    const Self = @This();
+
+    parents: [1]?*GradState,
+    output: RawTensor,
+    cap: f32,
+
+    pub fn init(self: *SoftcapBackward, allocator: std.mem.Allocator, parent: ?*GradState, output: *const RawTensor, cap: f32) !void {
+        _ = allocator;
+        self.* = .{
+            .parents = .{parent},
+            .output = try output.cloneView(),
+            .cap = cap,
+        };
+    }
+
+    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        if (needs_grad.len == 0 or !needs_grad[0]) return;
+
+        var y = try contiguousForRead(ctx, &self.output);
+        defer y.deinit();
+        var gy_ready = try contiguousForRead(ctx, gy);
+        defer gy_ready.deinit();
+
+        const inv = 1.0 / self.cap;
+        var gx = try ctx.empty(.f32, y.shape.slice());
+        errdefer gx.deinit();
+        for (y.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
+            const u = value * inv;
+            dst.* = grad * (1 - u * u);
+        }
+        out[0] = gx;
+    }
+
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        self.output.deinit();
+    }
+
+    pub const vtable = core.recordVTable(Self);
+};
+
 pub const LeakyReluBackward = struct {
     const Self = @This();
 
@@ -252,7 +297,7 @@ pub fn unaryUsesOutput(comptime op: exec_mod.UnaryOp) bool {
     // `UnaryOp` member must be claimed here explicitly (compile error until
     // it is), exactly like the forward dispatch switch.
     return switch (op) {
-        .tanh, .softcap_15, .reciprocal => true,
+        .tanh, .reciprocal => true,
         .relu,
         .exp,
         .sqrt,
@@ -269,7 +314,6 @@ pub fn unaryUsesOutput(comptime op: exec_mod.UnaryOp) bool {
         .fast_tanh,
         .gelu,
         .quick_gelu,
-        .softcap_30,
         .gelu_quant,
         .elu,
         .gelu_erf,
@@ -767,10 +811,6 @@ fn unaryDerivativeFromOutput(comptime op: exec_mod.UnaryOp, t: f32) f32 {
     return switch (op) {
         .tanh => 1 - t * t,
         // out = 15·tanh(x/15) ⇒ d/dx = 1 − (out/15)².
-        .softcap_15 => blk: {
-            const u = t * (1.0 / 15.0);
-            break :blk 1 - u * u;
-        },
         // out = 1/x ⇒ d/dx = -1/x² = -out².
         .reciprocal => -t * t,
         else => @compileError("unaryDerivativeFromOutput: op is not output-derivative"),
@@ -807,14 +847,6 @@ fn unaryDerivative(comptime op: exec_mod.UnaryOp, value: f32) f32 {
         .fast_tanh => fastTanhDerivative(value),
         .gelu => geluDerivative(value),
         .quick_gelu => quickGeluDerivative(value),
-        .softcap_15 => blk: {
-            const t = std.math.tanh(value * (1.0 / 15.0));
-            break :blk 1 - t * t;
-        },
-        .softcap_30 => blk: {
-            const t = std.math.tanh(value * (1.0 / 30.0));
-            break :blk 1 - t * t;
-        },
         .gelu_quant => geluDerivative(value), // inference-only; exact-gelu derivative
         .elu => if (value > 0) 1 else @exp(value),
         .gelu_erf => geluErfDerivative(value),

@@ -380,7 +380,6 @@ deep learning:
 | `.gelu` | tanh-approximated GELU | the transformer-era default |
 | `.gelu_erf` | exact-erf GELU | when parity with an exact reference matters |
 | `.gelu_quant` | f16-rounded tanh-GELU | bit parity with ggml's `GGML_GELU_FP16` table |
-| `.softcap_30` | `30·tanh(x/30)` | Gemma's logit softcap |
 | `.fast_tanh` | rational tanh approximation | the NAM guitar amp's realtime path ([Chapter 10](10-the-guitar-amp.md)) |
 
 Notice what several rows have in common: they exist for *interoperability*.

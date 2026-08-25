@@ -1390,6 +1390,23 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
     return .{ .alpha = galpha, .inv_b = ginv_b };
 }
 
+/// `cap * tanh(x / cap)`, the logit softcap (Gemma's final-logit cap, the
+/// nanochat GPT's). One f32 kernel; 16-bit inputs follow the `.widened`
+/// policy.
+pub fn softcap(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), cap: f32) !tensor.TensorOf(dtype) {
+    if (!(cap > 0)) return tensor.TensorError.InvalidShape;
+    const compute = comptime ExecContext.widenedCompute(dtype, "softcap");
+    var xx = try ctx.prepareAs(dtype, compute, x);
+    defer xx.deinit();
+
+    const xp = xx.tensor();
+    var out = try ctx.empty(compute, xp.shape.slice());
+    errdefer out.deinit();
+    ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+    kernels.softcapContiguousIntoUnchecked(ctx.pc(), &out, xp, xp.len(), cap);
+    return ctx.storeAs(compute, dtype, out);
+}
+
 pub fn clamp(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), min_value: f32, max_value: f32) !tensor.TensorOf(dtype) {
     if (min_value > max_value) return tensor.TensorError.InvalidShape;
     const compute = comptime ExecContext.widenedCompute(dtype, "clamp");

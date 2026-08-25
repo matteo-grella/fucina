@@ -308,8 +308,7 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const cos = elementwise_ops.cos;
         pub const tanh = elementwise_ops.tanh;
         pub const fastTanh = elementwise_ops.fastTanh;
-        pub const softcap30 = elementwise_ops.softcap30;
-        pub const softcap15 = elementwise_ops.softcap15;
+        pub const softcap = elementwise_ops.softcap;
         pub const gelu = elementwise_ops.gelu;
         pub const quickGelu = elementwise_ops.quickGelu;
         pub const elu = elementwise_ops.elu;
@@ -611,8 +610,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const cos = elementwise_ops.cos;
         pub const tanh = elementwise_ops.tanh;
         pub const fastTanh = elementwise_ops.fastTanh;
-        pub const softcap30 = elementwise_ops.softcap30;
-        pub const softcap15 = elementwise_ops.softcap15;
+        pub const softcap = elementwise_ops.softcap;
         pub const gelu = elementwise_ops.gelu;
         pub const quickGelu = elementwise_ops.quickGelu;
         pub const elu = elementwise_ops.elu;

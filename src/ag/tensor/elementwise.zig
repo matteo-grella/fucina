@@ -31,6 +31,7 @@ const ReluBackward = backward_elementwise.ReluBackward;
 const PreluChannelsBackward = backward_elementwise.PreluChannelsBackward;
 const ChannelAffineBackward = backward_elementwise.ChannelAffineBackward;
 const LeakyReluBackward = backward_elementwise.LeakyReluBackward;
+const SoftcapBackward = backward_elementwise.SoftcapBackward;
 const UnaryBackward = backward_elementwise.UnaryBackward;
 const unaryUsesOutput = backward_elementwise.unaryUsesOutput;
 const ScaleBackward = backward_elementwise.ScaleBackward;
@@ -484,7 +485,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
             return switch (op) {
                 .relu => self.relu(ctx),
-                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .softplus, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .softcap_30, .softcap_15, .gelu_quant, .elu, .gelu_erf, .erf, .floor, .ceil, .round, .sign, .reciprocal => unaryDifferentiable(self, ctx, op),
+                .exp, .sqrt, .rsqrt, .sigmoid, .silu, .log, .log1p, .softplus, .neg, .abs, .sin, .cos, .tanh, .fast_tanh, .gelu, .quick_gelu, .gelu_quant, .elu, .gelu_erf, .erf, .floor, .ceil, .round, .sign, .reciprocal => unaryDifferentiable(self, ctx, op),
             };
         }
 
@@ -604,10 +605,6 @@ pub fn Ops(comptime Self: type) type {
 
         pub const fastTanh = UnaryMethod(.fast_tanh).call;
 
-        pub const softcap30 = UnaryMethod(.softcap_30).call;
-
-        pub const softcap15 = UnaryMethod(.softcap_15).call;
-
         pub const gelu = UnaryMethod(.gelu).call;
 
         pub const quickGelu = UnaryMethod(.quick_gelu).call;
@@ -634,6 +631,14 @@ pub fn Ops(comptime Self: type) type {
                     return unaryDifferentiable(self, ctx, op);
                 }
             };
+        }
+
+        /// `cap * tanh(self / cap)`, the logit softcap (`cap > 0`).
+        /// Differentiable: the VJP reads the output, `1 - (y/cap)^2`.
+        pub fn softcap(self: *const Self, ctx: *ExecContext, cap: f32) !Self {
+            var value = try ctx.softcap(dtype, self.asRawTensor(), cap);
+            errdefer value.deinit();
+            return finish(tags, ctx, value, self.requiresGrad(), SoftcapBackward, .{ ctx.allocator, self.grad_state, &value, cap });
         }
 
         pub fn clamp(self: *const Self, ctx: *ExecContext, min_value: f32, max_value: f32) !Self {

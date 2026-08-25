@@ -200,8 +200,6 @@ method alias:
 | `.fast_tanh` | `fastTanh` | NAM rational approximation |
 | `.gelu` | `gelu` | tanh approximation (exact form of `.gelu_quant`) |
 | `.quick_gelu` | `quickGelu` | `x·sigmoid(1.702x)` |
-| `.softcap_30` | `softcap30` | `30·tanh(x/30)` logit softcap |
-| `.softcap_15` | `softcap15` | `15·tanh(x/15)` logit softcap |
 | `.gelu_quant` | — (`unary(.gelu_quant)` only) | ggml GGML_GELU_FP16 parity: f16-rounded tanh-gelu with hard clamps |
 | `.elu` | `elu` | alpha = 1, matches `ggml_vec_elu_f32` |
 | `.gelu_erf` | `geluErf` | exact-erf GELU (musl `erff` translation, matches `ggml_vec_gelu_erf_f32`) |
