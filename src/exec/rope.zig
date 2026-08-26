@@ -7,10 +7,16 @@
 //! full or partial rotary span. `sinValues`/`cosValues` are `pub` so
 //! `norm.zig`'s fused rms-norm+rope kernel can read them cross-module.
 //!
+//! `ropeWithTable` splits its vectors across the work pool above the
+//! fused-norm sibling's length gate; every vector owns disjoint output
+//! features, so the pooled result is bitwise identical to the serial walk
+//! (`rope_tests.zig` pins it).
+//!
 //! Domain module: every op receives an explicit `*ExecContext`; imports the
-//! shape leaf.
+//! shape leaf and the parallel policy constants.
 
 const std = @import("std");
+const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_shape = @import("shape.zig");
@@ -384,52 +390,110 @@ fn applyRope(
         },
     };
 
-    for (0..total_vectors) |vector_i| {
-        var remainder = vector_i;
-        var base_offset: usize = 0;
-        var position_coord: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            if (dim != feature_axis) {
-                const coord = remainder % source.shape[dim];
-                remainder /= source.shape[dim];
-                base_offset += coord * strides[dim];
-                if (dim == position_axis) position_coord = coord;
-            }
-        }
+    const Task = RopeVectorsTask(rank, position_axis, feature_axis, mode);
+    const task: Task = .{
+        .input = input,
+        .output = output,
+        .sin_values = sin_values,
+        .cos_values = cos_values,
+        .shape = source.shape,
+        .strides = strides,
+        .feature_stride = feature_stride,
+        .pair_count = pair_count,
+        .rotary_offset = rotary_offset,
+        .vector_start = 0,
+        .vector_end = total_vectors,
+    };
 
-        if (feature_stride == 1) {
-            const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
-            const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
-            switch (mode) {
-                .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset + rotary_offset, sin_row, cos_row),
-                .half => rotatePairsHalf(output, input, base_offset + rotary_offset, base_offset + rotary_offset + pair_count, sin_row, cos_row),
-            }
-            continue;
-        }
-
-        for (0..pair_count) |pair_i| {
-            const angle_i = position_coord * pair_count + pair_i;
-            const sin_value = sin_values[angle_i];
-            const cos_value = cos_values[angle_i];
-
-            const first_feature = rotary_offset + switch (mode) {
-                .interleaved, .interleaved_tail => 2 * pair_i,
-                .half => pair_i,
-            };
-            const second_feature = rotary_offset + switch (mode) {
-                .interleaved, .interleaved_tail => 2 * pair_i + 1,
-                .half => pair_i + pair_count,
-            };
-            const first_offset = base_offset + first_feature * feature_stride;
-            const second_offset = base_offset + second_feature * feature_stride;
-            const first = input[first_offset];
-            const second = input[second_offset];
-            output[first_offset] = first * cos_value - second * sin_value;
-            output[second_offset] = first * sin_value + second * cos_value;
-        }
+    // Same length gate as the fused rms-norm+rope sibling (norm.zig): the
+    // pool is engaged for prefill-sized inputs only; a decode step's
+    // handful of vectors stays on the calling thread. The gate decides
+    // POOLING only, never per-vector math.
+    if (total_vectors > 1 and input.len >= parallel.vector_elementwise_len_threshold / 8) {
+        if (ctx.dispatchRange(Task, "vector_start", "vector_end", task, total_vectors, Task.run)) return out;
     }
-
+    Task.run(&task);
     return out;
+}
+
+/// The per-vector rotation walk of `applyRope`, shaped as a range task so
+/// `dispatchRange` can split `[vector_start, vector_end)` across the pool.
+/// Each vector reads its own input features and writes its own output
+/// features, so any split produces the serial walk's bytes.
+fn RopeVectorsTask(
+    comptime rank: usize,
+    comptime position_axis: usize,
+    comptime feature_axis: usize,
+    comptime mode: RopeMode,
+) type {
+    return struct {
+        input: []const f32,
+        output: []f32,
+        sin_values: []const f32,
+        cos_values: []const f32,
+        shape: [rank]usize,
+        strides: [rank]usize,
+        feature_stride: usize,
+        pair_count: usize,
+        rotary_offset: usize,
+        vector_start: usize,
+        vector_end: usize,
+
+        fn run(task: *const @This()) void {
+            const input = task.input;
+            const output = task.output;
+            const sin_values = task.sin_values;
+            const cos_values = task.cos_values;
+            const feature_stride = task.feature_stride;
+            const pair_count = task.pair_count;
+            const rotary_offset = task.rotary_offset;
+
+            for (task.vector_start..task.vector_end) |vector_i| {
+                var remainder = vector_i;
+                var base_offset: usize = 0;
+                var position_coord: usize = 0;
+                comptime var dim = rank;
+                inline while (dim > 0) {
+                    dim -= 1;
+                    if (dim != feature_axis) {
+                        const coord = remainder % task.shape[dim];
+                        remainder /= task.shape[dim];
+                        base_offset += coord * task.strides[dim];
+                        if (dim == position_axis) position_coord = coord;
+                    }
+                }
+
+                if (feature_stride == 1) {
+                    const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
+                    const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
+                    switch (mode) {
+                        .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset + rotary_offset, sin_row, cos_row),
+                        .half => rotatePairsHalf(output, input, base_offset + rotary_offset, base_offset + rotary_offset + pair_count, sin_row, cos_row),
+                    }
+                    continue;
+                }
+
+                for (0..pair_count) |pair_i| {
+                    const angle_i = position_coord * pair_count + pair_i;
+                    const sin_value = sin_values[angle_i];
+                    const cos_value = cos_values[angle_i];
+
+                    const first_feature = rotary_offset + switch (mode) {
+                        .interleaved, .interleaved_tail => 2 * pair_i,
+                        .half => pair_i,
+                    };
+                    const second_feature = rotary_offset + switch (mode) {
+                        .interleaved, .interleaved_tail => 2 * pair_i + 1,
+                        .half => pair_i + pair_count,
+                    };
+                    const first_offset = base_offset + first_feature * feature_stride;
+                    const second_offset = base_offset + second_feature * feature_stride;
+                    const first = input[first_offset];
+                    const second = input[second_offset];
+                    output[first_offset] = first * cos_value - second * sin_value;
+                    output[second_offset] = first * sin_value + second * cos_value;
+                }
+            }
+        }
+    };
 }

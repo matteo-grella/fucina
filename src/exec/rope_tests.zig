@@ -134,3 +134,81 @@ test "theta factors scale frequencies; null reproduces plain RoPE" {
         }
     }
 }
+
+test "ropeWithTable splits vectors across the pool bitwise identically to the serial walk" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // [seq, heads, d] at a prefill size well above the pooling gate
+    // (4 Mi elements vs the 32 Ki gate), so the pooled arm is the one under
+    // test; the serial walk is the same body with the team forced to one.
+    const seq = 2048;
+    const heads = 16;
+    const feature_dim = 128;
+    const data = try allocator.alloc(f32, seq * heads * feature_dim);
+    defer allocator.free(data);
+    var prng = std.Random.DefaultPrng.init(0x50e);
+    const random = prng.random();
+    for (data) |*v| v.* = random.floatNorm(f32);
+    var x = try ctx.fromSlice(.f32, .{ seq, heads, feature_dim }, data);
+    defer x.deinit();
+
+    var full = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = 3, .len = seq } }, .feature_dim = feature_dim, .freqs = .{ .theta = .{ .base = 10000 } } });
+    defer full.deinit();
+    // A partial span (tail-64) exercises the pass-through copy + offset arm.
+    var partial = try ctx.prepareRopeTable(.{ .positions = .{ .range = .{ .origin = 3, .len = seq } }, .feature_dim = 64, .freqs = .{ .theta = .{ .base = 10000 } } });
+    defer partial.deinit();
+
+    // The team is built lazily and sized at creation, so it is created at
+    // the full count BEFORE the override drops the count to one (a team
+    // created under the override would have no workers and every later
+    // dispatch would run on the caller, testing nothing).
+    const saved_threads = parallel.cpuThreadCount(parallel.vector_max_threads);
+    _ = try ctx.tryWorkPool();
+    defer parallel.setMaxThreads(saved_threads);
+
+    inline for ([_]exec.RopeMode{ .half, .interleaved, .interleaved_tail }) |mode| {
+        inline for (.{ true, false }) |full_span| {
+            const table = if (full_span) &full else &partial;
+            const rotary_dim: usize = if (full_span) feature_dim else 64;
+            const rotary_offset: usize = if (!full_span and mode == .interleaved_tail) feature_dim - rotary_dim else 0;
+            const pair_count = rotary_dim / 2;
+
+            parallel.setMaxThreads(saved_threads);
+            var pooled = try ctx.ropeWithTable(3, &x, 0, 2, table, mode);
+            defer pooled.deinit();
+            parallel.setMaxThreads(1);
+            var serial = try ctx.ropeWithTable(3, &x, 0, 2, table, mode);
+            defer serial.deinit();
+            try std.testing.expectEqualSlices(f32, serial.dataConst(), pooled.dataConst());
+
+            // Both equal the scalar per-pair formula (the serial walk's
+            // own tail loop), so the equality above is not two copies of
+            // one mistake.
+            const sin_values = table.sinValues();
+            const cos_values = table.cosValues();
+            const got = pooled.dataConst();
+            for (0..seq * heads) |vector_i| {
+                const position = vector_i / heads;
+                const base = vector_i * feature_dim;
+                for (0..feature_dim) |feature_i| {
+                    if (feature_i < rotary_offset or feature_i >= rotary_offset + rotary_dim) {
+                        try std.testing.expectEqual(data[base + feature_i], got[base + feature_i]);
+                    }
+                }
+                for (0..pair_count) |pair_i| {
+                    const sin_value = sin_values[position * pair_count + pair_i];
+                    const cos_value = cos_values[position * pair_count + pair_i];
+                    const first_i = base + rotary_offset + (if (mode == .half) pair_i else 2 * pair_i);
+                    const second_i = base + rotary_offset + (if (mode == .half) pair_i + pair_count else 2 * pair_i + 1);
+                    const first = data[first_i];
+                    const second = data[second_i];
+                    try std.testing.expectEqual(first * cos_value - second * sin_value, got[first_i]);
+                    try std.testing.expectEqual(first * sin_value + second * cos_value, got[second_i]);
+                }
+            }
+        }
+    }
+}
