@@ -85,7 +85,6 @@ pub const names = [_][]const u8{
     "gemm",
     "gemmBatched",
     "packDenseRhs",
-    "packHalfRhs",
     "quantizeMatmulRhsBlockwiseI8",
     "quantizeMatmulRhsQ4_0",
     "quantizeMatmulRhsQ8_0",
@@ -107,7 +106,6 @@ pub const generic_names = [_][]const u8{
     "gemm",
     "gemmBatched",
     "packDenseRhs",
-    "packHalfRhs",
     "elementwiseContiguousIntoTyped",
     "addRowVectorSlice",
     "pool2dInto",
@@ -124,7 +122,6 @@ pub const generic_names = [_][]const u8{
 /// implementations.
 pub const pool_free_names = [_][]const u8{
     "packDenseRhs",
-    "packHalfRhs",
     "addInto",
     "subInto",
     "mulInto",

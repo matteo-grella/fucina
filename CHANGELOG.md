@@ -155,8 +155,8 @@ this point; earlier history is `git log`.
   `format`/`traits` decls on the RHS containers (`X.dtype`,
   `dtype.blockSize(X.dtype)`, `dtype.blockByteSize(X.dtype)`,
   `dtype.supportsQuantizedMatmulRhs(dt)`), `PackedMatmulFormat` /
-  `preferredRhsFormat` in `backend/packed.zig` (`PackedMatmulRhsFor(dt)`
-  carries `dtype`), and `backend/packed_layout.zig`. The
+  `preferredRhsFormat` in `backend/packed.zig` (`PackedDenseRhs` carries
+  `dtype`), and `backend/packed_layout.zig`. The
   `AnyQuantizedMatmulRhs` union tags are `DType` names (`.ggml_q4_k` →
   `.q4_k`; `.fucina_w8a8_rhs` unchanged). The GGML block structs have two
   paths, `fucina.quant.BlockQ4_K` (public) and `dtype.BlockQ4_K`
@@ -177,8 +177,8 @@ this point; earlier history is `git log`.
   a, b, m, n, k)` over an `ops.Gemm` request (orientation, operand and
   output dtypes, store or accumulate; unsupported combinations are compile
   errors), `gemmBatched(pc, kind, ...)`, `dot(pc, dtype, ...)`,
-  `packDenseRhs`/`packHalfRhs`, and `matmulPacked` now covering the f32
-  panel, the 16-bit panel, and the quantized packs by container type. The
+  `packDenseRhs`, and `matmulPacked` now covering the f32 panel and the
+  quantized packs by container type. The
   vector kernels (`vector.gemm.gemm`, `vector.batched.gemmBatched`) take
   slices and the same request. One orientation enum, `ops.MatmulKind`
   (`.plain`/`.trans_a`/`.trans_b`; `exec.MatmulKind` is that type), now
@@ -489,9 +489,11 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
   `enableNativeMatmulPoolForWork(dt, m, n, k)`
   (`enableNativeTypedMatmulPoolForWork`; `dt` names the storage the kernel
   walks, and the f32 dense arm keeps its BLAS bail).
-  `packMatmulRhsTyped` folds into `packMatmulRhs(dt, rhs)`, whose result
-  container is dtype-selected (`PackedMatmulRhsContainer`): the 16-bit
-  streaming pack for `.f16`/`.bf16`, the quantized block pack otherwise.
+  `packMatmulRhsTyped` folds into `packMatmulRhs(dt, rhs)`, the quantized
+  block pack for `dt` (`backend.PackedRhsFor(dt)`); dense f32/f16/bf16
+  weights pack through `packDenseMatmulRhs` into the one f32 panel, and
+  the separate same-dtype f16/bf16 panel (`packHalfRhs`,
+  `matmulHalfPanel`) is gone.
 - **`AxisRank` dropped; the comptime rank/axis parameters stay.**
   `softmax`, `logsumexp`, `logSoftmax`, `softmaxExt`, `rmsNorm`,
   `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulBackwardInput`,

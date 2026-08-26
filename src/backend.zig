@@ -18,7 +18,6 @@ const thread = @import("thread.zig");
 
 pub const dtype_info = dtype_mod;
 pub const DType = dtype_mod.DType;
-pub const PackedMatmulRhsFor = packed_matmul.PackedMatmulRhsFor;
 pub const PackedDenseRhs = packed_matmul.PackedDenseRhs;
 pub const supports_q4_k_mmla = quantized_matmul.supports_q4_k_mmla;
 pub const QuantizedMatmulRhsI8 = quantized_matmul.QuantizedMatmulRhsI8;

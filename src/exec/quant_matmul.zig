@@ -294,21 +294,9 @@ fn matmul2DWithQuantizedKTensorRhs(
 /// Pack a block-quantized [n, k] weight tensor into the ISA-best packed
 /// matmul RHS container for its dtype (`backend.PackedRhsFor(dt)`); the
 /// Q4_K choice between x8 and x2Mmla stays comptime. The per-format
-/// packers live in the backend's `quant/<fmt>.zig` children.
-/// Packed-RHS container type for `packMatmulRhs`: the 16-bit streaming
-/// pack for `.f16`/`.bf16`, the quantized block pack otherwise; both are
-/// consumed by `matmulPacked`.
-pub fn PackedMatmulRhsContainer(comptime dt: DType) type {
-    return if (dt == .f16 or dt == .bf16) backend_mod.PackedMatmulRhsFor(dt) else backend_mod.PackedRhsFor(dt);
-}
-
-pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !PackedMatmulRhsContainer(dt) {
-    if (comptime dt == .f16 or dt == .bf16) {
-        _ = try rhs.rankView(2);
-        var rr = try self.prepareContiguous(dt, rhs);
-        defer rr.deinit();
-        return kernels.packHalfRhs(dt, self.allocator, rr.tensor());
-    }
+/// packers live in the backend's `quant/<fmt>.zig` children. Dense f32,
+/// f16, and bf16 weights take `packDenseMatmulRhs` (the f32 panel).
+pub fn packMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !backend_mod.PackedRhsFor(dt) {
     return packMatmulRhsAs(self, backend_mod.PackedRhsFor(dt), rhs);
 }
 
@@ -324,36 +312,26 @@ pub fn packMatmulRhsAs(self: *ExecContext, comptime Rhs: type, rhs: *const tenso
     return backend_mod.quantized_matmul.packRhsAs(Rhs, self.allocator, rhs.dataConst(), n, k, blocks_per_row);
 }
 
-/// The three packed-RHS arms of `matmulPacked`, selected by the container
-/// type: the f32 output-row panel (`packDenseMatmulRhs`), the 16-bit panel
-/// (`packMatmulRhs(.f16|.bf16)`), or a quantized lane pack
-/// (`backend.PackedRhsFor(dt)`, `packMatmulRhs`/`packMatmulRhsAs`).
-const PackedArm = enum { dense, half, quant };
+/// The two packed-RHS arms of `matmulPacked`, selected by the container
+/// type: the f32 output-row panel (`packDenseMatmulRhs`) or a quantized
+/// lane pack (`backend.PackedRhsFor(dt)`, `packMatmulRhs`/`packMatmulRhsAs`).
+const PackedArm = enum { dense, quant };
 
 fn packedArm(comptime RhsContainer: type) PackedArm {
     if (RhsContainer == backend_mod.PackedDenseRhs) return .dense;
     if (!@hasDecl(RhsContainer, "dtype")) @compileError("matmulPacked: not a packed RHS container: " ++ @typeName(RhsContainer));
     if (dtype_mod.isBlockQuantized(RhsContainer.dtype)) return .quant;
-    if (RhsContainer == backend_mod.PackedMatmulRhsFor(RhsContainer.dtype)) return .half;
     @compileError("matmulPacked: not a packed RHS container: " ++ @typeName(RhsContainer));
 }
 
-/// The output type of `matmulPacked(a, rhs)`: f32 for the dense-panel and
-/// quantized arms (which take an f32 LHS), the matmul output dtype of the
-/// panel's dtype for the 16-bit arm (which takes an LHS of that dtype).
+/// The output type of `matmulPacked(a, rhs)`: f32 for both arms, which take
+/// an f32 LHS.
 pub fn MatmulPackedOutput(comptime Lhs: type, comptime Rhs: type) type {
     const lhs_dtype = @typeInfo(Lhs).pointer.child.dtype;
     const RhsContainer = @typeInfo(Rhs).pointer.child;
-    switch (packedArm(RhsContainer)) {
-        .dense, .quant => {
-            if (lhs_dtype != .f32) @compileError("matmulPacked: " ++ @typeName(RhsContainer) ++ " takes an f32 LHS");
-            return Tensor;
-        },
-        .half => {
-            if (lhs_dtype != RhsContainer.dtype) @compileError("matmulPacked: the 16-bit panel takes an LHS of its own dtype (." ++ @tagName(RhsContainer.dtype) ++ ")");
-            return tensor.TensorOf(dtype_mod.outputDType(.matmul, lhs_dtype));
-        },
-    }
+    _ = packedArm(RhsContainer);
+    if (lhs_dtype != .f32) @compileError("matmulPacked: " ++ @typeName(RhsContainer) ++ " takes an f32 LHS");
+    return Tensor;
 }
 
 /// Activations [m, k] x a pre-packed RHS -> [m, n]. `rhs` points at a
@@ -374,16 +352,6 @@ pub fn matmulPacked(self: *ExecContext, a: anytype, rhs: anytype) !MatmulPackedO
             var out = try self.empty(.f32, .{ m, rhs.n });
             errdefer out.deinit();
             self.enableNativeMatmulPoolForWork(.f32, m, rhs.n, k);
-            try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
-            return out;
-        },
-        .half => {
-            const dt = RhsContainer.dtype;
-            var aa = try self.prepareContiguous(dt, a);
-            defer aa.deinit();
-            var out = try self.empty(comptime dtype_mod.outputDType(.matmul, dt), .{ m, rhs.n });
-            errdefer out.deinit();
-            self.enableNativeMatmulPoolForWork(dt, m, rhs.n, k);
             try kernels.matmulPacked(self.pc(), self.allocator, &out, aa.tensor(), rhs, m, rhs.n, k);
             return out;
         },

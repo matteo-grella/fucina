@@ -209,8 +209,8 @@ Backends:
   forwards these outward), `common.zig` (the shared SIMD primitives). The
   f32 → quantized row encoders live in the format modules behind
   `quantizeRowForDType` in `quant.zig` (byte-exact ggml parity).
-- `src/backend/packed.zig` (dense packed-RHS helpers for `f16`/`bf16`
-  matmul), `src/backend/ops.zig` (shared op enums),
+- `src/backend/packed.zig` (the dense f32 output-row panel; f16/bf16
+  weights widen once at pack time), `src/backend/ops.zig` (shared op enums),
   `src/backend/quant_tables.zig` (GGML lookup tables).
 - `src/backend/metal.zig` + `src/backend/metal/`: the `-Dgpu=metal` GPU GEMM
   provider — Zig host (lazy init, persistent queue, eager-async f32/f16/dense-quant

@@ -380,12 +380,6 @@ test "exec context runs typed float forward math kernels" {
     defer hproduct.deinit();
     try std.testing.expectEqualSlices(f16, &.{ 58, 64, 139, 154 }, hproduct.dataConst());
 
-    var packed_rhs = try ctx.packMatmulRhs(.f16, &hright);
-    defer packed_rhs.deinit();
-    var packed_product = try ctx.matmulPacked(&hleft, &packed_rhs);
-    defer packed_product.deinit();
-    try std.testing.expectEqualSlices(f16, hproduct.dataConst(), packed_product.dataConst());
-
     var left = try ctx.fromSlice(.bf16, .{ 2, 3 }, &.{
         dtype_mod.f32ToBf16(1),
         dtype_mod.f32ToBf16(2),
@@ -412,12 +406,6 @@ test "exec context runs typed float forward math kernels" {
     defer product.deinit();
     try std.testing.expectEqual(@as(f32, 58), dtype_mod.bf16ToF32(product.dataConst()[0]));
     try std.testing.expectEqual(@as(f32, 154), dtype_mod.bf16ToF32(product.dataConst()[3]));
-
-    var bf16_packed_rhs = try ctx.packMatmulRhs(.bf16, &right);
-    defer bf16_packed_rhs.deinit();
-    var bf16_packed_product = try ctx.matmulPacked(&left, &bf16_packed_rhs);
-    defer bf16_packed_product.deinit();
-    try std.testing.expectEqualSlices(u16, product.dataConst(), bf16_packed_product.dataConst());
 
     var cast = try ctx.cast(.bf16, .f32, &product);
     defer cast.deinit();

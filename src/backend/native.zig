@@ -145,7 +145,6 @@ pub const kernels = struct {
     pub const gemm = native.gemm;
     pub const gemmBatched = native.gemmBatched;
     pub const packDenseRhs = native.packDenseRhs;
-    pub const packHalfRhs = native.packHalfRhs;
     pub const quantizeMatmulRhsBlockwiseI8 = native.quantizeMatmulRhsBlockwiseI8;
     pub const quantizeMatmulRhsQ4_0 = native.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = native.quantizeMatmulRhsQ8_0;
@@ -249,11 +248,6 @@ pub fn gemm(
     );
 }
 
-/// The plain f32 GEMM as the half-panel matmul's inner call.
-fn gemmF32Panel(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    gemm(pc, .{}, out, a, b, m, n, k);
-}
-
 /// Build the f32 output-row panels (`PackedDenseRhs`) from an f32, f16, or
 /// bf16 `[n, k]` weight.
 pub fn packDenseRhs(
@@ -262,16 +256,6 @@ pub fn packDenseRhs(
     rhs: *const tensor.TensorOf(dtype),
 ) !packed_matmul.PackedDenseRhs {
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
-}
-
-/// Build the 16-bit panel (`PackedMatmulRhsFor(dtype)`) from an f16 or bf16
-/// `[k, n]` weight.
-pub fn packHalfRhs(
-    comptime dtype: DType,
-    allocator: std.mem.Allocator,
-    rhs: *const tensor.TensorOf(dtype),
-) !packed_matmul.PackedMatmulRhsFor(dtype) {
-    return packed_matmul.packRhs(allocator, dtype, rhs);
 }
 
 /// f32 [m, k] x the f32 output-row panels -> f32 [m, n]. Explicit
@@ -854,12 +838,11 @@ pub fn matmulQuantizedRhs(
     }, allocator, out, a, rhs, m, n, k);
 }
 
-/// Activations x a pre-packed RHS -> [m, n]; the container type selects the
-/// arm at comptime: the f32 output-row panel (`packDenseRhs`; f32 LHS), the
-/// 16-bit panel (`packHalfRhs`; LHS and output in that dtype), or a
-/// lane-packed quantized container (f32 LHS; each arm keeps its exact
-/// dispatch: the Q8_0x4 bulk/tail split, the Q4_Kx8/Q5_Kx8 x4-prefix split,
-/// the smmla pair path).
+/// f32 activations x a pre-packed RHS -> [m, n]; the container type selects
+/// the arm at comptime: the f32 output-row panel (`packDenseRhs`) or a
+/// lane-packed quantized container (each arm keeps its exact dispatch: the
+/// Q8_0x4 bulk/tail split, the Q4_Kx8/Q5_Kx8 x4-prefix split, the smmla
+/// pair path).
 pub fn matmulPacked(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
@@ -873,8 +856,6 @@ pub fn matmulPacked(
     const Rhs = @TypeOf(rhs.*);
     if (comptime Rhs == packed_matmul.PackedDenseRhs)
         return matmulPackedDense(pc, out, a, rhs, m, n, k);
-    if (comptime !dtype_mod.isBlockQuantized(Rhs.dtype))
-        return packed_matmul.matmulHalfPanel(allocator, Rhs.dtype, out, a, rhs, m, n, k, pc, gemmF32Panel);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
         return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)

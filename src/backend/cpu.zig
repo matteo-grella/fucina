@@ -97,7 +97,6 @@ pub const kernels = struct {
     pub const gemm = cpu.gemm;
     pub const gemmBatched = cpu.gemmBatched;
     pub const packDenseRhs = cpu.packDenseRhs;
-    pub const packHalfRhs = cpu.packHalfRhs;
     pub const quantizeMatmulRhsBlockwiseI8 = cpu.quantizeMatmulRhsBlockwiseI8;
     pub const quantizeMatmulRhsQ4_0 = cpu.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = cpu.quantizeMatmulRhsQ8_0;
@@ -1357,25 +1356,12 @@ pub fn gemm(
     }
 }
 
-/// The plain f32 GEMM as the half-panel matmul's inner call.
-fn gemmF32Panel(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
-    gemm(pc, .{}, out, a, b, m, n, k);
-}
-
 pub fn packDenseRhs(
     comptime dtype: DType,
     allocator: std.mem.Allocator,
     rhs: *const tensor.TensorOf(dtype),
 ) !packed_matmul.PackedDenseRhs {
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
-}
-
-pub fn packHalfRhs(
-    comptime dtype: DType,
-    allocator: std.mem.Allocator,
-    rhs: *const tensor.TensorOf(dtype),
-) !packed_matmul.PackedMatmulRhsFor(dtype) {
-    return packed_matmul.packRhs(allocator, dtype, rhs);
 }
 
 pub fn quantizeMatmulRhsBlockwiseI8(
@@ -1639,8 +1625,6 @@ pub fn matmulPacked(
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
         return packed_matmul.matmulDenseScalar(contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m);
     }
-    if (comptime !dtype_mod.isBlockQuantized(Rhs.dtype))
-        return packed_matmul.matmulHalfPanel(allocator, Rhs.dtype, out, a, rhs, m, n, k, pc, gemmF32Panel);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
         return matmul2DQuantizedRhsQ8_0Rows(pc, quantized_matmul.q8_0.matmulQ8_0x4RhsRange, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)

@@ -106,9 +106,9 @@ test "backend build facts" {
 
 ```zig
 // src/backend/interface.zig
-pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 77 kernels
-pub const generic_names = [_][]const u8{ ... };    // 15: take a comptime dtype, op, or request
-pub const pool_free_names = [_][]const u8{ ... };  // 14: take no `pc`
+pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 76 kernels
+pub const generic_names = [_][]const u8{ ... };    // 14: take a comptime dtype, op, or request
+pub const pool_free_names = [_][]const u8{ ... };  // 13: take no `pc`
 pub fn conform(comptime Impl: type) void;          // the single comptime check
 
 // src/backend/cpu.zig and src/backend/native.zig
@@ -189,7 +189,7 @@ generic over a comptime dtype, op, request, or container type):
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
-| packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`), `packHalfRhs`*† (f16/bf16 `[k, n]` weight to the same-dtype panel `PackedMatmulRhsFor(dtype)`); both are consumed by `matmulPacked` |
+| packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulQuantizedRhs`† (comptime dtype, the plain K-quant containers), `matmulPacked`† (comptime container dispatch over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs` |
 
 The counts above are asserted against the lists themselves (the name
@@ -199,9 +199,9 @@ lists are reachable as `fucina.internal.backend_mod.interface`):
 test "kernel interface inventory" {
     const backend = fucina.internal.backend_mod;
     const interface = backend.interface;
-    try std.testing.expectEqual(@as(usize, 77), interface.names.len);
-    try std.testing.expectEqual(@as(usize, 15), interface.generic_names.len);
-    try std.testing.expectEqual(@as(usize, 14), interface.pool_free_names.len);
+    try std.testing.expectEqual(@as(usize, 76), interface.names.len);
+    try std.testing.expectEqual(@as(usize, 14), interface.generic_names.len);
+    try std.testing.expectEqual(@as(usize, 13), interface.pool_free_names.len);
     // Every named kernel is a declaration of the active provider's set
     // (`conform` pins that set to exactly `names`, so the same check on the
     // generic and pool-free lists shows they are subsets of the names).
@@ -568,17 +568,6 @@ two layout families, plus an older backend-only typed bridge:
   `weights.packRhs(ctx)` / `packRhsAs(ctx, fucina.quant.QuantizedMatmulRhsQ4_Kx8)`
   on a rank-2 quantized tensor and feeds the pack to `dotPacked` — full
   semantics in [§10](10-quantization.md).
-- Backend-only same-dtype f16/bf16 bridge: `backend/packed.zig` also defines
-  `PackedMatmulRhsFor(dtype)` for `.f16`/`.bf16` (the container's `dtype` is
-  the 16-bit source); the pack widens the RHS to f32 once (`packRhs` → owns
-  an f32 tensor; caller `deinit()`s the container).
-  `matmulPacked` on that panel (`packed.matmulHalfPanel`) then runs f32 GEMM with widen/narrow
-  bridges, with a dedicated `m == 1` GEMV fast path that dots the f16/bf16
-  activation row directly against the packed f32 columns (column-parallel
-  over the pool). This bridge preserves a same-dtype f16/bf16 result and is
-  distinct from the public f32-lhs `PackedDenseRhs` panel. It is reached
-  through `ExecContext.packMatmulRhs` (`.f16`/`.bf16`) /
-  `matmulPacked` ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)).
 
 **Arch-gated int8 dot arms.** The K-quant/Q8 kernels select their inner dot
 at comptime: aarch64 `sdot` inline asm (all aarch64), aarch64 `smmla` behind
