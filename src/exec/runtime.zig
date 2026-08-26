@@ -11,6 +11,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
+const storage = @import("../storage.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -25,15 +26,29 @@ const Tensor = tensor.Tensor;
 /// Reusable transient-buffer pool. Defined in the `buffer_pool.zig` leaf.
 pub const BufferPool = exec_buffer_pool.BufferPool;
 
-pub const ScopeNodeDestroy = *const fn (*anyopaque) void;
+pub const ScopeRelease = *const fn (*anyopaque) void;
 
+/// One reference held by an exec scope: a resource (a value buffer of any
+/// dtype, or a type-erased graph node) and the call that drops the
+/// reference. The scope knows nothing else about it; every adopted result
+/// is one or two of these, whatever its dtype.
 pub const ScopeEntry = struct {
-    /// Null when the adopted value lives inside the type-erased `node`
-    /// payload (non-f32 facade values; the payload's destructor frees it).
-    value: ?Tensor,
-    node: ?*anyopaque,
-    destroy_node: ScopeNodeDestroy,
+    ptr: *anyopaque,
+    release: ScopeRelease,
 };
+
+/// The entry for one reference on `buffer` that the caller hands over (the
+/// adopting handle's own reference; nothing is retained here). Dtype-
+/// generic: the release shim is instantiated per buffer type.
+pub fn bufferEntry(comptime dtype: DType, buffer: *storage.BufferOf(dtype)) ScopeEntry {
+    const Shim = struct {
+        fn release(ptr: *anyopaque) void {
+            const b: *storage.BufferOf(dtype) = @ptrCast(@alignCast(ptr));
+            b.release();
+        }
+    };
+    return .{ .ptr = buffer, .release = Shim.release };
+}
 
 pub const ExecScope = struct {
     index: usize,
@@ -58,9 +73,8 @@ pub const ScopeStack = struct {
     fn releaseTo(self: *ScopeStack, index: usize) void {
         std.debug.assert(index <= self.entries.items.len);
         while (self.entries.items.len > index) {
-            var entry = self.entries.pop().?;
-            if (entry.value) |*value| value.deinit();
-            if (entry.node) |node| entry.destroy_node(node);
+            const entry = self.entries.pop().?;
+            entry.release(entry.ptr);
         }
     }
 };
@@ -183,8 +197,11 @@ pub fn openExecScope(self: *ExecContext) ExecScope {
     return .{ .index = scopes.entries.items.len };
 }
 
-/// Release every tensor adopted since `mark`, newest first. Only safe
-/// once no backward() over tensors adopted in the scope is pending.
+/// Release every reference adopted since `mark`, newest first. Every
+/// handle adopted in the scope is a borrow and is invalid from here on
+/// (its `deinit` stays a no-op). Close after any backward over the
+/// scope's results: the graph is reference-counted, but the scope holds
+/// the only reference to a result nobody else retained.
 pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void {
     const scopes = activeScopes(self);
     std.debug.assert(scopes.depth > 0);
@@ -192,26 +209,15 @@ pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void {
     scopes.releaseTo(mark.index);
 }
 
-/// Two-phase adoption so op construction can stay infallible after its
-/// "consumes the value on success" point: reserve BEFORE building the
-/// result, adopt (cannot fail) after.
-pub fn reserveScopeSlot(self: *ExecContext) !void {
-    try activeScopes(self).entries.ensureUnusedCapacity(self.allocator, 1);
-}
-
-pub fn adoptScopeValueAssumeCapacity(self: *ExecContext, value: Tensor, node: ?*anyopaque, destroy_node: ScopeNodeDestroy) void {
+/// Hand the innermost scope the references of one result, all or nothing:
+/// on failure (the stack could not grow) no entry was taken and the caller
+/// still owns everything. Op tails call it BEFORE handing the value to the
+/// returned handle, so nothing needs to be un-consumed on the error path.
+pub fn adopt(self: *ExecContext, entries: []const ScopeEntry) !void {
     const scopes = activeScopes(self);
     std.debug.assert(scopes.depth > 0);
-    scopes.entries.appendAssumeCapacity(.{ .value = value, .node = node, .destroy_node = destroy_node });
-}
-
-/// Adopt a node-only entry: the value (any dtype) lives inside the
-/// type-erased payload, which the destructor must free along with any
-/// attached per-op state.
-pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque, destroy_node: ScopeNodeDestroy) void {
-    const scopes = activeScopes(self);
-    std.debug.assert(scopes.depth > 0);
-    scopes.entries.appendAssumeCapacity(.{ .value = null, .node = node, .destroy_node = destroy_node });
+    try scopes.entries.ensureUnusedCapacity(self.allocator, entries.len);
+    scopes.entries.appendSliceAssumeCapacity(entries);
 }
 
 // ------------------------------------------------------------------
@@ -750,8 +756,8 @@ pub fn enableNativeMatmulPoolForWork(self: *ExecContext, comptime dtype: DType, 
 /// NOT consumed (the caller's binding and defers stay valid) and the
 /// error propagates; on success the old tensor is released and the new
 /// one returned for rebinding. Inside an exec scope the release is a
-/// safe no-op for scope-owned op results (their `deinit` is a no-op —
-/// the scope owns them), so the same forward code is also training-safe.
+/// safe no-op for scope-owned op results (borrows; the scope releases at
+/// close), so the same forward code is also training-safe.
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value) {
     _ = self;
     comptime {

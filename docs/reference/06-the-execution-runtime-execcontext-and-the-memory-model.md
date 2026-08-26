@@ -91,11 +91,8 @@ aliases):
 pub fn execScopeActive(self: *const ExecContext) bool
 pub fn openExecScope(self: *ExecContext) ExecScope
 pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void
-pub fn reserveScopeSlot(self: *ExecContext) !void
-pub fn adoptScopeValueAssumeCapacity(self: *ExecContext, value: Tensor,
-    node: ?*anyopaque, destroy_node: ScopeNodeDestroy) void
-pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque,
-    destroy_node: ScopeNodeDestroy) void
+pub fn adopt(self: *ExecContext, entries: []const ScopeEntry) !void
+pub fn bufferEntry(comptime dtype: DType, buffer: *BufferOf(dtype)) ScopeEntry
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
 pub fn pc(self: *const ExecContext) backend.ParallelConfig
@@ -262,7 +259,8 @@ no handle bookkeeping at all.
 
 ```zig
 pub const ExecScope = struct { index: usize };
-pub const ScopeNodeDestroy = *const fn (*anyopaque) void;
+pub const ScopeRelease = *const fn (*anyopaque) void;
+pub const ScopeEntry = struct { ptr: *anyopaque, release: ScopeRelease }; // one reference: a value buffer of any dtype, or a graph node
 
 pub fn openExecScope(self: *ExecContext) ExecScope
 pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void
@@ -271,24 +269,30 @@ pub fn execScopeActive(self: *const ExecContext) bool
 
 Semantics:
 
-- **While a scope is open, every tensor returned by a facade op is adopted
-  by the innermost scope.** The value the caller receives is a borrow with
-  its `scope_owned` flag set: `deinit` on it is a safe no-op (arena-style),
-  and using it after the scope closes is use-after-free. Adoption covers
-  both differentiable results and no-grad f32 results (eval on constants,
-  the `values` arm of `topK`/`sort`, …) — it is wired into the op tails
-  (`finishOp` / `finishNoGrad` in `src/ag/tensor.zig`). The i64 INDEX
-  outputs (`argmax`, `argsort`, the `indices` arms) are typed constants
-  and stay caller-owned (below).
+- **While a scope is open, every tensor returned by a facade op, of any
+  dtype, is adopted by the innermost scope.** The value the caller receives
+  is a borrow with its `scope_owned` flag set: `deinit` on it is a safe
+  no-op for the value and the graph node alike (arena-style), and using it
+  after the scope closes is use-after-free. Adoption is wired into the op
+  tails (`finishOp` / `finishNoGrad` / `finishTyped` in
+  `src/ag/tensor/plumbing.zig`) and covers differentiable results, no-grad
+  f32 results (eval on constants, the `values` arm of `topK`/`sort`, …),
+  the i64 index outputs (`argmax`, `argsort`, the `indices` arms), `.bool`
+  masks, 16-bit casts, and the quantized branch's views and row gathers:
+  one rule, an op result under a scope is a borrow.
 - **What stays caller-owned even inside a scope:** tensors created
   explicitly (`variable`, `constant`, `fromSlice`, and the other [§3](03-tensors-types-construction-and-data-access.md)
-  constructors), fetched gradients (`grad` / `gradView`), the raw `ctx.*`
-  construction helpers of [§6.4](06-the-execution-runtime-execcontext-and-the-memory-model.md#64-raw-construction-and-copy-helpers-on-ctx-srcexeczig-srcexecruntimezig), and results of typed/quantized-constant
-  tensor methods (weights and caches have explicit lifetimes).
-- **`closeExecScope(mark)` releases every tensor adopted since `mark`,
-  newest first**, destroying each adopted graph node through its registered
-  destructor. Close a scope only when no `backward()` over tensors adopted
-  in it is pending.
+  constructors), fetched gradients (`grad` / `gradView`), and the raw
+  `ctx.*` construction helpers of [§6.4](06-the-execution-runtime-execcontext-and-the-memory-model.md#64-raw-construction-and-copy-helpers-on-ctx-srcexeczig-srcexecruntimezig).
+- **`closeExecScope(mark)` releases every reference adopted since `mark`,
+  newest first**: one entry per value buffer and one per graph node, each
+  through its own release call. Every borrow is invalid from then on (its
+  `deinit` stays a no-op). Close a scope after any `backward()` over its
+  results.
+- **Scopes manage lifetimes only.** The graph is reference-counted on its
+  own ([§5](05-automatic-differentiation.md): a record retains its operands' states), so a scope is never
+  required for correctness: unscoped code that releases every handle it
+  holds trains identically. The scope removes the handle bookkeeping.
 - **Scopes nest with strict stack discipline** — close in reverse order of
   opening. A nested scope releases only its own suffix; values adopted by an
   outer scope survive an inner close.
@@ -371,14 +375,13 @@ keeps every intermediate live until close (O(N), cold addresses) — measured
 the discipline; scopes are correct where holding the graph *is* the
 semantics (training), and harmless on cold no-grad paths.
 
-**Extension point.** Op implementers (e.g. `fucina.customVjp`, [§5](05-automatic-differentiation.md)) use the
-two-phase adoption API so op construction stays infallible after its
-"consumes the value on success" point: `reserveScopeSlot()` (fallible)
-*before* building the result, then `adoptScopeValueAssumeCapacity(value,
-node, destroy_node)` (infallible) after. `node` is a type-erased per-op
-payload (the autograd facade stores its backward node there) released via
-`destroy_node` at scope close — the exec layer itself knows nothing about
-autograd types.
+**Extension point.** Op implementers (e.g. `fucina.customVjp`, [§5](05-automatic-differentiation.md)) adopt
+through one fallible call: `adopt(entries)` takes the handle's references,
+all or nothing, as `ScopeEntry{ ptr, release }` values (`bufferEntry(dtype,
+buffer)` for a value buffer of any dtype; the autograd facade packages a
+graph node the same way, `core.scopeEntry`), performed before the value is
+handed to the returned handle, so nothing has to be un-consumed on the
+error path. The exec layer itself knows nothing about autograd types.
 
 ## 6.4 Raw construction and copy helpers on ctx (`src/exec.zig`, `src/exec/runtime.zig`)
 

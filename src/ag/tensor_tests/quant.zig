@@ -1093,7 +1093,7 @@ test "public f32 Tensor dotTernarySte works under exec scope" {
     }
 
     // Two steps with per-iteration scopes: the op's hand-inlined finishOp
-    // tail (reserveScopeSlot + adoptIntoScope + scope_owned) runs with the
+    // tail (finishWithRecord: adopt, then scope_owned) runs with the
     // scope active, and the scope close must free y/loss exactly once.
     for (0..2) |_| {
         const scope = ctx.openExecScope();

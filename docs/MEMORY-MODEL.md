@@ -211,7 +211,7 @@ discipline this document defends: (i) a held scope turns the pool's O(1)
 working set into O(N) live intermediates with cold addresses — pinned at
 <=2 vs 16 outstanding buffers on a 16-op chain by the "exec scope holds
 buffers until close" test in `src/ag/tensor_tests/control.zig`; (ii) scope adoption
-covers only the f32-facade op tails, never the typed/quantized/raw ops the
+covers the facade op tails of every dtype, never the raw `ctx.*` ops the
 engines run on, so a scoped engine still manages those explicitly. (A third
 fact at adjudication time — `ctx.replace` double-freeing scope-owned results
 — was since neutralized by the `scope_owned` flag, which makes `deinit` a

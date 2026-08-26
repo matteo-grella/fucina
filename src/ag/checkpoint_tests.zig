@@ -853,8 +853,10 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     defer allocator.free(ck_gx);
     defer allocator.free(ck_gw);
 
-    try std.testing.expectEqual(3 * chain_len, plain_entries);
-    try std.testing.expectEqual(chain_len, ck_entries);
+    // Two scope entries per grad-carrying result: the value buffer and
+    // the graph node.
+    try std.testing.expectEqual(2 * 3 * chain_len, plain_entries);
+    try std.testing.expectEqual(2 * chain_len, ck_entries);
     try std.testing.expect(ck_entries * 2 < plain_entries);
 
     // Same forward, same gradients — bitwise (w accumulates 8 contributions).
@@ -1428,8 +1430,10 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     };
     defer allocator.free(ck_gx);
 
-    try std.testing.expectEqual(3 * chain_len, plain_entries);
-    try std.testing.expectEqual(chain_len, ck_entries);
+    // Two scope entries per grad-carrying result: the value buffer and
+    // the graph node.
+    try std.testing.expectEqual(2 * 3 * chain_len, plain_entries);
+    try std.testing.expectEqual(2 * chain_len, ck_entries);
     try std.testing.expect(ck_entries * 2 < plain_entries);
 
     try std.testing.expectEqual(plain_loss, ck_loss);

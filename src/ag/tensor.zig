@@ -65,9 +65,8 @@ pub fn TopKResult(comptime tags_spec: anytype) type {
     return struct {
         values: Tensor(result_tags),
         /// Source positions along the reduced/sorted axis: a constant i64
-        /// tensor (exact for any axis length, torch's index dtype). Like
-        /// every typed-constant result it is caller-owned even under an
-        /// exec scope.
+        /// tensor (exact for any axis length, torch's index dtype); a
+        /// borrow under an exec scope like every op result.
         indices: Tensor(.{ .dtype = .i64, .tags = result_tags }),
 
         pub fn deinit(self: *@This()) void {
@@ -143,11 +142,12 @@ fn FloatTensor(comptime tags: anytype) type {
 
         value: RawTensor,
         grad_state: ?*GradState = null,
-        /// True when an exec scope owns this tensor: the struct is a borrow
-        /// and `deinit` is a safe no-op (arena-allocator semantics; the
-        /// scope releases value and node at closeExecScope). Lets the same
-        /// defer-deinit forward code run scoped (training) and unscoped
-        /// (inference).
+        /// True when an exec scope holds this result's references: the
+        /// struct is a borrow and `deinit` is a safe no-op for value and
+        /// node alike (arena semantics; the scope releases at
+        /// closeExecScope). Every branch carries the flag, so the same
+        /// defer-deinit forward code runs scoped (training) and unscoped
+        /// (inference) whatever the dtype.
         scope_owned: bool = false,
 
         const Self = @This();
@@ -702,6 +702,7 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const ag_root = ag_file;
 
         value: tensor_mod.TensorOf(tensor_dtype),
+        scope_owned: bool = false,
 
         const Self = @This();
 
@@ -831,6 +832,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const ag_root = ag_file;
 
         value: RawTypedTensor,
+        scope_owned: bool = false,
 
         const Self = @This();
 
@@ -884,20 +886,20 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             }
             var value = try self.asRawTensor().cloneView();
             errdefer value.deinit();
-            return Tensor(.{ .dtype = tensor_dtype, .tags = new_tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = tensor_dtype, .tags = new_tags }), ctx, value);
         }
 
         pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
             comptime if (target_dtype != .f32) @compileError("block-quantized tensors can currently only be converted to f32");
             var value = try ctx.dequantizeTensor(tensor_dtype, self.asRawTensor());
             errdefer value.deinit();
-            return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
         }
 
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.materialize(tensor_dtype, self.asRawTensor());
             errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
+            return plumbing.finishTyped(Self, ctx, value);
         }
 
         pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
@@ -914,7 +916,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
 
             var value = try ctx.concatQuantizedRows(tensor_dtype, raw_inputs);
             errdefer value.deinit();
-            return Self.fromTensor(ctx, value);
+            return plumbing.finishTyped(Self, ctx, value);
         }
 
         /// Pack this rank-2 quantized weight into the ISA-best packed matmul
@@ -956,7 +958,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             const result_tags = replaceTag(tags, tag, out_tag);
             var value = try ctx.getRowsQuantized(tensor_dtype, self.asRawTensor(), indices);
             errdefer value.deinit();
-            return Tensor(.{ .dtype = .f32, .tags = result_tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = .f32, .tags = result_tags }), ctx, value);
         }
 
         comptime {

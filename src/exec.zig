@@ -183,7 +183,8 @@ pub const ExecContext = struct {
     /// single-row MoE entries under its own mutex.
     moe_scratch: MoeDecodeScratch = .{},
 
-    pub const ScopeNodeDestroy = exec_runtime.ScopeNodeDestroy;
+    pub const ScopeEntry = exec_runtime.ScopeEntry;
+    pub const ScopeRelease = exec_runtime.ScopeRelease;
     pub const ExecScope = exec_runtime.ExecScope;
     pub const PreparedTensor = exec_runtime.PreparedTensor;
     pub const PreparedTensorOf = exec_runtime.PreparedTensorOf;
@@ -196,23 +197,24 @@ pub const ExecContext = struct {
     pub const floatEnvironmentAtInit = exec_runtime.floatEnvironmentAtInit;
 
     // ------------------------------------------------------------------
-    // Exec scopes: implicit ownership of EXECUTION artifacts — the tensor
-    // values ops produce plus a type-erased per-op payload released through
-    // a registered destructor. Exec deliberately knows nothing about
-    // autograd types; the ag facade stores its backward nodes in that
-    // payload. The user scopes the execution; that, in turn, is what
-    // enables autograd on top. (Hence "exec scope", not "graph" anything:
-    // there is no graph object in this runtime.)
+    // Exec scopes: an arena of borrowed EXECUTION artifacts. An entry is
+    // one reference (a value buffer of any dtype, or a type-erased graph
+    // node) plus the call that drops it; exec knows nothing about autograd
+    // types, the ag facade packages its nodes as entries. (Hence "exec
+    // scope", not "graph" anything: there is no graph object in this
+    // runtime.)
     //
-    // While a scope is open, every tensor RETURNED BY A FACADE OP is owned
-    // by the innermost scope (the ag facade adopts it here); the value the
-    // caller receives is a borrow — never deinit it, never use it after the
-    // scope closes. Tensors created explicitly (variable/constant/fromSlice)
-    // and fetched gradients (grad/gradView) stay caller-owned. The graph
-    // itself is reference-counted (a record retains its operands' states,
-    // see ag/core.zig), so a scope is a convenience, not a correctness
-    // requirement: it lets a forward written in the deinit-ASAP idiom run
-    // as a training step without any handle bookkeeping.
+    // While a scope is open, every tensor RETURNED BY A FACADE OP, of any
+    // dtype, is adopted by the innermost scope: the scope takes over the
+    // handle's references and the handle becomes a borrow (`scope_owned`:
+    // its deinit is a no-op for value and node alike; never use it after
+    // the scope closes). Tensors created explicitly (variable/constant/
+    // fromSlice) and fetched gradients (grad/gradView) stay caller-owned.
+    // The graph is reference-counted on its own (a record retains its
+    // operands' states, see ag/core.zig), so a scope only manages the
+    // lifetimes of borrowed results and is never required for correctness:
+    // it lets a forward written in the deinit-ASAP idiom, or one with no
+    // deinit at all, run as a training step without handle bookkeeping.
     //
     // Scopes nest with strict stack discipline (close in reverse order) and
     // a stack is not thread-safe — open/close/ops on one ctx from one
@@ -228,9 +230,8 @@ pub const ExecContext = struct {
     pub const execScopeActive = exec_runtime.execScopeActive;
     pub const openExecScope = exec_runtime.openExecScope;
     pub const closeExecScope = exec_runtime.closeExecScope;
-    pub const reserveScopeSlot = exec_runtime.reserveScopeSlot;
-    pub const adoptScopeValueAssumeCapacity = exec_runtime.adoptScopeValueAssumeCapacity;
-    pub const adoptScopeNodeAssumeCapacity = exec_runtime.adoptScopeNodeAssumeCapacity;
+    pub const adopt = exec_runtime.adopt;
+    pub const bufferEntry = exec_runtime.bufferEntry;
     pub const QuantDotGpuDisabledScope = exec_runtime.QuantDotGpuDisabledScope;
     pub const disableQuantDotGpu = exec_runtime.disableQuantDotGpu;
     pub const quantDotGpuEnabled = exec_runtime.quantDotGpuEnabled;

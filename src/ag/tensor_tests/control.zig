@@ -462,15 +462,81 @@ test "exec scope adopts no-grad op results (constants, argmax, topK)" {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const doubled = try c.add(&ctx, &c);
-    // Index outputs are i64 typed constants: caller-owned even under the
-    // scope (the typed-constant ownership rule) — values stay scope-owned.
+    // Index outputs are i64 typed constants and scope borrows like every
+    // other op result: their deinit is a no-op, the scope releases at close.
     var arg = try doubled.argmax(&ctx, .d);
     defer arg.deinit();
+    try std.testing.expect(arg.scope_owned);
     try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, try arg.dataConst());
     var top = try doubled.topK(&ctx, .d, 2, .k);
     defer top.indices.deinit();
+    try std.testing.expect(top.values.scope_owned and top.indices.scope_owned);
     try std.testing.expectEqualSlices(f32, &.{ 10, 6, 8, 4 }, try top.values.dataConst());
     try std.testing.expectEqualSlices(i64, &.{ 1, 3, 2, 1 }, try top.indices.dataConst());
+}
+
+test "typed results are scope borrows: deinit is a no-op and the scope releases at close" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{ .batch, .d }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+
+    const scope = ctx.openExecScope();
+    const base = ctx.scopes.entries.items.len;
+    var idx = try x.argmax(&ctx, .d); // i64: one entry, the buffer
+    try std.testing.expect(idx.scope_owned);
+    try std.testing.expectEqual(base + 1, ctx.scopes.entries.items.len);
+    var mask = try x.compare(&ctx, .gt, 2); // bool: one entry
+    try std.testing.expect(mask.scope_owned);
+    try std.testing.expectEqual(base + 2, ctx.scopes.entries.items.len);
+    var narrow = try x.to(&ctx, .bf16); // grad-carrying 16-bit: buffer + node
+    try std.testing.expect(narrow.scope_owned);
+    try std.testing.expectEqual(base + 4, ctx.scopes.entries.items.len);
+    try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, try idx.dataConst());
+
+    // The caller's deinit is a no-op on every borrow, whatever the dtype;
+    // the scope's close is the single release (a double release would
+    // trip the buffer pool and the DebugAllocator).
+    idx.deinit();
+    mask.deinit();
+    narrow.deinit();
+    try std.testing.expectEqual(base + 4, ctx.scopes.entries.items.len);
+    ctx.closeExecScope(scope);
+    try std.testing.expectEqual(base, ctx.scopes.entries.items.len);
+}
+
+test "a borrow's deinit after its scope closed is still a no-op" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var x = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer x.deinit();
+
+    var y: Tensor(.{.d}) = undefined;
+    var idx: Tensor(.{ .dtype = .i64, .tags = .{} }) = undefined;
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        y = try x.add(&ctx, &x);
+        idx = try y.argmax(&ctx, .d);
+        try std.testing.expectEqual(@as(i64, 1), try idx.item());
+    }
+    // The handles are invalid borrows now (their storage went at close);
+    // releasing them is still a no-op, so a defer placed outside the scope
+    // cannot double free. Reading them would be use-after-free.
+    y.deinit();
+    idx.deinit();
 }
 
 test "nested exec scopes release only their suffix" {

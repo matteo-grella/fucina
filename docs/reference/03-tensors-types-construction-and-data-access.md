@@ -120,10 +120,10 @@ Notes that follow from the dtype layer (`src/dtype.zig`, detailed in [§8](08-da
   `sumAll`) widen `f16`/`bf16` to `f32` (`f64` stays `f64`).
 
 Only the f32 and typed-float branches have gradient machinery: they carry
-`grad_state: ?*GradState` and a `scope_owned: bool` flag (see [§3.4](03-tensors-types-construction-and-data-access.md#34-deinit-lifetime-and-exec-scopes-srcagtensorzig-srctensorzig); on the
-typed-float branch only f16/bf16 tensors — autograd leaves and
-differentiable cast results, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig) — ever populate it); the typed scalar and
-block-quantized branches hold just the raw value and hard-code
+`grad_state: ?*GradState` (on the typed-float branch only f16/bf16 tensors
+— autograd leaves and differentiable cast results, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig) — ever
+populate it); the typed scalar and block-quantized branches hold just the
+raw value and hard-code
 `requiresGrad() == false`.
 
 ## 3.3 Construction and ownership (`src/ag/tensor.zig`, `src/exec.zig`)
@@ -431,9 +431,10 @@ pool mid-forward (see [MEMORY-MODEL.md](../MEMORY-MODEL.md) and [§6](06-the-exe
   the storage is freed only when the last owner — parent or view — deinits.
   View lifetimes are independent of their parents'.
 - **Exec scopes.** While `ctx.openExecScope()` is active (the training
-  pattern, [§5](05-automatic-differentiation.md)/[§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)), op *results* are adopted by the scope: the returned
-  struct is a borrow with `scope_owned = true` and its `deinit` is a safe
-  no-op — the scope releases value and graph node at `closeExecScope`. This
+  pattern, [§5](05-automatic-differentiation.md)/[§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)), op *results* of every dtype are adopted by the scope: the
+  returned struct is a borrow with `scope_owned = true` (every branch
+  carries the flag) and its `deinit` is a safe no-op — the scope releases
+  value and graph node at `closeExecScope`. This
   lets the same defer-deinit forward code run scoped (training) and unscoped
   (inference). Tensors built by the *constructors* above are never
   scope-owned; only op results are.

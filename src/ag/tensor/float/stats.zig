@@ -117,13 +117,13 @@ pub fn Ops(comptime Self: type) type {
         }
 
         /// Index of the row maximum along `tag` (torch.argmax over a dim):
-        /// a constant i64 tensor, no gradient. Caller-owned even under an
-        /// exec scope (the typed-constant ownership rule).
+        /// a constant i64 tensor, no gradient (a borrow under an exec scope,
+        /// like every op result).
         pub fn argmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = .i64, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             var value = try ctx.argmax(dtype, tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
-            return Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = .i64, .tags = result_tags }), ctx, value);
         }
 
         /// Categorical sampling from UNNORMALIZED non-negative weight rows
@@ -138,8 +138,7 @@ pub fn Ops(comptime Self: type) type {
         /// replacement each draw removes the chosen class's mass (torch
         /// semantics); `num_samples` beyond the class count — or beyond the
         /// row's nonzero classes — is `InvalidShape`. The result is a
-        /// constant i64 tensor: no gradient, and CALLER-owned even under an
-        /// exec scope (the typed-constant ownership rule).
+        /// constant i64 tensor: no gradient.
         pub fn multinomial(
             self: *const Self,
             ctx: *ExecContext,

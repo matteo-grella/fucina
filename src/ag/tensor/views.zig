@@ -4,12 +4,11 @@
 //! slices), the copying movers (gather, concat, stack, flip, roll,
 //! setSlice, setRows), and the materialize/contiguous/detach trio. On the
 //! f32 branch every op is differentiable (the VJP attaches through
-//! `finishOp`, exec-scope adoption included). On the typed branches the
-//! same ops are no-grad constants: a grad-requiring operand is
-//! `error.UnsupportedGradient` (the typed-branch rule, so a 16-bit leaf
-//! never silently drops its graph) and results are caller-owned even
-//! under an exec scope. A mixin over the tensor struct; aliased back onto
-//! it in ../tensor.zig.
+//! `finishOp`). On the typed branches the same ops are no-grad constants:
+//! a grad-requiring operand is `error.UnsupportedGradient` (the
+//! typed-branch rule, so a 16-bit leaf never silently drops its graph).
+//! Every result, typed or not, is adopted by an open exec scope. A mixin
+//! over the tensor struct; aliased back onto it in ../tensor.zig.
 
 const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
@@ -87,11 +86,10 @@ pub fn Ops(comptime Self: type) type {
             return null;
         }
 
-        /// The no-grad tail: an f32 result is scope-adopted (`finishNoGrad`),
-        /// a typed result is a caller-owned constant.
+        /// The no-grad tail: a constant, adopted by an open exec scope
+        /// whatever the dtype.
         fn finishConstant(comptime result_tags: anytype, ctx: *ExecContext, value: RawT) !Out(result_tags) {
-            if (comptime differentiable) return plumbing.finishNoGrad(result_tags, ctx, value);
-            return Out(result_tags).fromTensor(ctx, value);
+            return plumbing.finishTyped(Out(result_tags), ctx, value);
         }
 
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {

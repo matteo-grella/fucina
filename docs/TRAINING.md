@@ -100,16 +100,18 @@ const logits = try forwardLogits(&ctx, &model, &x);   // zero ceremony inside
   wires it). Cached memory holds at the high-water mark of live large
   blocks until `deinit`; a block serves only its own class, so workloads
   with widely varying shapes hoard more than fixed-shape training steps.
-- Adoption is wired into the op tails themselves (`finishOp` in
-  `src/ag/tensor.zig`), covering both differentiable results and no-grad
-  f32 results (eval on constants, the `values` arms, the packed-RHS fast
-  paths). i64 index outputs (`argmax`, `topK.indices`, `argsort`) are
-  typed constants: caller-owned even under a scope — pair with `deinit`.
-  Typed/quantized-constant tensor methods are not adopted — those are
-  weights/caches with explicit lifetimes. The one exception: a GRAD-CARRYING
-  16-bit result (the differentiable `to(.f16)`/`to(.bf16)` narrow, §10) is
-  scope-owned like any differentiable result — its graph node must live
-  until backward.
+- Adoption is wired into the op tails themselves (`finishOp`,
+  `finishNoGrad`, `finishTyped` in `src/ag/tensor/plumbing.zig`) and covers
+  every op result whatever its dtype: differentiable results, no-grad f32
+  results (eval on constants, the `values` arms, the packed-RHS fast
+  paths), the i64 index outputs (`argmax`, `topK.indices`, `argsort`),
+  `.bool` masks, 16-bit casts (grad-carrying or not), and the quantized
+  branch's views and row gathers. One rule: an op result under a scope is
+  a borrow, released at close.
+- Scopes manage lifetimes only. The graph is reference-counted (above), so
+  a scope is never required for correctness: unscoped code that releases
+  every handle it holds trains identically. The scope removes the handle
+  bookkeeping.
 - With no scope open, nothing changes: inference code keeps deinit-ASAP
   semantics and pays one branch per op.
 - Close a scope only when no `backward()` over its graph is pending.

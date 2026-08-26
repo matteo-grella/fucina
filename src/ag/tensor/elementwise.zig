@@ -67,6 +67,7 @@ pub fn Ops(comptime Self: type) type {
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
         const typedFinishOp = plumbing.typedFinishOp;
+        const finishTyped = plumbing.finishTyped;
         const dtype = Self.dtype;
         const RawT = tensor_mod.TensorOf(dtype);
         /// The f32 branch is the differentiable one; every other dtype takes
@@ -157,8 +158,8 @@ pub fn Ops(comptime Self: type) type {
         /// comparison dtype), true where `self <op> other` holds. `other`
         /// is comptime-dispatched from its type: a same-tagged tensor (same
         /// shape only, like `where`) or a numeric scalar (see
-        /// `exec.CompareOp`). Non-differentiable, and — like every typed
-        /// constant — CALLER-owned even under an exec scope. NaN semantics
+        /// `exec.CompareOp`). Non-differentiable; under an exec scope it is a
+        /// borrow like every op result. NaN semantics
         /// are IEEE: any comparison involving NaN is false, except `.ne`,
         /// which is true. Feed the result to `where`/`maskedFill`/the
         /// logical ops, count with `sum`, or cast with `to(.f32)` for the
@@ -169,7 +170,7 @@ pub fn Ops(comptime Self: type) type {
             if (comptime (OtherT == comptime_float or OtherT == comptime_int or @typeInfo(OtherT) == .float or @typeInfo(OtherT) == .int)) {
                 var value = try ctx.compareScalar(dtype, op, self.asRawTensor(), other);
                 errdefer value.deinit();
-                return BoolT.fromTensor(ctx, value);
+                return finishTyped(BoolT, ctx, value);
             }
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             comptime {
@@ -177,14 +178,14 @@ pub fn Ops(comptime Self: type) type {
             }
             var value = try ctx.compare(dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return BoolT.fromTensor(ctx, value);
+            return finishTyped(BoolT, ctx, value);
         }
 
         /// Elementwise logical AND over truthiness (the mask convention
         /// shared with `where`/`maskedFill`; NaN is truthy): a same-tagged
         /// `.bool` tensor (torch's logical-op dtype). `other` may be a
         /// float or `.bool` tensor. Same shape only; non-differentiable
-        /// and caller-owned like `compare`.
+        /// like `compare`.
         pub fn logicalAnd(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(.{ .dtype = .bool, .tags = tags }) {
             return self.logicalBinary(ctx, .l_and, other);
         }
@@ -208,7 +209,7 @@ pub fn Ops(comptime Self: type) type {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             var value = try ctx.logical(op, dtype, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
+            return finishTyped(Tensor(.{ .dtype = .bool, .tags = tags }), ctx, value);
         }
 
         /// Elementwise logical NOT over truthiness (see `logicalAnd`):
@@ -216,7 +217,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn logicalNot(self: *const Self, ctx: *ExecContext) !Tensor(.{ .dtype = .bool, .tags = tags }) {
             var value = try ctx.logicalNot(dtype, self.asRawTensor());
             errdefer value.deinit();
-            return Tensor(.{ .dtype = .bool, .tags = tags }).fromTensor(ctx, value);
+            return finishTyped(Tensor(.{ .dtype = .bool, .tags = tags }), ctx, value);
         }
 
         /// `.bool`, true where `self` is NaN (torch.isnan): the IEEE
@@ -307,11 +308,11 @@ pub fn Ops(comptime Self: type) type {
                 // Differentiable narrow (the mixed-precision seam): the
                 // backward is the identity in f32 gradient space — the
                 // upstream f32 gradient passes through unrounded.
-                if (!recordsGrad(self.requiresGrad())) return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
+                if (!recordsGrad(self.requiresGrad())) return finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
                 const Record = CastBackward(tags);
                 return typedFinishOp(target_dtype, tags, ctx, value, Record{ .parents = .{self.grad_state} });
             }
-            return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
+            return finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
         }
 
         pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {

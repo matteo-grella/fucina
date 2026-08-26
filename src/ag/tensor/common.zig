@@ -1,10 +1,10 @@
 //! Accessors shared by every `Tensor(...)` branch: lifetime, raw access,
 //! scalar read-out, and the tag/shape queries. Written once over
-//! `Self.dtype`; the gradient-carrying branches (f32, f16, bf16) are
-//! recognized by their `grad_state` field, so `deinit` honors exec-scope
-//! borrows and `data` refuses mutable access to a tensor that requires
-//! gradients. A mixin over the tensor struct; aliased back onto it in
-//! ../tensor.zig.
+//! `Self.dtype`; every branch carries the exec-scope borrow flag, and the
+//! gradient-carrying branches (f32, f16, bf16) are recognized by their
+//! `grad_state` field, so `deinit` releases the graph reference and `data`
+//! refuses mutable access to a tensor that requires gradients. A mixin
+//! over the tensor struct; aliased back onto it in ../tensor.zig.
 
 const tensor_mod = @import("../../tensor.zig");
 const tags_mod = @import("../../tags.zig");
@@ -23,10 +23,12 @@ pub fn Ops(comptime Self: type) type {
         const Elem = RawT.Element;
         const has_grad = @hasField(Self, "grad_state");
 
+        /// Release the handle: the value buffer's reference and, on the
+        /// gradient-carrying branches, the graph node's. A scope-owned
+        /// handle is a borrow and this is a no-op for both (the scope
+        /// releases at close).
         pub fn deinit(self: *Self) void {
-            if (comptime has_grad) {
-                if (self.scope_owned) return; // borrow: the exec scope owns value + node
-            }
+            if (self.scope_owned) return;
             self.value.deinit();
             if (comptime has_grad) {
                 if (self.grad_state) |state| state.release();

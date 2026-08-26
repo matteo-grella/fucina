@@ -48,6 +48,7 @@ const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
 const core = @import("core.zig");
+const plumbing = @import("tensor/plumbing.zig").Mod(@import("tensor.zig"));
 
 const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
@@ -155,28 +156,14 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
 
     if (!any_grad) {
         // No operand needs gradients: same tail as a no-grad facade op
-        // (tensor.zig finishNoGrad), including outer-scope adoption.
-        if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-        var result = try Output.fromTensor(ctx, out_value);
-        if (ctx.execScopeActive()) {
-            adoptIntoScope(ctx, &result);
-            result.scope_owned = true;
-        }
-        return result;
+        // (plumbing.finishNoGrad), including outer-scope adoption.
+        return plumbing.finishTyped(Output, ctx, out_value);
     }
 
-    // Reserve the outer-scope slot BEFORE consuming views/value so adoption
-    // cannot fail afterwards (same two-phase contract as tensor.zig finishOp).
-    if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-    const state = try core.createNode(ctx.allocator, CheckpointBackward(block, Extra, Inputs){ .extra = extra, .views = views, .states = states });
+    // Same tail as finishOp: adoption is the one fallible step after the
+    // record is built, and it happens before the value hand-off.
+    const result = try plumbing.finishWithRecord(Output, ctx, out_value, CheckpointBackward(block, Extra, Inputs){ .extra = extra, .views = views, .states = states });
     node_owns_views = true;
-    errdefer state.release();
-
-    var result = Output{ .value = out_value, .grad_state = state };
-    if (ctx.execScopeActive()) {
-        adoptIntoScope(ctx, &result);
-        result.scope_owned = true;
-    }
     return result;
 }
 
@@ -426,21 +413,6 @@ fn StripError(comptime T: type) type {
         .error_union => |eu| eu.payload,
         else => T,
     };
-}
-
-// Replicas of the private adoption tail in ag/tensor.zig (finishOp): hand the
-// result's value + GradState to the innermost scope via the type-erased entry.
-fn adoptIntoScope(ctx: *ExecContext, t: anytype) void {
-    ctx.adoptScopeValueAssumeCapacity(
-        t.value,
-        if (t.grad_state) |state| @ptrCast(state) else null,
-        destroyGradStateOpaque,
-    );
-}
-
-fn destroyGradStateOpaque(ptr: *anyopaque) void {
-    const state: *GradState = @ptrCast(@alignCast(ptr));
-    state.release();
 }
 
 test {

@@ -49,7 +49,7 @@ pub fn Ops(comptime Self: type) type {
             };
             raw_values = null;
             errdefer values.deinit();
-            var indices = try Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, raw_indices.?);
+            var indices = try plumbing.finishTyped(Tensor(.{ .dtype = .i64, .tags = result_tags }), ctx, raw_indices.?);
             raw_indices = null;
             errdefer indices.deinit();
             return .{ .values = values, .indices = indices };
@@ -83,7 +83,7 @@ pub fn Ops(comptime Self: type) type {
             };
             raw_values = null;
             errdefer values.deinit();
-            var indices = try Tensor(.{ .dtype = .i64, .tags = tags }).fromTensor(ctx, raw_indices.?);
+            var indices = try plumbing.finishTyped(Tensor(.{ .dtype = .i64, .tags = tags }), ctx, raw_indices.?);
             raw_indices = null;
             errdefer indices.deinit();
             return .{ .values = values, .indices = indices };
@@ -98,7 +98,7 @@ pub fn Ops(comptime Self: type) type {
             raw.values.deinit();
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_indices) |*value| value.deinit();
-            return Tensor(.{ .dtype = .i64, .tags = tags }).fromTensor(ctx, raw_indices.?);
+            return plumbing.finishTyped(Tensor(.{ .dtype = .i64, .tags = tags }), ctx, raw_indices.?);
         }
 
         pub fn routerTopK(

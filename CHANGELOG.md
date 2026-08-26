@@ -152,6 +152,10 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- `ExecContext.reserveScopeSlot`, `adoptScopeValueAssumeCapacity`,
+  `adoptScopeNodeAssumeCapacity`, and `ScopeNodeDestroy`. Rewrite:
+  `try ctx.adopt(&.{ ctx.bufferEntry(dtype, buffer), ... })` with
+  `ScopeEntry{ .ptr, .release }` values, before the value hand-off.
 - `error.ActiveExecScopeRequired` and the exec-scope requirement of the
   composed facade ops (`nllLoss`, `l2Normalize`, `cosineSimilarity`, `norm`,
   `normAll`, `maskedSelect`, `maskedScatter`, `select`, multi-axis `slice`,
@@ -203,6 +207,21 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Exec scopes are one uniform arena of borrows. An adopted result is one
+  `ExecContext.ScopeEntry{ ptr, release }` per reference (the value buffer
+  of any dtype, and the graph node when there is one), taken by one
+  fallible `ctx.adopt(entries)` before the value is handed to the returned
+  handle; the two-phase `reserveScopeSlot` + `adoptScope*AssumeCapacity`
+  protocol and the type-erased `TypedScopePayload` for 16-bit results are
+  gone. Every op result of every dtype is adopted alike: the i64 index
+  outputs (`argmax`, `topK.indices`, `argsort`), `.bool` masks, 16-bit
+  casts, and the quantized branch's views and row gathers are now scope
+  borrows too (`scope_owned` on every branch, `deinit` a uniform no-op),
+  where they used to be caller-owned under a scope. Rewrite: nothing for
+  the `defer x.deinit()` idiom (a no-op on a borrow); a typed result
+  computed under a scope must not be used after the scope closes. Scopes
+  manage lifetimes only and are never required for correctness (the graph
+  is reference-counted).
 - The backward record contract is derived (`core.recordVTable`): the
   operand slots come from a `parents` array or a `states` slice, `vjp`
   takes `*Self` and no `needs_grad` slice (`core.needs(self, i)` reads the

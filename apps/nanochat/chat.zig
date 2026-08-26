@@ -296,7 +296,7 @@ fn countExpr(allocator: Allocator, expr: []const u8) !?[]u8 {
         if (std.mem.indexOfScalar(u8, allowed, ch) == null) return null;
     }
     const dangerous = [_][]const u8{
-        "__",     "import",  "exec", "eval",    "compile", "open",    "file",    "input",
+        "__",        "import",  "exec",   "eval", "compile", "open",    "file",    "input",
         "raw_input", "globals", "locals", "vars", "dir",     "getattr", "setattr", "delattr",
         "hasattr",
     };
@@ -1041,7 +1041,7 @@ test "NANOCHAT_PARITY: engine greedy == argmax of full forward per position" {
         const logits = try model.forward(&ctx, seq.items, null);
         var last = try logits.narrow(&ctx, .seq, seq.items.len - 1, 1);
         var idx = try last.argmax(&ctx, .vocab);
-        defer idx.deinit(); // i64 indices are caller-owned even under the scope
+        defer idx.deinit(); // a scope borrow like every op result: no-op here, released at close
         const next: usize = @intCast(try idx.item());
         ctx.closeExecScope(scope);
         try seq.append(allocator, next);

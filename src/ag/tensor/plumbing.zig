@@ -77,7 +77,51 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// error it stays with the caller.
         pub fn finishTypedNoGrad(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype), wants_grad: bool) !OutT {
             if (wants_grad) return error.UnsupportedGradient;
-            return OutT.fromTensor(ctx, value);
+            return finishTyped(OutT, ctx, value);
+        }
+
+        /// The tail of every op result that carries no graph, of any dtype:
+        /// wrap as a constant and, under an exec scope, adopt it like every
+        /// result. Consumes `value` on success; on error it stays with the
+        /// caller.
+        pub fn finishTyped(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype)) !OutT {
+            var out = try OutT.fromTensor(ctx, value);
+            if (ctx.execScopeActive()) try adoptResult(ctx, &out);
+            return out;
+        }
+
+        /// Hand a result to the innermost scope: the scope takes over the
+        /// handle's references (the value buffer and, when present, the
+        /// graph node) and the handle becomes a borrow whose `deinit` is a
+        /// no-op. All or nothing: on failure the handle still owns
+        /// everything (`ExecContext.adopt`).
+        pub fn adoptResult(ctx: *ExecContext, t: anytype) !void {
+            const T = @TypeOf(t.*);
+            var entries: [2]ExecContext.ScopeEntry = undefined;
+            var count: usize = 1;
+            entries[0] = ExecContext.bufferEntry(T.dtype, t.value.buffer);
+            if (comptime @hasField(T, "grad_state")) {
+                if (t.grad_state) |state| {
+                    entries[1] = core.scopeEntry(state);
+                    count = 2;
+                }
+            }
+            try ctx.adopt(entries[0..count]);
+            t.scope_owned = true;
+        }
+
+        /// The grad-carrying tail shared by `finishOp` and `typedFinishOp`:
+        /// allocate the node, adopt its address and the value into an open
+        /// scope (the one fallible step after the record was built), then
+        /// move the record in. On error nothing was consumed: `value` and the
+        /// record's resources stay with the caller.
+        pub fn finishWithRecord(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype), record: anytype) !OutT {
+            const node = try core.allocNode(ctx.allocator, @TypeOf(record));
+            errdefer ctx.allocator.destroy(node);
+            var out = OutT{ .value = value, .grad_state = &node.state };
+            if (ctx.execScopeActive()) try adoptResult(ctx, &out);
+            _ = core.initNode(node, ctx.allocator, record);
+            return out;
         }
 
         /// The operand's gradient state, null on the branches without one.
@@ -222,9 +266,8 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// with the caller (its errdefers), never double-released.
         ///
         /// While an exec scope is open on `ctx` (ExecContext.openExecScope), the
-        /// result is adopted by the scope and the caller receives a borrow. The
-        /// scope slot is reserved BEFORE the node exists so adoption cannot fail
-        /// after the value has been consumed.
+        /// result is adopted by the scope and the caller receives a borrow
+        /// (`finishWithRecord`).
         pub fn finishOp(
             comptime result_tags: anytype,
             ctx: *ExecContext,
@@ -233,14 +276,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         ) !Tensor(result_tags) {
             var owned_value = value;
             try validateTensorRank(.f32, normalizeTags(result_tags), &owned_value);
-            if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-            const state = try core.createNode(ctx.allocator, record);
-            var out = Tensor(result_tags){ .value = owned_value, .grad_state = state };
-            if (ctx.execScopeActive()) {
-                adoptIntoScope(ctx, &out);
-                out.scope_owned = true;
-            }
-            return out;
+            return finishWithRecord(Tensor(result_tags), ctx, owned_value, record);
         }
 
         /// N-ary einsum: contracts two or more f32 tensors (values or pointers, in a
@@ -327,28 +363,11 @@ pub fn Mod(comptime ag_tensor: type) type {
             if (operand.requiresGrad()) return error.UnsupportedGradient;
         }
 
-        /// Scope payload for a grad-carrying 16-bit result: the exec-scope slot
-        /// holds f32 values only, so the typed value travels inside the type-erased
-        /// node payload with a destructor that frees value + graph node together.
-        pub fn TypedScopePayload(comptime tensor_dtype: DType) type {
-            return struct {
-                allocator: std.mem.Allocator,
-                value: tensor_mod.TensorOf(tensor_dtype),
-                state: *GradState,
-
-                fn destroy(ptr: *anyopaque) void {
-                    const payload: *@This() = @ptrCast(@alignCast(ptr));
-                    payload.value.deinit();
-                    payload.state.release();
-                    payload.allocator.destroy(payload);
-                }
-            };
-        }
-
         /// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the
         /// f32 -> f16/bf16 cast), once `recordsGrad` said yes. Same contract as
-        /// `finishOp`: consumes `value` on success; under an active exec scope
-        /// the result is a scope-owned borrow.
+        /// `finishOp`: consumes `value` on success; under an exec scope the
+        /// result is a borrow like any other (the 16-bit buffer and the node
+        /// are two ordinary scope entries).
         pub fn typedFinishOp(
             comptime tensor_dtype: DType,
             comptime result_tags: anytype,
@@ -356,42 +375,13 @@ pub fn Mod(comptime ag_tensor: type) type {
             value: tensor_mod.TensorOf(tensor_dtype),
             record: anytype,
         ) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
-            if (ctx.execScopeActive()) {
-                try ctx.reserveScopeSlot();
-                const payload = try ctx.allocator.create(TypedScopePayload(tensor_dtype));
-                errdefer ctx.allocator.destroy(payload);
-                const state = try core.createNode(ctx.allocator, record);
-                payload.* = .{ .allocator = ctx.allocator, .value = value, .state = state };
-                ctx.adoptScopeNodeAssumeCapacity(payload, TypedScopePayload(tensor_dtype).destroy);
-                return .{ .value = value, .grad_state = state, .scope_owned = true };
-            }
-            const state = try core.createNode(ctx.allocator, record);
-            return .{ .value = value, .grad_state = state };
+            return finishWithRecord(Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }), ctx, value, record);
         }
 
-        /// Shared no-grad tail: wrap as a constant and, when an exec scope is open,
-        /// hand ownership to the scope. Same value-ownership contract as `fromTensor`.
+        /// Shared no-grad tail: wrap as a constant and, when an exec scope is
+        /// open, adopt it. Same value-ownership contract as `fromTensor`.
         pub fn finishNoGrad(comptime result_tags: anytype, ctx: *ExecContext, value: RawTensor) !Tensor(result_tags) {
-            if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-            var out = try Tensor(result_tags).fromTensor(ctx, value);
-            if (ctx.execScopeActive()) {
-                adoptIntoScope(ctx, &out);
-                out.scope_owned = true;
-            }
-            return out;
-        }
-
-        pub fn adoptIntoScope(ctx: *ExecContext, t: anytype) void {
-            ctx.adoptScopeValueAssumeCapacity(
-                t.value,
-                if (t.grad_state) |state| @ptrCast(state) else null,
-                destroyGradStateOpaque,
-            );
-        }
-
-        pub fn destroyGradStateOpaque(ptr: *anyopaque) void {
-            const state: *GradState = @ptrCast(@alignCast(ptr));
-            state.release();
+            return finishTyped(Tensor(result_tags), ctx, value);
         }
 
         pub fn axisViewTensor(source: *const RawTensor, comptime axes: anytype, comptime target_tags: anytype) !RawTensor {

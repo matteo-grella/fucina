@@ -28,6 +28,7 @@ const tensor_mod = @import("../tensor.zig");
 const tag_ops = @import("../tag_ops.zig");
 const control = @import("control.zig");
 const core = @import("core.zig");
+const plumbing = @import("tensor/plumbing.zig").Mod(@import("tensor.zig"));
 
 const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
@@ -79,8 +80,9 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
     var node_owns_output = false;
     errdefer if (!node_owns_output) output_view.deinit();
 
-    if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-    const state = try core.createNode(ctx.allocator, CustomBackward(Spec, @TypeOf(extra), Inputs){
+    var owned_value = value;
+    try tag_ops.validateTensorRank(.f32, Spec.Output.axis_tags, &owned_value);
+    const out = try plumbing.finishWithRecord(Spec.Output, ctx, owned_value, CustomBackward(Spec, @TypeOf(extra), Inputs){
         .extra = extra,
         .views = views,
         .output = output_view,
@@ -88,11 +90,6 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
     });
     node_owns_views = true;
     node_owns_output = true;
-    var out = try finishWithBackward(Spec.Output, value, state);
-    if (ctx.execScopeActive()) {
-        adoptIntoScope(ctx, &out);
-        out.scope_owned = true;
-    }
     return out;
 }
 
@@ -143,33 +140,7 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
 }
 
 fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Output {
-    if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-    var out = try Output.fromTensor(ctx, value);
-    if (ctx.execScopeActive()) {
-        adoptIntoScope(ctx, &out);
-        out.scope_owned = true;
-    }
-    return out;
-}
-
-fn finishWithBackward(comptime Output: type, value: RawTensor, state: *GradState) !Output {
-    errdefer state.release();
-    var owned_value = value;
-    try tag_ops.validateTensorRank(.f32, Output.axis_tags, &owned_value);
-    return .{ .value = owned_value, .grad_state = state };
-}
-
-fn adoptIntoScope(ctx: *ExecContext, t: anytype) void {
-    ctx.adoptScopeValueAssumeCapacity(
-        t.value,
-        if (t.grad_state) |state| @ptrCast(state) else null,
-        destroyGradStateOpaque,
-    );
-}
-
-fn destroyGradStateOpaque(ptr: *anyopaque) void {
-    const state: *GradState = @ptrCast(@alignCast(ptr));
-    state.release();
+    return plumbing.finishTyped(Output, ctx, value);
 }
 
 fn inputFields(comptime Inputs: type) []const std.builtin.Type.StructField {

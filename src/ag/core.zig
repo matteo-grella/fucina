@@ -79,8 +79,21 @@ pub fn BackwardNode(comptime Record: type) type {
 /// `GradState.release` drops it and, as the last one, frees the entire
 /// node through the vtable.
 pub fn createNode(allocator: Allocator, record: anytype) !*GradState {
+    const node = try allocNode(allocator, @TypeOf(record));
+    return initNode(node, allocator, record);
+}
+
+/// The two halves of `createNode`, for a tail that must adopt the node's
+/// address into an exec scope (fallible) before it moves the record in:
+/// `allocNode` is the only allocation, `initNode` cannot fail and takes
+/// the record's resources. Between the two the node holds no record and
+/// no state; only its address is meaningful.
+pub fn allocNode(allocator: Allocator, comptime Record: type) !*BackwardNode(Record) {
+    return allocator.create(BackwardNode(Record));
+}
+
+pub fn initNode(node: anytype, allocator: Allocator, record: anytype) *GradState {
     const Record = @TypeOf(record);
-    const node = try allocator.create(BackwardNode(Record));
     node.record = record;
     node.state = .{
         .allocator = allocator,
@@ -88,6 +101,18 @@ pub fn createNode(allocator: Allocator, record: anytype) !*GradState {
     };
     retainParents(Record.vtable.operands(&node.record));
     return &node.state;
+}
+
+/// The exec-scope entry for the reference a handle holds on `state`
+/// (`ExecContext.adopt`): the scope takes it over and drops it at close.
+pub fn scopeEntry(state: *GradState) ExecContext.ScopeEntry {
+    const Shim = struct {
+        fn release(ptr: *anyopaque) void {
+            const s: *GradState = @ptrCast(@alignCast(ptr));
+            s.release();
+        }
+    };
+    return .{ .ptr = state, .release = Shim.release };
 }
 
 /// One reference per non-null operand, taken by `createNode`.

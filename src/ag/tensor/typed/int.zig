@@ -89,7 +89,7 @@ pub fn Ops(comptime Self: type) type {
             comptime if (dtype != .bool) @compileError("logical ops on the typed branch are .bool-only; cast explicitly");
             var value = try ctx.logicalNot(.bool, self.asRawTensor());
             errdefer value.deinit();
-            return BoolT.fromTensor(ctx, value);
+            return plumbing.finishTyped(BoolT, ctx, value);
         }
 
         const BinaryOp = enum { div_trunc, div_floor, rem, mod, bit_and, bit_or, bit_xor };
@@ -126,7 +126,7 @@ pub fn Ops(comptime Self: type) type {
                 .bit_xor => try ctx.bitwise(dtype, rank, .b_xor, &left_view, &right_view),
             };
             errdefer value.deinit();
-            return Out(Other).fromTensor(ctx, value);
+            return plumbing.finishTyped(Out(Other), ctx, value);
         }
 
         fn logical(comptime op: exec_mod.LogicalOp, self: *const Self, ctx: *ExecContext, other: anytype) !BoolT {
@@ -139,7 +139,7 @@ pub fn Ops(comptime Self: type) type {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
             var value = try ctx.logical(op, .bool, Other.dtype, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return BoolT.fromTensor(ctx, value);
+            return plumbing.finishTyped(BoolT, ctx, value);
         }
     };
 }

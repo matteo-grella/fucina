@@ -58,7 +58,7 @@ pub fn Ops(comptime Self: type) type {
                 // Integer/bool sources are grad-free: a plain f32 constant.
                 return plumbing.finishNoGrad(tags, ctx, value);
             }
-            return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
         }
 
         pub fn sum(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !ReducedOut(removeTag(tags, tag)) {
@@ -66,7 +66,7 @@ pub fn Ops(comptime Self: type) type {
             try requireNoGrad(self);
             var value = try ctx.sumAxis(dtype, tag_rank, self.asRawTensor(), Self.axis(tag));
             errdefer value.deinit();
-            return ReducedOut(removeTag(tags, tag)).fromTensor(ctx, value);
+            return plumbing.finishTyped(ReducedOut(removeTag(tags, tag)), ctx, value);
         }
 
         pub fn mean(self: *const Self, ctx: *ExecContext, comptime tag: Tag, opts: anytype) !ReducedOut(removeTag(tags, tag)) {
@@ -74,14 +74,14 @@ pub fn Ops(comptime Self: type) type {
             try requireNoGrad(self);
             var value = try ctx.meanAxis(dtype, tag_rank, self.asRawTensor(), Self.axis(tag));
             errdefer value.deinit();
-            return ReducedOut(removeTag(tags, tag)).fromTensor(ctx, value);
+            return plumbing.finishTyped(ReducedOut(removeTag(tags, tag)), ctx, value);
         }
 
         pub fn sumAll(self: *const Self, ctx: *ExecContext) !ReducedOut(.{}) {
             try requireNoGrad(self);
             var value = try ctx.sum(dtype, self.asRawTensor());
             errdefer value.deinit();
-            return ReducedOut(.{}).fromTensor(ctx, value);
+            return plumbing.finishTyped(ReducedOut(.{}), ctx, value);
         }
 
         /// Same-dtype contraction over one tag (the typed lowering in
@@ -96,7 +96,7 @@ pub fn Ops(comptime Self: type) type {
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
             var value = try plumbing.typedDotRaw(dtype, tags, self.asRawTensor(), ctx, Other.axis_tags, right.asRawTensor(), contract_tag);
             errdefer value.deinit();
-            return Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, dtype), .tags = result_tags }).fromTensor(ctx, value);
+            return plumbing.finishTyped(Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, dtype), .tags = result_tags }), ctx, value);
         }
 
         /// Exact comparison on an integer branch: `.bool` result (torch's
@@ -108,14 +108,14 @@ pub fn Ops(comptime Self: type) type {
             if (comptime (OtherT == comptime_int or @typeInfo(OtherT) == .int)) {
                 var value = try ctx.compareScalar(dtype, op, self.asRawTensor(), @intCast(other));
                 errdefer value.deinit();
-                return BoolT.fromTensor(ctx, value);
+                return plumbing.finishTyped(BoolT, ctx, value);
             }
             const Other = TensorObject(OtherT);
             comptime if (Other.dtype != dtype) @compileError("typed compare requires matching dtypes; cast explicitly");
             const other_ptr = tensorObjectPtrFrom(OtherT, &other);
             var value = try ctx.compare(dtype, op, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return BoolT.fromTensor(ctx, value);
+            return plumbing.finishTyped(BoolT, ctx, value);
         }
 
         fn requireNoOptions(opts: anytype) void {
