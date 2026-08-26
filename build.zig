@@ -344,6 +344,16 @@ pub fn build(b: *std.Build) void {
     // follows -Dtarget, so the same step drives the emulated x86 legs when
     // cross-invoked (e.g. -Dtarget=x86_64-macos -Dcpu=baseline -frosetta);
     // natively on the aarch64 dev machine it executes the sdot arms.
+    // The checker is its own module root importing src/*.zig by path, so it
+    // receives the same `build_options` module the fucina root does
+    // (storage.zig gates the accelerator slots on it). It links no BLAS and
+    // no GPU provider on any leg, so both are off in its option set.
+    var x86dot_values = option_values;
+    x86dot_values.blas_kind = .none;
+    x86dot_values.blas_threads = 0;
+    x86dot_values.gpu_kind = .none;
+    const x86dot_options = x86dot_values.addTo(b);
+
     const x86dot_check_exe = b.addExecutable(.{
         .name = "fucina-x86dot-check",
         .root_module = b.createModule(.{
@@ -352,6 +362,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseSafe,
         }),
     });
+    x86dot_check_exe.root_module.addOptions("build_options", x86dot_options);
 
     const x86dot_check_cmd = b.addRunArtifact(x86dot_check_exe);
     const x86dot_check_step = b.step("x86dot-check", "Run the cross-ISA int8/Q4_K/Q8_0/TQ2_0 dot parity checker (follows -Dtarget) + compile-only AVX2/VNNI/smmla bit-rot legs");
@@ -381,6 +392,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseSafe,
             }),
         });
+        leg_exe.root_module.addOptions("build_options", x86dot_options);
         // Force binary emission (an unconsumed artifact gets -fno-emit-bin):
         // the gated inline-asm arms are only instruction-selected at emit.
         _ = leg_exe.getEmittedBin();
