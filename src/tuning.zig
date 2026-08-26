@@ -203,6 +203,11 @@ pub const Table = struct {
         /// `0` is occupancy-blind, above 100 the grouped GPU path never
         /// engages.
         qmoe_min_fill: u64 = 50,
+        /// CUDA only: row floor applied alongside the transient work floor
+        /// (`min_work.transient`) — the measured break-even vs the CPU
+        /// blocked kernel is m of roughly 35-40 at LLM widths, and the
+        /// default keeps a ~3x safety margin.
+        transient_min_m: u64 = 128,
         min_work: MinWork = .{},
 
         /// Offload work floors in m*n*k units (attention: q*kv*heads*d).
@@ -271,10 +276,18 @@ pub const Table = struct {
             /// shape on the reference Ada host).
             dense_q5: u64 = 1 << 24,
             /// Dense Q6_K gate for the compact/raw tier (dense Q6_K linears
-            /// win after warmup far below the MoE gate). The same env
-            /// variable also re-seeds the provider's packed-Q6 tier; the
-            /// providers keep that coupling explicit.
+            /// win after warmup far below the MoE gate). An explicit value
+            /// also re-seeds the packed tier (`dense_q6_packed`) unless
+            /// that leaf is itself explicit; the rule is `gpuQ6Seeding`.
             dense_q6: u64 = 1 << 22,
+            /// Packed-tier Q6_K crossover against the load-time-packed CPU
+            /// fallback. Metal: paired eager measurements on M1 Max put
+            /// the conservative packed-CPU crossovers at 2^30 (Q4_K), 2^31
+            /// (Q6_K), 2^29 (Q8_0). CUDA: Q5_K wins at the smallest
+            /// admitted 32x1024x512 shape on the reference Ada host
+            /// (47.7 vs 63.3 us), so 2^24 keeps the measured boundary
+            /// while rejecting lower-work calls.
+            dense_q6_packed: u64 = perGpu(1 << 24, 1 << 31),
             /// Dense Q8_0 gate against the load-time-packed CPU fallback.
             dense_q8: u64 = perGpu(1 << 24, 1 << 29),
             /// Metal: dense/PTQTP ternary TQ2_0 gate against the x4
@@ -494,21 +507,30 @@ pub fn wasSet(comptime path: []const u8) bool {
     return leafGet(Overrides, env_values, path) != null;
 }
 
+/// The derived Q6 floors a GPU provider latches at its one-time
+/// configuration read (the seeding rule consults `wasSet`, so a later test
+/// pin must not re-derive them).
+pub const GpuQ6Floors = struct { dense_q6: u64, packed_q6: u64 };
+
 /// The Q6 seeding rule both GPU providers apply at their one-time
 /// configuration, stated once: an explicit `gpu.min_work.dense_q6` (env or
-/// pin) also re-seeds the provider's packed-Q6 tier; otherwise an explicit
-/// `gpu.min_work.qmoe` seeds the dense-Q6 floor; with neither explicit the
-/// dense floor keeps its measured default and the packed tier keeps the
-/// provider's `packed_q6_default`.
-pub fn gpuQ6Seeding(packed_q6_default: u64) struct { dense_q6: u64, packed_q6: u64 } {
+/// pin) also re-seeds the packed-Q6 tier unless `gpu.min_work.dense_q6_packed`
+/// is itself explicit; otherwise an explicit `gpu.min_work.qmoe` seeds the
+/// dense-Q6 floor; with none explicit both floors keep their measured
+/// defaults.
+pub fn gpuQ6Seeding() GpuQ6Floors {
     const t = get();
+    const packed_value = t.gpu.min_work.dense_q6_packed;
     if (wasSet("gpu.min_work.dense_q6")) {
-        return .{ .dense_q6 = t.gpu.min_work.dense_q6, .packed_q6 = t.gpu.min_work.dense_q6 };
+        return .{
+            .dense_q6 = t.gpu.min_work.dense_q6,
+            .packed_q6 = if (wasSet("gpu.min_work.dense_q6_packed")) packed_value else t.gpu.min_work.dense_q6,
+        };
     }
     if (wasSet("gpu.min_work.qmoe")) {
-        return .{ .dense_q6 = t.gpu.min_work.qmoe, .packed_q6 = packed_q6_default };
+        return .{ .dense_q6 = t.gpu.min_work.qmoe, .packed_q6 = packed_value };
     }
-    return .{ .dense_q6 = t.gpu.min_work.dense_q6, .packed_q6 = packed_q6_default };
+    return .{ .dense_q6 = t.gpu.min_work.dense_q6, .packed_q6 = packed_value };
 }
 
 fn LeafIn(comptime T: type, comptime path: []const u8) type {

@@ -655,7 +655,13 @@ Both providers implement the same eager accelerator contract:
 - **Gates decide, dispatchers run.** Cheap `shouldUse*` gates (no device
   init) sit at the dispatch sites; every dispatch entry returns
   `false`/`null` when the GPU did not run, and the caller falls through to
-  BLAS/vector — correctness never depends on the GPU.
+  BLAS/vector — correctness never depends on the GPU. The shape floors and
+  work comparisons the two providers apply identically are stated once in
+  `src/backend/gpu_policy.zig` (pure functions over `tuning.Table.Gpu`);
+  each provider's gate adds only its own residency probes, structural
+  kernel limits, and provider-only arms. The dispatch-trace counter table
+  and timing helpers are likewise shared (`src/backend/gpu_trace.zig`);
+  the dump format stays with the provider.
 - **Submit eagerly; synchronize at host visibility.** Dense f32 commands are
   encoded and submitted before the op returns. Output storage carries only a
   completion/lifetime token: GPU consumers remain queue-ordered and a CPU

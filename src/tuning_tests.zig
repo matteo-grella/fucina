@@ -40,6 +40,7 @@ test "env-name derivation reproduces the published spellings" {
         .{ .path = "gpu.quant_split_k", .name = "FUCINA_GPU_QUANT_SPLIT_K" },
         .{ .path = "gpu.vram_budget", .name = "FUCINA_GPU_VRAM_BUDGET" },
         .{ .path = "gpu.qmoe_min_fill", .name = "FUCINA_GPU_QMOE_MIN_FILL" },
+        .{ .path = "gpu.transient_min_m", .name = "FUCINA_GPU_TRANSIENT_MIN_M" },
         .{ .path = "gpu.min_work.base", .name = "FUCINA_GPU_MIN_WORK" },
         .{ .path = "gpu.min_work.resident", .name = "FUCINA_GPU_MIN_WORK_RESIDENT" },
         .{ .path = "gpu.min_work.f16", .name = "FUCINA_GPU_MIN_WORK_F16" },
@@ -53,6 +54,7 @@ test "env-name derivation reproduces the published spellings" {
         .{ .path = "gpu.min_work.dense_q4", .name = "FUCINA_GPU_MIN_WORK_DENSE_Q4" },
         .{ .path = "gpu.min_work.dense_q5", .name = "FUCINA_GPU_MIN_WORK_DENSE_Q5" },
         .{ .path = "gpu.min_work.dense_q6", .name = "FUCINA_GPU_MIN_WORK_DENSE_Q6" },
+        .{ .path = "gpu.min_work.dense_q6_packed", .name = "FUCINA_GPU_MIN_WORK_DENSE_Q6_PACKED" },
         .{ .path = "gpu.min_work.dense_q8", .name = "FUCINA_GPU_MIN_WORK_DENSE_Q8" },
         .{ .path = "gpu.min_work.dense_tq2", .name = "FUCINA_GPU_MIN_WORK_DENSE_TQ2" },
     };

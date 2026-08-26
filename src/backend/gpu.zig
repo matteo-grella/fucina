@@ -36,6 +36,7 @@ comptime {
 
 test {
     _ = impl; // forward the active provider's tests to the backend test root
+    _ = @import("gpu_policy.zig"); // shared gate policy: provider-independent
     // The shared suite calls the provider directly, so it belongs to GPU
     // builds only: on `-Dgpu=none` the null provider has no device and no
     // kernels to drive. Same guard backend.zig puts on this whole import.

@@ -416,13 +416,15 @@ shadow policy).
 | `FUCINA_GPU_MIN_WORK_QMOE` | Grouped quantized MoE GEMM gate; setting it also re-seeds the dense-Q6 gate. | `2^30` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q4` | Dense Q4_K model-weight gate against the load-time-packed CPU fallback. | Metal `2^30`; CUDA `2^27` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q5` (cuda) | Dense Q5_K model-weight gate against the load-time-packed CPU fallback. | `2^24` |
-| `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense Q6_K gate; overrides both the compact/raw and packed-CPU tiers. | compact/raw `2^22`; packed Metal `2^31`, CUDA `2^24` |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q6` | Dense Q6_K gate; overrides both the compact/raw and packed-CPU tiers (unless the packed leaf below is itself set). | compact/raw `2^22`; packed Metal `2^31`, CUDA `2^24` |
+| `FUCINA_GPU_MIN_WORK_DENSE_Q6_PACKED` | Dense Q6_K gate for the packed-CPU tier alone; wins over the `DENSE_Q6` re-seed. | Metal `2^31`; CUDA `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_Q8` | Dense Q8_0 model-weight gate against the load-time-packed CPU fallback. | Metal `2^29`; CUDA `2^24` |
 | `FUCINA_GPU_MIN_WORK_DENSE_TQ2` (metal) | Dense/PTQTP ternary TQ2_0 gate against the x4 interleaved CPU kernels. | `2^25` |
 | `FUCINA_GPU_QMOE_MIN_FILL` | Tile-occupancy gate (percent) for grouped MoE: small expert batches whose 32-row tiles would run mostly empty stay on CPU; `0` disables the gate, `>100` never passes it. | `50` |
 | `FUCINA_GPU_TRACE` | Non-`0` first character enables dispatch tracing; dump via `fucina.internal.gpu.traceDump()` (no-op when off). | off |
 | `FUCINA_GPU_TF32` (cuda) | Non-`0` opts f32 GEMMs into TF32 tensor cores (default is strict FP32). | off |
-| `FUCINA_GPU_MIN_WORK_TRANSIENT` (cuda) | Work floor for *non-resident* operands (each crossing PCIe per call); an `m ≥ 128` row floor applies alongside it. | `2^33` |
+| `FUCINA_GPU_MIN_WORK_TRANSIENT` (cuda) | Work floor for *non-resident* operands (each crossing PCIe per call); the `TRANSIENT_MIN_M` row floor applies alongside it. | `2^33` |
+| `FUCINA_GPU_TRANSIENT_MIN_M` (cuda) | Row floor applied alongside the transient work floor (streamed-RHS GEMMs below it cannot amortize the PCIe crossing). | `128` |
 | `FUCINA_GPU_MIN_WORK_ATTN` | Attention work floor, in q·kv·heads·d units, for the exec-tier grouped attention forward (f32 and f16 KV, softmax stats for training); on CUDA the same floor also gates the runner's fused prefill seam over the same kernel. | Metal `2^29`; CUDA `2^28` |
 | `FUCINA_GPU_DECODE` (cuda) | Non-`0` enables opt-in quantized decode for m ≤ 8 and resident weights only (GEMV generally; Q5_K uses tiled MMA at m=4..8). | off |
 | `FUCINA_GPU_MIN_WORK_DECODE_Q5` (cuda) | Q5_K-only decode work gate after `FUCINA_GPU_DECODE=1`; rejects the compact CPU kernel's measured 1×4096² win. | `3·2^23` |

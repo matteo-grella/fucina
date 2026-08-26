@@ -51,8 +51,10 @@ const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
+const gpu_policy = @import("gpu_policy.zig");
 const gpu_provider = @import("gpu_provider.zig");
 const Fmt = gpu_provider.QuantFormat;
+const gpu_trace = @import("gpu_trace.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -71,64 +73,21 @@ pub const has_quant_gemm = enabled;
 
 pub const Orient = gpu_provider.Orient;
 
-/// Runtime offload policy, latched from `tuning.get().gpu` at the one-time
-/// configuration read. Crossover provenance lives on the table field docs
-/// (`src/tuning.zig`); the fields keep the provider's own names because the
-/// dispatch code reads them on every gate probe.
-const State = struct {
-    gpu_enabled: bool = table_defaults.enabled,
-    tf32: bool = table_defaults.tf32,
-    /// Base f32 threshold. Ordinary host RHS operands must also pass the
-    /// much higher transient floor; device-resident RHS uses its separately
-    /// measured lower threshold.
-    min_work: u64 = table_defaults.min_work.base,
-    min_work_resident: u64 = table_defaults.min_work.resident,
-    min_work_f16: u64 = table_defaults.min_work.f16,
-    min_work_f16_resident: u64 = table_defaults.min_work.f16_resident,
-    min_work_gemv: u64 = table_defaults.min_work.gemv,
-    min_work_qmoe: u64 = table_defaults.min_work.qmoe,
-    min_work_dense_q6: u64 = table_defaults.min_work.dense_q6,
-    min_work_packed_q4: u64 = table_defaults.min_work.dense_q4,
-    min_work_packed_q5: u64 = table_defaults.min_work.dense_q5,
-    min_work_packed_q6: u64 = default_min_work_packed_q6,
-    min_work_packed_q8: u64 = table_defaults.min_work.dense_q8,
-    qmoe_min_fill_pct: u64 = table_defaults.qmoe_min_fill,
-    min_work_transient: u64 = table_defaults.min_work.transient,
-    transient_min_m: usize = default_transient_min_m,
-    /// FUCINA_GPU_VRAM_BUDGET override (bytes); null = ~80% of free VRAM at init.
-    vram_budget_env: ?usize = null,
-    /// FUCINA_GPU_KERNELS=src forces the NVRTC recompile path (dev loop).
-    kernels_from_src: bool = false,
-    /// Tensor-core quantized prefill kernel. FUCINA_GPU_QUANT_MMA=0 keeps the
-    /// scalar-FFMA fallback for parity/performance diagnosis.
-    quant_mma: bool = table_defaults.quant_mma,
-    /// Split substantially underfilled quantized prefill along K, then reduce
-    /// on-stream. The per-slot partial buffer is grow-only, so steady-state
-    /// dispatch remains allocation-free. FUCINA_GPU_QUANT_SPLIT_K=0 keeps one
-    /// block/output tile.
-    quant_split_k: bool = table_defaults.quant_split_k,
-    /// FUCINA_GPU_DECODE=1 opts into experimental m<=8 quantized decode
-    /// (GEMV normally; Q5_K switches to tiled MMA at m=4..8). Default off because
-    /// CPU/GPU quant arithmetic is tolerance-equivalent, not bit-identical.
-    decode_enabled: bool = table_defaults.decode,
-    /// Q5_K's compact CPU decode kernel is unusually strong; require enough
-    /// work to cross its measured RTX/CPU boundary even when decode is on.
-    min_work_decode_q5: u64 = table_defaults.min_work.decode_q5,
-    /// Prefill-attention offload gate (q·kv·heads·d work).
-    min_work_attn: u64 = table_defaults.min_work.attn,
-};
+/// Offload policy is read live from the process tuning table
+/// (`tuning.get().gpu` — loaded once from the environment and cached; the
+/// `*ForTest` seams pin leaves in place). Only two things latch at the
+/// one-time configuration read: the derived Q6 floors (their seeding rule
+/// consults `tuning.wasSet`, so later test pins must not re-derive them)
+/// and the trace flag. Crossover provenance lives on the table field docs
+/// (`src/tuning.zig`).
+var q6_floors: tuning.GpuQ6Floors = .{ .dense_q6 = 0, .packed_q6 = 0 };
 
 const table_defaults: tuning.Table.Gpu = .{};
-/// Packed-Q6 dense-linear crossover on the reference Ada host (Q5_K wins at
-/// the smallest admitted 32x1024x512 shape, 47.7 vs 63.3 us, so the 2^24
-/// packed tier keeps the measured boundary while rejecting lower-work
-/// calls). No env variable of its own; FUCINA_GPU_MIN_WORK_DENSE_Q6
-/// re-seeds it, see initConfigOnce.
-const default_min_work_packed_q6: u64 = 1 << 24;
-/// Row floor applied alongside the transient work floor (no env override).
-const default_transient_min_m: usize = 128;
 
-var state: State = .{};
+/// The live tuning table's GPU group.
+inline fn gpuT() *const tuning.Table.Gpu {
+    return &tuning.get().gpu;
+}
 var config_done = std.atomic.Value(bool).init(false);
 var init_done = std.atomic.Value(bool).init(false);
 var init_mutex: thread.Mutex = .{};
@@ -159,92 +118,23 @@ var ctx_storage: Ctx = undefined;
 var ctx_ptr: ?*Ctx = null;
 
 // --- Optional dispatch tracing (FUCINA_GPU_TRACE=1) -------------------------
-// Mirrors the Metal provider's tracing contract: zero overhead when off,
-// `traceReset`/`traceDump` callable unconditionally.
-var trace_on: bool = false;
-const Trace = struct {
-    f32_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    gemv_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    h2d_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
-    d2h_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
-    rhs_resident: std.atomic.Value(u64) = .{ .raw = 0 },
-    rhs_streamed: std.atomic.Value(u64) = .{ .raw = 0 },
-    dev_alloc_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    dev_alloc_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
-    /// Resident allocations and adoptions refused (VRAM budget, or the
-    /// registry could not grow); the caller kept its host bytes.
-    resident_refusals: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_pass: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_below: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_shape: std.atomic.Value(u64) = .{ .raw = 0 },
-    transient_below: std.atomic.Value(u64) = .{ .raw = 0 },
-    cuda_err: std.atomic.Value(u64) = .{ .raw = 0 },
-};
-var trace: Trace = .{};
-
-// Monotonic ns without an `std.Io` handle (backend dispatch sites have none;
-// `std.time.Timer` is gone in 0.16). This file only builds into Linux
-// `-Dgpu=cuda` binaries, which always link libc (build.zig configureGpu).
-const CTimespec = extern struct { sec: c_long, nsec: c_long };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *CTimespec) c_int;
-const clock_monotonic: c_int = 1; // Linux CLOCK_MONOTONIC
-
-inline fn tinc(c: *std.atomic.Value(u64), v: u64) void {
-    _ = c.fetchAdd(v, .monotonic);
-}
-inline fn tstart() u64 {
-    if (!trace_on) return 0;
-    var ts: CTimespec = undefined;
-    if (clock_gettime(clock_monotonic, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
-inline fn telapsed(c: *std.atomic.Value(u64), start: u64) void {
-    if (!trace_on) return;
-    var ts: CTimespec = undefined;
-    if (clock_gettime(clock_monotonic, &ts) != 0) return;
-    const now = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    _ = c.fetchAdd(now -% start, .monotonic);
-}
-inline fn tfinish(start: u64) u64 {
-    if (!trace_on) return 0;
-    var ts: CTimespec = undefined;
-    if (clock_gettime(clock_monotonic, &ts) != 0) return 0;
-    const now = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-    return now -% start;
-}
-inline fn tgate(pass: bool) void {
-    if (!trace_on) return;
-    tinc(if (pass) &trace.gate_pass else &trace.gate_below, 1);
-}
+// Mirrors the Metal provider's tracing contract through the shared shell
+// (`gpu_trace.zig`): zero overhead when off, `traceReset`/`traceDump`
+// callable unconditionally.
+var trace: gpu_trace.Table = .{};
 
 pub fn traceEnabled() bool {
     ensureConfig();
-    return trace_on;
+    return trace.on;
 }
 /// Reset counters (call before a warm measurement window). Single-threaded.
 pub fn traceReset() void {
-    if (!trace_on) return;
-    trace = .{};
+    if (!trace.on) return;
+    trace.reset();
 }
 /// Print the accumulated breakdown to stderr (no-op when tracing is off).
 pub fn traceDump() void {
-    if (!trace_on) return;
+    if (!trace.on) return;
     const mb = struct {
         fn f(bytes: u64) f64 {
             return @as(f64, @floatFromInt(bytes)) / 1e6;
@@ -257,36 +147,36 @@ pub fn traceDump() void {
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} transient-floor={d} cuda-error={d}
         \\
     , .{
-        trace.f32_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.f32_ns.load(.monotonic))) / 1e6,
-        trace.f16_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.f16_ns.load(.monotonic))) / 1e6,
-        trace.quant_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.quant_ns.load(.monotonic))) / 1e6,
-        trace.gemv_calls.load(.monotonic),
-        trace.attn_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.attn_ns.load(.monotonic))) / 1e6,
-        mb(trace.h2d_bytes.load(.monotonic)),
-        mb(trace.d2h_bytes.load(.monotonic)),
-        trace.f32_async_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.f32_submit_ns.load(.monotonic))) / 1e6,
-        @as(f64, @floatFromInt(trace.f32_wait_ns.load(.monotonic))) / 1e6,
-        trace.f16_async_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.f16_submit_ns.load(.monotonic))) / 1e6,
-        @as(f64, @floatFromInt(trace.f16_wait_ns.load(.monotonic))) / 1e6,
-        trace.quant_async_calls.load(.monotonic),
-        @as(f64, @floatFromInt(trace.quant_submit_ns.load(.monotonic))) / 1e6,
-        @as(f64, @floatFromInt(trace.quant_wait_ns.load(.monotonic))) / 1e6,
-        trace.rhs_resident.load(.monotonic),
-        trace.rhs_streamed.load(.monotonic),
-        trace.dev_alloc_calls.load(.monotonic),
-        mb(trace.dev_alloc_bytes.load(.monotonic)),
-        trace.resident_refusals.load(.monotonic),
-        trace.gate_pass.load(.monotonic),
-        trace.gate_below.load(.monotonic),
-        trace.gate_shape.load(.monotonic),
-        trace.transient_below.load(.monotonic),
-        trace.cuda_err.load(.monotonic),
+        trace.get(.f32_calls),
+        @as(f64, @floatFromInt(trace.get(.f32_ns))) / 1e6,
+        trace.get(.f16_calls),
+        @as(f64, @floatFromInt(trace.get(.f16_ns))) / 1e6,
+        trace.get(.quant_calls),
+        @as(f64, @floatFromInt(trace.get(.quant_ns))) / 1e6,
+        trace.get(.gemv_calls),
+        trace.get(.attn_calls),
+        @as(f64, @floatFromInt(trace.get(.attn_ns))) / 1e6,
+        mb(trace.get(.h2d_bytes)),
+        mb(trace.get(.d2h_bytes)),
+        trace.get(.f32_async_calls),
+        @as(f64, @floatFromInt(trace.get(.f32_submit_ns))) / 1e6,
+        @as(f64, @floatFromInt(trace.get(.f32_wait_ns))) / 1e6,
+        trace.get(.f16_async_calls),
+        @as(f64, @floatFromInt(trace.get(.f16_submit_ns))) / 1e6,
+        @as(f64, @floatFromInt(trace.get(.f16_wait_ns))) / 1e6,
+        trace.get(.quant_async_calls),
+        @as(f64, @floatFromInt(trace.get(.quant_submit_ns))) / 1e6,
+        @as(f64, @floatFromInt(trace.get(.quant_wait_ns))) / 1e6,
+        trace.get(.rhs_resident),
+        trace.get(.rhs_streamed),
+        trace.get(.dev_alloc_calls),
+        mb(trace.get(.dev_alloc_bytes)),
+        trace.get(.resident_refusals),
+        trace.get(.gate_pass),
+        trace.get(.gate_below),
+        trace.get(.gate_shape),
+        trace.get(.transient_below),
+        trace.get(.cuda_err),
     });
 }
 
@@ -303,43 +193,17 @@ fn ensureConfig() void {
 }
 
 fn initConfigOnce() void {
-    const t = &tuning.get().gpu;
-    state.gpu_enabled = t.enabled;
-    state.tf32 = t.tf32;
-    state.min_work = t.min_work.base;
-    state.min_work_resident = t.min_work.resident;
-    state.min_work_f16 = t.min_work.f16;
-    state.min_work_f16_resident = t.min_work.f16_resident;
-    state.min_work_gemv = t.min_work.gemv;
-    state.min_work_qmoe = t.min_work.qmoe;
     // The dense-Q6/packed-Q6/qmoe seeding rule lives in the tuning table
     // (`tuning.gpuQ6Seeding`), stated once for both providers.
-    const q6 = tuning.gpuQ6Seeding(default_min_work_packed_q6);
-    state.min_work_dense_q6 = q6.dense_q6;
-    state.min_work_packed_q6 = q6.packed_q6;
-    state.min_work_packed_q4 = t.min_work.dense_q4;
-    state.min_work_packed_q5 = t.min_work.dense_q5;
-    state.min_work_packed_q8 = t.min_work.dense_q8;
-    state.qmoe_min_fill_pct = t.qmoe_min_fill;
-    state.min_work_transient = t.min_work.transient;
-    state.vram_budget_env = if (t.vram_budget) |v| @as(usize, @intCast(v)) else null;
-    // FUCINA_GPU_KERNELS is string-valued ("src" selects the NVRTC
-    // recompile path), so it stays outside the tuning table as a direct
-    // env read.
-    state.kernels_from_src = parallel.envStringIs("FUCINA_GPU_KERNELS", "src");
-    state.quant_mma = t.quant_mma;
-    state.quant_split_k = t.quant_split_k;
-    state.decode_enabled = t.decode;
-    state.min_work_decode_q5 = t.min_work.decode_q5;
-    state.min_work_attn = t.min_work.attn;
-    trace_on = t.trace;
+    q6_floors = tuning.gpuQ6Seeding();
+    trace.on = gpuT().trace;
 }
 
 /// One-time lazy device init: double-checked under a mutex so concurrent
 /// ExecContexts share one context/stream/handle.
 fn ensureInit() void {
     ensureConfig();
-    if (!state.gpu_enabled) return;
+    if (!gpuT().enabled) return;
     if (init_done.load(.acquire)) return;
     init_mutex.lock();
     defer init_mutex.unlock();
@@ -402,7 +266,9 @@ fn initOnce() void {
     if (!c.managed_ok) {
         std.log.warn("fucina-cuda: no concurrent managed access on this platform; weight residency disabled (transient/CPU fallback)", .{});
     }
-    c.vram_budget = state.vram_budget_env orelse blk: {
+    // FUCINA_GPU_VRAM_BUDGET override (bytes); unset = ~80% of free VRAM.
+    const budget_env: ?usize = if (gpuT().vram_budget) |v| @as(usize, @intCast(v)) else null;
+    c.vram_budget = budget_env orelse blk: {
         var free_b: usize = 0;
         var total_b: usize = 0;
         if (c.driver.cuMemGetInfo(&free_b, &total_b) != 0) break :blk 0;
@@ -415,10 +281,10 @@ fn initOnce() void {
         var handle: api.CublasHandle = null;
         if (loaded.api.cublasCreate(&handle) == 0) {
             _ = loaded.api.cublasSetStream(handle, c.stream);
-            _ = loaded.api.cublasSetMathMode(handle, if (state.tf32) api.CUBLAS_TF32_TENSOR_OP_MATH else api.CUBLAS_DEFAULT_MATH);
+            _ = loaded.api.cublasSetMathMode(handle, if (gpuT().tf32) api.CUBLAS_TF32_TENSOR_OP_MATH else api.CUBLAS_DEFAULT_MATH);
             c.blas_handle = handle;
-            if (trace_on) std.debug.print("[gpu-trace] cuda: {s} via {s}{s}\n", .{
-                c.name_buf[0..c.name_len], loaded.soname, if (state.tf32) " (TF32)" else "",
+            if (trace.on) std.debug.print("[gpu-trace] cuda: {s} via {s}{s}\n", .{
+                c.name_buf[0..c.name_len], loaded.soname, if (gpuT().tf32) " (TF32)" else "",
             });
         } else {
             std.log.warn("fucina-cuda: cublasCreate failed; f32 GEMM offload disabled", .{});
@@ -448,38 +314,48 @@ pub fn deviceName() ?[]const u8 {
 /// floor (`min_work_transient`, `transient_min_m`) lives HERE in the gates;
 /// a residency-keyed dispatcher-side floor could replace it once the gates
 /// learn RHS lifetimes, dropping these back to `min_work`.
-fn gateWork(m: usize, n: usize, k: usize, work: u64) bool {
-    if (m < 32 or n < 32 or k < 16) {
-        if (trace_on) tinc(&trace.gate_shape, 1);
+/// Maps a shared work-gate decision onto the trace counters.
+fn gateDecision(d: gpu_policy.Decision) bool {
+    if (d == .shape) {
+        trace.inc(.gate_shape, 1);
         return false;
     }
-    if (!state.gpu_enabled or work < state.min_work) {
-        tgate(false);
-        return false;
+    const pass = d == .pass;
+    trace.gate(pass);
+    return pass;
+}
+
+fn gateWork(m: usize, n: usize, k: usize, work: u64) bool {
+    const t = gpuT();
+    switch (gpu_policy.f32Gate(t, m, n, k, work)) {
+        .shape => {
+            trace.inc(.gate_shape, 1);
+            return false;
+        },
+        .below => {
+            trace.gate(false);
+            return false;
+        },
+        .pass => {},
     }
     // Shapes that pass the plain gate but fall to the transient floor are
     // counted separately: this split is the gate-retuning evidence.
-    if (m < state.transient_min_m or work < state.min_work_transient) {
-        if (trace_on) tinc(&trace.transient_below, 1);
+    if (m < t.transient_min_m or work < t.min_work.transient) {
+        trace.inc(.transient_below, 1);
         return false;
     }
-    tgate(true);
+    trace.gate(true);
     return true;
 }
 
 pub fn shouldUseGpu(m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    // Saturate on overflow: astronomically large work passes the work
-    // thresholds but never bypasses the kill switch or shape floors.
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    return gateWork(m, n, k, work);
+    return gateWork(m, n, k, gpu_policy.work(m, n, k));
 }
 
 pub fn shouldUseGpuBatched(m: usize, n: usize, k: usize, batch_count: usize) bool {
     ensureConfig();
-    const per = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    const work = std.math.mul(u64, per, batch_count) catch std.math.maxInt(u64);
-    return gateWork(m, n, k, work);
+    return gateWork(m, n, k, gpu_policy.workBatched(m, n, k, batch_count));
 }
 
 /// f16 gate: no transient floor on top of `min_work_f16` — the CPU f16 row
@@ -488,14 +364,7 @@ pub fn shouldUseGpuBatched(m: usize, n: usize, k: usize, batch_count: usize) boo
 /// so streamed f16 offload pays off around the Metal-tuned 2^27 already.
 pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (m < 32 or n < 32 or k < 16) {
-        if (trace_on) tinc(&trace.gate_shape, 1);
-        return false;
-    }
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    const pass = state.gpu_enabled and work >= state.min_work_f16;
-    tgate(pass);
-    return pass;
+    return gateDecision(gpu_policy.f16Gate(gpuT(), m, n, k));
 }
 
 fn tensorHasDeviceStorage(b: anytype) bool {
@@ -516,11 +385,12 @@ fn tensorHasDeviceStorage(b: anytype) bool {
 /// retains its m>=32 and high work floor for transient operands.
 pub fn shouldUseGpuF16ForRhs(b: *const TensorF16, m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (m != 0 and n >= 32 and k >= 16 and state.gpu_enabled) {
-        const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-        if (work >= state.min_work_f16_resident) {
+    const t = gpuT();
+    if (m != 0 and n >= 32 and k >= 16 and t.enabled) {
+        const work = gpu_policy.work(m, n, k);
+        if (work >= t.min_work.f16_resident) {
             const resident = tensorHasDeviceStorage(b);
-            tgate(resident);
+            trace.gate(resident);
             if (resident) return true;
         }
     }
@@ -631,11 +501,9 @@ pub fn gemmBf16NtAsync(_: *const Tensor, _: *const tensor.TensorOf(.bf16), _: *T
 
 pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (m == 0 or m > 8 or n < 256 or k < 256) return false;
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    if (work < state.min_work_gemv or !state.gpu_enabled) return false;
+    if (!gpu_policy.gemvEligible(gpuT(), m, n, k)) return false;
     const resident = tensorHasDeviceStorage(b);
-    tgate(resident);
+    trace.gate(resident);
     return resident;
 }
 
@@ -645,10 +513,11 @@ pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
 pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
     if (shouldUseGpuGemv(b, m, n, k)) return true;
     ensureConfig();
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    if (state.gpu_enabled and m != 0 and n >= 32 and k >= 16 and work >= state.min_work_resident) {
+    const t = gpuT();
+    const work = gpu_policy.work(m, n, k);
+    if (t.enabled and m != 0 and n >= 32 and k >= 16 and work >= t.min_work.resident) {
         const resident = tensorHasDeviceStorage(b);
-        tgate(resident);
+        trace.gate(resident);
         if (resident) return true;
     }
     return shouldUseGpu(m, n, k);
@@ -656,11 +525,11 @@ pub fn shouldUseGpuForRhs(b: *const Tensor, m: usize, n: usize, k: usize) bool {
 
 pub fn shouldUseGpuBatchedForRhs(b: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize) bool {
     ensureConfig();
-    const per = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    const work = std.math.mul(u64, per, batch_count) catch std.math.maxInt(u64);
-    if (state.gpu_enabled and m >= 32 and n >= 32 and k >= 16 and work >= state.min_work_resident) {
+    const t = gpuT();
+    const work = gpu_policy.workBatched(m, n, k, batch_count);
+    if (t.enabled and m >= 32 and n >= 32 and k >= 16 and work >= t.min_work.resident) {
         const resident = tensorHasDeviceStorage(b);
-        tgate(resident);
+        trace.gate(resident);
         if (resident) return true;
     }
     return shouldUseGpuBatched(m, n, k, batch_count);
@@ -694,7 +563,7 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
     if (ctx.blas_handle == null) return null;
     const blas = &(ctx.blas.?);
 
-    const timer = tstart();
+    const timer = trace.start();
     dispatch_lock.lock();
     defer dispatch_lock.unlock();
     const d = &ctx.driver;
@@ -710,27 +579,27 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
         f16_out_cap = c_elems;
     }
     if (!dev_a16.ensure(d, a_elems * 2) or !dev_c16.ensure(d, c_elems * 2)) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return null;
     }
     if (d.cuMemcpyHtoD(dev_a16.ptr, a.ptr, a_elems * 2) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return null;
     }
     const b_dev: api.CUdeviceptr = if (residentDevPtr(ctx, std.mem.sliceAsBytes(b[0..b_elems]), false)) |dev| blk: {
-        if (trace_on) tinc(&trace.rhs_resident, 1);
+        if (trace.on) trace.inc(.rhs_resident, 1);
         break :blk dev;
     } else blk: {
-        if (trace_on) tinc(&trace.rhs_streamed, 1);
+        if (trace.on) trace.inc(.rhs_streamed, 1);
         if (!dev_b16.ensure(d, b_elems * 2)) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return null;
         }
         if (d.cuMemcpyHtoD(dev_b16.ptr, b.ptr, b_elems * 2) != 0) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return null;
         }
-        if (trace_on) tinc(&trace.h2d_bytes, b_elems * 2);
+        if (trace.on) trace.inc(.h2d_bytes, b_elems * 2);
         break :blk dev_b16.ptr;
     };
 
@@ -760,22 +629,22 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
         api.CUBLAS_GEMM_DEFAULT,
     );
     if (rc != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return null;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return null;
     }
     if (d.cuMemcpyDtoH(@ptrCast(f16_out_ptr.?), dev_c16.ptr, c_elems * 2) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return null;
     }
-    if (trace_on) {
-        tinc(&trace.f16_calls, 1);
-        telapsed(&trace.f16_ns, timer);
-        tinc(&trace.h2d_bytes, a_elems * 2);
-        tinc(&trace.d2h_bytes, c_elems * 2);
+    if (trace.on) {
+        trace.inc(.f16_calls, 1);
+        trace.elapsed(.f16_ns, timer);
+        trace.inc(.h2d_bytes, a_elems * 2);
+        trace.inc(.d2h_bytes, c_elems * 2);
     }
     return f16_out_ptr.?[0..c_elems];
 }
@@ -861,37 +730,37 @@ pub fn gemmBatchedF32(
     const total_c = std.math.add(usize, std.math.mul(usize, stride_c, batch_count - 1) catch return false, block_c) catch return false;
     if (a.len < total_a or b.len < total_b or c.len < total_c) return false;
 
-    const timer = tstart();
+    const timer = trace.start();
     dispatch_lock.lock();
     defer dispatch_lock.unlock();
     const d = &ctx.driver;
     if (d.cuCtxSetCurrent(ctx.context) != 0) return false;
 
     if (!dev_a.ensure(d, total_a * 4) or !dev_c.ensure(d, total_c * 4)) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuMemcpyHtoD(dev_a.ptr, a.ptr, total_a * 4) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     // Resident RHS (managed memory, unified addressing): zero weight
     // transfer. Transient RHS streams (the backend f32 tier has no lifetime
     // info, so no adoption here).
     const b_dev: api.CUdeviceptr = if (residentDevPtr(ctx, std.mem.sliceAsBytes(b[0..total_b]), false)) |dev| blk: {
-        if (trace_on) tinc(&trace.rhs_resident, 1);
+        if (trace.on) trace.inc(.rhs_resident, 1);
         break :blk dev;
     } else blk: {
-        if (trace_on) tinc(&trace.rhs_streamed, 1);
+        if (trace.on) trace.inc(.rhs_streamed, 1);
         if (!dev_b.ensure(d, total_b * 4)) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return false;
         }
         if (d.cuMemcpyHtoD(dev_b.ptr, b.ptr, total_b * 4) != 0) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return false;
         }
-        if (trace_on) tinc(&trace.h2d_bytes, total_b * 4);
+        if (trace.on) trace.inc(.h2d_bytes, total_b * 4);
         break :blk dev_b.ptr;
     };
 
@@ -917,16 +786,16 @@ pub fn gemmBatchedF32(
     else
         blas.cublasSgemmStridedBatched(ctx.blas_handle, op_b, op_a, cm, cn, ck, &one, b_dev, ld_b, @intCast(stride_b), dev_a.ptr, ld_a, @intCast(stride_a), &zero, dev_c.ptr, ld_c, @intCast(stride_c), @intCast(batch_count));
     if (rc != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (batch_count == 1 or stride_c == block_c) {
         if (d.cuMemcpyDtoH(c.ptr, dev_c.ptr, total_c * 4) != 0) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return false;
         }
     } else {
@@ -937,16 +806,16 @@ pub fn gemmBatchedF32(
         for (0..batch_count) |bi| {
             const off = bi * stride_c;
             if (d.cuMemcpyDtoH(c[off .. off + block_c].ptr, dev_c.ptr + off * 4, block_c * 4) != 0) {
-                if (trace_on) tinc(&trace.cuda_err, 1);
+                if (trace.on) trace.inc(.cuda_err, 1);
                 return false;
             }
         }
     }
-    if (trace_on) {
-        tinc(&trace.f32_calls, 1);
-        telapsed(&trace.f32_ns, timer);
-        tinc(&trace.h2d_bytes, total_a * 4);
-        tinc(&trace.d2h_bytes, total_c * 4);
+    if (trace.on) {
+        trace.inc(.f32_calls, 1);
+        trace.elapsed(.f32_ns, timer);
+        trace.inc(.h2d_bytes, total_a * 4);
+        trace.inc(.d2h_bytes, total_c * 4);
     }
     return true;
 }
@@ -1083,7 +952,7 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
                 if (self.b_buffer) |buffer| buffer.clearPendingUse(&self.work);
             }
             const d = &self.ctx.driver;
-            const started = tstart();
+            const started = trace.start();
             if (d.cuCtxSetCurrent(self.ctx.context) != 0) return false;
             if (copy_to_host) {
                 const bytes = self.total_c * @sizeOf(f32);
@@ -1115,17 +984,17 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
                         }
                     }
                 }
-                if (trace_on) tinc(&trace.d2h_bytes, bytes);
+                if (trace.on) trace.inc(.d2h_bytes, bytes);
             } else if (d.cuEventSynchronize(self.slot.done) != 0) {
                 // Discard has no host transfer to carry the dependency, but the
                 // slot cannot be recycled while compute still touches it.
                 return false;
             }
-            if (trace_on) tinc(switch (self.kind) {
-                .f32 => &trace.f32_wait_ns,
-                .f16 => &trace.f16_wait_ns,
-                .quant => &trace.quant_wait_ns,
-            }, tfinish(started));
+            trace.inc(switch (self.kind) {
+                .f32 => .f32_wait_ns,
+                .f16 => .f16_wait_ns,
+                .quant => .quant_wait_ns,
+            }, trace.finish(started));
             return true;
         }
 
@@ -1174,7 +1043,7 @@ fn stageInput(
     _ = ensureHostRegistered(ctx, x.buffer);
     if (ctx.driver.cuMemcpyHtoDAsync(dev.ptr, values.ptr, bytes, ctx.upload_stream) != 0) return null;
     copy_queued.* = true;
-    if (trace_on) tinc(&trace.h2d_bytes, bytes);
+    if (trace.on) trace.inc(.h2d_bytes, bytes);
     return dev.ptr;
 }
 
@@ -1193,7 +1062,7 @@ fn stageInputF16(
     _ = ensureHostRegistered(ctx, x.buffer);
     if (ctx.driver.cuMemcpyHtoDAsync(dev.ptr, values.ptr, bytes, ctx.upload_stream) != 0) return null;
     copy_queued.* = true;
-    if (trace_on) tinc(&trace.h2d_bytes, bytes);
+    if (trace.on) trace.inc(.h2d_bytes, bytes);
     return dev.ptr;
 }
 
@@ -1249,7 +1118,7 @@ pub fn gemmBatchedF32Async(
         std.heap.c_allocator.destroy(holder);
     };
 
-    const submit_started = tstart();
+    const submit_started = trace.start();
     if (!slot.c_dev.ensure(&ctx.driver, total_c * @sizeOf(f32))) return false;
     const output_registered = ensureHostRegistered(ctx, out.buffer);
     if (!output_registered and !slot.c_host.ensure(&ctx.driver, total_c * @sizeOf(f32))) return false;
@@ -1296,9 +1165,9 @@ pub fn gemmBatchedF32Async(
     b.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
     success = true;
-    if (trace_on) {
-        tinc(&trace.f32_async_calls, 1);
-        tinc(&trace.f32_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.f32_async_calls, 1);
+        trace.inc(.f32_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -1339,7 +1208,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
         std.heap.c_allocator.destroy(holder);
     };
 
-    const submit_started = tstart();
+    const submit_started = trace.start();
     if (!slot.c_dev.ensure(&ctx.driver, c_elems * @sizeOf(f32))) return false;
     const output_registered = ensureHostRegistered(ctx, out.buffer);
     if (!output_registered and !slot.c_host.ensure(&ctx.driver, c_elems * @sizeOf(f32))) return false;
@@ -1398,9 +1267,9 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
     b.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
     success = true;
-    if (trace_on) {
-        tinc(&trace.f16_async_calls, 1);
-        tinc(&trace.f16_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.f16_async_calls, 1);
+        trace.inc(.f16_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -1485,7 +1354,7 @@ fn residentAppendLocked(entry: ResidentEntry) bool {
 }
 
 fn residentRefused() void {
-    if (trace_on) tinc(&trace.resident_refusals, 1);
+    if (trace.on) trace.inc(.resident_refusals, 1);
 }
 
 /// Resolve `bytes` to a zero-transfer device pointer:
@@ -1552,9 +1421,9 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
         return null;
     }
     _ = ctx.driver.cuMemPrefetchAsync(dptr, bytes.len, ctx.device, ctx.stream);
-    if (trace_on) {
-        tinc(&trace.dev_alloc_calls, 1);
-        tinc(&trace.dev_alloc_bytes, bytes.len);
+    if (trace.on) {
+        trace.inc(.dev_alloc_calls, 1);
+        trace.inc(.dev_alloc_bytes, bytes.len);
     }
     return dptr;
 }
@@ -1604,7 +1473,7 @@ pub fn flatPerturb(dt: FlatDType, bytes: []u8, stream_seed: u64, scaled: f32, n:
     var params = [_]?*anyopaque{ @ptrCast(&p_data), @ptrCast(&p_seed), @ptrCast(&p_scaled), @ptrCast(&p_n) };
     const pairs = (@as(u64, n) + 1) / 2;
     if (d.cuLaunchKernel(f, esLaunchGrid(pairs), 1, 1, 256, 1, 1, 0, ctx.stream, &params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) return false;
@@ -1643,7 +1512,7 @@ pub fn flatWeightedUpdate(dt: FlatDType, bytes: []u8, stream_seeds: []const u64,
     };
     const pairs = (@as(u64, n) + 1) / 2;
     if (d.cuLaunchKernel(f, esLaunchGrid(pairs), 1, 1, 256, 1, 1, 0, ctx.stream, &params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) return false;
@@ -1672,7 +1541,7 @@ pub fn flatAnchorDecay(dt: FlatDType, bytes: []u8, anchor: []const u8, decay_ste
         @ptrCast(&p_data), @ptrCast(&p_anchor), @ptrCast(&p_step), @ptrCast(&p_l1), @ptrCast(&p_n),
     };
     if (d.cuLaunchKernel(f, esLaunchGrid(@intCast(n)), 1, 1, 256, 1, 1, 0, ctx.stream, &params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) return false;
@@ -1713,9 +1582,9 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
         return null;
     }
 
-    if (trace_on) {
-        tinc(&trace.dev_alloc_calls, 1);
-        tinc(&trace.dev_alloc_bytes, len);
+    if (trace.on) {
+        trace.inc(.dev_alloc_calls, 1);
+        trace.inc(.dev_alloc_bytes, len);
     }
     const p: [*]u8 = @ptrFromInt(@as(usize, @intCast(dptr)));
     return p[0..len];
@@ -1827,7 +1696,10 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
     const d = &ctx.driver;
     if (d.cuCtxSetCurrent(ctx.context) != 0) return null;
     var module: api.CUmodule = null;
-    if (!state.kernels_from_src) {
+    // FUCINA_GPU_KERNELS is string-valued ("src" selects the NVRTC
+    // recompile path), so it stays outside the tuning table as a direct
+    // env read (one-shot: the kernels latch above guards this body).
+    if (!parallel.envStringIs("FUCINA_GPU_KERNELS", "src")) {
         if (d.cuModuleLoadData(&module, kernels_ptx.ptr) != 0) module = null;
     }
     if (module == null) {
@@ -1886,7 +1758,7 @@ const QuantMulMmLaunch = struct {
 
 fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: Fmt, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
     const index: usize = @intCast(abi(format));
-    if (state.quant_mma and ctx.compute_major >= 7) {
+    if (gpuT().quant_mma and ctx.compute_major >= 7) {
         if (ctx.sm_count > 0) {
             const n64_tiles = n / 64 + @intFromBool(n % 64 != 0);
             const n64_blocks = std.math.mul(usize, grid_x, n64_tiles) catch std.math.maxInt(usize);
@@ -1902,7 +1774,7 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: Fmt, grid_
             // reduction then costs more than the small occupancy deficit. The
             // 7/8 cutoff still admits the measured 64/76 Qwen grid.
             const split_block_ceiling = sm_count - sm_count / 8;
-            if (allow_split_k and state.quant_split_k and kernels.reduce_split_k != null and n64_blocks < split_block_ceiling) {
+            if (allow_split_k and gpuT().quant_split_k and kernels.reduce_split_k != null and n64_blocks < split_block_ceiling) {
                 const desired_split = sm_count / n64_blocks + @intFromBool(sm_count % n64_blocks != 0);
                 // On the 76-SM Ada reference host, three Q6 partitions fill 72
                 // slots for the 24-tile Parakeet shape; a fourth wave only adds
@@ -1991,13 +1863,13 @@ pub fn gemmQuantNtAsync(
         std.heap.c_allocator.destroy(holder);
     };
 
-    const submit_started = tstart();
+    const submit_started = trace.start();
     if (!slot.c_dev.ensure(d, output_elems * @sizeOf(f32))) return false;
     const output_registered = ensureHostRegistered(ctx, out.buffer);
     if (!output_registered and !slot.c_host.ensure(d, output_elems * @sizeOf(f32))) return false;
     const input_dev = pendingDeviceInput(input, &dep_input) orelse stageInput(ctx, input, input_elems, &slot.a_dev, &copy_queued) orelse return false;
     const rhs_dev = residentDevPtr(ctx, rhs_bytes, true) orelse return false;
-    if (trace_on) tinc(&trace.rhs_resident, 1);
+    if (trace.on) trace.inc(.rhs_resident, 1);
 
     const use_gemv = quantDecodeUsesGemv(format, m);
     if (use_gemv) {
@@ -2090,7 +1962,7 @@ pub fn gemmQuantNtAsync(
                 if (d.cuLaunchKernel(ks.reduce_split_k.?, reduce_grid, 1, 1, 256, 1, 1, 0, ctx.stream, &reduce_params, null) != 0) return false;
             }
         }
-        if (trace_on) tinc(&trace.h2d_bytes, tiles_bytes);
+        if (trace.on) trace.inc(.h2d_bytes, tiles_bytes);
     }
     if (d.cuEventRecord(slot.done, ctx.stream) != 0) return false;
 
@@ -2115,9 +1987,9 @@ pub fn gemmQuantNtAsync(
     input.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
     success = true;
-    if (trace_on) {
-        tinc(&trace.quant_async_calls, 1);
-        tinc(&trace.quant_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.quant_async_calls, 1);
+        trace.inc(.quant_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -2213,19 +2085,19 @@ pub fn gemmQGroupedNt(
         _ = d.cuStreamSynchronize(ctx.transfer_stream);
     };
 
-    const timer = tstart();
+    const timer = trace.start();
     // Stable (cacheable) RHS is adopted into the managed registry on first
     // use — the Metal wrap-cache analog — so mmap'd model weights cross PCIe
     // once per process, not once per dispatch. Transient RHS streams.
     const rhs_dev: api.CUdeviceptr = if (residentDevPtr(ctx, rhs_bytes, rhs_cacheable)) |dev| blk: {
-        if (trace_on) tinc(&trace.rhs_resident, 1);
+        if (trace.on) trace.inc(.rhs_resident, 1);
         break :blk dev;
     } else blk: {
-        if (trace_on) tinc(&trace.rhs_streamed, 1);
+        if (trace.on) trace.inc(.rhs_streamed, 1);
         if (!qmoe_rhs_dev.ensure(d, rhs_bytes.len)) return false;
         if (d.cuMemcpyHtoDAsync(qmoe_rhs_dev.ptr, rhs_bytes.ptr, rhs_bytes.len, ctx.upload_stream) != 0) return false;
         queued = true;
-        if (trace_on) tinc(&trace.h2d_bytes, rhs_bytes.len);
+        if (trace.on) trace.inc(.h2d_bytes, rhs_bytes.len);
         break :blk qmoe_rhs_dev.ptr;
     };
 
@@ -2256,7 +2128,7 @@ pub fn gemmQGroupedNt(
         @ptrCast(&p_partial), @ptrCast(&p_split_k), @ptrCast(&p_partial_stride),
     };
     if (d.cuLaunchKernel(launch.kernel, @intCast(tiles.len), grid_y, 1, 16, launch.block_y, 1, 0, ctx.stream, &launch_params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuEventRecord(qmoe_done, ctx.stream) != 0 or
@@ -2264,14 +2136,14 @@ pub fn gemmQGroupedNt(
         d.cuMemcpyDtoHAsync(qmoe_out_host.?, qmoe_out_dev.ptr, qmoe_out_bytes, ctx.transfer_stream) != 0 or
         d.cuStreamSynchronize(ctx.transfer_stream) != 0)
     {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
-    if (trace_on) {
-        tinc(&trace.quant_calls, 1);
-        telapsed(&trace.quant_ns, timer);
-        tinc(&trace.h2d_bytes, qmoe_in_bytes + tiles_bytes);
-        tinc(&trace.d2h_bytes, qmoe_out_bytes);
+    if (trace.on) {
+        trace.inc(.quant_calls, 1);
+        trace.elapsed(.quant_ns, timer);
+        trace.inc(.h2d_bytes, qmoe_in_bytes + tiles_bytes);
+        trace.inc(.d2h_bytes, qmoe_out_bytes);
     }
     success = true;
     return true;
@@ -2304,7 +2176,7 @@ fn gemvQuant(
     if (d.cuCtxSetCurrent(ctx.context) != 0) return false;
 
     const rhs_dev = residentDevPtr(ctx, rhs_bytes, rhs_cacheable) orelse return false;
-    if (trace_on) tinc(&trace.rhs_resident, 1);
+    if (trace.on) trace.inc(.rhs_resident, 1);
 
     const in_bytes = m * k * 4;
     const out_bytes = m * n * 4;
@@ -2327,12 +2199,12 @@ fn gemvQuant(
     const grid: c_uint = @intCast((n + warps_per_block - 1) / warps_per_block);
     const f = ks.gemv[@intCast(abi(format))];
     if (d.cuLaunchKernel(f, grid, 1, 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d.cuStreamSynchronize(ctx.stream) != 0) return false;
     if (d.cuMemcpyDtoH(c.ptr, dev_c.ptr, out_bytes) != 0) return false;
-    if (trace_on) tinc(&trace.gemv_calls, 1);
+    if (trace.on) trace.inc(.gemv_calls, 1);
     return true;
 }
 
@@ -2357,7 +2229,7 @@ pub fn gemmQuantNt(
     const out_elems = std.math.mul(usize, m, n) catch return false;
     if (a.len < in_elems or c.len < out_elems) return false;
 
-    if (state.decode_enabled and quantDecodeUsesGemv(format, m) and n % 4 == 0 and n <= std.math.maxInt(i32)) {
+    if (gpuT().decode and quantDecodeUsesGemv(format, m) and n % 4 == 0 and n <= std.math.maxInt(i32)) {
         return gemvQuant(format, rhs_bytes, rhs_cacheable, nb01, a, c, m, n, k);
     }
 
@@ -2438,8 +2310,8 @@ pub fn gemmQuantNtSharedABatch(
 
 pub fn shouldUseGpuQMoe(total_work: u64) bool {
     ensureConfig();
-    const pass = state.gpu_enabled and total_work >= state.min_work_qmoe;
-    tgate(pass);
+    const pass = gpu_policy.qmoeWork(gpuT(), total_work);
+    trace.gate(pass);
     return pass;
 }
 
@@ -2447,43 +2319,32 @@ pub fn shouldUseGpuQMoe(total_work: u64) bool {
 /// provider so gate behavior is provider-independent once the arm lands.
 pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     ensureConfig();
-    if (n_tiles == 0) return false;
-    const filled = std.math.mul(u64, @as(u64, rows), 100) catch return true;
-    return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
+    return gpu_policy.qmoeFillAcceptable(gpuT(), rows, n_tiles);
 }
 
 pub fn shouldUseGpuDenseQuant(format: Fmt, total_work: u64) bool {
     ensureConfig();
-    const min_work = switch (format) {
-        .q6_k => state.min_work_dense_q6,
-        .q5_k => state.min_work_packed_q5,
-        .q4_k, .q8_0 => state.min_work_qmoe,
-        .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel (supportsQuant gates first)
-    };
-    const pass = state.gpu_enabled and total_work >= min_work;
-    tgate(pass);
+    // No CUDA ternary kernel (supportsQuant gates first).
+    std.debug.assert(format != .tq2_0 and format != .tq2_0_folded);
+    const pass = gpu_policy.denseQuantWork(gpuT(), q6_floors, format, total_work);
+    trace.gate(pass);
     return pass;
 }
 
 /// Dense model-weight gate against Fucina's load-time-packed CPU fallback.
 pub fn shouldUseGpuDenseQuantPacked(format: Fmt, total_work: u64) bool {
     ensureConfig();
-    const min_work = switch (format) {
-        .q4_k => state.min_work_packed_q4,
-        .q5_k => state.min_work_packed_q5,
-        .q6_k => state.min_work_packed_q6,
-        .q8_0 => state.min_work_packed_q8,
-        .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel (supportsQuant gates first)
-    };
-    const pass = state.gpu_enabled and total_work >= min_work;
-    tgate(pass);
+    // No CUDA ternary kernel (supportsQuant gates first).
+    std.debug.assert(format != .tq2_0 and format != .tq2_0_folded);
+    const pass = gpu_policy.denseQuantPackedWork(gpuT(), q6_floors, format, total_work);
+    trace.gate(pass);
     return pass;
 }
 
 /// Test seam: unit-test shapes never reach the real threshold.
 pub fn setMinWorkQMoeForTest(v: u64) void {
     ensureConfig();
-    state.min_work_qmoe = v;
+    tuning.setField("gpu.min_work.qmoe", v);
 }
 
 /// True when this provider is compiled in AND holds a live device context.
@@ -2497,12 +2358,12 @@ pub fn deviceAvailableForTest() bool {
 /// The grouped-MoE tile-occupancy gate, as a save/restore pair for tests.
 pub fn qmoeMinFillForTest() u64 {
     ensureConfig();
-    return state.qmoe_min_fill_pct;
+    return gpuT().qmoe_min_fill;
 }
 
 pub fn setQmoeMinFillForTest(v: u64) void {
     ensureConfig();
-    state.qmoe_min_fill_pct = v;
+    tuning.setField("gpu.qmoe_min_fill", v);
 }
 
 /// Quantized decode-GEMV gate — the decode arm of `offload.quantGemmAccepts`
@@ -2511,11 +2372,11 @@ pub fn setQmoeMinFillForTest(v: u64) void {
 /// own work floor.
 pub fn shouldUseGpuQuantDecode(format: Fmt, m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (!state.decode_enabled) return false;
+    const t = gpuT();
+    if (!t.decode) return false;
     if (format != .q5_k) return true;
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    const pass = work >= state.min_work_decode_q5;
-    tgate(pass);
+    const pass = gpu_policy.work(m, n, k) >= t.min_work.decode_q5;
+    trace.gate(pass);
     return pass;
 }
 
@@ -2523,17 +2384,17 @@ pub fn shouldUseGpuQuantDecode(format: Fmt, m: usize, n: usize, k: usize) bool {
 /// exercise the staged panel path regardless of FUCINA_GPU_DECODE.
 pub fn setDecodeForTest(v: bool) void {
     ensureConfig();
-    state.decode_enabled = v;
+    tuning.setField("gpu.decode", v);
 }
 
 fn setQuantMmaForTest(v: bool) void {
     ensureConfig();
-    state.quant_mma = v;
+    tuning.setField("gpu.quant_mma", v);
 }
 
 fn setQuantSplitKForTest(v: bool) void {
     ensureConfig();
-    state.quant_split_k = v;
+    tuning.setField("gpu.quant_split_k", v);
 }
 
 // --- Prefill attention offload ------------------------------------------------
@@ -2552,9 +2413,8 @@ var attn_map_dev: DeviceBuf = .{};
 /// call already pays at prefill shapes; decode never reaches this seam.
 pub fn shouldUseGpuAttn(q_seq: usize, kv_seq: usize, heads: usize, d: usize) bool {
     ensureConfig();
-    const work = std.math.mul(u64, std.math.mul(u64, q_seq, kv_seq) catch std.math.maxInt(u64), std.math.mul(u64, heads, d) catch std.math.maxInt(u64)) catch std.math.maxInt(u64);
-    const pass = state.gpu_enabled and work >= state.min_work_attn;
-    tgate(pass);
+    const pass = gpu_policy.attnWork(gpuT(), q_seq, kv_seq, heads, d);
+    trace.gate(pass);
     return pass;
 }
 
@@ -2625,7 +2485,7 @@ fn attnFwdHostImpl(
     const ks = ensureKernels(ctx) orelse return false;
     const d_ = &ctx.driver;
 
-    const timer = tstart();
+    const timer = trace.start();
     dispatch_lock.lock();
     defer dispatch_lock.unlock();
     if (d_.cuCtxSetCurrent(ctx.context) != 0) return false;
@@ -2635,7 +2495,7 @@ fn attnFwdHostImpl(
         !attn_map_dev.ensure(d_, heads * 4) or
         (stats != null and !attn_s_dev.ensure(d_, stat_elems * 4)))
     {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d_.cuMemcpyHtoD(attn_q_dev.ptr, q.ptr, q_elems * 4) != 0 or
@@ -2643,7 +2503,7 @@ fn attnFwdHostImpl(
         d_.cuMemcpyHtoD(attn_v_dev.ptr, v.ptr, kv_elems * kv_bytes) != 0 or
         d_.cuMemcpyHtoD(attn_map_dev.ptr, kv_head_for_head.ptr, heads * 4) != 0)
     {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
 
@@ -2671,39 +2531,39 @@ fn attnFwdHostImpl(
     const warps_per_block = 4;
     const grid_x: c_uint = @intCast((q_seq + warps_per_block - 1) / warps_per_block);
     if (d_.cuLaunchKernel(kernel, grid_x, @intCast(heads), 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d_.cuStreamSynchronize(ctx.stream) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (d_.cuMemcpyDtoH(out.ptr, attn_o_dev.ptr, q_elems * 4) != 0) {
-        if (trace_on) tinc(&trace.cuda_err, 1);
+        if (trace.on) trace.inc(.cuda_err, 1);
         return false;
     }
     if (stats) |values| {
         if (d_.cuMemcpyDtoH(values.ptr, attn_s_dev.ptr, stat_elems * 4) != 0) {
-            if (trace_on) tinc(&trace.cuda_err, 1);
+            if (trace.on) trace.inc(.cuda_err, 1);
             return false;
         }
     }
-    if (trace_on) {
+    if (trace.on) {
         const d2h_total = q_elems * 4 + (if (stats != null) stat_elems * 4 else @as(usize, 0));
-        tinc(&trace.attn_calls, 1);
-        telapsed(&trace.attn_ns, timer);
-        tinc(&trace.h2d_bytes, q_elems * 4 + kv_elems * 2 * kv_bytes + heads * 4);
-        tinc(&trace.d2h_bytes, d2h_total);
+        trace.inc(.attn_calls, 1);
+        trace.elapsed(.attn_ns, timer);
+        trace.inc(.h2d_bytes, q_elems * 4 + kv_elems * 2 * kv_bytes + heads * 4);
+        trace.inc(.d2h_bytes, d2h_total);
     }
     return true;
 }
 
 /// Test seam: parity tests use small shapes that the transient-RHS floor
 /// would otherwise refuse.
-pub fn setTransientFloorForTest(min_work: u64, min_m: usize) void {
+pub fn setTransientFloorForTest(min_work: u64, min_m: u64) void {
     ensureConfig();
-    state.min_work_transient = min_work;
-    state.transient_min_m = min_m;
+    tuning.setField("gpu.min_work.transient", min_work);
+    tuning.setField("gpu.transient_min_m", min_m);
 }
 
 // ---------------------------------------------------------------------------
@@ -2718,40 +2578,39 @@ const expectQuantGemmRows = gpu_test_util.expectQuantGemmRows;
 test "cuda gate applies the transient floor above min_work" {
     if (comptime !enabled) return error.SkipZigTest;
     ensureConfig();
-    const saved_work = state.min_work_transient;
-    const saved_m = state.transient_min_m;
-    defer setTransientFloorForTest(saved_work, saved_m);
+    defer {
+        tuning.setField("gpu.min_work.transient", null);
+        tuning.setField("gpu.transient_min_m", null);
+    }
 
     // 512·2048·2048 = 2^31: above min_work (2^30), below the default
     // transient floor (2^33) — refused until residency lands.
-    setTransientFloorForTest(table_defaults.min_work.transient, default_transient_min_m);
+    setTransientFloorForTest(table_defaults.min_work.transient, table_defaults.transient_min_m);
     try std.testing.expect(!shouldUseGpu(512, 2048, 2048));
     // m below transient_min_m is refused even at huge work.
     try std.testing.expect(!shouldUseGpu(64, 1 << 14, 1 << 14));
     // With the floor lowered to the plain gate, the same shape passes
     // (when the kill switch hasn't disabled the GPU in this environment).
     setTransientFloorForTest(0, 0);
-    try std.testing.expect(shouldUseGpu(512, 2048, 2048) == state.gpu_enabled);
+    try std.testing.expect(shouldUseGpu(512, 2048, 2048) == gpuT().enabled);
 }
 
 test "cuda Q5_K decode gate preserves the compact CPU crossover" {
     if (comptime !enabled) return error.SkipZigTest;
     ensureConfig();
-    const saved_decode = state.decode_enabled;
-    const saved_q5 = state.min_work_decode_q5;
     defer {
-        state.decode_enabled = saved_decode;
-        state.min_work_decode_q5 = saved_q5;
+        tuning.setField("gpu.decode", null);
+        tuning.setField("gpu.min_work.decode_q5", null);
     }
 
-    state.decode_enabled = true;
-    state.min_work_decode_q5 = table_defaults.min_work.decode_q5;
+    tuning.setField("gpu.decode", true);
+    tuning.setField("gpu.min_work.decode_q5", table_defaults.min_work.decode_q5);
     try std.testing.expect(!shouldUseGpuQuantDecode(.q5_k, 1, 4096, 4096));
     try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 1, 6144, 4096));
     try std.testing.expect(shouldUseGpuQuantDecode(.q5_k, 2, 4096, 4096));
     // Existing formats retain the global opt-in behavior unchanged.
     try std.testing.expect(shouldUseGpuQuantDecode(.q4_k, 1, 256, 256));
-    state.decode_enabled = false;
+    tuning.setField("gpu.decode", false);
     try std.testing.expect(!shouldUseGpuQuantDecode(.q5_k, 8, 16384, 16384));
 }
 
@@ -2834,10 +2693,10 @@ test "cuda quant gemm q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     // Pin the decode arm off: the m=1 case must exercise the staged panel
     // path even when the suite runs with FUCINA_GPU_DECODE=1.
     ensureConfig();
-    const saved_decode = state.decode_enabled;
+    const saved_decode = gpuT().decode;
     setDecodeForTest(false);
     defer setDecodeForTest(saved_decode);
-    const saved_mma = state.quant_mma;
+    const saved_mma = gpuT().quant_mma;
     defer setQuantMmaForTest(saved_mma);
 
     var prng = std.Random.DefaultPrng.init(17);
@@ -2915,8 +2774,8 @@ test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storag
     const allocator = std.testing.allocator;
     if (context() == null) return error.SkipZigTest;
     ensureConfig();
-    const saved_mma = state.quant_mma;
-    const saved_split_k = state.quant_split_k;
+    const saved_mma = gpuT().quant_mma;
+    const saved_split_k = gpuT().quant_split_k;
     setQuantMmaForTest(true);
     setQuantSplitKForTest(true);
     defer {

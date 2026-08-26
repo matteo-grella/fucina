@@ -30,8 +30,10 @@ const accelerator = @import("../accelerator.zig");
 const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
+const gpu_policy = @import("gpu_policy.zig");
 const gpu_provider = @import("gpu_provider.zig");
 const Fmt = gpu_provider.QuantFormat;
+const gpu_trace = @import("gpu_trace.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const tuning = @import("../tuning.zig");
@@ -176,96 +178,34 @@ extern fn fucina_metal_gemm_q_dense_nt_async(
 // include-guards make the concatenation safe.
 const msl_source = @embedFile("metal/mlx_gemm.metal") ++ "\n" ++ @embedFile("metal/ggml_mul_mm.metal") ++ "\n" ++ @embedFile("metal/attention.metal");
 
-/// Runtime offload policy, latched from `tuning.get().gpu` at the one-time
-/// configuration read. Crossover provenance lives on the table field docs
-/// (`src/tuning.zig`); the fields keep the provider's own names because the
-/// dispatch code reads them on every gate probe.
-const State = struct {
-    ctx: ?*anyopaque = null,
-    gpu_enabled: bool = table_defaults.enabled,
-    min_work: u64 = table_defaults.min_work.base,
-    min_work_f16: u64 = table_defaults.min_work.f16,
-    min_work_16bit_resident: u64 = table_defaults.min_work.@"16bit_resident",
-    min_work_gemv: u64 = table_defaults.min_work.gemv,
-    min_work_attn: u64 = table_defaults.min_work.attn,
-    min_work_qmoe: u64 = table_defaults.min_work.qmoe,
-    min_work_dense_q6: u64 = table_defaults.min_work.dense_q6,
-    min_work_packed_q4: u64 = table_defaults.min_work.dense_q4,
-    min_work_packed_q6: u64 = default_min_work_packed_q6,
-    min_work_packed_q8: u64 = table_defaults.min_work.dense_q8,
-    min_work_packed_tq2: u64 = table_defaults.min_work.dense_tq2,
-    qmoe_min_fill_pct: u64 = table_defaults.qmoe_min_fill,
-};
-
-const table_defaults: tuning.Table.Gpu = .{};
-/// Packed-Q6 dense-linear crossover: paired eager measurements on M1 Max
-/// put the conservative packed-CPU crossovers at 2^30 (Q4_K), 2^31 (Q6_K),
-/// and 2^29 (Q8_0); Q4_K and Q8_0 live on the tuning table. No env
-/// variable of its own; FUCINA_GPU_MIN_WORK_DENSE_Q6 re-seeds it, see
-/// initConfigOnce.
-const default_min_work_packed_q6: u64 = 1 << 31;
-
-var state: State = .{};
+/// Offload policy is read live from the process tuning table
+/// (`tuning.get().gpu` — loaded once from the environment and cached; the
+/// `*ForTest` seams pin leaves in place). Only two things latch at the
+/// one-time configuration read: the derived Q6 floors (their seeding rule
+/// consults `tuning.wasSet`, so later test pins must not re-derive them)
+/// and the trace flag. Crossover provenance lives on the table field docs
+/// (`src/tuning.zig`).
+var q6_floors: tuning.GpuQ6Floors = .{ .dense_q6 = 0, .packed_q6 = 0 };
+var device_ctx: ?*anyopaque = null;
 var config_done = std.atomic.Value(bool).init(false);
 var init_done = std.atomic.Value(bool).init(false);
 var init_mutex: thread.Mutex = .{};
 
+/// The live tuning table's GPU group.
+inline fn gpuT() *const tuning.Table.Gpu {
+    return &tuning.get().gpu;
+}
+
 // --- Optional dispatch tracing (FUCINA_GPU_TRACE=1) -------------------------
-// Zero-overhead when off: every site is guarded by `trace_on` (a plain bool set
-// once at config). Counters are atomic (gates run on worker threads; dispatches
-// are lock-serialized). The synchronous-dispatch wall-time per kind is the
-// combined GPU-compute + waitUntilCompleted envelope (we commit+wait inline);
-// qmoe lock-wait and stage-copy are split out. When tracing is on, the shim also
-// returns command-buffer GPU/kernel timestamps so traceDump can show wall-vs-GPU
+// The counter table and timing helpers are the shared shell (`gpu_trace.zig`):
+// zero overhead when off (`trace.on`, latched once at config), atomic
+// counters (gates run on worker threads; dispatches are lock-serialized).
+// The synchronous-dispatch wall-time per kind is the combined GPU-compute +
+// waitUntilCompleted envelope (we commit+wait inline); qmoe lock-wait and
+// stage-copy are split out. When tracing is on, the shim also returns
+// command-buffer GPU/kernel timestamps so traceDump can show wall-vs-GPU
 // overhead and the dominant shape buckets.
-var trace_on: bool = false;
-const Trace = struct {
-    f32_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f32_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    f16_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    bf16_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    bf16_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    bf16_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    bf16_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    bf16_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    attn_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_gpu_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_sched_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_async_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_submit_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_wait_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_lock_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    quant_stage_ns: std.atomic.Value(u64) = .{ .raw = 0 },
-    rhs_cacheable: std.atomic.Value(u64) = .{ .raw = 0 },
-    rhs_transient: std.atomic.Value(u64) = .{ .raw = 0 },
-    dev_alloc_calls: std.atomic.Value(u64) = .{ .raw = 0 },
-    dev_alloc_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
-    /// Resident allocations refused because the range registry could not
-    /// grow (the caller fell back to host bytes).
-    resident_refusals: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_pass: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_below: std.atomic.Value(u64) = .{ .raw = 0 },
-    gate_shape: std.atomic.Value(u64) = .{ .raw = 0 },
-    shim_err: std.atomic.Value(u64) = .{ .raw = 0 },
-    shape_overflow: std.atomic.Value(u64) = .{ .raw = 0 },
-};
-var trace: Trace = .{};
+var trace: gpu_trace.Table = .{};
 
 const TraceKind = enum(u8) { f32, f16, quant };
 const TraceShape = struct {
@@ -284,39 +224,14 @@ const trace_shape_slots = 16;
 var trace_shape_lock: thread.Mutex = .{};
 var trace_shapes: [trace_shape_slots]TraceShape = [_]TraceShape{.{}} ** trace_shape_slots;
 
-// Monotonic ns without an `std.Io` handle (the backend dispatch sites have none,
-// and `std.time.Timer` was removed in 0.16's Io migration). This file is macOS-only
-// — `-Dgpu=metal` does not build elsewhere — so the Darwin clock is fine.
-extern fn clock_gettime_nsec_np(clock_id: c_int) u64;
-const clock_uptime_raw: c_int = 8; // Darwin <sys/_clock_id.h> CLOCK_UPTIME_RAW
-
-inline fn tinc(c: *std.atomic.Value(u64), v: u64) void {
-    _ = c.fetchAdd(v, .monotonic);
-}
-/// Returns a start timestamp (0 when tracing is off → `telapsed` is a no-op).
-inline fn tstart() u64 {
-    return if (trace_on) clock_gettime_nsec_np(clock_uptime_raw) else 0;
-}
-inline fn telapsed(c: *std.atomic.Value(u64), start: u64) void {
-    if (!trace_on) return;
-    _ = c.fetchAdd(clock_gettime_nsec_np(clock_uptime_raw) -% start, .monotonic);
-}
-inline fn tfinish(start: u64) u64 {
-    return if (trace_on) clock_gettime_nsec_np(clock_uptime_raw) -% start else 0;
-}
 inline fn traceRhsCache(flag: bool) void {
-    if (!trace_on) return;
-    tinc(if (flag) &trace.rhs_cacheable else &trace.rhs_transient, 1);
-}
-inline fn tgate(pass: bool) void {
-    if (!trace_on) return;
-    tinc(if (pass) &trace.gate_pass else &trace.gate_below, 1);
+    trace.inc(if (flag) .rhs_cacheable else .rhs_transient, 1);
 }
 inline fn overheadNs(wall_ns: u64, gpu_ns: u64) u64 {
     return if (wall_ns > gpu_ns) wall_ns - gpu_ns else 0;
 }
 fn traceRecordShape(kind: TraceKind, m: usize, n: usize, k: usize, batch: usize, tiles: usize, wall_ns: u64, timing: CommandTiming) void {
-    if (!trace_on) return;
+    if (!trace.on) return;
     trace_shape_lock.lock();
     defer trace_shape_lock.unlock();
 
@@ -349,7 +264,7 @@ fn traceRecordShape(kind: TraceKind, m: usize, n: usize, k: usize, batch: usize,
         };
         return;
     }
-    tinc(&trace.shape_overflow, 1);
+    trace.inc(.shape_overflow, 1);
 }
 fn traceResetShapes() void {
     trace_shape_lock.lock();
@@ -363,40 +278,40 @@ fn traceShapeLess(_: void, a: TraceShape, b: TraceShape) bool {
 
 pub fn traceEnabled() bool {
     ensureConfig();
-    return trace_on;
+    return trace.on;
 }
 /// Reset counters (call before a warm measurement window). Single-threaded.
 pub fn traceReset() void {
-    if (!trace_on) return;
-    trace = .{};
+    if (!trace.on) return;
+    trace.reset();
     traceResetShapes();
 }
 /// Print the accumulated breakdown to stderr (no-op when tracing is off).
 pub fn traceDump() void {
-    if (!trace_on) return;
+    if (!trace.on) return;
     const ms = struct {
         fn f(ns: u64) f64 {
             return @as(f64, @floatFromInt(ns)) / 1e6;
         }
     }.f;
-    const f32_wall = trace.f32_ns.load(.monotonic);
-    const f16_wall = trace.f16_ns.load(.monotonic);
-    const quant_wall = trace.quant_ns.load(.monotonic);
-    const attn_wall = trace.attn_ns.load(.monotonic);
-    const f32_gpu = trace.f32_gpu_ns.load(.monotonic);
-    const f16_gpu = trace.f16_gpu_ns.load(.monotonic);
-    const quant_gpu = trace.quant_gpu_ns.load(.monotonic);
-    const attn_gpu = trace.attn_gpu_ns.load(.monotonic);
+    const f32_wall = trace.get(.f32_ns);
+    const f16_wall = trace.get(.f16_ns);
+    const quant_wall = trace.get(.quant_ns);
+    const attn_wall = trace.get(.attn_ns);
+    const f32_gpu = trace.get(.f32_gpu_ns);
+    const f16_gpu = trace.get(.f16_gpu_ns);
+    const quant_gpu = trace.get(.quant_gpu_ns);
+    const attn_gpu = trace.get(.attn_gpu_ns);
     std.debug.print(
         "[gpu-trace] async: f32 calls={d} submit={d:.1}ms host-wait={d:.1}ms | f16 calls={d} submit={d:.1}ms host-wait={d:.1}ms | bf16 calls={d} submit={d:.1}ms host-wait={d:.1}ms gpu={d:.1}ms | quant calls={d} submit={d:.1}ms host-wait={d:.1}ms\n",
         .{
-            trace.f32_async_calls.load(.monotonic),   ms(trace.f32_submit_ns.load(.monotonic)),
-            ms(trace.f32_wait_ns.load(.monotonic)),   trace.f16_async_calls.load(.monotonic),
-            ms(trace.f16_submit_ns.load(.monotonic)), ms(trace.f16_wait_ns.load(.monotonic)),
-            trace.bf16_async_calls.load(.monotonic),  ms(trace.bf16_submit_ns.load(.monotonic)),
-            ms(trace.bf16_wait_ns.load(.monotonic)),  ms(trace.bf16_gpu_ns.load(.monotonic)),
-            trace.quant_async_calls.load(.monotonic), ms(trace.quant_submit_ns.load(.monotonic)),
-            ms(trace.quant_wait_ns.load(.monotonic)),
+            trace.get(.f32_async_calls),   ms(trace.get(.f32_submit_ns)),
+            ms(trace.get(.f32_wait_ns)),   trace.get(.f16_async_calls),
+            ms(trace.get(.f16_submit_ns)), ms(trace.get(.f16_wait_ns)),
+            trace.get(.bf16_async_calls),  ms(trace.get(.bf16_submit_ns)),
+            ms(trace.get(.bf16_wait_ns)),  ms(trace.get(.bf16_gpu_ns)),
+            trace.get(.quant_async_calls), ms(trace.get(.quant_submit_ns)),
+            ms(trace.get(.quant_wait_ns)),
         },
     );
     std.debug.print(
@@ -408,22 +323,22 @@ pub fn traceDump() void {
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} shim-error={d} shape-overflow={d}
         \\
     , .{
-        trace.f32_calls.load(.monotonic),          ms(f32_wall),
-        trace.f16_calls.load(.monotonic),          ms(f16_wall),
-        trace.quant_calls.load(.monotonic),        ms(quant_wall),
-        trace.attn_calls.load(.monotonic),         ms(attn_wall),
-        ms(f32_gpu),                               ms(overheadNs(f32_wall, f32_gpu)),
-        ms(f16_gpu),                               ms(overheadNs(f16_wall, f16_gpu)),
-        ms(quant_gpu),                             ms(overheadNs(quant_wall, quant_gpu)),
-        ms(attn_gpu),                              ms(overheadNs(attn_wall, attn_gpu)),
-        ms(trace.f32_sched_ns.load(.monotonic)),   ms(trace.f16_sched_ns.load(.monotonic)),
-        ms(trace.quant_sched_ns.load(.monotonic)), ms(trace.attn_sched_ns.load(.monotonic)),
-        ms(trace.quant_lock_ns.load(.monotonic)),  ms(trace.quant_stage_ns.load(.monotonic)),
-        trace.rhs_cacheable.load(.monotonic),      trace.rhs_transient.load(.monotonic),
-        trace.dev_alloc_calls.load(.monotonic),    @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6,
-        trace.resident_refusals.load(.monotonic),  trace.gate_pass.load(.monotonic),
-        trace.gate_below.load(.monotonic),         trace.gate_shape.load(.monotonic),
-        trace.shim_err.load(.monotonic),           trace.shape_overflow.load(.monotonic),
+        trace.get(.f32_calls),          ms(f32_wall),
+        trace.get(.f16_calls),          ms(f16_wall),
+        trace.get(.quant_calls),        ms(quant_wall),
+        trace.get(.attn_calls),         ms(attn_wall),
+        ms(f32_gpu),                    ms(overheadNs(f32_wall, f32_gpu)),
+        ms(f16_gpu),                    ms(overheadNs(f16_wall, f16_gpu)),
+        ms(quant_gpu),                  ms(overheadNs(quant_wall, quant_gpu)),
+        ms(attn_gpu),                   ms(overheadNs(attn_wall, attn_gpu)),
+        ms(trace.get(.f32_sched_ns)),   ms(trace.get(.f16_sched_ns)),
+        ms(trace.get(.quant_sched_ns)), ms(trace.get(.attn_sched_ns)),
+        ms(trace.get(.quant_lock_ns)),  ms(trace.get(.quant_stage_ns)),
+        trace.get(.rhs_cacheable),      trace.get(.rhs_transient),
+        trace.get(.dev_alloc_calls),    @as(f64, @floatFromInt(trace.get(.dev_alloc_bytes))) / 1e6,
+        trace.get(.resident_refusals),  trace.get(.gate_pass),
+        trace.get(.gate_below),         trace.get(.gate_shape),
+        trace.get(.shim_err),           trace.get(.shape_overflow),
     });
     trace_shape_lock.lock();
     var shapes = trace_shapes;
@@ -455,31 +370,17 @@ fn ensureConfig() void {
 }
 
 fn initConfigOnce() void {
-    const t = &tuning.get().gpu;
-    state.gpu_enabled = t.enabled;
-    state.min_work = t.min_work.base;
-    state.min_work_f16 = t.min_work.f16;
-    state.min_work_gemv = t.min_work.gemv;
-    state.min_work_attn = t.min_work.attn;
-    state.min_work_16bit_resident = t.min_work.@"16bit_resident";
-    state.min_work_qmoe = t.min_work.qmoe;
     // The dense-Q6/packed-Q6/qmoe seeding rule lives in the tuning table
     // (`tuning.gpuQ6Seeding`), stated once for both providers.
-    const q6 = tuning.gpuQ6Seeding(default_min_work_packed_q6);
-    state.min_work_dense_q6 = q6.dense_q6;
-    state.min_work_packed_q6 = q6.packed_q6;
-    state.min_work_packed_q4 = t.min_work.dense_q4;
-    state.min_work_packed_q8 = t.min_work.dense_q8;
-    state.min_work_packed_tq2 = t.min_work.dense_tq2;
-    state.qmoe_min_fill_pct = t.qmoe_min_fill;
-    trace_on = t.trace;
+    q6_floors = tuning.gpuQ6Seeding();
+    trace.on = gpuT().trace;
 }
 
 /// One-time lazy device init (std.once is gone in Zig 0.16): double-checked
 /// under a mutex so concurrent ExecContexts share one device/library.
 fn ensureInit() void {
     ensureConfig();
-    if (!state.gpu_enabled) return;
+    if (!gpuT().enabled) return;
     if (init_done.load(.acquire)) return;
     init_mutex.lock();
     defer init_mutex.unlock();
@@ -490,8 +391,8 @@ fn ensureInit() void {
 }
 
 fn initOnce() void {
-    state.ctx = fucina_metal_init(msl_source);
-    if (state.ctx == null) {
+    device_ctx = fucina_metal_init(msl_source);
+    if (device_ctx == null) {
         std.log.warn("fucina-metal: init failed; GPU GEMM disabled for this process", .{});
     }
 }
@@ -499,7 +400,7 @@ fn initOnce() void {
 /// Lazy device init; null = GPU unavailable/disabled.
 fn context() ?*anyopaque {
     ensureInit();
-    return state.ctx;
+    return device_ctx;
 }
 
 pub fn deviceName() ?[]const u8 {
@@ -507,41 +408,30 @@ pub fn deviceName() ?[]const u8 {
     return std.mem.span(fucina_metal_device_name(ctx));
 }
 
-pub fn shouldUseGpu(m: usize, n: usize, k: usize) bool {
-    ensureConfig();
-    if (m < 32 or n < 32 or k < 16) {
-        if (trace_on) tinc(&trace.gate_shape, 1);
+/// Maps a shared work-gate decision onto the trace counters.
+fn gateDecision(d: gpu_policy.Decision) bool {
+    if (d == .shape) {
+        trace.inc(.gate_shape, 1);
         return false;
     }
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch return true, k) catch return true;
-    const pass = state.gpu_enabled and work >= state.min_work;
-    tgate(pass);
+    const pass = d == .pass;
+    trace.gate(pass);
     return pass;
+}
+
+pub fn shouldUseGpu(m: usize, n: usize, k: usize) bool {
+    ensureConfig();
+    return gateDecision(gpu_policy.f32Gate(gpuT(), m, n, k, gpu_policy.work(m, n, k)));
 }
 
 pub fn shouldUseGpuBatched(m: usize, n: usize, k: usize, batch_count: usize) bool {
     ensureConfig();
-    if (m < 32 or n < 32 or k < 16) {
-        if (trace_on) tinc(&trace.gate_shape, 1);
-        return false;
-    }
-    const per = std.math.mul(u64, std.math.mul(u64, m, n) catch return true, k) catch return true;
-    const work = std.math.mul(u64, per, batch_count) catch return true;
-    const pass = state.gpu_enabled and work >= state.min_work;
-    tgate(pass);
-    return pass;
+    return gateDecision(gpu_policy.f32Gate(gpuT(), m, n, k, gpu_policy.workBatched(m, n, k, batch_count)));
 }
 
 pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (m < 32 or n < 32 or k < 16) {
-        if (trace_on) tinc(&trace.gate_shape, 1);
-        return false;
-    }
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch return true, k) catch return true;
-    const pass = state.gpu_enabled and work >= state.min_work_f16;
-    tgate(pass);
-    return pass;
+    return gateDecision(gpu_policy.f16Gate(gpuT(), m, n, k));
 }
 
 /// Resident small-m admission (the CUDA gate's idea, wrap-based): a decode
@@ -550,12 +440,12 @@ pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
 /// decides. Legal only with an existing wrap: first touch happens on a
 /// large prefill, never on the latency-sensitive decode path.
 fn residentSmallM16bit(buffer: anytype, m: usize, n: usize, k: usize) bool {
+    const t = gpuT();
     if (m == 0 or m >= 32 or n < 256 or k < 256) return false;
-    if (!state.gpu_enabled) return false;
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch return false, k) catch return false;
-    if (work < state.min_work_16bit_resident) return false;
+    if (!t.enabled) return false;
+    if (gpu_policy.work(m, n, k) < t.min_work.@"16bit_resident") return false;
     const resident = buffer.acceleratorResource(.metal) != null;
-    tgate(resident);
+    trace.gate(resident);
     return resident;
 }
 
@@ -578,12 +468,10 @@ pub fn shouldUseGpuBf16ForRhs(b: *const TensorBf16, m: usize, n: usize, k: usize
 /// device-owned resident allocation), so no large page-wrap cost is hidden.
 pub fn shouldUseGpuGemv(b: *const Tensor, m: usize, n: usize, k: usize) bool {
     ensureConfig();
-    if (m == 0 or m > 8 or n < 256 or k < 256) return false;
-    const work = std.math.mul(u64, std.math.mul(u64, m, n) catch std.math.maxInt(u64), k) catch std.math.maxInt(u64);
-    if (work < state.min_work_gemv or !state.gpu_enabled) return false;
+    if (!gpu_policy.gemvEligible(gpuT(), m, n, k)) return false;
     const bytes = std.mem.sliceAsBytes(b.buffer.data);
     const resident = isResidentRange(bytes) or b.buffer.acceleratorResource(.metal) != null;
-    tgate(resident);
+    trace.gate(resident);
     return resident;
 }
 
@@ -605,11 +493,10 @@ pub const has_attention_fwd = true;
 /// stays within the CPU tiled kernel's own ceiling.
 pub fn shouldUseGpuAttentionFwd(q_seq: usize, kv_seq: usize, heads: usize, d: usize) bool {
     ensureConfig();
-    if (!state.gpu_enabled) return false;
+    if (!gpuT().enabled) return false;
     if (kv_seq > 7680 or d > 256 or d == 0) return false;
-    const work = std.math.mul(u64, std.math.mul(u64, q_seq, kv_seq) catch return false, heads * d) catch return false;
-    const pass = work >= state.min_work_attn;
-    tgate(pass);
+    const pass = gpu_policy.attnWork(gpuT(), q_seq, kv_seq, heads, d);
+    trace.gate(pass);
     return pass;
 }
 
@@ -688,7 +575,7 @@ fn attentionFwdImpl(
         if (values.len < heads * q_seq * 2) return false;
     }
     var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-    const timer = tstart();
+    const timer = trace.start();
     const rc = fucina_metal_attention_fwd_f32(
         ctx,
         q_data.ptr,
@@ -708,15 +595,15 @@ fn attentionFwdImpl(
         @intFromBool(stats != null),
         @intFromBool(KvElem == f16),
         scale_value,
-        if (trace_on) &timing else null,
+        if (trace.on) &timing else null,
     );
-    if (trace_on) {
-        const wall_ns = tfinish(timer);
-        tinc(&trace.attn_ns, wall_ns);
-        tinc(&trace.attn_gpu_ns, timing.gpu_ns);
-        tinc(&trace.attn_sched_ns, timing.sched_ns);
-        tinc(&trace.attn_calls, 1);
-        if (rc != 0) tinc(&trace.shim_err, 1);
+    if (trace.on) {
+        const wall_ns = trace.finish(timer);
+        trace.inc(.attn_ns, wall_ns);
+        trace.inc(.attn_gpu_ns, timing.gpu_ns);
+        trace.inc(.attn_sched_ns, timing.sched_ns);
+        trace.inc(.attn_calls, 1);
+        if (rc != 0) trace.inc(.shim_err, 1);
     }
     return rc == 0;
 }
@@ -764,17 +651,17 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
     const cacheable = rhs_cacheable or isResidentRange(std.mem.sliceAsBytes(b));
     var staging: [*]const f16 = undefined;
     var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-    const timer = tstart();
-    const rc = fucina_metal_gemm_f16_nt(ctx, a.ptr, b.ptr, @intCast(m), @intCast(n), @intCast(k), @intFromBool(cacheable), &staging, if (trace_on) &timing else null);
-    if (trace_on) {
-        const wall_ns = tfinish(timer);
-        tinc(&trace.f16_ns, wall_ns);
-        tinc(&trace.f16_gpu_ns, timing.gpu_ns);
-        tinc(&trace.f16_sched_ns, timing.sched_ns);
-        tinc(&trace.f16_calls, 1);
+    const timer = trace.start();
+    const rc = fucina_metal_gemm_f16_nt(ctx, a.ptr, b.ptr, @intCast(m), @intCast(n), @intCast(k), @intFromBool(cacheable), &staging, if (trace.on) &timing else null);
+    if (trace.on) {
+        const wall_ns = trace.finish(timer);
+        trace.inc(.f16_ns, wall_ns);
+        trace.inc(.f16_gpu_ns, timing.gpu_ns);
+        trace.inc(.f16_sched_ns, timing.sched_ns);
+        trace.inc(.f16_calls, 1);
         traceRhsCache(cacheable);
         traceRecordShape(.f16, m, n, k, 1, 0, wall_ns, timing);
-        if (rc != 0) tinc(&trace.shim_err, 1);
+        if (rc != 0) trace.inc(.shim_err, 1);
     }
     if (rc != 0) return null;
     return staging[0 .. m * n];
@@ -810,7 +697,7 @@ pub fn gemmBatchedF32(
 ) bool {
     const ctx = context() orelse return false;
     var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-    const timer = tstart();
+    const timer = trace.start();
     const rc = fucina_metal_gemm_f32(
         ctx,
         @intFromEnum(orient),
@@ -824,16 +711,16 @@ pub fn gemmBatchedF32(
         @intCast(stride_a),
         @intCast(stride_b),
         @intCast(stride_c),
-        if (trace_on) &timing else null,
+        if (trace.on) &timing else null,
     );
-    if (trace_on) {
-        const wall_ns = tfinish(timer);
-        tinc(&trace.f32_ns, wall_ns);
-        tinc(&trace.f32_gpu_ns, timing.gpu_ns);
-        tinc(&trace.f32_sched_ns, timing.sched_ns);
-        tinc(&trace.f32_calls, 1);
+    if (trace.on) {
+        const wall_ns = trace.finish(timer);
+        trace.inc(.f32_ns, wall_ns);
+        trace.inc(.f32_gpu_ns, timing.gpu_ns);
+        trace.inc(.f32_sched_ns, timing.sched_ns);
+        trace.inc(.f32_calls, 1);
         traceRecordShape(.f32, m, n, k, batch_count, 0, wall_ns, timing);
-        if (rc != 0) tinc(&trace.shim_err, 1);
+        if (rc != 0) trace.inc(.shim_err, 1);
     }
     return rc == 0;
 }
@@ -899,13 +786,13 @@ const MetalWork = struct {
             if (self.b_buffer) |buffer| buffer.clearPendingUse(&self.work);
         }
         var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-        const wait_started = tstart();
-        const rc = fucina_metal_ticket_wait(self.ticket, if (trace_on) &timing else null);
-        if (trace_on) {
-            tinc(&trace.f32_wait_ns, tfinish(wait_started));
-            tinc(&trace.f32_gpu_ns, timing.gpu_ns);
-            tinc(&trace.f32_sched_ns, timing.sched_ns);
-            if (rc != 0) tinc(&trace.shim_err, 1);
+        const wait_started = trace.start();
+        const rc = fucina_metal_ticket_wait(self.ticket, if (trace.on) &timing else null);
+        if (trace.on) {
+            trace.inc(.f32_wait_ns, trace.finish(wait_started));
+            trace.inc(.f32_gpu_ns, timing.gpu_ns);
+            trace.inc(.f32_sched_ns, timing.sched_ns);
+            if (rc != 0) trace.inc(.shim_err, 1);
         }
         return rc == 0;
     }
@@ -950,7 +837,7 @@ pub fn gemmBatchedF32Async(
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalWork) catch return false;
-    const submit_started = tstart();
+    const submit_started = trace.start();
     const ticket = fucina_metal_gemm_f32_async(
         ctx,
         @intFromEnum(orient),
@@ -982,9 +869,9 @@ pub fn gemmBatchedF32Async(
     a.buffer.setPendingUse(&holder.work);
     b.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
-    if (trace_on) {
-        tinc(&trace.f32_async_calls, 1);
-        tinc(&trace.f32_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.f32_async_calls, 1);
+        trace.inc(.f32_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -1012,13 +899,13 @@ const MetalF16Work = struct {
             self.b_buffer.clearPendingUse(&self.work);
         }
         var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-        const wait_started = tstart();
-        const rc = fucina_metal_ticket_wait(self.ticket, if (trace_on) &timing else null);
-        if (trace_on) {
-            tinc(&trace.f16_wait_ns, tfinish(wait_started));
-            tinc(&trace.f16_gpu_ns, timing.gpu_ns);
-            tinc(&trace.f16_sched_ns, timing.sched_ns);
-            if (rc != 0) tinc(&trace.shim_err, 1);
+        const wait_started = trace.start();
+        const rc = fucina_metal_ticket_wait(self.ticket, if (trace.on) &timing else null);
+        if (trace.on) {
+            trace.inc(.f16_wait_ns, trace.finish(wait_started));
+            trace.inc(.f16_gpu_ns, timing.gpu_ns);
+            trace.inc(.f16_sched_ns, timing.sched_ns);
+            if (rc != 0) trace.inc(.shim_err, 1);
         }
         return rc == 0;
     }
@@ -1047,7 +934,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalF16Work) catch return false;
-    const submit_started = tstart();
+    const submit_started = trace.start();
     const ticket = fucina_metal_gemm_f16_nt_async(
         ctx,
         a.buffer.data[a.offset..].ptr,
@@ -1074,9 +961,9 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
     a.buffer.setPendingUse(&holder.work);
     b.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
-    if (trace_on) {
-        tinc(&trace.f16_async_calls, 1);
-        tinc(&trace.f16_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.f16_async_calls, 1);
+        trace.inc(.f16_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -1099,13 +986,13 @@ const MetalBf16Work = struct {
         const self: *MetalBf16Work = @ptrCast(@alignCast(ctx));
         defer self.b_buffer.clearPendingUse(&self.work);
         var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-        const wait_started = tstart();
-        const rc = fucina_metal_ticket_wait(self.ticket, if (trace_on) &timing else null);
-        if (trace_on) {
-            tinc(&trace.bf16_wait_ns, tfinish(wait_started));
-            tinc(&trace.bf16_gpu_ns, timing.gpu_ns);
-            tinc(&trace.bf16_sched_ns, timing.sched_ns);
-            if (rc != 0) tinc(&trace.shim_err, 1);
+        const wait_started = trace.start();
+        const rc = fucina_metal_ticket_wait(self.ticket, if (trace.on) &timing else null);
+        if (trace.on) {
+            trace.inc(.bf16_wait_ns, trace.finish(wait_started));
+            trace.inc(.bf16_gpu_ns, timing.gpu_ns);
+            trace.inc(.bf16_sched_ns, timing.sched_ns);
+            if (rc != 0) trace.inc(.shim_err, 1);
         }
         return rc == 0;
     }
@@ -1148,7 +1035,7 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
     }
 
     const holder = std.heap.c_allocator.create(MetalBf16Work) catch return false;
-    const submit_started = tstart();
+    const submit_started = trace.start();
     const ticket = fucina_metal_gemm_bf16_nt_async(
         ctx,
         scratch.data.ptr,
@@ -1174,9 +1061,9 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
     scratch_owned = false;
     b.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
-    if (trace_on) {
-        tinc(&trace.bf16_async_calls, 1);
-        tinc(&trace.bf16_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.bf16_async_calls, 1);
+        trace.inc(.bf16_submit_ns, trace.finish(submit_started));
     }
     return true;
 }
@@ -1234,13 +1121,13 @@ const MetalQuantWork = struct {
         const self: *MetalQuantWork = @ptrCast(@alignCast(ctx));
         defer self.input_buffer.clearPendingUse(&self.work);
         var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-        const wait_started = tstart();
-        const rc = fucina_metal_ticket_wait(self.ticket, if (trace_on) &timing else null);
-        if (trace_on) {
-            tinc(&trace.quant_wait_ns, tfinish(wait_started));
-            tinc(&trace.quant_gpu_ns, timing.gpu_ns);
-            tinc(&trace.quant_sched_ns, timing.sched_ns);
-            if (rc != 0) tinc(&trace.shim_err, 1);
+        const wait_started = trace.start();
+        const rc = fucina_metal_ticket_wait(self.ticket, if (trace.on) &timing else null);
+        if (trace.on) {
+            trace.inc(.quant_wait_ns, trace.finish(wait_started));
+            trace.inc(.quant_gpu_ns, timing.gpu_ns);
+            trace.inc(.quant_sched_ns, timing.sched_ns);
+            if (rc != 0) trace.inc(.shim_err, 1);
         }
         return rc == 0;
     }
@@ -1282,7 +1169,7 @@ pub fn gemmQuantNtAsync(
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalQuantWork) catch return false;
-    const submit_started = tstart();
+    const submit_started = trace.start();
     const ticket = fucina_metal_gemm_q_dense_nt_async(
         ctx,
         abi(format),
@@ -1310,9 +1197,9 @@ pub fn gemmQuantNtAsync(
     };
     input.buffer.setPendingUse(&holder.work);
     out.buffer.setPending(&holder.work);
-    if (trace_on) {
-        tinc(&trace.quant_async_calls, 1);
-        tinc(&trace.quant_submit_ns, tfinish(submit_started));
+    if (trace.on) {
+        trace.inc(.quant_async_calls, 1);
+        trace.inc(.quant_submit_ns, trace.finish(submit_started));
         traceRhsCache(true);
     }
     return true;
@@ -1371,12 +1258,12 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
         // dispatch paths would not recognize and would re-stage as
         // transient on every call: the caller keeps its host copy.
         _ = fucina_metal_free_resident_bytes(ctx, p);
-        if (trace_on) tinc(&trace.resident_refusals, 1);
+        if (trace.on) trace.inc(.resident_refusals, 1);
         return null;
     }
-    if (trace_on) {
-        tinc(&trace.dev_alloc_calls, 1);
-        tinc(&trace.dev_alloc_bytes, len);
+    if (trace.on) {
+        trace.inc(.dev_alloc_calls, 1);
+        trace.inc(.dev_alloc_bytes, len);
     }
     return p[0..len];
 }
@@ -1463,7 +1350,7 @@ test "metal resident-range registry grows past the retired 512-entry cap" {
 pub fn freeResidentBytes(bytes: []const u8) void {
     if (bytes.len == 0) return;
     unregisterResidentRange(@intFromPtr(bytes.ptr));
-    const ctx = state.ctx orelse return;
+    const ctx = device_ctx orelse return;
     _ = fucina_metal_free_resident_bytes(ctx, bytes.ptr);
 }
 
@@ -1516,7 +1403,7 @@ pub fn gemmQGroupedNt(
     if (tiles.len == 0) return false;
     const ctx = context() orelse return false;
     var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
-    const timer = tstart();
+    const timer = trace.start();
     const rc = fucina_metal_gemm_q_grouped_nt(
         ctx,
         abi(format),
@@ -1529,17 +1416,17 @@ pub fn gemmQGroupedNt(
         @intCast(k),
         tiles.ptr,
         @intCast(tiles.len),
-        if (trace_on) &timing else null,
+        if (trace.on) &timing else null,
     );
-    if (trace_on) {
-        const wall_ns = tfinish(timer);
-        tinc(&trace.quant_ns, wall_ns);
-        tinc(&trace.quant_gpu_ns, timing.gpu_ns);
-        tinc(&trace.quant_sched_ns, timing.sched_ns);
-        tinc(&trace.quant_calls, 1);
+    if (trace.on) {
+        const wall_ns = trace.finish(timer);
+        trace.inc(.quant_ns, wall_ns);
+        trace.inc(.quant_gpu_ns, timing.gpu_ns);
+        trace.inc(.quant_sched_ns, timing.sched_ns);
+        trace.inc(.quant_calls, 1);
         traceRhsCache(rhs_cacheable);
         traceRecordShape(.quant, rowsCoveredByTiles(tiles), n_out, k, 1, tiles.len, wall_ns, timing);
-        if (rc != 0) tinc(&trace.shim_err, 1);
+        if (rc != 0) trace.inc(.shim_err, 1);
     }
     return rc == 0;
 }
@@ -1580,14 +1467,14 @@ pub fn gemmQuantNt(
     const in_bytes = std.math.mul(usize, in_elems, @sizeOf(f32)) catch return false;
     const out_bytes = std.math.mul(usize, out_elems, @sizeOf(f32)) catch return false;
 
-    const lock_timer = tstart();
+    const lock_timer = trace.start();
     qmoe_lock.lock();
     defer qmoe_lock.unlock();
-    telapsed(&trace.quant_lock_ns, lock_timer);
+    trace.elapsed(.quant_lock_ns, lock_timer);
     const stage = qmoeStage(in_bytes, out_bytes) orelse return false;
-    const in_timer = tstart();
+    const in_timer = trace.start();
     @memcpy(stage.in[0..in_elems], a[0..in_elems]);
-    telapsed(&trace.quant_stage_ns, in_timer);
+    trace.elapsed(.quant_stage_ns, in_timer);
     var tiles_buf: [64]QMMTile = undefined;
     const n_tiles = (m + 31) / 32;
     if (n_tiles > tiles_buf.len) return false;
@@ -1595,9 +1482,9 @@ pub fn gemmQuantNt(
         tiles_buf[t] = .{ .expert = 0, .base_row = 0, .m = @intCast(m), .tile_m = @intCast(t) };
     }
     if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, 0, n, k, tiles_buf[0..n_tiles])) return false;
-    const out_timer = tstart();
+    const out_timer = trace.start();
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
-    telapsed(&trace.quant_stage_ns, out_timer);
+    trace.elapsed(.quant_stage_ns, out_timer);
     return true;
 }
 
@@ -1631,20 +1518,20 @@ pub fn gemmQuantNtSharedABatch(
     var tiles_buf: [2048]QMMTile = undefined;
     if (n_tiles_total > tiles_buf.len) return false;
 
-    const lock_timer = tstart();
+    const lock_timer = trace.start();
     qmoe_lock.lock();
     defer qmoe_lock.unlock();
-    telapsed(&trace.quant_lock_ns, lock_timer);
+    trace.elapsed(.quant_lock_ns, lock_timer);
 
     const row_bytes = std.math.mul(usize, k, @sizeOf(f32)) catch return false;
     const in_bytes = std.math.mul(usize, rows_total, row_bytes) catch return false;
     const out_bytes = std.math.mul(usize, out_elems, @sizeOf(f32)) catch return false;
     const stage = qmoeStage(in_bytes, out_bytes) orelse return false;
-    const in_timer = tstart();
+    const in_timer = trace.start();
     for (0..batch_count) |bi| {
         @memcpy(stage.in[bi * in_elems ..][0..in_elems], a[0..in_elems]);
     }
-    telapsed(&trace.quant_stage_ns, in_timer);
+    trace.elapsed(.quant_stage_ns, in_timer);
 
     var tile_i: usize = 0;
     for (0..batch_count) |bi| {
@@ -1660,16 +1547,16 @@ pub fn gemmQuantNtSharedABatch(
         }
     }
     if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, nb02, n, k, tiles_buf[0..n_tiles_total])) return false;
-    const out_timer = tstart();
+    const out_timer = trace.start();
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
-    telapsed(&trace.quant_stage_ns, out_timer);
+    trace.elapsed(.quant_stage_ns, out_timer);
     return true;
 }
 
 pub fn shouldUseGpuQMoe(total_work: u64) bool {
     ensureConfig();
-    const pass = state.gpu_enabled and total_work >= state.min_work_qmoe;
-    tgate(pass);
+    const pass = gpu_policy.qmoeWork(gpuT(), total_work);
+    trace.gate(pass);
     return pass;
 }
 
@@ -1679,42 +1566,30 @@ pub fn shouldUseGpuQMoe(total_work: u64) bool {
 /// table they are about to dispatch.
 pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     ensureConfig();
-    if (n_tiles == 0) return false;
-    const filled = std.math.mul(u64, @as(u64, rows), 100) catch return true;
-    return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
+    return gpu_policy.qmoeFillAcceptable(gpuT(), rows, n_tiles);
 }
 
 pub fn shouldUseGpuDenseQuant(format: Fmt, total_work: u64) bool {
     ensureConfig();
-    const min_work = switch (format) {
-        .q6_k => state.min_work_dense_q6,
-        .q4_k, .q8_0, .tq2_0, .tq2_0_folded => state.min_work_qmoe,
-        .q5_k => unreachable, // no Metal Q5_K kernel (supportsQuant gates first)
-    };
-    const pass = state.gpu_enabled and total_work >= min_work;
-    tgate(pass);
+    std.debug.assert(format != .q5_k); // no Metal Q5_K kernel (supportsQuant gates first)
+    const pass = gpu_policy.denseQuantWork(gpuT(), q6_floors, format, total_work);
+    trace.gate(pass);
     return pass;
 }
 
 /// Dense model-weight gate against the load-time-packed CPU fallback.
 pub fn shouldUseGpuDenseQuantPacked(format: Fmt, total_work: u64) bool {
     ensureConfig();
-    const min_work = switch (format) {
-        .q4_k => state.min_work_packed_q4,
-        .q6_k => state.min_work_packed_q6,
-        .q8_0 => state.min_work_packed_q8,
-        .tq2_0, .tq2_0_folded => state.min_work_packed_tq2,
-        .q5_k => unreachable, // no Metal Q5_K kernel (supportsQuant gates first)
-    };
-    const pass = state.gpu_enabled and total_work >= min_work;
-    tgate(pass);
+    std.debug.assert(format != .q5_k); // no Metal Q5_K kernel (supportsQuant gates first)
+    const pass = gpu_policy.denseQuantPackedWork(gpuT(), q6_floors, format, total_work);
+    trace.gate(pass);
     return pass;
 }
 
 /// Test seam: unit-test shapes never reach the real threshold.
 pub fn setMinWorkQMoeForTest(v: u64) void {
     ensureConfig();
-    state.min_work_qmoe = v;
+    tuning.setField("gpu.min_work.qmoe", v);
 }
 
 /// True when this provider is compiled in AND holds a live device context.
@@ -1728,12 +1603,12 @@ pub fn deviceAvailableForTest() bool {
 /// The grouped-MoE tile-occupancy gate, as a save/restore pair for tests.
 pub fn qmoeMinFillForTest() u64 {
     ensureConfig();
-    return state.qmoe_min_fill_pct;
+    return gpuT().qmoe_min_fill;
 }
 
 pub fn setQmoeMinFillForTest(v: u64) void {
     ensureConfig();
-    state.qmoe_min_fill_pct = v;
+    tuning.setField("gpu.qmoe_min_fill", v);
 }
 
 /// Quantized decode-GEMV gate — the decode arm of `offload.quantGemmAccepts`
