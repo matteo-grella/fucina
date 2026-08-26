@@ -822,13 +822,13 @@ fn loadParamAs(
         @memcpy(std.mem.sliceAsBytes(tmp), info.data[0 .. n * 4]);
         return ParamTensor(dt, tags).variableFromSlice(ctx, shape, tmp);
     }
-    const tmp = try allocator.alloc(u16, n);
+    const tmp = try allocator.alloc(fucina.Bf16, n);
     defer allocator.free(tmp);
     switch (info.dtype) {
         .BF16 => @memcpy(std.mem.sliceAsBytes(tmp), info.data[0 .. n * 2]),
         .F32 => for (tmp, 0..) |*v, i| {
             const bits = std.mem.readInt(u32, info.data[i * 4 ..][0..4], .little);
-            v.* = fucina.f32ToBf16(@bitCast(bits));
+            v.* = fucina.Bf16.fromF32(@bitCast(bits));
         },
         else => return error.UnexpectedDtype,
     }
@@ -896,9 +896,9 @@ fn rngParamAs(
     if (comptime dt == .f32) {
         return ParamTensor(dt, tags).variableFromSlice(ctx, shape, buf);
     }
-    const nbuf = try allocator.alloc(u16, n);
+    const nbuf = try allocator.alloc(fucina.Bf16, n);
     defer allocator.free(nbuf);
-    for (nbuf, buf) |*v, x| v.* = fucina.f32ToBf16(x);
+    for (nbuf, buf) |*v, x| v.* = fucina.Bf16.fromF32(x);
     return ParamTensor(dt, tags).variableFromSlice(ctx, shape, nbuf);
 }
 
