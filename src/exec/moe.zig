@@ -1288,11 +1288,6 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
 }
 
-// Master switch for the 4-row lane-packed Q8_Kx4 column-outer kernels (Q5_K/Q6_K)
-// in batched MoE prefill. Flip to false to fall back to the per-row column-outer
-// path (used for A/B benchmarking; the per-row path stays bit-identical).
-const moe_lane_packed_enabled = true;
-
 const MoeBatchGatherTask = struct {
     x_data: []const f32,
     order: []const usize,
@@ -1838,8 +1833,8 @@ pub fn moeExpertFfnBatch(
     // 4-row Q8_Kx4 groups (qx for gate/up, qg for down). `group_offset[e]` is the
     // expert's first group; buffers stay empty for non-q5_k models or small
     // (non-phased) batches, leaving the per-row path unchanged.
-    const gate_up_x4 = moe_lane_packed_enabled and use_phased and (moeRhsUsesLanePacked(gate) or moeRhsUsesLanePacked(up));
-    const down_x4 = moe_lane_packed_enabled and use_phased and moeRhsUsesLanePacked(down);
+    const gate_up_x4 = use_phased and (moeRhsUsesLanePacked(gate) or moeRhsUsesLanePacked(up));
+    const down_x4 = use_phased and moeRhsUsesLanePacked(down);
     var total_groups: usize = 0;
     for (0..n_expert) |e| {
         group_offset[e] = total_groups;

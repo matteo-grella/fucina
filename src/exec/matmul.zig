@@ -388,14 +388,6 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
 // FUCINA_CPU_F32_SHADOW_MIN_M overrides the m >= 32 crossover.
 // ---------------------------------------------------------------------------
 
-/// Test hook (and emergency switch), `setNormQuantFused`-style: pins the
-/// process gate over the env read. A `null` first argument re-arms the
-/// env/default gate; a `null` min_m leaves the crossover pin alone.
-pub fn setCpuF32Shadow(on: ?bool, min_m: ?u64) void {
-    tuning.setField("cpu_f32_shadow", on);
-    if (min_m) |v| tuning.setField("cpu_f32_shadow_min_m", v);
-}
-
 /// The shadow route's crossover for this runtime, or null when the route is
 /// off. Per-context `Overrides` win; otherwise the process table decides.
 fn cpuShadowMinM(ctx: *const ExecContext) ?u64 {

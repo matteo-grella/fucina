@@ -450,19 +450,6 @@ fn winogradF4MaxCin() usize {
     return @intCast(tuning.get().winograd_f4_maxcin);
 }
 
-/// Test hook: pin the Winograd route on/off, or `null` to restore the
-/// env/default gate.
-pub fn setWinogradForTest(state: ?bool) void {
-    tuning.setField("winograd", state);
-}
-
-/// Test hook: pin the conv2d backward GEMM route
-/// (`tuning.Table.conv_bwd_gemm`) on/off, or `null` to restore the
-/// env/default gate.
-pub fn setConvBwdGemmForTest(state: ?bool) void {
-    tuning.setField("conv_bwd_gemm", state);
-}
-
 const WinoKind = enum { f2, f4 };
 
 fn winoPlanes(comptime kind: WinoKind) usize {

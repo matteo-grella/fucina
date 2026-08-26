@@ -176,9 +176,9 @@ test "conv2d winograd route matches the direct kernel (3x3 s1, pad 0/1, odd shap
 
     // Pin the Winograd route ON so the check is meaningful on every build
     // config (BLAS builds default the route off).
-    const exec_conv = @import("../../exec/conv.zig");
-    exec_conv.setWinogradForTest(true);
-    defer exec_conv.setWinogradForTest(null);
+    const tuning = @import("../../tuning.zig");
+    tuning.setField("winograd", true);
+    defer tuning.setField("winograd", null);
 
     const cases = [_][5]usize{
         // h, w, cin, cout, pad — even/odd spatial exercise full and partial
@@ -268,9 +268,9 @@ test "conv2dPrepared matches conv2d bitwise (winograd F2/F4 tiers, odd tails, ci
 
     // Pin the Winograd route ON so preparation is exercised on every build
     // config (BLAS builds default the route off).
-    const exec_conv = @import("../../exec/conv.zig");
-    exec_conv.setWinogradForTest(true);
-    defer exec_conv.setWinogradForTest(null);
+    const tuning = @import("../../tuning.zig");
+    tuning.setField("winograd", true);
+    defer tuning.setField("winograd", null);
 
     const cases = [_][6]usize{
         // h, w, cin, cout, pad, stride — F2-tier small maps (even/odd, full
@@ -345,9 +345,9 @@ test "conv2dPrepared: 1x1 and .empty preparations are inert; grad operands are r
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const exec_conv = @import("../../exec/conv.zig");
-    exec_conv.setWinogradForTest(true);
-    defer exec_conv.setWinogradForTest(null);
+    const tuning = @import("../../tuning.zig");
+    tuning.setField("winograd", true);
+    defer tuning.setField("winograd", null);
 
     const rng_mod = @import("../../rng.zig");
     const xd = try allocator.alloc(f32, 8 * 8 * 8);

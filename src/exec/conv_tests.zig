@@ -100,8 +100,9 @@ test "conv2d prepared winograd weights: exec-level parity, .empty fallback, shap
 
     // Pin the Winograd route ON (BLAS builds default it off).
     const exec_conv = @import("conv.zig");
-    exec_conv.setWinogradForTest(true);
-    defer exec_conv.setWinogradForTest(null);
+    const tuning = @import("../tuning.zig");
+    tuning.setField("winograd", true);
+    defer tuning.setField("winograd", null);
 
     // 8x8x8 -> F2-eligible 3x3 s1 p1 conv.
     const h = 8;
@@ -425,9 +426,9 @@ test "conv2d backward GEMM routes match the direct gather kernels" {
 
     // Pin the GEMM route ON so every groups == 1 case below exercises it
     // (the depthwise case stays on the direct kernel either way).
-    const exec_conv = @import("conv.zig");
-    exec_conv.setConvBwdGemmForTest(true);
-    defer exec_conv.setConvBwdGemmForTest(null);
+    const tuning = @import("../tuning.zig");
+    tuning.setField("conv_bwd_gemm", true);
+    defer tuning.setField("conv_bwd_gemm", null);
 
     const vector_conv = @import("../backend/vector/conv.zig");
 

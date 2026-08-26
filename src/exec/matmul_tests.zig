@@ -293,7 +293,7 @@ test "exec context matmul transposed bf16 RHS uses backend output" {
 
 test "cpu f32 shadow route matches the streaming kernels and caches per buffer" {
     if (@import("build_options").use_gpu) return error.SkipZigTest;
-    const exec_matmul = @import("matmul.zig");
+    const tuning = @import("../tuning.zig");
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -322,14 +322,16 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     var bbf = try ctx.fromSlice(.bf16, .{ n, k }, &bbf_data);
     defer bbf.deinit();
 
-    exec_matmul.setCpuF32Shadow(false, null);
+    tuning.setField("cpu_f32_shadow", false);
     var want16 = try ctx.matmulHalfRhs(.f16, &a, &b16);
     defer want16.deinit();
     var wantbf = try ctx.matmulHalfRhs(.bf16, &a, &bbf);
     defer wantbf.deinit();
 
-    exec_matmul.setCpuF32Shadow(true, 4);
-    defer exec_matmul.setCpuF32Shadow(null, 32);
+    tuning.setField("cpu_f32_shadow", true);
+    defer tuning.setField("cpu_f32_shadow", null);
+    tuning.setField("cpu_f32_shadow_min_m", 4);
+    defer tuning.setField("cpu_f32_shadow_min_m", null);
     var got16 = try ctx.matmulHalfRhs(.f16, &a, &b16);
     defer got16.deinit();
     var gotbf = try ctx.matmulHalfRhs(.bf16, &a, &bbf);
@@ -354,7 +356,7 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     // it (fresh weight tensor so the shadow resource is created here), and
     // a second untouched context stays on the streaming kernels — two
     // contexts in one process running different policy.
-    exec_matmul.setCpuF32Shadow(false, null);
+    tuning.setField("cpu_f32_shadow", false);
     var ctx_on: ExecContext = undefined;
     ctx_on.init(allocator);
     defer ctx_on.deinit();
