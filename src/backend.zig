@@ -58,23 +58,16 @@ pub const QuantizedRowsQ8_0 = quantized_matmul.QuantizedRowsQ8_0;
 pub const PackedMatmulRhsI8 = QuantizedMatmulRhsI8;
 
 /// The one dtype -> packed RHS container map. Dense f32/f16/bf16 weights
-/// share the f32 output-row panel; block-quantized weights select the
-/// ISA-best lane pack: q8_0 -> x4, q6_k -> x4, q5_k -> x8, q4_k -> x2mmla on
-/// aarch64+i8mm targets, x8 elsewhere. Every container carries
-/// `pub const dtype`, so `@TypeOf(rhs) == PackedRhsFor(rhs.dtype)` names the
-/// default pack and a different container of the same dtype is an explicit
-/// layout choice (the Q4_K x8 pack on an MMLA target).
+/// share the f32 output-row panel; block-quantized weights take the
+/// ISA-best lane pack from `quant.PackedQuantRhsFor` (the single quant
+/// switch). Every container carries `pub const dtype`, so
+/// `@TypeOf(rhs) == PackedRhsFor(rhs.dtype)` names the default pack and a
+/// different container of the same dtype is an explicit layout choice (the
+/// Q4_K x8 pack on an MMLA target).
 pub fn PackedRhsFor(comptime dt: DType) type {
     return switch (dt) {
         .f32, .f16, .bf16 => PackedDenseRhs,
-        .q8_0 => QuantizedMatmulRhsQ8_0x4,
-        .q6_k => QuantizedMatmulRhsQ6_Kx4,
-        .q5_k => QuantizedMatmulRhsQ5_Kx8,
-        .q4_k => if (supports_q4_k_mmla)
-            QuantizedMatmulRhsQ4_Kx2Mmla
-        else
-            QuantizedMatmulRhsQ4_Kx8,
-        else => @compileError("PackedRhsFor: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
+        else => quantized_matmul.PackedQuantRhsFor(dt),
     };
 }
 
