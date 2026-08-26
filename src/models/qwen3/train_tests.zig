@@ -816,13 +816,15 @@ test "loss decreases over AdamW steps at seq 64 (tiled attention path)" {
 // ---------------------------------------------------------------------------
 // Full-stack finite-difference gradient check.
 //
-// Op-level gradchecks cover every individual VJP and the loss-descent tests
-// prove the trainer learns, but neither catches WIRING bugs in the composed
-// model (wrong residual routing, a contribution dropped through the fused
-// q/k-norm+RoPE, a LoRA delta added at the wrong point, CE masking
-// interacting with grads). The definitive internal check: central finite
-// differences through the ENTIRE `Trainer.loss` forward must match the
-// analytical adapter gradients.
+// Op-level finite-difference checks (`src/ag/gradcheck_tests.zig`,
+// `src/ag/gradcheck_vjp_tests.zig`, and the per-op suites under
+// `src/ag/tensor_tests/`) cover the individual VJP records on small
+// shapes, and the loss-descent tests prove the trainer learns, but neither
+// catches WIRING bugs in the composed model (wrong residual routing, a
+// contribution dropped through the fused q/k-norm+RoPE, a LoRA delta added
+// at the wrong point, CE masking interacting with grads). The definitive
+// internal check: central finite differences through the ENTIRE
+// `Trainer.loss` forward must match the analytical adapter gradients.
 // ---------------------------------------------------------------------------
 
 /// FD batch labels: the seq-64 next-token labels with a masked prefix and

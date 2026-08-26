@@ -191,4 +191,5 @@ fn StripError(comptime T: type) type {
 
 test {
     _ = @import("gradcheck_tests.zig");
+    _ = @import("gradcheck_vjp_tests.zig");
 }

@@ -729,8 +729,11 @@ test "customVjp validated by gradcheck" {
 ```
 
 `gradcheck` is the oracle used throughout `src/ag/gradcheck_tests.zig` to
-validate both built-in VJPs (conv2d, losses, norms) and custom ops; use it
-for every new `customVjp` spec.
+validate both built-in VJPs (conv2d, losses, norms) and custom ops, and by
+the table-driven sibling `src/ag/gradcheck_vjp_tests.zig`, which runs one
+small-shape case per remaining backward record (softmax, norms, RoPE,
+matmul/bmm, gated units, reductions, functional updates, views, casts,
+causal convolutions, unfold/fold); use it for every new `customVjp` spec.
 
 ## 5.8 VJP coverage inventory (`src/ag/backward/`)
 
