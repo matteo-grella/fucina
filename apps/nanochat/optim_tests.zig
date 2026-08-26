@@ -383,8 +383,8 @@ fn runOptstep(
     for (&opt.adamw) |*a| {
         for (a.slots.items) |*slot| {
             const pname = slot.param.name.?;
-            try cmp.recordSlice(try std.fmt.bufPrint(&name_buf, "{s}.exp_avg", .{pname}), slot.m.f32);
-            try cmp.recordSlice(try std.fmt.bufPrint(&name_buf, "{s}.exp_avg_sq", .{pname}), slot.v.f32);
+            try cmp.recordSlice(try std.fmt.bufPrint(&name_buf, "{s}.exp_avg", .{pname}), slot.state.m.f32);
+            try cmp.recordSlice(try std.fmt.bufPrint(&name_buf, "{s}.exp_avg_sq", .{pname}), slot.state.v.f32);
         }
     }
     // Muon optimizer-state buffers (momentum / second_momentum per group).
