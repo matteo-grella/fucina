@@ -274,6 +274,7 @@ GEMM sweep; a kernel change needs both tracks, always.
 | `zig build snippet-check` | every runnable reference snippet still compiles and passes (§7.2) | any docs/reference edit; any public-API change |
 | `zig build x86dot-check` | cross-ISA int8/quant dot parity + compile-only ISA legs | quant kernel / dot-arm changes |
 | `zig build cuda-check` | CUDA provider still compiles (GPU-less machines) | exec/backend surface changes on GPU-adjacent code |
+| `zig build metal-check` | Metal provider and its shim still compile (macOS hosts, no device needed) | exec/backend surface changes on GPU-adjacent code |
 | `zig build bench-check` | every bench main still compiles (`addBench` registers each bench into the gate, so a new bench cannot land outside it) | bench/ or op-signature changes |
 | Family parity oracles (`--tokenize`, logit parity, `--compare` batteries) | model behavior unchanged | anything touching a family |
 | `tools/bench_gate.py` / `tools/opbench_gate.py` | speed did not regress (paired, median, CV-guarded) | any kernel/perf/hot-path change |
@@ -490,12 +491,22 @@ via `mlugg/setup-zig@v2`. Steps, in order:
     llguidance tests and snippets (§7.2), keeping the extern ABI, the cargo
     build, and the Rust-staticlib link from bit-rotting behind a green
     default build — and continuously proving the Linux link of that
-    staticlib.
+    staticlib;
+11. `zig build cuda-check` — ubuntu only: the compile-only CUDA-provider
+    legs (fucina + models test roots and the PTX generator, cross-compiled
+    for x86_64-linux-gnu, not run; no CUDA SDK involved);
+12. `zig build metal-check` — macOS only: the compile-only Metal-provider
+    legs (fucina + models test roots with the Objective-C shim and the
+    Metal/Foundation frameworks linked, not run; no device needed).
 
 Between the matrix and the conditional legs, every backend combination that
 can run on stock CI hardware is covered: native+BLAS, native without BLAS,
 and scalar, on both ISAs' unit-test surface, plus the opt-in llguidance
-feature on Linux. The CUDA GPU provider is
-covered by the compile-only `cuda-check` leg locally (not in CI); CPU dot
-ISA arms that CI cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered
-by the compile-only legs and attestation records in `src/x86dot_check.zig`.
+feature on Linux. Neither runner has a usable GPU, so both GPU providers are
+covered at the compile level only: `cuda-check` on ubuntu and `metal-check`
+on macOS keep the provider arms, their shims, and the model tier's provider
+surface from bit-rotting behind a green `-Dgpu=none` build, while the
+device-gated conformance suite (`src/backend/gpu_conformance.zig`) still
+runs only on GPU hardware (`docs/GPU-OFFLOAD.md`). CPU dot ISA arms that CI
+cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered by the
+compile-only legs and attestation records in `src/x86dot_check.zig`.

@@ -303,9 +303,11 @@ On top sits the CI matrix (`docs/REFERENCE.md` §2.8; `.github/workflows/ci.yml`
 7. `zig build x86dot-check` — dot-kernel parity on the host ISA plus the compile-only bit-rot legs;
 8. `zig build test -Dbackend=scalar` — ubuntu only: the reference backend;
 9. `zig build test -Dblas=none` — macOS only: pure-Zig native kernels, complementing the Accelerate run in step 1;
-10. `zig build test -Dllguidance=true` + `snippet-check -Dllguidance=true` — ubuntu only (the runner image ships cargo): un-skips the flag-gated constrained-decoding tests and snippets, keeping the extern ABI, the cargo build, and the Rust-staticlib link from bit-rotting behind a green default build.
+10. `zig build test -Dllguidance=true` + `snippet-check -Dllguidance=true` — ubuntu only (the runner image ships cargo): un-skips the flag-gated constrained-decoding tests and snippets, keeping the extern ABI, the cargo build, and the Rust-staticlib link from bit-rotting behind a green default build;
+11. `zig build cuda-check` — ubuntu only: the compile-only CUDA-provider legs (cross-compiled for x86_64-linux-gnu, no CUDA SDK involved, not run);
+12. `zig build metal-check` — macOS only: the compile-only Metal-provider legs (the Objective-C shim and frameworks linked, not run, no device needed).
 
-Study the shape of steps 8–10: the expensive legs run on *one* OS each, chosen so that "between the matrix and the conditional legs, every backend combination that can run on stock CI hardware is covered" without doubling the bill — scalar gets its coverage on Linux, no-BLAS gets its coverage exactly where BLAS is otherwise the default, and the opt-in feature builds where its toolchain happens to exist. Note the honesty in that sentence's qualifier, too: the CUDA provider is covered by a *compile-only* `cuda-check` leg locally (not in CI), and the ISA arms CI hardware cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered by compile-only legs plus dated execution attestations — which brings us to a principle important enough for its own paragraph.
+Study the shape of steps 8–12: the expensive legs run on *one* OS each, chosen so that "between the matrix and the conditional legs, every backend combination that can run on stock CI hardware is covered" without doubling the bill — scalar gets its coverage on Linux, no-BLAS gets its coverage exactly where BLAS is otherwise the default, the opt-in feature builds where its toolchain happens to exist, and each GPU provider compiles where its SDK story allows. Note the honesty in that sentence's qualifier, too: neither runner has a usable GPU, so both providers are covered at the *compile* level only (their device-gated conformance suite runs on GPU hardware), and the ISA arms CI hardware cannot execute (AVX-VNNI, AVX512-VNNI, smmla) are covered by compile-only legs plus dated execution attestations — which brings us to a principle important enough for its own paragraph.
 
 **Compilation proves nothing about numerics.** A kernel arm that compiles for an ISA you've never run on may still compute garbage there — and worse, "emulators can execute unsupported instructions silently wrong rather than faulting" (`docs/PORTING.md` §8). Fucina's answer is the execution-attestation table in `src/x86dot_check.zig`: a dated, per-arm record of where each SIMD arm has actually *executed*, kept in the module header where no one can miss it:
 
@@ -457,6 +459,7 @@ Four stations, each with a lesson worth exporting.
 | `zig build snippet-check` | every runnable REFERENCE.md snippet compiles and passes | any REFERENCE.md edit; any public-API change |
 | `zig build x86dot-check` | cross-ISA int8/quant dot parity + compile-only ISA legs | quant kernel / dot-arm changes |
 | `zig build cuda-check` | CUDA provider still compiles (GPU-less machines) | exec/backend surface changes on GPU-adjacent code |
+| `zig build metal-check` | Metal provider and its shim still compile (macOS hosts, no device needed) | exec/backend surface changes on GPU-adjacent code |
 | `zig build bench-check` | every bench main still compiles | bench/ or op-signature changes |
 | Family parity oracles (`--tokenize`, logit parity, `--compare`) | model behavior unchanged | anything touching a family |
 | `tools/bench_gate.py` / `tools/opbench_gate.py` | speed did not regress | any kernel/perf/hot-path change |

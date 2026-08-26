@@ -116,7 +116,7 @@ One home per command set:
 
 - **Verification gates** (`test`, `test-fucina`, `test-models`, `test-serving`,
   `arch-check`, `doc-check`, `snippet-check`, `x86dot-check`, `cuda-check`,
-  `bench-check`, `bench-gate`): the gate matrix in
+  `metal-check`, `bench-check`, `bench-gate`): the gate matrix in
   [DEVELOPMENT.md §4.2](../DEVELOPMENT.md#42-run-the-gates-that-your-change-can-affect),
   with the test-root layout, snippet contract, and CI matrix in
   [DEVELOPMENT.md §7](../DEVELOPMENT.md#7-test-layout-doc-snippets-and-ci)

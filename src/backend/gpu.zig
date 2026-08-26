@@ -29,7 +29,7 @@ comptime {
 
     // The selected provider implements the whole interface, checked on
     // signatures only (no function addresses taken). The unselected real
-    // providers ride their compile legs: `zig build -Dgpu=metal` for the
+    // providers ride their compile legs: `zig build metal-check` for the
     // Metal arm, `zig build cuda-check` for the CUDA arm.
     provider.assertConforms(impl);
 }

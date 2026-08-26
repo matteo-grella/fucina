@@ -457,6 +457,54 @@ pub fn build(b: *std.Build) void {
         cuda_check_step.dependOn(&cuda_ptx_gen.step);
     }
 
+    // Compile-only Metal-provider leg (`zig build metal-check`): the cuda-check
+    // discipline for the other provider arm. The fucina and models test roots
+    // are semantically analyzed and linked with -Dgpu=metal on the host
+    // (Objective-C shim, Metal/Foundation frameworks) without running, so the
+    // arm needs no GPU device and cannot bit-rot behind the default
+    // -Dgpu=none build. macOS hosts only: the shim compiles against the
+    // Apple SDK, so elsewhere the step reports why instead of building.
+    const metal_check_step = b.step("metal-check", "Compile-only -Dgpu=metal legs (host fucina + models roots with the Metal shim, not run): catches Metal-provider bit-rot behind the default -Dgpu=none build; macOS hosts only");
+    if (target.result.os.tag == .macos) {
+        // Same option-value set with only the provider overridden (the
+        // cuda-check rule): a new build option can never leave this leg
+        // checking a stale configuration.
+        var metal_values = option_values;
+        metal_values.gpu_kind = .metal;
+        const metal_options = metal_values.addTo(b);
+
+        // Leg 1: the fucina root — provider + exec offload seam + provider
+        // tests. The shim and frameworks attach to THIS module once; they
+        // propagate to the models leg through its import.
+        const metal_fucina_module = b.createModule(.{
+            .root_source_file = b.path("src/fucina.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        metal_fucina_module.addOptions("build_options", metal_options);
+        configureBlasModule(b, metal_fucina_module, blas_kind);
+        configureGpuModule(b, metal_fucina_module, .metal);
+        const metal_check_fucina = b.addTest(.{ .root_module = metal_fucina_module });
+        _ = metal_check_fucina.getEmittedBin();
+        metal_check_step.dependOn(&metal_check_fucina.step);
+
+        // Leg 2: the models root — the residency/qmoe/grouped-GEMM provider
+        // surface exec never touches.
+        const metal_models_module = b.createModule(.{
+            .root_source_file = b.path("src/models.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        metal_models_module.addImport("fucina", metal_fucina_module);
+        metal_models_module.addOptions("models_build_options", models_options_off);
+        const metal_check_models = b.addTest(.{ .root_module = metal_models_module });
+        _ = metal_check_models.getEmittedBin();
+        metal_check_step.dependOn(&metal_check_models.step);
+    } else {
+        const fail = b.addFail("metal-check needs a macOS host: -Dgpu=metal compiles the Metal shim against the Apple SDK");
+        metal_check_step.dependOn(&fail.step);
+    }
+
     const bench_raw_module = b.addModule("bench_raw", .{
         .root_source_file = b.path("src/bench_raw.zig"),
         .target = target,

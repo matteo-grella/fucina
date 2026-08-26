@@ -39,6 +39,18 @@ jobs:
       - name: Unit tests (no-BLAS native backend)
         if: matrix.os == 'macos-15'
         run: zig build test -Dblas=none
+      # GPU-provider compile legs: neither runner has a usable GPU, so both
+      # providers are gated compile-only. cuda-check cross-compiles the CUDA
+      # provider, its test roots, and the PTX generator for x86_64-linux-gnu
+      # (no CUDA SDK involved; libcuda/cuBLAS are dlopen'd at runtime), so it
+      # rides the ubuntu job; metal-check compiles the Metal provider and its
+      # Objective-C shim against the Apple SDK, so it rides the macOS job.
+      - name: Compile CUDA provider legs
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build cuda-check
+      - name: Compile Metal provider legs
+        if: matrix.os == 'macos-15'
+        run: zig build metal-check
       # -Dllguidance leg (vendor/llguidance is Rust; the runner image ships
       # cargo): un-skips the flag-gated tests and snippets, so the extern ABI,
       # the cargo build, and the staticlib link cannot bit-rot behind a green
