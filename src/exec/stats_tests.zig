@@ -295,3 +295,219 @@ test "exec sort orders rows both directions with NaN last and exact indices" {
     try std.testing.expect(std.math.isNan(nan_desc.values.dataConst()[3]));
     try std.testing.expectEqualSlices(i64, &.{ 3, 0, 2, 1 }, nan_desc.indices.dataConst());
 }
+
+// ---- Non-last-axis lane kernels vs the retired scalar strided arms ----
+//
+// The oracles below are the strided scalar loops the inner-lane kernels
+// replaced (one scalar accumulator per output lane, stride `inner`), kept
+// verbatim: the kernels promise the same per-element accumulation order,
+// so the comparison is bitwise.
+
+fn oracleVarianceStrided(data: []const f32, out: []f32, outer: usize, axis_dim: usize, inner: usize, ddof: u1) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    const inv_denom = 1 / (@as(f32, @floatFromInt(axis_dim)) - @as(f32, @floatFromInt(ddof)));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sum_acc: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                sum_acc += data[base + axis_i * inner + inner_i];
+            }
+            const mean_value = sum_acc * inv_axis_dim;
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const centered = data[base + axis_i * inner + inner_i] - mean_value;
+                sumsq += centered * centered;
+            }
+            out[outer_i * inner + inner_i] = sumsq * inv_denom;
+        }
+    }
+}
+
+fn oracleStandardizeStrided(comptime Acc: type, input: []const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, valid_count: usize, options: exec.StandardizeOptions) void {
+    const ddof_count: usize = options.ddof;
+    const eps: Acc = @floatCast(options.eps);
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            if (valid_count == 0) {
+                for (0..axis_dim) |axis_i| output[base + axis_i * inner + inner_i] = 0;
+                continue;
+            }
+            var sum_acc: Acc = 0;
+            for (0..valid_count) |axis_i| {
+                sum_acc += @floatCast(input[base + axis_i * inner + inner_i]);
+            }
+            const count: Acc = @floatFromInt(valid_count);
+            const mean_value = sum_acc / count;
+            var variance: Acc = 0;
+            if (valid_count > ddof_count) {
+                var sumsq: Acc = 0;
+                for (0..valid_count) |axis_i| {
+                    const centered = @as(Acc, @floatCast(input[base + axis_i * inner + inner_i])) - mean_value;
+                    sumsq += centered * centered;
+                }
+                variance = sumsq / @as(Acc, @floatFromInt(valid_count - ddof_count));
+            }
+            const std_value = @sqrt(variance);
+            const denom = switch (options.eps_mode) {
+                .outside_sqrt => std_value + eps,
+                .inside_sqrt => @sqrt(variance + eps),
+            };
+            for (0..valid_count) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const centered = @as(Acc, @floatCast(input[offset])) - mean_value;
+                output[offset] = @floatCast(centered / denom);
+            }
+            for (valid_count..axis_dim) |axis_i| {
+                output[base + axis_i * inner + inner_i] = 0;
+            }
+        }
+    }
+}
+
+fn oracleStandardizeBackwardStrided(comptime Acc: type, input: []const f32, upstream: []const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, valid_count: usize, options: exec.StandardizeOptions) void {
+    @memset(output, 0);
+    const ddof_count: usize = options.ddof;
+    const eps: Acc = @floatCast(options.eps);
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            if (valid_count == 0) continue;
+            var sum_acc: Acc = 0;
+            for (0..valid_count) |axis_i| {
+                sum_acc += @floatCast(input[base + axis_i * inner + inner_i]);
+            }
+            const count: Acc = @floatFromInt(valid_count);
+            const mean_value = sum_acc / count;
+            var variance: Acc = 0;
+            if (valid_count > ddof_count) {
+                var sumsq: Acc = 0;
+                for (0..valid_count) |axis_i| {
+                    const centered = @as(Acc, @floatCast(input[base + axis_i * inner + inner_i])) - mean_value;
+                    sumsq += centered * centered;
+                }
+                variance = sumsq / @as(Acc, @floatFromInt(valid_count - ddof_count));
+            }
+            const std_value = @sqrt(variance);
+            const denom = switch (options.eps_mode) {
+                .outside_sqrt => std_value + eps,
+                .inside_sqrt => @sqrt(variance + eps),
+            };
+            const inv_denom = 1 / denom;
+            var grad_sum: Acc = 0;
+            var centered_grad_dot: Acc = 0;
+            for (0..valid_count) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const g = @as(Acc, @floatCast(upstream[offset]));
+                const centered = @as(Acc, @floatCast(input[offset])) - mean_value;
+                grad_sum += g;
+                centered_grad_dot += g * centered;
+            }
+            const mean_grad = grad_sum / count;
+            var second_scale: Acc = 0;
+            if (valid_count > ddof_count and variance > 0) {
+                const denom_count: Acc = @floatFromInt(valid_count - ddof_count);
+                second_scale = switch (options.eps_mode) {
+                    .outside_sqrt => centered_grad_dot / (denom_count * std_value * denom * denom),
+                    .inside_sqrt => centered_grad_dot / (denom_count * denom * denom * denom),
+                };
+            }
+            for (0..valid_count) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const centered = @as(Acc, @floatCast(input[offset])) - mean_value;
+                output[offset] = @floatCast((@as(Acc, @floatCast(upstream[offset])) - mean_grad) * inv_denom - centered * second_scale);
+            }
+        }
+    }
+}
+
+fn testFillRandom(data: []f32, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    for (data) |*value| value.* = random.floatNorm(f32) * 3;
+}
+
+fn expectBitwiseF32(expected: []const f32, actual: []const f32) !void {
+    try std.testing.expectEqualSlices(u32, @ptrCast(expected), @ptrCast(actual));
+}
+
+/// Every non-last axis of one shape, through varAxis / standardize /
+/// standardizeBackward, against the strided oracles.
+fn expectStatsLaneKernelsMatchOracle(ctx: *ExecContext, comptime rank: usize, shape: [rank]usize, seed: u64) !void {
+    const allocator = std.testing.allocator;
+    var len: usize = 1;
+    for (shape) |dim| len *= dim;
+    const data = try allocator.alloc(f32, len);
+    defer allocator.free(data);
+    testFillRandom(data, seed);
+    const grad = try allocator.alloc(f32, len);
+    defer allocator.free(grad);
+    testFillRandom(grad, seed + 1);
+    const expected = try allocator.alloc(f32, len);
+    defer allocator.free(expected);
+
+    var x = try ctx.fromSlice(.f32, shape, data);
+    defer x.deinit();
+    var gy = try ctx.fromSlice(.f32, shape, grad);
+    defer gy.deinit();
+
+    inline for (0..rank - 1) |axis| {
+        const axis_dim = shape[axis];
+        var outer: usize = 1;
+        for (0..axis) |dim_i| outer *= shape[dim_i];
+        const inner = len / (outer * axis_dim);
+
+        for ([_]u1{ 0, 1 }) |ddof| {
+            var got = try ctx.varAxis(.f32, rank, &x, axis, ddof);
+            defer got.deinit();
+            oracleVarianceStrided(data, expected[0 .. outer * inner], outer, axis_dim, inner, ddof);
+            try expectBitwiseF32(expected[0 .. outer * inner], got.dataConst());
+        }
+
+        const option_set = [_]exec.StandardizeOptions{
+            .{},
+            .{ .ddof = 1, .eps = 1e-5, .eps_mode = .outside_sqrt },
+            .{ .ddof = 0, .eps = 1e-5, .eps_mode = .inside_sqrt },
+            .{ .ddof = 1, .eps = 1e-3, .eps_mode = .inside_sqrt, .accumulation = .f64 },
+            .{ .eps = 1e-5, .accumulation = .f64 },
+        };
+        for (option_set) |options| {
+            for ([_]?usize{ null, axis_dim / 2, 1, 0 }) |valid_len| {
+                const valid_count = valid_len orelse axis_dim;
+                var got = if (valid_len) |prefix|
+                    try ctx.standardizeValidPrefix(rank, &x, axis, prefix, options)
+                else
+                    try ctx.standardize(rank, &x, axis, options);
+                defer got.deinit();
+                switch (options.accumulation) {
+                    .f32 => oracleStandardizeStrided(f32, data, expected, outer, axis_dim, inner, valid_count, options),
+                    .f64 => oracleStandardizeStrided(f64, data, expected, outer, axis_dim, inner, valid_count, options),
+                }
+                try expectBitwiseF32(expected, got.dataConst());
+
+                var got_bwd = try ctx.standardizeBackward(rank, &x, &gy, axis, valid_len, options);
+                defer got_bwd.deinit();
+                switch (options.accumulation) {
+                    .f32 => oracleStandardizeBackwardStrided(f32, data, grad, expected, outer, axis_dim, inner, valid_count, options),
+                    .f64 => oracleStandardizeBackwardStrided(f64, data, grad, expected, outer, axis_dim, inner, valid_count, options),
+                }
+                try expectBitwiseF32(expected, got_bwd.dataConst());
+            }
+        }
+    }
+}
+
+test "stats non-last-axis lane kernels are bitwise the strided scalar arms" {
+    var ctx: ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+
+    // Below the row-kernel dispatch threshold (serial lane kernel, odd lane
+    // counts for the vector tails) and above it (lane ranges split across
+    // the pool, tails again).
+    try expectStatsLaneKernelsMatchOracle(&ctx, 3, .{ 3, 5, 7 }, 0x51a7);
+    try expectStatsLaneKernelsMatchOracle(&ctx, 4, .{ 2, 3, 4, 5 }, 0x51a8);
+    try expectStatsLaneKernelsMatchOracle(&ctx, 3, .{ 2, 64, 1027 }, 0x51a9);
+    try expectStatsLaneKernelsMatchOracle(&ctx, 4, .{ 2, 3, 32, 701 }, 0x51aa);
+}

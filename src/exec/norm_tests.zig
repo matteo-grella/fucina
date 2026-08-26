@@ -386,3 +386,261 @@ test "groupNorm backward: hand-computed G=C case + rejection" {
     defer bad_w.deinit();
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.groupNormBackward(&x, &gy, 2, eps, .{ .weight = &bad_w, .need_input = true, .need_weight = false, .need_bias = false }));
 }
+
+// ---- Non-last-axis lane kernels vs the retired scalar strided arms ----
+//
+// The oracles below are the strided scalar loops the inner-lane kernels
+// replaced (one scalar accumulator per output lane, stride `inner`), kept
+// verbatim per forward/backward arm: the kernels promise the same
+// per-element accumulation order, so the comparison is bitwise.
+
+fn oracleRmsNormPlainStrided(input: []const f32, residual_data: ?[]const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const value = input[base + axis_i * inner + inner_i];
+                sumsq += value * value;
+            }
+            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const value = input[offset] * scale_value;
+                output[offset] = if (residual_data) |r| r[offset] + value else value;
+            }
+        }
+    }
+}
+
+fn oracleRmsNormMulStrided(input: []const f32, weights: []const f32, residual_data: ?[]const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const value = input[base + axis_i * inner + inner_i];
+                sumsq += value * value;
+            }
+            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                output[offset] = if (residual_data) |r|
+                    r[offset] + input[offset] * scale_value * weights[axis_i]
+                else
+                    input[offset] * scale_value * weights[axis_i];
+            }
+        }
+    }
+}
+
+fn oracleRmsNormBackwardInputWeightedStrided(input: []const f32, weights: []const f32, grad: []const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sumsq: f32 = 0;
+            var dot_acc: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const value = input[offset];
+                sumsq += value * value;
+                dot_acc += grad[offset] * weights[axis_i] * value;
+            }
+            const rms_scale = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            const correction_scale = rms_scale * rms_scale * rms_scale * inv_axis_dim * dot_acc;
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                output[offset] = grad[offset] * weights[axis_i] * rms_scale - input[offset] * correction_scale;
+            }
+        }
+    }
+}
+
+fn oracleRmsNormBackwardInputPlainStrided(input: []const f32, gyd: []const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sumsq: f32 = 0;
+            var dot_acc: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                const value = input[offset];
+                sumsq += value * value;
+                dot_acc += gyd[offset] * value;
+            }
+            const inv_rms = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            const correction = dot_acc * inv_axis_dim * inv_rms * inv_rms * inv_rms;
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                output[offset] = gyd[offset] * inv_rms - input[offset] * correction;
+            }
+        }
+    }
+}
+
+fn oracleRmsNormBackwardWeightStrided(input: []const f32, grad: []const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    @memset(output, 0);
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const value = input[base + axis_i * inner + inner_i];
+                sumsq += value * value;
+            }
+            const rms_scale = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                output[axis_i] += grad[offset] * input[offset] * rms_scale;
+            }
+        }
+    }
+}
+
+fn oracleLayerNormStrided(input: []const f32, weights: ?[]const f32, biases: ?[]const f32, output: []f32, outer: usize, axis_dim: usize, inner: usize, eps: f32) void {
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    for (0..outer) |outer_i| {
+        const base = outer_i * axis_dim * inner;
+        for (0..inner) |inner_i| {
+            var sum_acc: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                sum_acc += input[base + axis_i * inner + inner_i];
+            }
+            const mean_value = sum_acc * inv_axis_dim;
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const centered = input[base + axis_i * inner + inner_i] - mean_value;
+                sumsq += centered * centered;
+            }
+            const inv_sigma = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * inner + inner_i;
+                var value = (input[offset] - mean_value) * inv_sigma;
+                if (weights) |w| value = value * w[axis_i];
+                if (biases) |b| value = value + b[axis_i];
+                output[offset] = value;
+            }
+        }
+    }
+}
+
+fn testFillRandom(data: []f32, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    for (data) |*value| value.* = random.floatNorm(f32) * 3;
+}
+
+fn expectBitwiseF32(expected: []const f32, actual: []const f32) !void {
+    try std.testing.expectEqualSlices(u32, @ptrCast(expected), @ptrCast(actual));
+}
+
+/// Every non-last axis of one shape, through rmsNorm (plain / weighted /
+/// weighted + residual), rmsNormBackward (dx plain and weighted, dweight)
+/// and layerNorm (plain / affine), against the strided oracles.
+fn expectNormLaneKernelsMatchOracle(ctx: *ExecContext, comptime rank: usize, shape: [rank]usize, seed: u64) !void {
+    const allocator = std.testing.allocator;
+    var len: usize = 1;
+    for (shape) |dim| len *= dim;
+    const data = try allocator.alloc(f32, len);
+    defer allocator.free(data);
+    testFillRandom(data, seed);
+    const grad = try allocator.alloc(f32, len);
+    defer allocator.free(grad);
+    testFillRandom(grad, seed + 1);
+    const expected = try allocator.alloc(f32, len);
+    defer allocator.free(expected);
+    const eps: f32 = 1e-5;
+
+    var x = try ctx.fromSlice(.f32, shape, data);
+    defer x.deinit();
+    var gy = try ctx.fromSlice(.f32, shape, grad);
+    defer gy.deinit();
+
+    inline for (0..rank - 1) |axis| {
+        const axis_dim = shape[axis];
+        var outer: usize = 1;
+        for (0..axis) |dim_i| outer *= shape[dim_i];
+        const inner = len / (outer * axis_dim);
+
+        const weight_data = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(weight_data);
+        testFillRandom(weight_data, seed + 2 + axis);
+        const bias_data = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(bias_data);
+        testFillRandom(bias_data, seed + 3 + axis);
+        var weight = try ctx.fromSlice(.f32, .{axis_dim}, weight_data);
+        defer weight.deinit();
+        var bias = try ctx.fromSlice(.f32, .{axis_dim}, bias_data);
+        defer bias.deinit();
+
+        {
+            var got = try ctx.rmsNorm(.f32, rank, &x, axis, eps, .{});
+            defer got.deinit();
+            oracleRmsNormPlainStrided(data, null, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+        {
+            var got = try ctx.rmsNorm(.f32, rank, &x, axis, eps, .{ .residual = &gy });
+            defer got.deinit();
+            oracleRmsNormPlainStrided(data, grad, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+        {
+            var got = try ctx.rmsNorm(.f32, rank, &x, axis, eps, .{ .weight = &weight });
+            defer got.deinit();
+            oracleRmsNormMulStrided(data, weight_data, null, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+        {
+            var got = try ctx.rmsNorm(.f32, rank, &x, axis, eps, .{ .weight = &weight, .residual = &gy });
+            defer got.deinit();
+            oracleRmsNormMulStrided(data, weight_data, grad, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+        {
+            var got = try ctx.rmsNormBackward(rank, &x, &gy, axis, eps, .{ .need_input = true, .need_weight = true });
+            defer got.deinit();
+            oracleRmsNormBackwardInputPlainStrided(data, grad, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.input.?.dataConst());
+            oracleRmsNormBackwardWeightStrided(data, grad, expected[0..axis_dim], outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected[0..axis_dim], got.weight.?.dataConst());
+        }
+        {
+            var got = try ctx.rmsNormBackward(rank, &x, &gy, axis, eps, .{ .need_input = true, .weight = &weight });
+            defer got.deinit();
+            oracleRmsNormBackwardInputWeightedStrided(data, weight_data, grad, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.input.?.dataConst());
+        }
+        {
+            var got = try ctx.layerNorm(.f32, rank, &x, axis, eps, .{});
+            defer got.deinit();
+            oracleLayerNormStrided(data, null, null, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+        {
+            var got = try ctx.layerNorm(.f32, rank, &x, axis, eps, .{ .weight = &weight, .bias = &bias });
+            defer got.deinit();
+            oracleLayerNormStrided(data, weight_data, bias_data, expected, outer, axis_dim, inner, eps);
+            try expectBitwiseF32(expected, got.dataConst());
+        }
+    }
+}
+
+test "norm non-last-axis lane kernels are bitwise the strided scalar arms" {
+    var ctx: ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+
+    // Below the row-kernel dispatch threshold (serial lane kernel, odd lane
+    // counts for the vector tails) and above it (lane ranges split across
+    // the pool, tails again).
+    try expectNormLaneKernelsMatchOracle(&ctx, 3, .{ 3, 5, 7 }, 0x9e11);
+    try expectNormLaneKernelsMatchOracle(&ctx, 4, .{ 2, 3, 4, 5 }, 0x9e12);
+    try expectNormLaneKernelsMatchOracle(&ctx, 3, .{ 2, 64, 1027 }, 0x9e13);
+    try expectNormLaneKernelsMatchOracle(&ctx, 4, .{ 2, 3, 32, 701 }, 0x9e14);
+}

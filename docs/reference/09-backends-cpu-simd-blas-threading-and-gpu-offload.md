@@ -344,15 +344,21 @@ tolerance instead — see [§9.3](09-backends-cpu-simd-blas-threading-and-gpu-of
 
 Above the backend seam, the exec tier builds streaming inner-lane kernels
 from the same primitives (`src/exec/row_ops.zig`): softmax, logsumexp,
-logSoftmax, and softmax backward on non-last axes, and layerNorm
-backward's inner>1 arm, stream every pass row-major and run `@Vector`
-lanes across the contiguous inner index, with pooled scratch rows for the
-per-lane max/sum (`vexpf` matches the last-axis row kernels' arithmetic).
-The softmax-family kernels split their lane range across the pool — lanes
-are independent and scratch columns disjoint, so any task count is
-bitwise identical to the serial call (64-lane minimum per task);
-layerNorm backward stays serial by design, its dweight/dbias accumulation
-crosses lanes.
+logSoftmax, and softmax backward on non-last axes, the non-last-axis arms
+of variance, standardize (forward and backward, f32 or f64 accumulation),
+rmsNorm (forward, and backward's dx and dweight) and layerNorm forward,
+and layerNorm backward's inner>1 arm, stream every pass row-major and run
+`@Vector` lanes across the contiguous inner index, with pooled scratch
+rows for the per-lane statistics (`vexpf` matches the last-axis row
+kernels' arithmetic). Per lane the accumulation order along the axis is
+the strided scalar loop's, so the stats/norm kernels are bitwise the
+scalar arms they replaced. Every one of them but the two cross-lane
+accumulations splits its lane range across the pool
+(`ExecContext.dispatchInnerLanes`): lanes are independent and scratch
+columns disjoint, so any task count is bitwise identical to the serial
+call (64-lane minimum per task); layerNorm backward and rmsNorm
+backward's dweight stay serial by design, their parameter-gradient
+accumulation crosses lanes.
 
 The primitive vocabulary is also re-exported on the public facade as
 `fucina.simd` (`Vf32`, `vector_len`, `vexpf`, `sigmoidVec`, `tanhVec`):

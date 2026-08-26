@@ -37,6 +37,9 @@ const LayerNormRowsTask = exec_row_ops.LayerNormRowsTask;
 const LayerNormBackwardInputRowsTask = exec_row_ops.LayerNormBackwardInputRowsTask;
 const LayerNormRowStatsTask = exec_row_ops.LayerNormRowStatsTask;
 const LayerNormParamGradColumnsTask = exec_row_ops.LayerNormParamGradColumnsTask;
+const RmsNormInnerTask = exec_row_ops.RmsNormInnerTask;
+const RmsNormBackwardInputInnerTask = exec_row_ops.RmsNormBackwardInputInnerTask;
+const LayerNormInnerTask = exec_row_ops.LayerNormInnerTask;
 const runRmsNormMulRopeHalfTask = exec_row_ops.runRmsNormMulRopeHalfTask;
 const runRmsNormMulRowsTask = exec_row_ops.runRmsNormMulRowsTask;
 const runRmsNormMulAddRowsTask = exec_row_ops.runRmsNormMulAddRowsTask;
@@ -46,6 +49,9 @@ const runLayerNormRowsTask = exec_row_ops.runLayerNormRowsTask;
 const runLayerNormBackwardInputRowsTask = exec_row_ops.runLayerNormBackwardInputRowsTask;
 const runLayerNormRowStatsTask = exec_row_ops.runLayerNormRowStatsTask;
 const runLayerNormParamGradColumnsTask = exec_row_ops.runLayerNormParamGradColumnsTask;
+const runRmsNormInnerTask = exec_row_ops.runRmsNormInnerTask;
+const runRmsNormBackwardInputInnerTask = exec_row_ops.runRmsNormBackwardInputInnerTask;
+const runLayerNormInnerTask = exec_row_ops.runLayerNormInnerTask;
 const rmsNormMulRopeHalfVectors = exec_row_ops.rmsNormMulRopeHalfVectors;
 const rmsNormMulRows = exec_row_ops.rmsNormMulRows;
 const rmsNormMulAddRows = exec_row_ops.rmsNormMulAddRows;
@@ -148,9 +154,11 @@ pub const RmsNormBackwardResult = struct {
 
 /// RMSNorm over `axis`: y = x / sqrt(mean(x^2) + eps), then `* weight` and
 /// `+ residual` when given. The weighted rows go through the row kernels
-/// (`inner == 1`, large inputs); every other combination through the scalar
-/// loop. Each combination computes the same expression in the same order,
-/// so an option is never a different numeric result. One f32 kernel set;
+/// (`inner == 1`, large inputs); a non-last axis (`inner > 1`) through the
+/// inner-lane kernel with its lane range split across the pool; every other
+/// combination through the scalar loop. Each path computes the same
+/// expression in the same order, so neither an option nor the layout is
+/// ever a different numeric result. One f32 kernel set;
 /// 16-bit inputs (and their weight/residual) follow the `.widened` policy.
 pub fn rmsNorm(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, eps: f32, options: RmsNormOptions(dtype)) !tensor.TensorOf(dtype) {
     const compute = comptime ExecContext.widenedCompute(dtype, "rmsNorm");
@@ -214,6 +222,27 @@ fn rmsNormPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, resid
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    if (inner > 1) {
+        // Non-last axis: the inner-lane kernel (lane ranges split across
+        // the pool; per-lane order equals the scalar loop below).
+        var scratch = try ctx.empty(.f32, .{inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
+            .input = input,
+            .weights = null,
+            .residual = residual_data,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runRmsNormInnerTask);
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -277,6 +306,27 @@ fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight:
         return out;
     }
 
+    if (inner > 1) {
+        // Non-last axis: the inner-lane kernel (lane ranges split across
+        // the pool; per-lane order equals the scalar loop below).
+        var scratch = try ctx.empty(.f32, .{inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
+            .input = input,
+            .weights = weights,
+            .residual = null,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runRmsNormInnerTask);
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -344,6 +394,27 @@ fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weig
         return out;
     }
 
+    if (inner > 1) {
+        // Non-last axis: the inner-lane kernel (lane ranges split across
+        // the pool; per-lane order equals the scalar loop below).
+        var scratch = try ctx.empty(.f32, .{inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
+            .input = input,
+            .weights = weights,
+            .residual = residual_data,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runRmsNormInnerTask);
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -419,6 +490,25 @@ fn rmsNormBackwardInputWeighted(
         return out;
     }
 
+    if (inner > 1) {
+        var scratch = try ctx.empty(.f32, .{2 * inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormBackwardInputInnerTask, .{
+            .input = input,
+            .weights = weights,
+            .grad = grad,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runRmsNormBackwardInputInnerTask);
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -515,6 +605,26 @@ fn rmsNormBackwardWeight(
         }
 
         rmsNormMulBackwardWeightRows(base_task);
+        return out;
+    }
+
+    if (inner > 1) {
+        // Non-last axis: lane-vectorized row statistics; the dweight
+        // accumulation itself chains every (outer, lane) pair in the scalar
+        // loop's order, so this arm stays serial.
+        var scratch = try ctx.empty(.f32, .{inner});
+        defer scratch.deinit();
+        exec_row_ops.rmsNormBackwardWeightInner(.{
+            .input = input,
+            .grad = grad,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+        });
         return out;
     }
 
@@ -738,6 +848,25 @@ fn rmsNormBackwardInputPlain(ctx: *ExecContext, comptime rank: usize, x: *const 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    if (inner > 1) {
+        var scratch = try ctx.empty(.f32, .{2 * inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormBackwardInputInnerTask, .{
+            .input = input,
+            .weights = null,
+            .grad = gyd,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runRmsNormBackwardInputInnerTask);
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -890,6 +1019,26 @@ fn layerNormDispatchAxisRank(
         }
 
         exec_row_ops.layerNormRows(base_task);
+        return out;
+    }
+
+    if (inner > 1) {
+        var scratch = try ctx.empty(.f32, .{2 * inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(LayerNormInnerTask, .{
+            .input = input,
+            .weights = weights,
+            .biases = biases,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .scratch = scratch.data(),
+            .outer = outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, runLayerNormInnerTask);
         return out;
     }
 

@@ -1,9 +1,11 @@
 //! Axis reductions that return statistics: argmax, extrema (max/min + index),
 //! variance, standardization (fwd/bwd), top-k, and full sort/argsort.
 //!
-//! Domain module: every op receives an explicit `*ExecContext`. Self-contained
-//! (pure Zig loops over prepared-contiguous inputs; no backend/row_ops
-//! kernels). Home of `TopKResult` (returned by extrema + top-k) and the
+//! Domain module: every op receives an explicit `*ExecContext`. Pure Zig
+//! loops over prepared-contiguous inputs; the non-last-axis arms of
+//! variance/standardize run the inner-lane kernels of `row_ops.zig`
+//! (lane ranges split across the pool). Home of `TopKResult` (returned by
+//! extrema + top-k) and the
 //! `Standardize*` option types (re-exported by `exec.zig`). `topK`
 //! is co-located here so the extrema/top-k family owning `TopKResult` lives
 //! together (plan D3).
@@ -12,6 +14,7 @@ const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
+const exec_row_ops = @import("row_ops.zig");
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
@@ -391,8 +394,9 @@ fn extremumMasked(
 /// Σ(x−μ)²/(N−ddof). ddof 0 = biased (the LayerNorm/ggml convention),
 /// ddof 1 = Bessel-corrected (the torch.var default). Statistics are
 /// two-pass like layerNorm; N == ddof yields 0/0 → NaN, matching
-/// torch.var on a single element. Rows stay serial like
-/// sumAxis/meanAxis; inner == 1 rows take a SIMD body.
+/// torch.var on a single element. inner == 1 rows stay serial like
+/// sumAxis/meanAxis and take a SIMD body; inner > 1 (a non-last axis)
+/// runs the inner-lane kernel with lane ranges split across the pool.
 /// Variance over `axis`. One f32 kernel; 16-bit inputs widen and return
 /// f32 (the reduction output dtype).
 pub fn varAxis(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *const tensor.TensorOf(dtype), comptime axis: usize, ddof: u1) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
@@ -457,22 +461,23 @@ fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sum_acc: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                sum_acc += input[base + axis_i * inner + inner_i];
-            }
-            const mean_value = sum_acc * inv_axis_dim;
-            var sumsq: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const centered = input[base + axis_i * inner + inner_i] - mean_value;
-                sumsq += centered * centered;
-            }
-            output[outer_i * inner + inner_i] = sumsq * inv_denom;
-        }
-    }
+    // inner > 1: vector lanes across `inner`, every pass streamed row-major;
+    // per-lane accumulation order along the axis is the strided scalar
+    // loop's, so the lane split is bitwise-neutral.
+    const scratch = try ctx.allocator.alloc(f32, 2 * inner);
+    defer ctx.allocator.free(scratch);
+    ctx.dispatchInnerLanes(exec_row_ops.VarianceInnerTask, .{
+        .input = input,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .scratch = scratch,
+        .outer = outer,
+        .inv_axis_dim = inv_axis_dim,
+        .inv_denom = inv_denom,
+        .inner_start = 0,
+        .inner_end = inner,
+    }, source.len(), inner, exec_row_ops.runVarianceInnerTask);
     return out;
 }
 
@@ -549,6 +554,27 @@ fn standardizeAccum(
     const outer = productBeforeAxis(rank, source.shape, axis);
     const ddof_count: usize = options.ddof;
     const eps: Acc = @floatCast(options.eps);
+    if (inner > 1) {
+        // Non-last axis: the inner-lane kernel (lane ranges split across
+        // the pool; per-lane order equals the scalar loop below).
+        const scratch = try ctx.allocator.alloc(Acc, 2 * inner);
+        defer ctx.allocator.free(scratch);
+        ctx.dispatchInnerLanes(exec_row_ops.StandardizeInnerTask(Acc), .{
+            .input = input,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .valid_count = valid_count,
+            .ddof_count = ddof_count,
+            .eps = eps,
+            .eps_inside_sqrt = options.eps_mode == .inside_sqrt,
+            .scratch = scratch,
+            .outer = outer,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, exec_row_ops.runStandardizeInnerTask(Acc));
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {
@@ -644,6 +670,26 @@ fn standardizeBackwardAccum(
     const outer = productBeforeAxis(rank, source.shape, axis);
     const ddof_count: usize = options.ddof;
     const eps: Acc = @floatCast(options.eps);
+    if (inner > 1) {
+        const scratch = try ctx.allocator.alloc(Acc, 5 * inner);
+        defer ctx.allocator.free(scratch);
+        ctx.dispatchInnerLanes(exec_row_ops.StandardizeBackwardInnerTask(Acc), .{
+            .input = input,
+            .grad = upstream,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = inner,
+            .valid_count = valid_count,
+            .ddof_count = ddof_count,
+            .eps = eps,
+            .eps_inside_sqrt = options.eps_mode == .inside_sqrt,
+            .scratch = scratch,
+            .outer = outer,
+            .inner_start = 0,
+            .inner_end = inner,
+        }, source.len(), inner, exec_row_ops.runStandardizeBackwardInnerTask(Acc));
+        return out;
+    }
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;
         for (0..inner) |inner_i| {

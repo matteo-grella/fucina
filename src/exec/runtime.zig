@@ -317,6 +317,29 @@ pub fn dispatchRange(
     return self.dispatchRangeCapped(Task, start_field, end_field, base_task, count, count, run);
 }
 
+// Minimum lanes per task when splitting an inner-lane kernel across the
+// pool: below this the per-dispatch cost outweighs the split.
+const min_inner_lanes_per_task = 64;
+
+/// Split `base_task`'s `[0, inner)` lane range across the pool when the
+/// total work clears the row-kernel threshold; otherwise run it serially.
+/// The inner-lane kernels (`row_ops.zig`: softmax, the stats/norm
+/// non-last-axis arms) own disjoint lane sub-ranges and disjoint scratch
+/// columns, so the result is bitwise identical for any task count.
+pub fn dispatchInnerLanes(
+    self: *ExecContext,
+    comptime Task: type,
+    base_task: Task,
+    total_len: usize,
+    inner: usize,
+    comptime run: fn (task: *const Task) void,
+) void {
+    if (total_len >= parallel.row_kernel_len_threshold) {
+        if (self.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / min_inner_lanes_per_task, run)) return;
+    }
+    run(&base_task);
+}
+
 /// `dispatchRange` with a separate task-count cap (the inner-lane
 /// dispatches cap tasks by a minimum per-task lane width, not by the
 /// range being split).

@@ -1954,6 +1954,581 @@ pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
     }
 }
 
+// ---- Stats/norm inner-lane kernels: the non-last-axis arms of
+// variance/standardize (fwd/bwd) and the rms/layer norms (fwd, rms bwd).
+// Same layout rule as the softmax family above: lanes across `inner`, every
+// pass streamed row-major, and per-lane accumulation order along the axis
+// identical to the scalar strided loops they replace (bitwise-neutral: for
+// one output element the sequence of adds is unchanged). The per-lane
+// finalize steps (mean, 1/sigma, correction, ...) are plain scalar loops
+// over the lane row that evaluate the retired loops' expressions verbatim,
+// so the vector/scalar split of the streaming passes cannot move a bit.
+// `Acc` (f32 or f64) is the standardize family's accumulation type; inputs
+// and outputs stay f32.
+
+fn laneWidth(comptime Acc: type) comptime_int {
+    return switch (Acc) {
+        f32 => inner_vec_width,
+        f64 => inner_vec_width / 2,
+        else => @compileError("lane accumulation type must be f32 or f64"),
+    };
+}
+
+fn LaneVec(comptime Acc: type) type {
+    return @Vector(laneWidth(Acc), Acc);
+}
+
+/// Lane-wise `acc += row` (f32 rows widened to `Acc`).
+fn addIntoLanes(comptime Acc: type, acc: []Acc, row: []const f32) void {
+    const width = laneWidth(Acc);
+    var i: usize = 0;
+    while (i + width <= acc.len) : (i += width) {
+        const values: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row[i..][0..width].*));
+        acc[i..][0..width].* = @as(LaneVec(Acc), acc[i..][0..width].*) + values;
+    }
+    while (i < acc.len) : (i += 1) acc[i] += @as(Acc, @floatCast(row[i]));
+}
+
+/// Lane-wise `acc += (row - mean)^2`.
+fn addCenteredSqIntoLanes(comptime Acc: type, acc: []Acc, row: []const f32, mean_row: []const Acc) void {
+    const width = laneWidth(Acc);
+    var i: usize = 0;
+    while (i + width <= acc.len) : (i += width) {
+        const values: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row[i..][0..width].*));
+        const centered = values - @as(LaneVec(Acc), mean_row[i..][0..width].*);
+        acc[i..][0..width].* = @as(LaneVec(Acc), acc[i..][0..width].*) + centered * centered;
+    }
+    while (i < acc.len) : (i += 1) {
+        const centered = @as(Acc, @floatCast(row[i])) - mean_row[i];
+        acc[i] += centered * centered;
+    }
+}
+
+/// Lane-wise `acc += row^2`.
+fn addSqIntoLanes(acc: []f32, row: []const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= acc.len) : (i += inner_vec_width) {
+        const values: InnerVec = row[i..][0..inner_vec_width].*;
+        acc[i..][0..inner_vec_width].* = @as(InnerVec, acc[i..][0..inner_vec_width].*) + values * values;
+    }
+    while (i < acc.len) : (i += 1) acc[i] += row[i] * row[i];
+}
+
+/// Lane-wise `out = (row - mean) / denom` in `Acc`, stored as f32.
+fn centeredDivStoreLanes(comptime Acc: type, out: []f32, row: []const f32, mean_row: []const Acc, denom_row: []const Acc) void {
+    const width = laneWidth(Acc);
+    var i: usize = 0;
+    while (i + width <= out.len) : (i += width) {
+        const values: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row[i..][0..width].*));
+        const centered = values - @as(LaneVec(Acc), mean_row[i..][0..width].*);
+        out[i..][0..width].* = @as(@Vector(width, f32), @floatCast(centered / @as(LaneVec(Acc), denom_row[i..][0..width].*)));
+    }
+    while (i < out.len) : (i += 1) {
+        const centered = @as(Acc, @floatCast(row[i])) - mean_row[i];
+        out[i] = @floatCast(centered / denom_row[i]);
+    }
+}
+
+pub const VarianceInnerTask = struct {
+    input: []const f32,
+    /// One `inner`-wide row per outer block (the axis removed).
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `2 * inner`: sum (then mean) row, then
+    /// the centered sum-of-squares row. Tasks touch only their own
+    /// `[inner_start, inner_end)` columns.
+    scratch: []f32,
+    outer: usize,
+    inv_axis_dim: f32,
+    /// `1 / (axis_dim - ddof)`.
+    inv_denom: f32,
+    inner_start: usize,
+    inner_end: usize,
+};
+
+pub fn runVarianceInnerTask(task: *const VarianceInnerTask) void {
+    varianceInner(task.*);
+}
+
+pub fn varianceInner(task: VarianceInnerTask) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const mean_row = task.scratch[lane0..][0..lanes];
+    const sumsq_row = task.scratch[inner + lane0 ..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(mean_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addIntoLanes(f32, mean_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        for (mean_row) |*mean| mean.* = mean.* * task.inv_axis_dim;
+        @memset(sumsq_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addCenteredSqIntoLanes(f32, sumsq_row, task.input[base + axis_i * inner ..][0..lanes], mean_row);
+        }
+        const out_row = task.output[outer_i * inner + lane0 ..][0..lanes];
+        for (out_row, sumsq_row) |*out, sumsq| out.* = sumsq * task.inv_denom;
+    }
+}
+
+pub fn StandardizeInnerTask(comptime Acc: type) type {
+    return struct {
+        input: []const f32,
+        output: []f32,
+        axis_dim: usize,
+        inner: usize,
+        /// Standardized prefix of the axis; positions past it are written 0.
+        valid_count: usize,
+        ddof_count: usize,
+        eps: Acc,
+        /// `denom = sqrt(var + eps)` when set, `sqrt(var) + eps` otherwise.
+        eps_inside_sqrt: bool,
+        /// Pooled `Acc` scratch of length `2 * inner`: mean row, then the
+        /// variance (finalized in place to the denominator) row.
+        scratch: []Acc,
+        outer: usize,
+        inner_start: usize,
+        inner_end: usize,
+    };
+}
+
+pub fn runStandardizeInnerTask(comptime Acc: type) fn (task: *const StandardizeInnerTask(Acc)) void {
+    return struct {
+        fn run(task: *const StandardizeInnerTask(Acc)) void {
+            standardizeInner(Acc, task.*);
+        }
+    }.run;
+}
+
+pub fn standardizeInner(comptime Acc: type, task: StandardizeInnerTask(Acc)) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const mean_row = task.scratch[lane0..][0..lanes];
+    const denom_row = task.scratch[inner + lane0 ..][0..lanes];
+    const count: Acc = @floatFromInt(task.valid_count);
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        if (task.valid_count == 0) {
+            for (0..task.axis_dim) |axis_i| @memset(task.output[base + axis_i * inner ..][0..lanes], 0);
+            continue;
+        }
+
+        @memset(mean_row, 0);
+        for (0..task.valid_count) |axis_i| {
+            addIntoLanes(Acc, mean_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        for (mean_row) |*mean| mean.* = mean.* / count;
+
+        @memset(denom_row, 0);
+        if (task.valid_count > task.ddof_count) {
+            for (0..task.valid_count) |axis_i| {
+                addCenteredSqIntoLanes(Acc, denom_row, task.input[base + axis_i * inner ..][0..lanes], mean_row);
+            }
+            const denom_count: Acc = @floatFromInt(task.valid_count - task.ddof_count);
+            for (denom_row) |*variance| variance.* = variance.* / denom_count;
+        }
+        for (denom_row) |*variance| {
+            variance.* = if (task.eps_inside_sqrt) @sqrt(variance.* + task.eps) else @sqrt(variance.*) + task.eps;
+        }
+
+        for (0..task.valid_count) |axis_i| {
+            const offset = base + axis_i * inner;
+            centeredDivStoreLanes(Acc, task.output[offset..][0..lanes], task.input[offset..][0..lanes], mean_row, denom_row);
+        }
+        for (task.valid_count..task.axis_dim) |axis_i| @memset(task.output[base + axis_i * inner ..][0..lanes], 0);
+    }
+}
+
+pub fn StandardizeBackwardInnerTask(comptime Acc: type) type {
+    return struct {
+        input: []const f32,
+        grad: []const f32,
+        /// Pre-zeroed: `valid_count == 0` blocks are left untouched.
+        output: []f32,
+        axis_dim: usize,
+        inner: usize,
+        valid_count: usize,
+        ddof_count: usize,
+        eps: Acc,
+        eps_inside_sqrt: bool,
+        /// Pooled `Acc` scratch of length `5 * inner`: mean, variance,
+        /// denominator (1/denominator after the finalize), gradient sum
+        /// (then mean gradient), centered-gradient dot (then second scale).
+        scratch: []Acc,
+        outer: usize,
+        inner_start: usize,
+        inner_end: usize,
+    };
+}
+
+pub fn runStandardizeBackwardInnerTask(comptime Acc: type) fn (task: *const StandardizeBackwardInnerTask(Acc)) void {
+    return struct {
+        fn run(task: *const StandardizeBackwardInnerTask(Acc)) void {
+            standardizeBackwardInner(Acc, task.*);
+        }
+    }.run;
+}
+
+/// Lane-wise `gsum += g; dot += g * (row - mean)`.
+fn addGradMomentsIntoLanes(comptime Acc: type, gsum_row: []Acc, dot_row: []Acc, grad: []const f32, row: []const f32, mean_row: []const Acc) void {
+    const width = laneWidth(Acc);
+    var i: usize = 0;
+    while (i + width <= gsum_row.len) : (i += width) {
+        const g: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), grad[i..][0..width].*));
+        const values: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row[i..][0..width].*));
+        const centered = values - @as(LaneVec(Acc), mean_row[i..][0..width].*);
+        gsum_row[i..][0..width].* = @as(LaneVec(Acc), gsum_row[i..][0..width].*) + g;
+        dot_row[i..][0..width].* = @as(LaneVec(Acc), dot_row[i..][0..width].*) + g * centered;
+    }
+    while (i < gsum_row.len) : (i += 1) {
+        const g = @as(Acc, @floatCast(grad[i]));
+        const centered = @as(Acc, @floatCast(row[i])) - mean_row[i];
+        gsum_row[i] += g;
+        dot_row[i] += g * centered;
+    }
+}
+
+pub fn standardizeBackwardInner(comptime Acc: type, task: StandardizeBackwardInnerTask(Acc)) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const mean_row = task.scratch[lane0..][0..lanes];
+    const var_row = task.scratch[inner + lane0 ..][0..lanes];
+    const denom_row = task.scratch[2 * inner + lane0 ..][0..lanes];
+    const mean_grad_row = task.scratch[3 * inner + lane0 ..][0..lanes];
+    const second_row = task.scratch[4 * inner + lane0 ..][0..lanes];
+    const count: Acc = @floatFromInt(task.valid_count);
+    const width = laneWidth(Acc);
+    for (0..task.outer) |outer_i| {
+        if (task.valid_count == 0) continue;
+        const base = outer_i * task.axis_dim * inner + lane0;
+
+        @memset(mean_row, 0);
+        for (0..task.valid_count) |axis_i| {
+            addIntoLanes(Acc, mean_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        for (mean_row) |*mean| mean.* = mean.* / count;
+
+        @memset(var_row, 0);
+        if (task.valid_count > task.ddof_count) {
+            for (0..task.valid_count) |axis_i| {
+                addCenteredSqIntoLanes(Acc, var_row, task.input[base + axis_i * inner ..][0..lanes], mean_row);
+            }
+            const denom_count: Acc = @floatFromInt(task.valid_count - task.ddof_count);
+            for (var_row) |*variance| variance.* = variance.* / denom_count;
+        }
+        for (denom_row, var_row) |*denom, variance| {
+            denom.* = if (task.eps_inside_sqrt) @sqrt(variance + task.eps) else @sqrt(variance) + task.eps;
+        }
+
+        @memset(mean_grad_row, 0);
+        @memset(second_row, 0);
+        for (0..task.valid_count) |axis_i| {
+            const offset = base + axis_i * inner;
+            addGradMomentsIntoLanes(Acc, mean_grad_row, second_row, task.grad[offset..][0..lanes], task.input[offset..][0..lanes], mean_row);
+        }
+        for (0..lanes) |i| {
+            mean_grad_row[i] = mean_grad_row[i] / count;
+            var second_scale: Acc = 0;
+            if (task.valid_count > task.ddof_count and var_row[i] > 0) {
+                const denom_count: Acc = @floatFromInt(task.valid_count - task.ddof_count);
+                const std_value = @sqrt(var_row[i]);
+                const denom = denom_row[i];
+                second_scale = if (task.eps_inside_sqrt)
+                    second_row[i] / (denom_count * denom * denom * denom)
+                else
+                    second_row[i] / (denom_count * std_value * denom * denom);
+            }
+            second_row[i] = second_scale;
+            denom_row[i] = 1 / denom_row[i];
+        }
+
+        for (0..task.valid_count) |axis_i| {
+            const offset = base + axis_i * inner;
+            const row_g = task.grad[offset..][0..lanes];
+            const row_in = task.input[offset..][0..lanes];
+            const row_out = task.output[offset..][0..lanes];
+            var i: usize = 0;
+            while (i + width <= lanes) : (i += width) {
+                const g: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row_g[i..][0..width].*));
+                const values: LaneVec(Acc) = @floatCast(@as(@Vector(width, f32), row_in[i..][0..width].*));
+                const centered = values - @as(LaneVec(Acc), mean_row[i..][0..width].*);
+                row_out[i..][0..width].* = @as(@Vector(width, f32), @floatCast((g - @as(LaneVec(Acc), mean_grad_row[i..][0..width].*)) * @as(LaneVec(Acc), denom_row[i..][0..width].*) -
+                    centered * @as(LaneVec(Acc), second_row[i..][0..width].*)));
+            }
+            while (i < lanes) : (i += 1) {
+                const centered = @as(Acc, @floatCast(row_in[i])) - mean_row[i];
+                row_out[i] = @floatCast((@as(Acc, @floatCast(row_g[i])) - mean_grad_row[i]) * denom_row[i] - centered * second_row[i]);
+            }
+        }
+    }
+}
+
+pub const RmsNormInnerTask = struct {
+    input: []const f32,
+    /// Per-axis weight row (`[axis_dim]`) and same-shape residual; null =
+    /// absent. One kernel covers the plain / weighted / weighted+residual
+    /// forward arms with their exact expression order.
+    weights: ?[]const f32,
+    residual: ?[]const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `inner`: sum-of-squares, then 1/rms row.
+    scratch: []f32,
+    outer: usize,
+    inv_axis_dim: f32,
+    eps: f32,
+    inner_start: usize,
+    inner_end: usize,
+};
+
+pub fn runRmsNormInnerTask(task: *const RmsNormInnerTask) void {
+    rmsNormInner(task.*);
+}
+
+/// Lane-wise `out = in * scale [* w] [+ r]` (the residual added last, on
+/// the left, as the scalar arms wrote it).
+fn rmsApplyLanes(out: []f32, in: []const f32, scale_row: []const f32, weight: ?f32, residual: ?[]const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        var value = @as(InnerVec, in[i..][0..inner_vec_width].*) * @as(InnerVec, scale_row[i..][0..inner_vec_width].*);
+        if (weight) |w| value = value * @as(InnerVec, @splat(w));
+        if (residual) |r| value = @as(InnerVec, r[i..][0..inner_vec_width].*) + value;
+        out[i..][0..inner_vec_width].* = value;
+    }
+    while (i < out.len) : (i += 1) {
+        var value = in[i] * scale_row[i];
+        if (weight) |w| value = value * w;
+        if (residual) |r| value = r[i] + value;
+        out[i] = value;
+    }
+}
+
+pub fn rmsNormInner(task: RmsNormInnerTask) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const scale_row = task.scratch[lane0..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(scale_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addSqIntoLanes(scale_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        for (scale_row) |*scale| scale.* = 1 / @sqrt(scale.* * task.inv_axis_dim + task.eps);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            rmsApplyLanes(
+                task.output[offset..][0..lanes],
+                task.input[offset..][0..lanes],
+                scale_row,
+                if (task.weights) |w| w[axis_i] else null,
+                if (task.residual) |r| r[offset..][0..lanes] else null,
+            );
+        }
+    }
+}
+
+pub const RmsNormBackwardInputInnerTask = struct {
+    input: []const f32,
+    /// Per-axis weight row (`[axis_dim]`); null = the plain (unweighted)
+    /// rmsNorm, whose correction term is spelled in its own order.
+    weights: ?[]const f32,
+    grad: []const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `2 * inner`: sum-of-squares (then
+    /// 1/rms) row, then the grad·x dot (then correction) row.
+    scratch: []f32,
+    outer: usize,
+    inv_axis_dim: f32,
+    eps: f32,
+    inner_start: usize,
+    inner_end: usize,
+};
+
+pub fn runRmsNormBackwardInputInnerTask(task: *const RmsNormBackwardInputInnerTask) void {
+    rmsNormBackwardInputInner(task.*);
+}
+
+/// Lane-wise `sumsq += x^2; dot += (g * w) * x`.
+fn addSqAndWeightedDotIntoLanes(sumsq_row: []f32, dot_row: []f32, row: []const f32, grad: []const f32, w_axis: f32) void {
+    const w_splat: InnerVec = @splat(w_axis);
+    var i: usize = 0;
+    while (i + inner_vec_width <= sumsq_row.len) : (i += inner_vec_width) {
+        const values: InnerVec = row[i..][0..inner_vec_width].*;
+        const g: InnerVec = grad[i..][0..inner_vec_width].*;
+        sumsq_row[i..][0..inner_vec_width].* = @as(InnerVec, sumsq_row[i..][0..inner_vec_width].*) + values * values;
+        dot_row[i..][0..inner_vec_width].* = @as(InnerVec, dot_row[i..][0..inner_vec_width].*) + g * w_splat * values;
+    }
+    while (i < sumsq_row.len) : (i += 1) {
+        sumsq_row[i] += row[i] * row[i];
+        dot_row[i] += grad[i] * w_axis * row[i];
+    }
+}
+
+pub fn rmsNormBackwardInputInner(task: RmsNormBackwardInputInnerTask) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const rms_row = task.scratch[lane0..][0..lanes];
+    const corr_row = task.scratch[inner + lane0 ..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(rms_row, 0);
+        @memset(corr_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const w_axis: f32 = if (task.weights) |w| w[axis_i] else 1;
+            addSqAndWeightedDotIntoLanes(rms_row, corr_row, task.input[offset..][0..lanes], task.grad[offset..][0..lanes], w_axis);
+        }
+        // Two spellings of the same correction, kept verbatim from the
+        // weighted and plain scalar arms (they round differently).
+        if (task.weights != null) {
+            for (rms_row, corr_row) |*rms, *corr| {
+                const rms_scale = 1 / @sqrt(rms.* * task.inv_axis_dim + task.eps);
+                rms.* = rms_scale;
+                corr.* = rms_scale * rms_scale * rms_scale * task.inv_axis_dim * corr.*;
+            }
+        } else {
+            for (rms_row, corr_row) |*rms, *corr| {
+                const inv_rms = 1 / @sqrt(rms.* * task.inv_axis_dim + task.eps);
+                rms.* = inv_rms;
+                corr.* = corr.* * task.inv_axis_dim * inv_rms * inv_rms * inv_rms;
+            }
+        }
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const w_axis: f32 = if (task.weights) |w| w[axis_i] else 1;
+            const w_splat: InnerVec = @splat(w_axis);
+            const row_in = task.input[offset..][0..lanes];
+            const row_g = task.grad[offset..][0..lanes];
+            const row_out = task.output[offset..][0..lanes];
+            var i: usize = 0;
+            while (i + inner_vec_width <= lanes) : (i += inner_vec_width) {
+                row_out[i..][0..inner_vec_width].* = @as(InnerVec, row_g[i..][0..inner_vec_width].*) * w_splat * @as(InnerVec, rms_row[i..][0..inner_vec_width].*) -
+                    @as(InnerVec, row_in[i..][0..inner_vec_width].*) * @as(InnerVec, corr_row[i..][0..inner_vec_width].*);
+            }
+            while (i < lanes) : (i += 1) {
+                row_out[i] = row_g[i] * w_axis * rms_row[i] - row_in[i] * corr_row[i];
+            }
+        }
+    }
+}
+
+pub const RmsNormBackwardWeightInnerTask = struct {
+    input: []const f32,
+    grad: []const f32,
+    /// `[axis_dim]` accumulator (pre-zeroed): every (outer, lane) pair is
+    /// chained into it in the scalar loop's order, so this kernel has no
+    /// lane split and runs serially.
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// f32 scratch of length `inner`: sum-of-squares, then 1/rms row.
+    scratch: []f32,
+    outer: usize,
+    inv_axis_dim: f32,
+    eps: f32,
+};
+
+pub fn rmsNormBackwardWeightInner(task: RmsNormBackwardWeightInnerTask) void {
+    const inner = task.inner;
+    const scale_row = task.scratch[0..inner];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner;
+        @memset(scale_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addSqIntoLanes(scale_row, task.input[base + axis_i * inner ..][0..inner]);
+        }
+        for (scale_row) |*scale| scale.* = 1 / @sqrt(scale.* * task.inv_axis_dim + task.eps);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            var acc = task.output[axis_i];
+            for (task.grad[offset..][0..inner], task.input[offset..][0..inner], scale_row) |g, x, scale| {
+                acc += g * x * scale;
+            }
+            task.output[axis_i] = acc;
+        }
+    }
+}
+
+pub const LayerNormInnerTask = struct {
+    input: []const f32,
+    /// Affine terms (rank-1 `[axis_dim]`); null = absent.
+    weights: ?[]const f32,
+    biases: ?[]const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `2 * inner`: sum (then mean) row, then
+    /// the centered sum-of-squares (then 1/sigma) row.
+    scratch: []f32,
+    outer: usize,
+    inv_axis_dim: f32,
+    eps: f32,
+    inner_start: usize,
+    inner_end: usize,
+};
+
+pub fn runLayerNormInnerTask(task: *const LayerNormInnerTask) void {
+    layerNormInner(task.*);
+}
+
+/// Lane-wise `out = (in - mean) * inv_sigma [* w] [+ b]`.
+fn layerNormApplyLanes(out: []f32, in: []const f32, mean_row: []const f32, sigma_row: []const f32, weight: ?f32, bias: ?f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        var value = (@as(InnerVec, in[i..][0..inner_vec_width].*) - @as(InnerVec, mean_row[i..][0..inner_vec_width].*)) * @as(InnerVec, sigma_row[i..][0..inner_vec_width].*);
+        if (weight) |w| value = value * @as(InnerVec, @splat(w));
+        if (bias) |b| value = value + @as(InnerVec, @splat(b));
+        out[i..][0..inner_vec_width].* = value;
+    }
+    while (i < out.len) : (i += 1) {
+        var value = (in[i] - mean_row[i]) * sigma_row[i];
+        if (weight) |w| value = value * w;
+        if (bias) |b| value = value + b;
+        out[i] = value;
+    }
+}
+
+pub fn layerNormInner(task: LayerNormInnerTask) void {
+    const inner = task.inner;
+    const lane0 = task.inner_start;
+    const lanes = task.inner_end - task.inner_start;
+    const mean_row = task.scratch[lane0..][0..lanes];
+    const sigma_row = task.scratch[inner + lane0 ..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(mean_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addIntoLanes(f32, mean_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        for (mean_row) |*mean| mean.* = mean.* * task.inv_axis_dim;
+        @memset(sigma_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addCenteredSqIntoLanes(f32, sigma_row, task.input[base + axis_i * inner ..][0..lanes], mean_row);
+        }
+        for (sigma_row) |*sigma| sigma.* = 1 / @sqrt(sigma.* * task.inv_axis_dim + task.eps);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            layerNormApplyLanes(
+                task.output[offset..][0..lanes],
+                task.input[offset..][0..lanes],
+                mean_row,
+                sigma_row,
+                if (task.weights) |w| w[axis_i] else null,
+                if (task.biases) |b| b[axis_i] else null,
+            );
+        }
+    }
+}
+
 pub fn crossEntropyLossRows(task: CrossEntropyLossRowsTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;

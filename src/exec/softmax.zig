@@ -38,27 +38,6 @@ const runLogsumexpInnerTask = exec_row_ops.runLogsumexpInnerTask;
 const runLogSoftmaxInnerTask = exec_row_ops.runLogSoftmaxInnerTask;
 const runSoftmaxBackwardInnerTask = exec_row_ops.runSoftmaxBackwardInnerTask;
 
-// Minimum lanes per task when splitting an inner-lane kernel across the
-// pool: below this the per-dispatch cost outweighs the split.
-const min_inner_lanes_per_task = 64;
-
-/// Split `base_task`'s `[0, inner)` lane range across the pool when the
-/// total work clears the elementwise threshold; otherwise run it serially.
-/// Lane sub-ranges are independent and scratch columns are disjoint, so the
-/// result is bitwise identical for any task count.
-fn dispatchInnerLanes(
-    comptime Task: type,
-    ctx: *ExecContext,
-    base_task: Task,
-    total_len: usize,
-    inner: usize,
-    comptime run: fn (task: *const Task) void,
-) void {
-    if (total_len >= parallel.row_kernel_len_threshold) {
-        if (ctx.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / min_inner_lanes_per_task, run)) return;
-    }
-    run(&base_task);
-}
 const runSoftmaxRowsTask = exec_row_ops.runSoftmaxRowsTask;
 const runSoftmaxExtRowsTask = exec_row_ops.runSoftmaxExtRowsTask;
 const runSoftmaxBackwardRowsTask = exec_row_ops.runSoftmaxBackwardRowsTask;
@@ -129,7 +108,7 @@ fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
 
     var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
-    dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
+    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
@@ -192,7 +171,7 @@ fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comp
 
     var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
-    dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
+    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
@@ -251,7 +230,7 @@ fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 
     var scratch = try ctx.empty(.f32, .{2 * inner});
     defer scratch.deinit();
-    dispatchInnerLanes(SoftmaxInnerTask, ctx, .{
+    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
@@ -400,7 +379,7 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
 
     var scratch = try ctx.empty(.f32, .{inner});
     defer scratch.deinit();
-    dispatchInnerLanes(SoftmaxBackwardInnerTask, ctx, .{
+    ctx.dispatchInnerLanes(SoftmaxBackwardInnerTask, .{
         .y = yd,
         .gy = gyd,
         .output = output,
