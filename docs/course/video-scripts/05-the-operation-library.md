@@ -119,11 +119,11 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
   - `src/ag/tensor.zig:1257–1261` — `scale`, the entire method.
   - `src/ag/tensor.zig:3747` — the `dot` signature (one line, wraps).
 - **Chapter excerpts (render from `docs/course/05-the-operation-library.md`):**
-  - Lines 508–521 — machine-verified test "dot with a shared batch tag
+  - Lines 503–516 — machine-verified test "dot with a shared batch tag
     lowers to bmm".
-  - Lines 375–384 — the activation-zoo table.
-  - Lines 618–629 — the softmax options list.
-  - Lines 744–759 — machine-verified test "crossEntropy on uniform logits
+  - Lines 370–379 — the activation-zoo table.
+  - Lines 613–624 — the softmax options list.
+  - Lines 739–754 — machine-verified test "crossEntropy on uniform logits
     is ln(K)".
 - **Terminal recording:** `zig build snippet-check` from the repo root (the
   in-tree gate that extracts and runs every runnable docs/REFERENCE.md
