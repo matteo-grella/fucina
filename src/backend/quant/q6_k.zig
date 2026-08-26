@@ -143,6 +143,11 @@ fn dotUnpackedI8x16(w: QKV16i8, a: QKV16i8) i32 {
         // i.e. quantizeRowQ8_KInto's -127/max scale construction, so a ∈ [-127,127]
         // — inside the sign-trick exactness domain; see common.zig).
         .x86_vnni, .x86_avx2, .portable => common.dotI8x16Portable(w, a),
+        .scalar => blk: {
+            var acc: i32 = 0;
+            inline for (0..16) |i| acc += @as(i32, w[i]) * @as(i32, a[i]);
+            break :blk acc;
+        },
     };
 }
 
@@ -218,6 +223,7 @@ inline fn dot16Group4RowsQ8_Kx4(a: *const types.BlockQ8_Kx4, fg_base: usize, wv:
             return dot;
         },
         .x86_vnni, .x86_avx2, .portable => return dot16Group4RowsQ8_Kx4Simd(isa.tier, a, fg_base, wv),
+        .scalar => return dot16Group4RowsQ8_Kx4Scalar(a, fg_base, wv),
     }
 }
 
@@ -501,6 +507,7 @@ fn dotQ6_KQ8_K(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
             return @as(f32, @floatFromInt(iacc)) * d;
         },
         .x86_vnni, .x86_avx2, .portable => return dotQ6_KQ8_KSimd(isa.tier, w, a),
+        .scalar => return dotQ6_KQ8_KScalar(w, a),
     }
 }
 
@@ -515,6 +522,7 @@ inline fn dotQ6BiasedGroups(comptime tier: isa.Tier, acc: QKV8i32, biased: commo
         .x86_avx2 => common.maddubsDotGroupsI32x8(acc, biased, act),
         .portable => common.dotI8GroupsWidenI32x8(acc, @as(common.QKV32i8, @bitCast(biased)) -% @as(common.QKV32i8, @splat(32)), act),
         .neon_i8mm, .neon_sdot => @compileError("dotQ6BiasedGroups: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
+        .scalar => @compileError("dotQ6BiasedGroups: the scalar tier takes dotQ6_KQ8_KScalar"),
     };
 }
 
@@ -582,6 +590,7 @@ pub fn dotQ6_KQ8_KScalar(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
 
 fn accumulateQ6_Kx4(lhs: *const BlockQ8_K, rhs: *const BlockQ6_Kx4, acc: QKV4f32) QKV4f32 {
     return switch (isa.tier) {
+        .scalar => accumulateQ6_Kx4Scalar(lhs, rhs, acc),
         .neon_i8mm, .neon_sdot => accumulateQ6_Kx4Aarch64(lhs, rhs, acc),
         .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4Simd(isa.tier, lhs, rhs, acc),
     };
@@ -600,6 +609,10 @@ fn accumulateQ6_Kx4Pair(
     up_acc: QKV4f32,
 ) Q6Kx4PairAcc {
     return switch (isa.tier) {
+        .scalar => .{
+            .gate = accumulateQ6_Kx4Scalar(lhs, gate_rhs, gate_acc),
+            .up = accumulateQ6_Kx4Scalar(lhs, up_rhs, up_acc),
+        },
         .neon_i8mm, .neon_sdot => accumulateQ6_Kx4PairAarch64(lhs, gate_rhs, up_rhs, gate_acc, up_acc),
         .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4PairSimd(isa.tier, lhs, gate_rhs, up_rhs, gate_acc, up_acc),
     };
@@ -613,10 +626,16 @@ fn accumulateQ6_Kx4Rows(
     rhs: *const BlockQ6_Kx4,
     acc: *[q8_0_row_block]QKV4f32,
 ) void {
-    return switch (isa.tier) {
+    switch (isa.tier) {
+        .scalar => {
+            inline for (0..q8_0_row_block) |r| {
+                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                acc[r] = accumulateQ6_Kx4Scalar(lhs, rhs, acc[r]);
+            }
+        },
         .neon_i8mm, .neon_sdot => accumulateQ6_Kx4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
         .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4RowsSimd(isa.tier, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
-    };
+    }
 }
 
 fn accumulateQ6_Kx4RowsPair(
@@ -631,7 +650,7 @@ fn accumulateQ6_Kx4RowsPair(
 ) void {
     switch (isa.tier) {
         .neon_i8mm, .neon_sdot => return accumulateQ6_Kx4RowsPairAarch64(lhs_blocks, row_start, blocks_per_row, block_index, gate_rhs, up_rhs, gate_acc, up_acc),
-        .x86_vnni, .x86_avx2, .portable => {
+        .x86_vnni, .x86_avx2, .portable, .scalar => {
             inline for (0..q8_0_row_block) |r| {
                 const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
                 const pair = accumulateQ6_Kx4Pair(lhs, gate_rhs, up_rhs, gate_acc[r], up_acc[r]);
@@ -888,6 +907,7 @@ inline fn dotQ6Kx4Groups(comptime tier: isa.Tier, acc: QKV8i32, w: Q6Kx4WeightCh
         .x86_avx2 => common.maddubsDotGroupsI32x8(acc, w, a),
         .portable => common.dotI8GroupsWidenI32x8(acc, w, a),
         .neon_i8mm, .neon_sdot => @compileError("dotQ6Kx4Groups: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
+        .scalar => @compileError("dotQ6Kx4Groups: the scalar tier takes accumulateQ6_Kx4Scalar"),
     };
 }
 
@@ -1091,6 +1111,7 @@ fn dotQ6_KGroupI32(w: *const BlockQ6_K, a: *const BlockQ8_K, comptime chunk: usi
             const product_i32: common.QKV16i32 = @intCast(w_i16 * a_i16);
             return @reduce(.Add, product_i32);
         },
+        .scalar => @compileError("dotQ6_KGroupI32: the scalar tier takes dotQ6_KQ8_KScalar"),
     }
 }
 

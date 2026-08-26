@@ -310,7 +310,7 @@ pub fn matmulQ8_0RhsTile(
 ) void {
     switch (isa.tier) {
         .neon_i8mm, .neon_sdot => return matmulQ8_0RhsTileAarch64(out, lhs_blocks, rhs, n, r0, r1, c0, c1),
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
 
     const blocks_per_row = rhs.rows.blocks_per_row;
@@ -807,7 +807,7 @@ pub fn vecDotQ8_0Q8_0(a: []const BlockQ8_0, b: []const BlockQ8_0) f32 {
             }
             return @reduce(.Add, acc);
         },
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
     var acc: f32 = 0;
     for (a, b) |*ab, *bb| acc += dotQ8_0Q8_0(ab, bb);
@@ -830,7 +830,7 @@ pub fn vecDotQ8_0Q8_0Pair(a0: []const BlockQ8_0, a1: []const BlockQ8_0, b: []con
             }
             return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
         },
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
     var acc0: f32 = 0;
     var acc1: f32 = 0;
@@ -876,7 +876,7 @@ pub fn vecDotQ8_0Q8_0x2(q: []const BlockQ8_0, q_scales: []const f32, k0: []const
             }
             return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
         },
-        .x86_vnni, .x86_avx2, .portable => return .{ vecDotQ8_0Q8_0(q, k0), vecDotQ8_0Q8_0(q, k1) },
+        .x86_vnni, .x86_avx2, .portable, .scalar => return .{ vecDotQ8_0Q8_0(q, k0), vecDotQ8_0Q8_0(q, k1) },
     }
 }
 
@@ -932,7 +932,7 @@ pub fn vecDotQ8_0Q8_0Pairx2(
             }
             return .{ @reduce(.Add, acc00), @reduce(.Add, acc10), @reduce(.Add, acc01), @reduce(.Add, acc11) };
         },
-        .x86_vnni, .x86_avx2, .portable => {
+        .x86_vnni, .x86_avx2, .portable, .scalar => {
             const a = vecDotQ8_0Q8_0Pair(q0, q1, k0);
             const b = vecDotQ8_0Q8_0Pair(q0, q1, k1);
             return .{ a[0], a[1], b[0], b[1] };
@@ -1062,7 +1062,7 @@ fn dotQ8_0Q8_0(a: *const BlockQ8_0, b: *const BlockQ8_0) f32 {
                 common.dotI8x16Portable(@bitCast(b.qs[16..32].*), @bitCast(a.qs[16..32].*));
             return @as(f32, @floatFromInt(dot)) * d;
         },
-        .neon_i8mm, .neon_sdot, .portable => return @as(f32, @floatFromInt(common.i8DotI32(&a.qs, &b.qs))) * d,
+        .neon_i8mm, .neon_sdot, .portable, .scalar => return @as(f32, @floatFromInt(common.i8DotI32(&a.qs, &b.qs))) * d,
     }
 }
 
@@ -1094,6 +1094,7 @@ fn accumulateQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32
 /// ADD sequence — and therefore the results — bitwise unchanged.
 fn contributionQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
     return switch (isa.tier) {
+        .scalar => accumulateQ8_0x4Scalar(lhs, rhs, @splat(0)),
         .neon_i8mm, .neon_sdot => contributionQ8_0x4Aarch64(lhs, rhs),
         .x86_vnni => contributionQ8_0x4Vnni(lhs, rhs),
         .x86_avx2 => contributionQ8_0x4Avx2(lhs, rhs),
@@ -1111,7 +1112,7 @@ fn accumulateQ8_0x4Rows(
 ) void {
     switch (isa.tier) {
         .neon_i8mm, .neon_sdot => return accumulateQ8_0x4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
-        .x86_vnni, .x86_avx2, .portable => {
+        .x86_vnni, .x86_avx2, .portable, .scalar => {
             inline for (0..common.q8_0_row_block) |r| {
                 const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
                 acc[r] = accumulateQ8_0x4(lhs, rhs, acc[r]);
@@ -1183,6 +1184,7 @@ fn accumulateQ8_0x4RowsAarch64(
 
 fn accumulateQ8_0x4Packed(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_0x4, acc: *[4]QKV4f32) void {
     return switch (isa.tier) {
+        .scalar => accumulateQ8_0x4PackedScalar(lhs, rhs, acc),
         .neon_i8mm, .neon_sdot => accumulateQ8_0x4PackedAarch64(lhs, rhs, acc),
         .x86_vnni => accumulateQ8_0x4PackedVnni(lhs, rhs, acc),
         .x86_avx2 => accumulateQ8_0x4PackedAvx2(lhs, rhs, acc),
@@ -1247,6 +1249,10 @@ fn accumulateQ8_0x4PackedDual(
     acc_b: *[4]QKV4f32,
 ) void {
     switch (isa.tier) {
+        .scalar => {
+            accumulateQ8_0x4PackedScalar(lhs_a, rhs, acc_a);
+            accumulateQ8_0x4PackedScalar(lhs_b, rhs, acc_b);
+        },
         .neon_i8mm, .neon_sdot => accumulateQ8_0x4PackedDualAarch64(lhs_a, lhs_b, rhs, acc_a, acc_b),
         .x86_vnni => accumulateQ8_0x4PackedDualVnni(lhs_a, lhs_b, rhs, acc_a, acc_b),
         .x86_avx2 => accumulateQ8_0x4PackedDualAvx2(lhs_a, lhs_b, rhs, acc_a, acc_b),

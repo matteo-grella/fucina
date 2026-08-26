@@ -4,8 +4,15 @@
 //! `pc: ParallelConfig` first and ignore it (every kernel here runs
 //! serially). Routing shared by both backends (im2col, the Winograd
 //! transforms, the conv2d/pool2d backward loops) reuses the `vector/`
-//! implementation serially; everything with a SIMD counterpart is an
-//! independent scalar loop. `parity_test.zig` holds the two in agreement.
+//! implementation serially; kernels with a SIMD counterpart are independent
+//! scalar loops here. The quantized GEMM entries forward into the `quant/`
+//! format kernels, whose arm is `backend/isa.zig`'s comptime tier: on
+//! `-Dbackend=scalar` builds that tier is `.scalar` and every format
+//! resolves to its plain `accumulate*Scalar`/`dot*Scalar` reference, so the
+//! forwarding is the scalar specification by construction (on native builds
+//! the same forwarding reaches the SIMD tiles). `parity_test.zig` holds the
+//! two providers together, including the quantized family against a
+//! dequantized f32 reference.
 const std = @import("std");
 const ops = @import("ops.zig");
 const packed_matmul = @import("packed.zig");

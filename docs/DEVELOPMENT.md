@@ -136,6 +136,11 @@ algorithms without accepting that existing checkpoints break.
 
 The scalar backend (`-Dbackend=scalar`) is the executable reference: native
 and scalar must agree, and `src/backend/parity_test.zig` holds them together.
+The quantized GEMM family selects its plain scalar accumulators on that leg
+through `backend/isa.zig`'s `scalar` tier (formats without a scalar twin
+take their exact-integer portable arm), and `parity_test.zig` checks the
+quantized cases (q8_0/q4_k/q5_k/q6_k/tq2_0 and the packed x4/x8 arms)
+against a dequantized f32 reference on both providers.
 The scalar leg runs before merge when the change touches `src/backend/` or
 `src/exec/` (once, on the final code — it is slow by design); other changes
 skip it, since `parity_test.zig` already diffs both backends inside every
@@ -208,7 +213,9 @@ template (e.g. `softmax` for a row op, `maxPool2d` for a pool op).
    `generic_names`/`pool_free_names` as applicable). `conform` then forces
    both providers.
 3. `src/backend/cpu.zig` — the scalar reference implementation. This is
-   the specification (see 1.10).
+   the specification (see 1.10; for the quantized GEMM family the
+   reference is the `*Scalar` accumulator in `backend/quant/`, selected
+   by the `scalar` tier of `backend/isa.zig`).
 4. `src/backend/native.zig` + `src/backend/vector/<domain>.zig` — the
    SIMD implementation, `pc`-first signature.
 5. `src/backend/parity_test.zig` or the domain's `vector/*_tests.zig` —

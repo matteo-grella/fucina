@@ -431,6 +431,7 @@ pub fn matmulQ5_KCompactQ8_Kx4ColOuter(
 
 fn accumulateQ5_Kx8(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
     return switch (isa.tier) {
+        .scalar => accumulateQ5_Kx8Scalar(lhs, rhs, acc),
         .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Aarch64(lhs, rhs, acc),
         .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Tier(isa.tier, lhs, rhs, acc),
     };
@@ -452,6 +453,7 @@ fn accumulateQ5_Kx8Rows(
 
 fn accumulateQ5_Kx8Q8_Kx4(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     return switch (isa.tier) {
+        .scalar => accumulateQ5_Kx8Q8_Kx4Scalar(lhs, rhs, acc),
         .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Q8_Kx4Sdot(lhs, rhs, acc),
         .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Q8_Kx4Tier(isa.tier, lhs, rhs, acc),
     };
@@ -842,6 +844,7 @@ fn dotQ5_KQ8_K(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
             return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
         },
         .x86_vnni, .x86_avx2, .portable => return dotQ5_KQ8_KSimd(isa.tier, w, a),
+        .scalar => return dotQ5_KQ8_KScalar(w, a),
     }
 }
 
@@ -946,6 +949,7 @@ fn dotQ5_KSubblockI32(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K, compti
             const a1: @Vector(16, i32) = @intCast(a1_i8);
             return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
         },
+        .scalar => @compileError("dotQ5_KSubblockI32: the scalar tier takes dotQ5_KQ8_KScalar"),
     }
 }
 

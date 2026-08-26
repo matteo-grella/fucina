@@ -625,6 +625,7 @@ pub inline fn dotGroupsI32x8(comptime tier: isa.Tier, acc: QKV8i32, w: QKV32u8, 
         .x86_avx2 => maddubsDotGroupsI32x8(acc, w, a),
         .portable => dotI8GroupsWidenI32x8(acc, @bitCast(w), a),
         .neon_i8mm, .neon_sdot => @compileError("dotGroupsI32x8: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
+        .scalar => @compileError("dotGroupsI32x8: the scalar tier takes the formats' *Scalar twins"),
     };
 }
 
@@ -644,6 +645,11 @@ pub fn dotUnpackedI8x32(w0: QKV16i8, w1: QKV16i8, a0: QKV16i8, a1: QKV16i8) i32 
         // so a is in [-127,127]: inside the sign-trick exactness domain; see
         // dotI8x16Portable).
         .x86_vnni, .x86_avx2, .portable => return dotI8x16Portable(w0, a0) + dotI8x16Portable(w1, a1),
+        .scalar => {
+            var acc: i32 = 0;
+            inline for (0..16) |i| acc += @as(i32, w0[i]) * @as(i32, a0[i]) + @as(i32, w1[i]) * @as(i32, a1[i]);
+            return acc;
+        },
     }
 }
 
@@ -684,6 +690,7 @@ pub inline fn dot4RowsSubblockQ8_Kx4(a: *const types.BlockQ8_Kx4, comptime subbl
             return dot;
         },
         .x86_vnni, .x86_avx2, .portable => return dot4RowsSubblockQ8_Kx4Simd(isa.tier, a, subblock, wv),
+        .scalar => return dot4RowsSubblockQ8_Kx4Scalar(a, subblock, wv),
     }
 }
 

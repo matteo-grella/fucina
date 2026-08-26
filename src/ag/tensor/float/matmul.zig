@@ -393,8 +393,8 @@ pub fn Ops(comptime Self: type) type {
                 // (including -Dbackend=scalar): the mul-free f32 kernel is
                 // pure fixed-order @Vector bitwise ops + adds, bitwise-
                 // identical on every target by construction, so the scalar
-                // leg exercises the same numerics (unlike the quant matmuls,
-                // which keep a scalar reference in cpu.zig).
+                // leg exercises the same numerics (the quant matmuls instead
+                // select their scalar accumulators through backend/isa.zig).
                 backend_mod.vector_impl.matmul_quant.matmul2DTQ2_0F32RhsInto(config, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
                 if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) break :forward product;
                 const reshaped = try product.reshape(result_shape[0..]);

@@ -76,14 +76,14 @@ inline fn blockDotI32(w: *const dtype_mod.BlockMXFP4, a_lo: common.QKV16i8, a_hi
             // vpsignb zeroes where the code is 0 — magnitude 0 there anyway.
             const adj = common.psignI8x32(a32, svec);
             var acc8: common.QKV8i32 = @splat(0);
-            acc8 = switch (isa.tier) {
-                .x86_vnni => common.dpbusdI32x8(acc8, mag, adj),
-                else => common.maddubsDotGroupsI32x8(acc8, mag, adj),
-            };
+            acc8 = if (comptime isa.tier == .x86_vnni)
+                common.dpbusdI32x8(acc8, mag, adj)
+            else
+                common.maddubsDotGroupsI32x8(acc8, mag, adj);
             return common.addHalvesI32x8(acc8);
         },
         // NEON `tbl`+`sdot`, or their exact portable twins.
-        .neon_i8mm, .neon_sdot, .portable => {
+        .neon_i8mm, .neon_sdot, .portable, .scalar => {
             const d = decodeBlock(&w.qs);
             var iacc: common.QKV4i32 = @splat(0);
             iacc = common.sdotI8x16(iacc, d.lo, a_lo);

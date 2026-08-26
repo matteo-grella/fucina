@@ -239,7 +239,9 @@ inline fn crumb32(q: QKV32u8, comptime lane: usize) QKV32u8 {
 inline fn dotGroups32(acc: common.QKV8i32, codes: QKV32u8, a: common.QKV32i8) common.QKV8i32 {
     return switch (isa.tier) {
         .x86_vnni => common.dpbusdI32x8(acc, codes, a),
-        // The maddubs primitive is the exact widening twin below AVX2.
+        // The maddubs primitive is the exact widening twin below AVX2; the
+        // scalar tier takes the widening form directly (no ISA asm).
+        .scalar => common.dotI8GroupsWidenI32x8(acc, @bitCast(codes), a),
         .x86_avx2, .portable => common.maddubsDotGroupsI32x8(acc, codes, a),
         .neon_i8mm, .neon_sdot => @compileError("dotGroups32: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
     };
@@ -297,7 +299,7 @@ inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *
             }
             return out;
         },
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
     var acc: [width]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 32 }) |j| {
@@ -518,7 +520,7 @@ inline fn x4BlockDot(w: *const types.BlockTQ2_0x4, a: *const dtype_mod.BlockQ8_K
             }
             return (accs[0] + accs[1]) + (accs[2] + accs[3]);
         },
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
     var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 128 }) |h| {
@@ -724,7 +726,7 @@ inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const dtype_mod
             }
             return (accs[0] + accs[1]) + (accs[2] + accs[3]);
         },
-        .x86_vnni, .x86_avx2, .portable => {},
+        .x86_vnni, .x86_avx2, .portable, .scalar => {},
     }
     var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for (0..8) |sub| {
@@ -959,7 +961,7 @@ inline fn q8_0BlockSum(a: *const dtype_mod.BlockQ8_0) i32 {
 /// (sdot), one 32-byte vector elsewhere (vpdpbusd/maddubs or portable twins).
 const Q2_0Codes = switch (isa.tier) {
     .neon_i8mm, .neon_sdot => struct { lo: common.QKV16i8, hi: common.QKV16i8 },
-    .x86_vnni, .x86_avx2, .portable => QKV32u8,
+    .x86_vnni, .x86_avx2, .portable, .scalar => QKV32u8,
 };
 
 /// Unpack sub-block `k` (elements k*32..k*32+32) of one Q2_0 block. Codes
@@ -971,7 +973,7 @@ inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
             .lo = @bitCast(q2_0Codes16(qs, k * 8)),
             .hi = @bitCast(q2_0Codes16(qs, k * 8 + 4)),
         },
-        .x86_vnni, .x86_avx2, .portable => q2_0Codes32(qs, k * 8),
+        .x86_vnni, .x86_avx2, .portable, .scalar => q2_0Codes32(qs, k * 8),
     };
 }
 
@@ -989,7 +991,7 @@ inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const dtype_mod.BlockQ8_0) i32 {
             acc = common.sdotI8x16(acc, codes.hi, a1);
             return @reduce(.Add, acc);
         },
-        .x86_vnni, .x86_avx2, .portable => {
+        .x86_vnni, .x86_avx2, .portable, .scalar => {
             const av: common.QKV32i8 = a.qs;
             var acc: common.QKV8i32 = @splat(0);
             acc = dotGroups32(acc, codes, av);

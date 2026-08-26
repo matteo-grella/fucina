@@ -8,9 +8,14 @@
 //! Resolution is comptime and target-driven: with no `-Dtarget` the build
 //! targets the compiling machine's exact CPU, a bare `-Dtarget` drops to the
 //! architecture baseline (portable on x86; sdot on aarch64, see below), and
-//! `-Dcpu` pins a model. Nothing here is a runtime dispatch.
+//! `-Dcpu` pins a model. `-Dbackend=scalar` overrides the hardware ladder
+//! with the `scalar` tier: the quantized kernels then select their plain
+//! scalar accumulators (the `accumulate*Scalar` / `dot*Scalar` twins), so the
+//! scalar provider's forwarding into the format files is the reference by
+//! construction. Nothing here is a runtime dispatch.
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 pub const is_aarch64 = builtin.cpu.arch == .aarch64;
 pub const is_x86_64 = builtin.cpu.arch == .x86_64;
@@ -65,8 +70,12 @@ pub const has_llvm_asm = builtin.zig_backend == .stage2_llvm;
 /// build. The NEON tiers dot with `sdot` lanes (`neon_i8mm` additionally
 /// selects the `smmla` packs); the x86 tiers are the grouped u8·i8 ymm dots
 /// (`x86_vnni` = vpdpbusd, `x86_avx2` = vpmaddubsw+vpmaddwd); `portable` is
-/// the universal exact widening `@Vector` form every other target takes.
+/// the universal exact widening `@Vector` form every other target takes;
+/// `scalar` (`-Dbackend=scalar` only) is the plain-loop reference: each
+/// format selects its `*Scalar` twin, and a format without one takes its
+/// exact-integer portable arm (bitwise the same sums, no ISA asm).
 pub const Tier = enum {
+    scalar,
     neon_i8mm,
     neon_sdot,
     x86_vnni,
@@ -74,7 +83,12 @@ pub const Tier = enum {
     portable,
 };
 
-pub const tier: Tier = if (has_aarch64_i8mm)
+/// The reference build: `-Dbackend=scalar`.
+pub const reference = build_options.backend_kind == .scalar;
+
+pub const tier: Tier = if (reference)
+    .scalar
+else if (has_aarch64_i8mm)
     .neon_i8mm
 else if (has_neon)
     .neon_sdot
@@ -87,10 +101,11 @@ else
 
 test "tier agrees with the capability booleans" {
     switch (tier) {
-        .neon_i8mm => try std.testing.expect(has_neon and has_aarch64_i8mm),
-        .neon_sdot => try std.testing.expect(has_neon and !has_aarch64_i8mm),
-        .x86_vnni => try std.testing.expect(!has_neon and has_x86_vnni_ymm),
-        .x86_avx2 => try std.testing.expect(!has_neon and !has_x86_vnni_ymm and has_x86_avx2),
-        .portable => try std.testing.expect(!has_neon and !has_x86_avx2),
+        .scalar => try std.testing.expect(reference),
+        .neon_i8mm => try std.testing.expect(!reference and has_neon and has_aarch64_i8mm),
+        .neon_sdot => try std.testing.expect(!reference and has_neon and !has_aarch64_i8mm),
+        .x86_vnni => try std.testing.expect(!reference and !has_neon and has_x86_vnni_ymm),
+        .x86_avx2 => try std.testing.expect(!reference and !has_neon and !has_x86_vnni_ymm and has_x86_avx2),
+        .portable => try std.testing.expect(!reference and !has_neon and !has_x86_avx2),
     }
 }

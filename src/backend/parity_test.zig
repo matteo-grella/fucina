@@ -585,6 +585,281 @@ const Impl = struct {
             try expectClose(zc[0..c], zn[0..c], elementwise_tolerance);
         }
     }
+
+    // ------------------------------------------------------------------
+    // Quantized GEMM family: encode a random RHS, run both providers'
+    // entries (the plain containers and the packed x4/x8 arms), and check
+    // each against a dequantized f32 reference accumulated in f64. The
+    // kernels' integer dots are exact, so the only divergence is the f32
+    // epilogue's association order — tolerance scales with k like the dense
+    // matmul cases above. On `-Dbackend=scalar` builds the format kernels
+    // resolve to their scalar accumulators (`isa.tier == .scalar`), so this
+    // suite is what actually holds the scalar reference and the SIMD tiles
+    // to the same answer.
+
+    const qm = @import("quant.zig");
+    const dtype_mod = @import("../dtype.zig");
+    const DType = dtype_mod.DType;
+    const qk_k = qm.types.qk_k_block_size;
+
+    // m hits the single-row, generic, and x4-LHS arms (native's
+    // q4_k_x4_min_rows = 4; m = 16 also drives the Q8_0x4 packed-LHS path);
+    // k covers one and two K-quant super-blocks.
+    const quant_sizes = [_][3]usize{ .{ 1, 256, 8 }, .{ 3, 512, 16 }, .{ 16, 512, 16 } };
+
+    fn quantRef(allocator: Allocator, lhs_deq: []const f32, rhs_deq: []const f32, m: usize, n: usize, k: usize) ![]f32 {
+        const ref = try allocator.alloc(f32, m * n);
+        for (0..m) |i| {
+            for (0..n) |j| {
+                var acc: f64 = 0;
+                for (0..k) |t| acc += @as(f64, lhs_deq[i * k + t]) * @as(f64, rhs_deq[j * k + t]);
+                ref[i * n + j] = @floatCast(acc);
+            }
+        }
+        return ref;
+    }
+
+    fn expectQuantClose(ref: []const f32, actual: []const f32, k: usize) !void {
+        const tol = matmul_tolerance_scale * @as(f32, @floatFromInt(k));
+        for (ref, actual, 0..) |r, x, i| {
+            std.testing.expectApproxEqAbs(r, x, tol) catch |err| {
+                std.debug.print("quant parity mismatch at index {}: ref={d} got={d} (tol={d})\n", .{ i, r, x, tol });
+                return err;
+            };
+        }
+    }
+
+    /// Dequantize the [m, k] LHS exactly as the Q8_K-activation kernels see it.
+    fn lhsDeqQ8_K(allocator: Allocator, a: *const Tensor, m: usize, k: usize) ![]f32 {
+        const bpr = k / qk_k;
+        const blocks = try qm.q8k.quantizeRowsQ8_K(allocator, a);
+        defer allocator.free(blocks);
+        const deq = try allocator.alloc(f32, m * k);
+        errdefer allocator.free(deq);
+        var buf: [qk_k]f32 = undefined;
+        for (0..m) |i| {
+            for (0..bpr) |bi| {
+                qm.q8k.dequantizeBlockQ8_KInto(&buf, &blocks[i * bpr + bi]);
+                @memcpy(deq[i * k + bi * qk_k ..][0..qk_k], &buf);
+            }
+        }
+        return deq;
+    }
+
+    /// Dequantize the [m, k] LHS exactly as the Q8_0-activation kernels see it.
+    fn lhsDeqQ8_0(allocator: Allocator, a: *const Tensor, m: usize, k: usize) ![]f32 {
+        var rows = try qm.q8k.quantizeRowsQ8_0(allocator, a);
+        defer rows.deinit();
+        const deq = try allocator.alloc(f32, m * k);
+        errdefer allocator.free(deq);
+        for (0..m) |i| try qm.q8k.dequantizeRowQ8_0Into(deq[i * k ..][0..k], rows.rowBlocks(i));
+        return deq;
+    }
+
+    fn runBothQuant(allocator: Allocator, a: *const Tensor, rhs: qm.AnyQuantizedMatmulRhs, ref: []const f32, m: usize, n: usize, k: usize) !void {
+        var cpu_out = try Tensor.zeros(allocator, &.{ m, n });
+        defer cpu_out.deinit();
+        try cpu.matmul2DQuantizedRhs(.{}, allocator, &cpu_out, a, rhs, m, n, k);
+        try expectQuantClose(ref, cpu_out.dataConst(), k);
+        var native_out = try Tensor.zeros(allocator, &.{ m, n });
+        defer native_out.deinit();
+        try native.matmul2DQuantizedRhs(.{}, allocator, &native_out, a, rhs, m, n, k);
+        try expectQuantClose(ref, native_out.dataConst(), k);
+    }
+
+    fn runBothPacked(allocator: Allocator, a: *const Tensor, pack: anytype, ref: []const f32, m: usize, n: usize, k: usize) !void {
+        var cpu_out = try Tensor.zeros(allocator, &.{ m, n });
+        defer cpu_out.deinit();
+        try cpu.matmulPacked(.{}, allocator, &cpu_out, a, pack, m, n, k);
+        try expectQuantClose(ref, cpu_out.dataConst(), k);
+        var native_out = try Tensor.zeros(allocator, &.{ m, n });
+        defer native_out.deinit();
+        try native.matmulPacked(.{}, allocator, &native_out, a, pack, m, n, k);
+        try expectQuantClose(ref, native_out.dataConst(), k);
+    }
+
+    fn checkQ8_0Parity(allocator: Allocator, rng: std.Random) !void {
+        for (quant_sizes) |dims| {
+            const m = dims[0];
+            const k = dims[1];
+            const n = dims[2];
+
+            const a_data = try allocator.alloc(f32, m * k);
+            defer allocator.free(a_data);
+            fillRandom(rng, a_data);
+            var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_data);
+            defer a.deinit();
+
+            const b_data = try allocator.alloc(f32, k * n);
+            defer allocator.free(b_data);
+            fillRandom(rng, b_data);
+            var b = try Tensor.fromSlice(allocator, &.{ k, n }, b_data);
+            defer b.deinit();
+            var rhs = try qm.quantizeMatmulRhsQ8_0(allocator, &b);
+            defer rhs.deinit();
+
+            const rhs_deq = try allocator.alloc(f32, n * k);
+            defer allocator.free(rhs_deq);
+            for (0..n) |j| try qm.q8k.dequantizeRowQ8_0Into(rhs_deq[j * k ..][0..k], rhs.rows.rowBlocks(j));
+            const lhs_deq = try lhsDeqQ8_0(allocator, &a, m, k);
+            defer allocator.free(lhs_deq);
+            const ref = try quantRef(allocator, lhs_deq, rhs_deq, m, n, k);
+            defer allocator.free(ref);
+
+            try runBothQuant(allocator, &a, .{ .q8_0 = &rhs }, ref, m, n, k);
+
+            var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ8_0x4, allocator, rhs.rows.blocks, n, k, rhs.rows.blocks_per_row);
+            defer x4.deinit();
+            try runBothPacked(allocator, &a, &x4, ref, m, n, k);
+        }
+    }
+
+    fn checkKQuantParity(comptime dt: DType, allocator: Allocator, rng: std.Random) !void {
+        for (quant_sizes) |dims| {
+            const m = dims[0];
+            const k = dims[1];
+            const n = dims[2];
+            const bpc = k / qk_k;
+
+            const a_data = try allocator.alloc(f32, m * k);
+            defer allocator.free(a_data);
+            fillRandom(rng, a_data);
+            var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_data);
+            defer a.deinit();
+
+            // Encode the RHS column-wise from a random [k, n] matrix.
+            const b_data = try allocator.alloc(f32, k * n);
+            defer allocator.free(b_data);
+            fillRandom(rng, b_data);
+            const blocks = try allocator.alloc(dtype_mod.Storage(dt), n * bpc);
+            defer allocator.free(blocks);
+            const col = try allocator.alloc(f32, k);
+            defer allocator.free(col);
+            for (0..n) |j| {
+                for (0..k) |t| col[t] = b_data[t * n + j];
+                switch (dt) {
+                    .q4_k => try qm.q4_k.quantizeRowQ4_KInto(blocks[j * bpc ..][0..bpc], col),
+                    .q5_k => try qm.q5_k.quantizeRowQ5_KInto(blocks[j * bpc ..][0..bpc], col),
+                    .q6_k => try qm.q6_k.quantizeRowQ6_KInto(blocks[j * bpc ..][0..bpc], col),
+                    else => comptime unreachable,
+                }
+            }
+
+            const rhs_deq = try allocator.alloc(f32, n * k);
+            defer allocator.free(rhs_deq);
+            var buf: [qk_k]f32 = undefined;
+            for (0..n) |j| {
+                for (0..bpc) |bi| {
+                    switch (dt) {
+                        .q4_k => qm.q4_k.dequantizeBlockQ4_KInto(&buf, &blocks[j * bpc + bi]),
+                        .q5_k => qm.q5_k.dequantizeBlockQ5_KInto(&buf, &blocks[j * bpc + bi]),
+                        .q6_k => qm.q6_k.dequantizeBlockQ6_KInto(&buf, &blocks[j * bpc + bi]),
+                        else => comptime unreachable,
+                    }
+                    @memcpy(rhs_deq[j * k + bi * qk_k ..][0..qk_k], &buf);
+                }
+            }
+            const lhs_deq = try lhsDeqQ8_K(allocator, &a, m, k);
+            defer allocator.free(lhs_deq);
+            const ref = try quantRef(allocator, lhs_deq, rhs_deq, m, n, k);
+            defer allocator.free(ref);
+
+            // Plain per-column container.
+            var rhs = switch (dt) {
+                .q4_k => try qm.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, k, n, blocks),
+                .q5_k => try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks),
+                .q6_k => try qm.q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, k, n, blocks),
+                else => comptime unreachable,
+            };
+            defer rhs.deinit();
+            const any: qm.AnyQuantizedMatmulRhs = switch (dt) {
+                .q4_k => .{ .q4_k = &rhs },
+                .q5_k => .{ .q5_k = &rhs },
+                .q6_k => .{ .q6_k = &rhs },
+                else => comptime unreachable,
+            };
+            try runBothQuant(allocator, &a, any, ref, m, n, k);
+
+            // Packed lane arms.
+            switch (dt) {
+                .q4_k => {
+                    var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ4_Kx4, allocator, blocks, n, k, bpc);
+                    defer x4.deinit();
+                    try runBothPacked(allocator, &a, &x4, ref, m, n, k);
+                    var x8 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ4_Kx8, allocator, blocks, n, k, bpc);
+                    defer x8.deinit();
+                    try runBothPacked(allocator, &a, &x8, ref, m, n, k);
+                },
+                .q5_k => {
+                    var x8 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ5_Kx8, allocator, blocks, n, k, bpc);
+                    defer x8.deinit();
+                    try runBothPacked(allocator, &a, &x8, ref, m, n, k);
+                },
+                .q6_k => {
+                    var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ6_Kx4, allocator, blocks, n, k, bpc);
+                    defer x4.deinit();
+                    try runBothPacked(allocator, &a, &x4, ref, m, n, k);
+                },
+                else => comptime unreachable,
+            }
+        }
+    }
+
+    fn checkTQ2_0Parity(allocator: Allocator, rng: std.Random) !void {
+        for (quant_sizes) |dims| {
+            const m = dims[0];
+            const k = dims[1];
+            const n = dims[2];
+
+            const a_data = try allocator.alloc(f32, m * k);
+            defer allocator.free(a_data);
+            fillRandom(rng, a_data);
+            var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_data);
+            defer a.deinit();
+
+            // TQ2_0 encodes row-major [n][k] (RHS rows are output columns).
+            const wt = try allocator.alloc(f32, n * k);
+            defer allocator.free(wt);
+            fillRandom(rng, wt);
+            var rhs = try qm.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, wt);
+            defer rhs.deinit();
+
+            const rhs_deq = try allocator.alloc(f32, n * k);
+            defer allocator.free(rhs_deq);
+            for (0..n) |j| try qm.cold.dequantizeRowTQ2_0Into(rhs_deq[j * k ..][0..k], rhs.rows.rowBlocks(j));
+            const lhs_deq = try lhsDeqQ8_K(allocator, &a, m, k);
+            defer allocator.free(lhs_deq);
+            const ref = try quantRef(allocator, lhs_deq, rhs_deq, m, n, k);
+            defer allocator.free(ref);
+
+            try runBothQuant(allocator, &a, .{ .tq2_0 = &rhs }, ref, m, n, k);
+        }
+    }
+
+    test "parity: quantized GEMM q8_0 plain + x4 pack vs dequantized reference" {
+        var prng = std.Random.DefaultPrng.init(0x9800);
+        try checkQ8_0Parity(std.testing.allocator, prng.random());
+    }
+
+    test "parity: quantized GEMM q4_k plain + x4/x8 packs vs dequantized reference" {
+        var prng = std.Random.DefaultPrng.init(0x94a0);
+        try checkKQuantParity(.q4_k, std.testing.allocator, prng.random());
+    }
+
+    test "parity: quantized GEMM q5_k plain + x8 pack vs dequantized reference" {
+        var prng = std.Random.DefaultPrng.init(0x95a0);
+        try checkKQuantParity(.q5_k, std.testing.allocator, prng.random());
+    }
+
+    test "parity: quantized GEMM q6_k plain + x4 pack vs dequantized reference" {
+        var prng = std.Random.DefaultPrng.init(0x96a0);
+        try checkKQuantParity(.q6_k, std.testing.allocator, prng.random());
+    }
+
+    test "parity: quantized GEMM tq2_0 vs dequantized reference" {
+        var prng = std.Random.DefaultPrng.init(0x9720);
+        try checkTQ2_0Parity(std.testing.allocator, prng.random());
+    }
 };
 
 test {
