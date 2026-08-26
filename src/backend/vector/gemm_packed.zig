@@ -7,13 +7,13 @@
 //! inference shapes from starving a row-parallel team.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const isa = @import("../isa.zig");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
 
 const output_tile = 4;
-const max_input_tile = if (builtin.cpu.arch == .aarch64) 6 else 3;
+const max_input_tile = if (isa.is_aarch64) 6 else 3;
 const tasks_per_participant = 3;
 const max_tasks = parallel.vector_max_threads * tasks_per_participant;
 
@@ -91,7 +91,7 @@ fn gemmPackedNtCols(
     // vector. For short-k m>=6 cells, a 6x2 tile revisits each RHS panel half
     // as often as 3x4 without exceeding the sixteen-vector-register file.
     // Long-k cells remain 3x4: their extra LHS load instruction is measurable.
-    if (comptime builtin.cpu.arch == .x86_64) {
+    if (comptime isa.is_x86_64) {
         if (m >= 6 and k <= 128) {
             gemmPackedNtColsX2(6, out, lhs, rhs, m, n, k, col_start, col_end);
             return;

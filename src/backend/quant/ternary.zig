@@ -23,8 +23,8 @@
 //! round-clip) for straight-through-estimator training and ternary-native ES.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
+const isa = @import("../isa.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
 
@@ -237,8 +237,12 @@ inline fn crumb32(q: QKV32u8, comptime lane: usize) QKV32u8 {
 }
 
 inline fn dotGroups32(acc: common.QKV8i32, codes: QKV32u8, a: common.QKV32i8) common.QKV8i32 {
-    if (comptime common.has_x86_vnni_ymm) return common.dpbusdI32x8(acc, codes, a);
-    return common.maddubsDotGroupsI32x8(acc, codes, a);
+    return switch (isa.tier) {
+        .x86_vnni => common.dpbusdI32x8(acc, codes, a),
+        // The maddubs primitive is the exact widening twin below AVX2.
+        .x86_avx2, .portable => common.maddubsDotGroupsI32x8(acc, codes, a),
+        .neon_i8mm, .neon_sdot => @compileError("dotGroups32: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
+    };
 }
 
 /// sum over the 16 per-16-element activation sums = sum(a) for the block.
@@ -255,42 +259,45 @@ inline fn blockBsumTotal(a: *const dtype_mod.BlockQ8_K) i32 {
 /// 256*2*127 = 65024), so all arms and widths agree bitwise — the fused
 /// 4-column tile and the width-1 tail take the same body.
 inline fn blockCodeDotW(comptime width: usize, w: [width]*const BlockTQ2_0, a: *const dtype_mod.BlockQ8_K) [width]i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        // In-place crumbs (see `crumb16InPlace`): lanes 0 and 3 carry no
-        // factor and share an accumulator; lanes 1 and 2 accumulate 4x and
-        // 16x the true dot and are divided once at the reduce — exact.
-        var acc0: [width]QKV4i32 = @splat(@splat(0));
-        var acc1: [width]QKV4i32 = @splat(@splat(0));
-        var acc2: [width]QKV4i32 = @splat(@splat(0));
-        inline for ([_]usize{ 0, 32 }) |j| {
-            var q0: [width]common.QKV16u8 = undefined;
-            var q1: [width]common.QKV16u8 = undefined;
-            inline for (0..width) |ci| {
-                q0[ci] = w[ci].qs[j..][0..16].*;
-                q1[ci] = w[ci].qs[j + 16 ..][0..16].*;
-            }
-            inline for (0..4) |lane| {
-                const a0: common.QKV16i8 = a.qs[j * 4 + lane * 32 ..][0..16].*;
-                const a1: common.QKV16i8 = a.qs[j * 4 + lane * 32 + 16 ..][0..16].*;
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            // In-place crumbs (see `crumb16InPlace`): lanes 0 and 3 carry no
+            // factor and share an accumulator; lanes 1 and 2 accumulate 4x and
+            // 16x the true dot and are divided once at the reduce — exact.
+            var acc0: [width]QKV4i32 = @splat(@splat(0));
+            var acc1: [width]QKV4i32 = @splat(@splat(0));
+            var acc2: [width]QKV4i32 = @splat(@splat(0));
+            inline for ([_]usize{ 0, 32 }) |j| {
+                var q0: [width]common.QKV16u8 = undefined;
+                var q1: [width]common.QKV16u8 = undefined;
                 inline for (0..width) |ci| {
-                    const dst = switch (lane) {
-                        0, 3 => &acc0[ci],
-                        1 => &acc1[ci],
-                        else => &acc2[ci],
-                    };
-                    dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q0[ci], lane), a0);
-                    dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q1[ci], lane), a1);
+                    q0[ci] = w[ci].qs[j..][0..16].*;
+                    q1[ci] = w[ci].qs[j + 16 ..][0..16].*;
+                }
+                inline for (0..4) |lane| {
+                    const a0: common.QKV16i8 = a.qs[j * 4 + lane * 32 ..][0..16].*;
+                    const a1: common.QKV16i8 = a.qs[j * 4 + lane * 32 + 16 ..][0..16].*;
+                    inline for (0..width) |ci| {
+                        const dst = switch (lane) {
+                            0, 3 => &acc0[ci],
+                            1 => &acc1[ci],
+                            else => &acc2[ci],
+                        };
+                        dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q0[ci], lane), a0);
+                        dst.* = common.sdotI8x16(dst.*, crumb16InPlace(q1[ci], lane), a1);
+                    }
                 }
             }
-        }
-        var out: [width]i32 = undefined;
-        inline for (0..width) |ci| {
-            const total = acc0[ci] +
-                (acc1[ci] >> @as(QKV4i32, @splat(2))) +
-                (acc2[ci] >> @as(QKV4i32, @splat(4)));
-            out[ci] = @reduce(.Add, total);
-        }
-        return out;
+            var out: [width]i32 = undefined;
+            inline for (0..width) |ci| {
+                const total = acc0[ci] +
+                    (acc1[ci] >> @as(QKV4i32, @splat(2))) +
+                    (acc2[ci] >> @as(QKV4i32, @splat(4)));
+                out[ci] = @reduce(.Add, total);
+            }
+            return out;
+        },
+        .x86_vnni, .x86_avx2, .portable => {},
     }
     var acc: [width]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 32 }) |j| {
@@ -488,27 +495,30 @@ pub fn matmulTQ2_0X4RhsTileAcc(
 /// folded 8->4 once per block (exact i32). Same four-accumulator
 /// independence, mirroring the Q4_Kx8 x86 shape.
 inline fn x4BlockDot(w: *const types.BlockTQ2_0x4, a: *const dtype_mod.BlockQ8_K) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var accs: [4]QKV4i32 = @splat(@splat(0));
-        inline for ([_]usize{ 0, 128 }) |h| {
-            var wv: [8]common.QKV16u8 = undefined;
-            inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
-            inline for (0..4) |lane| {
-                const a0: common.QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
-                const a1: common.QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
-                inline for (0..4) |fg| {
-                    accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg], lane), a0);
-                    accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg + 4], lane), a1);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var accs: [4]QKV4i32 = @splat(@splat(0));
+            inline for ([_]usize{ 0, 128 }) |h| {
+                var wv: [8]common.QKV16u8 = undefined;
+                inline for (0..8) |fg| wv[fg] = w.qs[h + fg * 16 ..][0..16].*;
+                inline for (0..4) |lane| {
+                    const a0: common.QKV16i8 = a.qs[h + lane * 32 ..][0..16].*;
+                    const a1: common.QKV16i8 = a.qs[h + lane * 32 + 16 ..][0..16].*;
+                    inline for (0..4) |fg| {
+                        accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg], lane), a0);
+                        accs[lane] = common.sdotI8x16Lane(fg, accs[lane], crumb16InPlace(wv[fg + 4], lane), a1);
+                    }
                 }
             }
-        }
-        // Undo the in-place crumbs' 4^lane factor (exact: arithmetic shift
-        // of a sum in which every term is divisible by 4^lane). Lane 3's
-        // bare `>> 6` already yields plain crumbs — no factor to undo.
-        inline for (1..3) |lane| {
-            accs[lane] = accs[lane] >> @as(QKV4i32, @splat(2 * lane));
-        }
-        return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+            // Undo the in-place crumbs' 4^lane factor (exact: arithmetic shift
+            // of a sum in which every term is divisible by 4^lane). Lane 3's
+            // bare `>> 6` already yields plain crumbs — no factor to undo.
+            inline for (1..3) |lane| {
+                accs[lane] = accs[lane] >> @as(QKV4i32, @splat(2 * lane));
+            }
+            return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+        },
+        .x86_vnni, .x86_avx2, .portable => {},
     }
     var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for ([_]usize{ 0, 128 }) |h| {
@@ -700,18 +710,21 @@ pub fn packMatmulRhsTQ2_0FoldedRows(
 /// combined-code sums. Same accumulator discipline as x4BlockDot (four
 /// independent chains — here per dword-group).
 inline fn foldedBlockDot(w: *const types.BlockTQ2_0Foldedx4, a: *const dtype_mod.BlockQ8_K) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var accs: [4]QKV4i32 = @splat(@splat(0));
-        inline for (0..8) |sub| {
-            const a_lo: common.QKV16i8 = a.qs[sub * 32 ..][0..16].*;
-            const a_hi: common.QKV16i8 = a.qs[sub * 32 + 16 ..][0..16].*;
-            inline for (0..4) |jg| {
-                const v: common.QKV16u8 = w.qs[sub * 64 + jg * 16 ..][0..16].*;
-                accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4LowNibbleI8(v), a_lo);
-                accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4HighNibbleI8(v), a_hi);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var accs: [4]QKV4i32 = @splat(@splat(0));
+            inline for (0..8) |sub| {
+                const a_lo: common.QKV16i8 = a.qs[sub * 32 ..][0..16].*;
+                const a_hi: common.QKV16i8 = a.qs[sub * 32 + 16 ..][0..16].*;
+                inline for (0..4) |jg| {
+                    const v: common.QKV16u8 = w.qs[sub * 64 + jg * 16 ..][0..16].*;
+                    accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4LowNibbleI8(v), a_lo);
+                    accs[jg] = common.sdotI8x16Lane(jg, accs[jg], common.q4HighNibbleI8(v), a_hi);
+                }
             }
-        }
-        return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+            return (accs[0] + accs[1]) + (accs[2] + accs[3]);
+        },
+        .x86_vnni, .x86_avx2, .portable => {},
     }
     var accs: [4]common.QKV8i32 = @splat(@splat(0));
     inline for (0..8) |sub| {
@@ -944,22 +957,22 @@ inline fn q8_0BlockSum(a: *const dtype_mod.BlockQ8_0) i32 {
 /// Unpacked unsigned codes for one 32-element sub-block of a Q2_0 block, in
 /// the granule shape the ISA's dot arm wants: two 16-byte vectors on aarch64
 /// (sdot), one 32-byte vector elsewhere (vpdpbusd/maddubs or portable twins).
-const Q2_0Codes = if (builtin.cpu.arch == .aarch64)
-    struct { lo: common.QKV16i8, hi: common.QKV16i8 }
-else
-    QKV32u8;
+const Q2_0Codes = switch (isa.tier) {
+    .neon_i8mm, .neon_sdot => struct { lo: common.QKV16i8, hi: common.QKV16i8 },
+    .x86_vnni, .x86_avx2, .portable => QKV32u8,
+};
 
 /// Unpack sub-block `k` (elements k*32..k*32+32) of one Q2_0 block. Codes
 /// stay unsigned {0..3}; the matmul subtracts the activation bsum instead of
 /// materializing the "-1" per lane (dot = sum(q*a) - sum(a)).
 inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return .{
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => .{
             .lo = @bitCast(q2_0Codes16(qs, k * 8)),
             .hi = @bitCast(q2_0Codes16(qs, k * 8 + 4)),
-        };
-    }
-    return q2_0Codes32(qs, k * 8);
+        },
+        .x86_vnni, .x86_avx2, .portable => q2_0Codes32(qs, k * 8),
+    };
 }
 
 /// sum(q * a) of unpacked codes against one Q8_0 sub-block, exact i32
@@ -967,18 +980,22 @@ inline fn q2_0UnpackCodes(qs: QKV32u8, comptime k: usize) Q2_0Codes {
 /// i16 saturation) — every arm produces the exact integer, so all paths
 /// agree with cold.zig's dotQ2_0RowQ8_0 reference bitwise.
 inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const dtype_mod.BlockQ8_0) i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        const a0: common.QKV16i8 = a.qs[0..16].*;
-        const a1: common.QKV16i8 = a.qs[16..32].*;
-        var acc: QKV4i32 = @splat(0);
-        acc = common.sdotI8x16(acc, codes.lo, a0);
-        acc = common.sdotI8x16(acc, codes.hi, a1);
-        return @reduce(.Add, acc);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            const a0: common.QKV16i8 = a.qs[0..16].*;
+            const a1: common.QKV16i8 = a.qs[16..32].*;
+            var acc: QKV4i32 = @splat(0);
+            acc = common.sdotI8x16(acc, codes.lo, a0);
+            acc = common.sdotI8x16(acc, codes.hi, a1);
+            return @reduce(.Add, acc);
+        },
+        .x86_vnni, .x86_avx2, .portable => {
+            const av: common.QKV32i8 = a.qs;
+            var acc: common.QKV8i32 = @splat(0);
+            acc = dotGroups32(acc, codes, av);
+            return @reduce(.Add, acc);
+        },
     }
-    const av: common.QKV32i8 = a.qs;
-    var acc: common.QKV8i32 = @splat(0);
-    acc = dotGroups32(acc, codes, av);
-    return @reduce(.Add, acc);
 }
 
 /// Vectorized Q2_0 row dequantize — same values as cold.zig's

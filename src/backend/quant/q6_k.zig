@@ -4,9 +4,9 @@
 //! grammar is in `quant.zig`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
+const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
@@ -136,14 +136,14 @@ fn unpackQ6_KGroup(w: *const BlockQ6_K, comptime chunk: usize, comptime section:
 }
 
 fn dotUnpackedI8x16(w: QKV16i8, a: QKV16i8) i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return @reduce(.Add, common.sdotI8x16(@as(QKV4i32, @splat(0)), w, a));
-    }
-    // non-aarch64: VNNI lowers to vpdpbusd (via the +128 bias), AVX2 takes the
-    // sign-trick vpmaddubsw path (w ∈ [-32,31] here; a comes from BlockQ8_K,
-    // i.e. quantizeRowQ8_KInto's -127/max scale construction, so a ∈ [-127,127]
-    // — inside the sign-trick exactness domain; see common.zig).
-    return common.dotI8x16Portable(w, a);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => @reduce(.Add, common.sdotI8x16(@as(QKV4i32, @splat(0)), w, a)),
+        // VNNI lowers to vpdpbusd (via the +128 bias), AVX2 takes the
+        // sign-trick vpmaddubsw path (w ∈ [-32,31] here; a comes from BlockQ8_K,
+        // i.e. quantizeRowQ8_KInto's -127/max scale construction, so a ∈ [-127,127]
+        // — inside the sign-trick exactness domain; see common.zig).
+        .x86_vnni, .x86_avx2, .portable => common.dotI8x16Portable(w, a),
+    };
 }
 
 /// Column-outer Q6_K matmul for m>1 (batched MoE prefill): unpack each weight
@@ -208,30 +208,30 @@ pub fn matmulQ6_KRhsCompactColOuter(
 /// order-independent, so this equals the per-row `dotUnpackedI8x16` path exactly.
 inline fn dot16Group4RowsQ8_Kx4(a: *const types.BlockQ8_Kx4, fg_base: usize, wv: QKV16i8) QKV4i32 {
     @setEvalBranchQuota(10000); // raises the caller's running quota for the unrolled arms
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var dot: QKV4i32 = @splat(0);
-        inline for (0..4) |g| {
-            const ag: QKV16i8 = @bitCast(a.qs[(fg_base + g) * 16 ..][0..16].*);
-            dot = sdotI8x16Lane(g, dot, ag, wv);
-        }
-        return dot;
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var dot: QKV4i32 = @splat(0);
+            inline for (0..4) |g| {
+                const ag: QKV16i8 = @bitCast(a.qs[(fg_base + g) * 16 ..][0..16].*);
+                dot = sdotI8x16Lane(g, dot, ag, wv);
+            }
+            return dot;
+        },
+        .x86_vnni, .x86_avx2, .portable => return dot16Group4RowsQ8_Kx4Simd(isa.tier, a, fg_base, wv),
     }
-    if (comptime common.has_x86_vnni_ymm) return dot16Group4RowsQ8_Kx4Simd(.vnni, a, fg_base, wv);
-    if (comptime common.has_x86_avx2) return dot16Group4RowsQ8_Kx4Simd(.avx2, a, fg_base, wv);
-    return dot16Group4RowsQ8_Kx4Simd(.widen, a, fg_base, wv);
 }
 
 /// Prepared pre-unpacked ColOuter weight-group type per tier: +32-biased u8
 /// for the u8·i8 tiers, untouched signed i8 for the widening tier (the
 /// 16-byte analog of `Q6Kx4WeightChunk`).
-fn Q6Weights16(comptime tier: Q6Kx4SimdTier) type {
-    return if (tier == .widen) QKV16i8 else common.QKV16u8;
+fn Q6Weights16(comptime tier: isa.Tier) type {
+    return if (tier == .portable) QKV16i8 else common.QKV16u8;
 }
 
 /// +32-bias one pre-unpacked 16-weight group for the u8·i8 tiers (exact:
 /// w ∈ [-32,31] → u8 ∈ [0,63]); pass-through for the widening tier.
-inline fn prepQ6Weights16(comptime tier: Q6Kx4SimdTier, w: QKV16i8) Q6Weights16(tier) {
-    if (comptime tier == .widen) return w;
+inline fn prepQ6Weights16(comptime tier: isa.Tier, w: QKV16i8) Q6Weights16(tier) {
+    if (comptime tier == .portable) return w;
     return @bitCast(w +% @as(QKV16i8, @splat(32)));
 }
 
@@ -251,7 +251,7 @@ inline fn prepQ6Weights16(comptime tier: Q6Kx4SimdTier, w: QKV16i8) Q6Weights16(
 /// < 2^17, |32·bsum| ≤ 32·16·128 = 2^16. Integer sums are order-independent →
 /// bit-identical to `dot16Group4RowsQ8_Kx4Scalar` (q6_k_tests.zig). pub for
 /// the sibling exact-parity tests.
-pub fn dot16Group4RowsQ8_Kx4Simd(comptime tier: Q6Kx4SimdTier, a: *const types.BlockQ8_Kx4, fg_base: usize, wv: QKV16i8) QKV4i32 {
+pub fn dot16Group4RowsQ8_Kx4Simd(comptime tier: isa.Tier, a: *const types.BlockQ8_Kx4, fg_base: usize, wv: QKV16i8) QKV4i32 {
     const w4: QKV4i32 = @bitCast(prepQ6Weights16(tier, wv));
     var sum8: QKV8i32 = @splat(0);
     inline for (0..2) |c| {
@@ -259,7 +259,7 @@ pub fn dot16Group4RowsQ8_Kx4Simd(comptime tier: Q6Kx4SimdTier, a: *const types.B
         sum8 = dotQ6Kx4Groups(tier, sum8, @bitCast(broadcastPairGroupsI32x4(c, w4)), act);
     }
     var dot = common.addHalvesI32x8(sum8);
-    if (comptime tier != .widen) {
+    if (comptime tier != .portable) {
         const sg = fg_base / 4;
         var bs: QKV4i32 = undefined;
         inline for (0..4) |row| bs[row] = a.bsums[(sg / 4) * 16 + row * 4 + sg % 4];
@@ -484,24 +484,24 @@ pub fn matmulQ6_Kx4RhsPairTile(
 pub const matmulQ6_Kx4RhsRange = common.RangeFromTile(matmulQ6_Kx4RhsTile);
 
 fn dotQ6_KQ8_K(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        const d = common.f16BitsToF32(w.d) * a.d;
-        // Accumulate acc*scale in i32 across the 16 groups, apply d once at the end.
-        var iacc: i32 = 0;
-        inline for (0..2) |chunk| {
-            inline for (0..4) |section| {
-                inline for (0..2) |half| {
-                    const group = chunk * 8 + section * 2 + half;
-                    const acc = dotQ6_KGroupI32(w, a, chunk, section, half);
-                    iacc += acc * @as(i32, w.scales[group]);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            const d = common.f16BitsToF32(w.d) * a.d;
+            // Accumulate acc*scale in i32 across the 16 groups, apply d once at the end.
+            var iacc: i32 = 0;
+            inline for (0..2) |chunk| {
+                inline for (0..4) |section| {
+                    inline for (0..2) |half| {
+                        const group = chunk * 8 + section * 2 + half;
+                        const acc = dotQ6_KGroupI32(w, a, chunk, section, half);
+                        iacc += acc * @as(i32, w.scales[group]);
+                    }
                 }
             }
-        }
-        return @as(f32, @floatFromInt(iacc)) * d;
+            return @as(f32, @floatFromInt(iacc)) * d;
+        },
+        .x86_vnni, .x86_avx2, .portable => return dotQ6_KQ8_KSimd(isa.tier, w, a),
     }
-    if (comptime common.has_x86_vnni_ymm) return dotQ6_KQ8_KSimd(.vnni, w, a);
-    if (comptime common.has_x86_avx2) return dotQ6_KQ8_KSimd(.avx2, w, a);
-    return dotQ6_KQ8_KSimd(.widen, w, a);
 }
 
 /// One grouped dot-accumulate of a 32-byte +32-biased Q6_K weight run
@@ -509,11 +509,12 @@ fn dotQ6_KQ8_K(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
 /// per-tier exactness arguments) as `dotQ6Kx4Groups`; the widening tier
 /// re-centers to signed [-32,31] in-register (exact, no wrap) so it needs no
 /// bias correction.
-inline fn dotQ6BiasedGroups(comptime tier: Q6Kx4SimdTier, acc: QKV8i32, biased: common.QKV32u8, act: common.QKV32i8) QKV8i32 {
+inline fn dotQ6BiasedGroups(comptime tier: isa.Tier, acc: QKV8i32, biased: common.QKV32u8, act: common.QKV32i8) QKV8i32 {
     return switch (tier) {
-        .vnni => common.dpbusdI32x8(acc, biased, act),
-        .avx2 => common.maddubsDotGroupsI32x8(acc, biased, act),
-        .widen => common.dotI8GroupsWidenI32x8(acc, @as(common.QKV32i8, @bitCast(biased)) -% @as(common.QKV32i8, @splat(32)), act),
+        .x86_vnni => common.dpbusdI32x8(acc, biased, act),
+        .x86_avx2 => common.maddubsDotGroupsI32x8(acc, biased, act),
+        .portable => common.dotI8GroupsWidenI32x8(acc, @as(common.QKV32i8, @bitCast(biased)) -% @as(common.QKV32i8, @splat(32)), act),
+        .neon_i8mm, .neon_sdot => @compileError("dotQ6BiasedGroups: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
     };
 }
 
@@ -532,7 +533,7 @@ inline fn dotQ6BiasedGroups(comptime tier: Q6Kx4SimdTier, acc: QKV8i32, biased: 
 /// = 2^27. Identical i32 total (order-independent integer adds) and identical
 /// f32 epilogue as the scalar reference → bit-exact (q6_k_tests.zig). pub for
 /// the sibling exact-parity tests.
-pub fn dotQ6_KQ8_KSimd(comptime tier: Q6Kx4SimdTier, w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ6_KQ8_KSimd(comptime tier: isa.Tier, w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
     @setEvalBranchQuota(10000);
     var iacc8: QKV8i32 = @splat(0);
     var ibias: i32 = 0;
@@ -549,13 +550,13 @@ pub fn dotQ6_KQ8_KSimd(comptime tier: Q6Kx4SimdTier, w: *const BlockQ6_K, a: *co
             const s0: i32 = w.scales[g0];
             const s1: i32 = w.scales[g0 + 1];
             iacc8 += sum * @as(QKV8i32, .{ s0, s0, s0, s0, s1, s1, s1, s1 });
-            if (comptime tier != .widen) {
+            if (comptime tier != .portable) {
                 ibias += s0 * @as(i32, a.bsums[g0]) + s1 * @as(i32, a.bsums[g0 + 1]);
             }
         }
     }
     var iacc = @reduce(.Add, iacc8);
-    if (comptime tier != .widen) iacc -= 32 * ibias;
+    if (comptime tier != .portable) iacc -= 32 * ibias;
     const d = common.f16BitsToF32(w.d) * a.d;
     return @as(f32, @floatFromInt(iacc)) * d;
 }
@@ -580,16 +581,10 @@ pub fn dotQ6_KQ8_KScalar(w: *const BlockQ6_K, a: *const BlockQ8_K) f32 {
 }
 
 fn accumulateQ6_Kx4(lhs: *const BlockQ8_K, rhs: *const BlockQ6_Kx4, acc: QKV4f32) QKV4f32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ6_Kx4Aarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ6_Kx4Simd(.vnni, lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ6_Kx4Simd(.avx2, lhs, rhs, acc);
-    }
-    return accumulateQ6_Kx4Simd(.widen, lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ6_Kx4Aarch64(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4Simd(isa.tier, lhs, rhs, acc),
+    };
 }
 
 const Q6Kx4PairAcc = struct {
@@ -604,16 +599,10 @@ fn accumulateQ6_Kx4Pair(
     gate_acc: QKV4f32,
     up_acc: QKV4f32,
 ) Q6Kx4PairAcc {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ6_Kx4PairAarch64(lhs, gate_rhs, up_rhs, gate_acc, up_acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ6_Kx4PairSimd(.vnni, lhs, gate_rhs, up_rhs, gate_acc, up_acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ6_Kx4PairSimd(.avx2, lhs, gate_rhs, up_rhs, gate_acc, up_acc);
-    }
-    return accumulateQ6_Kx4PairSimd(.widen, lhs, gate_rhs, up_rhs, gate_acc, up_acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ6_Kx4PairAarch64(lhs, gate_rhs, up_rhs, gate_acc, up_acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4PairSimd(isa.tier, lhs, gate_rhs, up_rhs, gate_acc, up_acc),
+    };
 }
 
 fn accumulateQ6_Kx4Rows(
@@ -624,16 +613,10 @@ fn accumulateQ6_Kx4Rows(
     rhs: *const BlockQ6_Kx4,
     acc: *[q8_0_row_block]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ6_Kx4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ6_Kx4RowsSimd(.vnni, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ6_Kx4RowsSimd(.avx2, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    return accumulateQ6_Kx4RowsSimd(.widen, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ6_Kx4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ6_Kx4RowsSimd(isa.tier, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
+    };
 }
 
 fn accumulateQ6_Kx4RowsPair(
@@ -646,14 +629,16 @@ fn accumulateQ6_Kx4RowsPair(
     gate_acc: *[q8_0_row_block]QKV4f32,
     up_acc: *[q8_0_row_block]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ6_Kx4RowsPairAarch64(lhs_blocks, row_start, blocks_per_row, block_index, gate_rhs, up_rhs, gate_acc, up_acc);
-    }
-    inline for (0..q8_0_row_block) |r| {
-        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-        const pair = accumulateQ6_Kx4Pair(lhs, gate_rhs, up_rhs, gate_acc[r], up_acc[r]);
-        gate_acc[r] = pair.gate;
-        up_acc[r] = pair.up;
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => return accumulateQ6_Kx4RowsPairAarch64(lhs_blocks, row_start, blocks_per_row, block_index, gate_rhs, up_rhs, gate_acc, up_acc),
+        .x86_vnni, .x86_avx2, .portable => {
+            inline for (0..q8_0_row_block) |r| {
+                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                const pair = accumulateQ6_Kx4Pair(lhs, gate_rhs, up_rhs, gate_acc[r], up_acc[r]);
+                gate_acc[r] = pair.gate;
+                up_acc[r] = pair.up;
+            }
+        },
     }
 }
 
@@ -873,23 +858,22 @@ fn accumulateQ6_Kx4RowsPairAarch64(
 // already rely on it). Activations are unrestricted i8 in every tier — no
 // sign-trick domain restriction anywhere on this path.
 
-/// SIMD tier of the non-aarch64 Q6_Kx4 arms: which grouped dot primitive the
-/// arm is built on. `vnni`/`avx2` are the +32-weight-bias u8·i8 forms
-/// (vpdpbusd / vpmaddubsw+vpmaddwd); `widen` is the universal exact i8·i8
-/// floor (no bias, no correction, no arch gate).
-pub const Q6Kx4SimdTier = enum { vnni, avx2, widen };
+// The non-NEON Q6_Kx4 arms take the x86/portable tiers of `isa.Tier`:
+// `x86_vnni`/`x86_avx2` are the +32-weight-bias u8·i8 forms (vpdpbusd /
+// vpmaddubsw+vpmaddwd); `portable` is the universal exact i8·i8 floor (no
+// bias, no correction, no arch gate).
 
 /// Prepared weight-chunk type per tier: +32-biased u8 for the u8·i8 tiers,
 /// untouched signed i8 for the widening tier.
-fn Q6Kx4WeightChunk(comptime tier: Q6Kx4SimdTier) type {
-    return if (tier == .widen) common.QKV32i8 else common.QKV32u8;
+fn Q6Kx4WeightChunk(comptime tier: isa.Tier) type {
+    return if (tier == .portable) common.QKV32i8 else common.QKV32u8;
 }
 
 /// +32-bias one 32-byte packed weight chunk for the u8·i8 tiers. Exact u8 for
 /// all w ≥ −32 (w+32 ≤ 159 < 256; wrapping add ≡ mod-256); the packed format
 /// guarantees w ∈ [-32,31] → u8 ∈ [0,63]. Pass-through for the widening tier.
-inline fn prepQ6Kx4WeightChunk(comptime tier: Q6Kx4SimdTier, w: common.QKV32i8) Q6Kx4WeightChunk(tier) {
-    if (comptime tier == .widen) return w;
+inline fn prepQ6Kx4WeightChunk(comptime tier: isa.Tier, w: common.QKV32i8) Q6Kx4WeightChunk(tier) {
+    if (comptime tier == .portable) return w;
     return @bitCast(w +% @as(common.QKV32i8, @splat(32)));
 }
 
@@ -898,11 +882,12 @@ inline fn prepQ6Kx4WeightChunk(comptime tier: Q6Kx4SimdTier, w: common.QKV32i8) 
 /// 2·63·128 = 16128 < 2^15 in the packed weight domain (biased u8 ≤ 63), so
 /// the maddubs form never saturates; the vnni and widen forms are exact for
 /// all inputs by construction (see common.zig).
-inline fn dotQ6Kx4Groups(comptime tier: Q6Kx4SimdTier, acc: QKV8i32, w: Q6Kx4WeightChunk(tier), a: common.QKV32i8) QKV8i32 {
+inline fn dotQ6Kx4Groups(comptime tier: isa.Tier, acc: QKV8i32, w: Q6Kx4WeightChunk(tier), a: common.QKV32i8) QKV8i32 {
     return switch (tier) {
-        .vnni => common.dpbusdI32x8(acc, w, a),
-        .avx2 => common.maddubsDotGroupsI32x8(acc, w, a),
-        .widen => common.dotI8GroupsWidenI32x8(acc, w, a),
+        .x86_vnni => common.dpbusdI32x8(acc, w, a),
+        .x86_avx2 => common.maddubsDotGroupsI32x8(acc, w, a),
+        .portable => common.dotI8GroupsWidenI32x8(acc, w, a),
+        .neon_i8mm, .neon_sdot => @compileError("dotQ6Kx4Groups: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
     };
 }
 
@@ -932,7 +917,7 @@ inline fn q6Kx4Scales(rhs: *const BlockQ6_Kx4, comptime scale_group: usize) QKV4
 /// 128 → ≤ 8.26M, ×16 groups ≤ 133M < 2^31; the bias accumulator is bounded
 /// by 16·2048·128 ≈ 4.2M (|bsums| ≤ 16·128 by the format contract), ×32 ≤
 /// 135M.
-pub fn accumulateQ6_Kx4Simd(comptime tier: Q6Kx4SimdTier, lhs: *const BlockQ8_K, rhs: *const BlockQ6_Kx4, acc: QKV4f32) QKV4f32 {
+pub fn accumulateQ6_Kx4Simd(comptime tier: isa.Tier, lhs: *const BlockQ8_K, rhs: *const BlockQ6_Kx4, acc: QKV4f32) QKV4f32 {
     @setEvalBranchQuota(10000); // fully unrolls 16 scale groups x 2 chunks
     var iacc8: QKV8i32 = @splat(0);
     var bias4: QKV4i32 = @splat(0);
@@ -946,11 +931,11 @@ pub fn accumulateQ6_Kx4Simd(comptime tier: Q6Kx4SimdTier, lhs: *const BlockQ8_K,
             sum = dotQ6Kx4Groups(tier, sum, w, @bitCast(broadcastPairGroupsI32x4(chunk, lhs4)));
         }
         iacc8 += sum * @shuffle(i32, scales, undefined, [8]i32{ 0, 1, 2, 3, 0, 1, 2, 3 });
-        if (comptime tier != .widen) bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * scales;
+        if (comptime tier != .portable) bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * scales;
     }
 
     var iacc = common.addHalvesI32x8(iacc8);
-    if (comptime tier != .widen) iacc -= bias4 * @as(QKV4i32, @splat(32));
+    if (comptime tier != .portable) iacc -= bias4 * @as(QKV4i32, @splat(32));
     const d = common.f16x4BitsToF32(rhs.d) * @as(QKV4f32, @splat(lhs.d));
     return acc + @as(QKV4f32, @floatFromInt(iacc)) * d;
 }
@@ -961,7 +946,7 @@ pub fn accumulateQ6_Kx4Simd(comptime tier: Q6Kx4SimdTier, lhs: *const BlockQ8_K,
 /// same integer/f32 algebra (and bounds) as accumulateQ6_Kx4Simd, so results
 /// are bit-identical to per-row calls.
 pub fn accumulateQ6_Kx4RowsSimd(
-    comptime tier: Q6Kx4SimdTier,
+    comptime tier: isa.Tier,
     lhs_blocks: []const BlockQ8_K,
     row_start: usize,
     blocks_per_row: usize,
@@ -987,13 +972,13 @@ pub fn accumulateQ6_Kx4RowsSimd(
             sum = dotQ6Kx4Groups(tier, sum, w0, @bitCast(broadcastPairGroupsI32x4(0, lhs4)));
             sum = dotQ6Kx4Groups(tier, sum, w1, @bitCast(broadcastPairGroupsI32x4(1, lhs4)));
             iacc8[r] += sum * scales8;
-            if (comptime tier != .widen) bias4[r] += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * scales;
+            if (comptime tier != .portable) bias4[r] += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * scales;
         }
     }
 
     inline for (0..q8_0_row_block) |r| {
         var iacc = common.addHalvesI32x8(iacc8[r]);
-        if (comptime tier != .widen) iacc -= bias4[r] * @as(QKV4i32, @splat(32));
+        if (comptime tier != .portable) iacc -= bias4[r] * @as(QKV4i32, @splat(32));
         const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
         const d = rhs_d * @as(QKV4f32, @splat(lhs.d));
         acc[r] += @as(QKV4f32, @floatFromInt(iacc)) * d;
@@ -1005,7 +990,7 @@ pub fn accumulateQ6_Kx4RowsSimd(
 /// accumulateQ6_Kx4Simd, so results are bit-identical to two independent
 /// calls.
 pub fn accumulateQ6_Kx4PairSimd(
-    comptime tier: Q6Kx4SimdTier,
+    comptime tier: isa.Tier,
     lhs: *const BlockQ8_K,
     gate_rhs: *const BlockQ6_Kx4,
     up_rhs: *const BlockQ6_Kx4,
@@ -1028,19 +1013,19 @@ pub fn accumulateQ6_Kx4PairSimd(
         gate_sum = dotQ6Kx4Groups(tier, gate_sum, prepQ6Kx4WeightChunk(tier, @bitCast(gate_rhs.qs[scale_group * 64 ..][0..32].*)), a0);
         gate_sum = dotQ6Kx4Groups(tier, gate_sum, prepQ6Kx4WeightChunk(tier, @bitCast(gate_rhs.qs[scale_group * 64 + 32 ..][0..32].*)), a1);
         gate_iacc8 += gate_sum * @shuffle(i32, gate_scales, undefined, [8]i32{ 0, 1, 2, 3, 0, 1, 2, 3 });
-        if (comptime tier != .widen) gate_bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * gate_scales;
+        if (comptime tier != .portable) gate_bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * gate_scales;
 
         const up_scales = q6Kx4Scales(up_rhs, scale_group);
         var up_sum: QKV8i32 = @splat(0);
         up_sum = dotQ6Kx4Groups(tier, up_sum, prepQ6Kx4WeightChunk(tier, @bitCast(up_rhs.qs[scale_group * 64 ..][0..32].*)), a0);
         up_sum = dotQ6Kx4Groups(tier, up_sum, prepQ6Kx4WeightChunk(tier, @bitCast(up_rhs.qs[scale_group * 64 + 32 ..][0..32].*)), a1);
         up_iacc8 += up_sum * @shuffle(i32, up_scales, undefined, [8]i32{ 0, 1, 2, 3, 0, 1, 2, 3 });
-        if (comptime tier != .widen) up_bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * up_scales;
+        if (comptime tier != .portable) up_bias4 += @as(QKV4i32, @splat(lhs.bsums[scale_group])) * up_scales;
     }
 
     var gate_iacc = common.addHalvesI32x8(gate_iacc8);
     var up_iacc = common.addHalvesI32x8(up_iacc8);
-    if (comptime tier != .widen) {
+    if (comptime tier != .portable) {
         gate_iacc -= gate_bias4 * @as(QKV4i32, @splat(32));
         up_iacc -= up_bias4 * @as(QKV4i32, @splat(32));
     }
@@ -1095,14 +1080,18 @@ fn dotQ6_KGroupI32(w: *const BlockQ6_K, a: *const BlockQ8_K, comptime chunk: usi
 
     const a_i8: QKV16i8 = @bitCast(a.qs[a_offset..][0..16].*);
     // q6 values center to [-32,31] (fit i8); dot via NEON sdot where available.
-    if (comptime builtin.cpu.arch == .aarch64) {
-        const w_i8: QKV16i8 = @as(QKV16i8, @intCast(combined)) - @as(QKV16i8, @splat(32));
-        return @reduce(.Add, common.sdotI8x16(@splat(0), w_i8, a_i8));
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            const w_i8: QKV16i8 = @as(QKV16i8, @intCast(combined)) - @as(QKV16i8, @splat(32));
+            return @reduce(.Add, common.sdotI8x16(@splat(0), w_i8, a_i8));
+        },
+        .x86_vnni, .x86_avx2, .portable => {
+            const w_i16: common.QKV16i16 = @as(common.QKV16i16, @intCast(combined)) - @as(common.QKV16i16, @splat(32));
+            const a_i16: common.QKV16i16 = @intCast(a_i8);
+            const product_i32: common.QKV16i32 = @intCast(w_i16 * a_i16);
+            return @reduce(.Add, product_i32);
+        },
     }
-    const w_i16: common.QKV16i16 = @as(common.QKV16i16, @intCast(combined)) - @as(common.QKV16i16, @splat(32));
-    const a_i16: common.QKV16i16 = @intCast(a_i8);
-    const product_i32: common.QKV16i32 = @intCast(w_i16 * a_i16);
-    return @reduce(.Add, product_i32);
 }
 
 pub fn dequantizeBlockQ6_KInto(dst: *[types.qk_k_block_size]f32, src: *const BlockQ6_K) void {

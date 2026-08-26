@@ -50,7 +50,7 @@
 //! parity suites ("ggml_q8_0x4/q4_kx4/q4_kx8/q5_kx8/q6_kx4 ... SIMD arms match
 //! the scalar arm bit-exactly") are the execution vehicle for the kernel arms.
 //! ReleaseFast matters: Debug builds execute the portable twins instead (the
-//! stage2-assembler gate — see common.has_llvm_asm).
+//! stage2-assembler gate — see isa.has_llvm_asm).
 //!
 //! ENCODING TRAP (2026-07-03, hardware-found): LLVM's asm parser does not
 //! feature-check inline asm — a bare `vpdpbusd` assembles to the EVEX
@@ -91,6 +91,7 @@ const builtin = @import("builtin");
 const dtype_mod = @import("dtype.zig");
 const quant = @import("backend/quant.zig");
 const common = @import("backend/quant/common.zig");
+const isa = @import("backend/isa.zig");
 const tensor_mod = @import("tensor.zig");
 
 const BlockQ4_K = dtype_mod.BlockQ4_K;
@@ -831,7 +832,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
 
     std.debug.print("x86dot-check arch={s} avx2={} avxvnni={} avx512vnni={}\n", .{
-        @tagName(builtin.cpu.arch), common.has_x86_avx2, common.has_x86_avxvnni, common.has_x86_avx512vnni,
+        @tagName(builtin.cpu.arch), isa.has_x86_avx2, isa.has_x86_avxvnni, isa.has_x86_avx512vnni,
     });
 
     checkPrimitives();

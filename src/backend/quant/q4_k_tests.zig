@@ -10,6 +10,7 @@ const qm = @import("../quant.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const isa = @import("../isa.zig");
 const q4_k = @import("q4_k.zig");
 
 const Allocator = std.mem.Allocator;
@@ -760,7 +761,7 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
 // the arms' portable primitive twins, x86 ReleaseFast/Safe executes the real
 // vpdpbusd / vpmaddubsw instructions.
 
-const lane_dot_tiers = [_]common.X86DotTier{ .vnni, .avx2, .widen };
+const lane_dot_tiers = [_]isa.Tier{ .x86_vnni, .x86_avx2, .portable };
 
 test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
     var prng = std.Random.DefaultPrng.init(0x9d3c5b17e2a4f086);

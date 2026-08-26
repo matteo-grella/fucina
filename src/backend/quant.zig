@@ -41,6 +41,7 @@ const tensor = @import("../tensor.zig");
 
 pub const types = @import("quant/types.zig");
 pub const common = @import("quant/common.zig");
+const isa = @import("isa.zig");
 pub const q8k = @import("quant/q8k.zig");
 pub const q8_0 = @import("quant/q8_0.zig");
 pub const q4_k = @import("quant/q4_k.zig");
@@ -54,7 +55,7 @@ const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-pub const supports_q4_k_mmla = common.has_aarch64_i8mm;
+pub const supports_q4_k_mmla = isa.has_aarch64_i8mm;
 
 /// The dtype -> packed matmul RHS container map for the block-quantized
 /// serving formats. `backend.PackedRhsFor` layers the dense f32 panel on

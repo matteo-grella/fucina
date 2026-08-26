@@ -75,7 +75,7 @@ pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
 ```
 
 `supports_q4_k_mmla` is `true` on aarch64 targets whose feature set includes
-`i8mm` (`src/backend/quant/common.zig` `has_aarch64_i8mm`); it decides which
+`i8mm` (`src/backend/isa.zig` `has_aarch64_i8mm`); it decides which
 packed Q4_K RHS layout `packRhs` produces ([§9.7](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#97-quantized-matmul-dispatch-packed-rhs-and-the-int8-dot-arms), [§10](10-quantization.md)). All of these are
 comptime values — branches on them fold away:
 

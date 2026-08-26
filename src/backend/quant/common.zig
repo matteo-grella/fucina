@@ -2,35 +2,15 @@
 //!
 //! Leaf module: the generic SIMD vector type aliases, the f16 bit conversions,
 //! the AArch64 sdot/smmla helpers, the rounding/quantize primitives, the nibble
-//! helpers, the shared row/column blocking consts, and the i8mm feature flag.
+//! helpers, and the shared row/column blocking consts. Every ISA fact the
+//! primitives gate on comes from `backend/isa.zig` (the capability booleans
+//! and the int8-dot `tier`); nothing here reads `builtin.cpu`.
 //! Imported by quant.zig and the per-type kernel files (q8_0/q4_k/q5_k/q6_k/cold);
 //! it imports none of them. `types.zig` supplies the block layouts the shared
 //! Q8_Kx4 lane dots read.
 const std = @import("std");
-const builtin = @import("builtin");
+const isa = @import("../isa.zig");
 const types = @import("types.zig");
-
-// SMMLA is a separate AArch64 feature from SDOT; Apple M1-class CPUs have
-// FEAT_DotProd but not FEAT_I8MM, so the MMLA path must stay gated.
-pub const has_aarch64_i8mm = builtin.cpu.arch == .aarch64 and std.Target.aarch64.featureSetHas(builtin.cpu.features, .i8mm);
-
-// x86 int8-GEMM feature gates (mirror has_aarch64_i8mm). AVX-512-VNNI provides the
-// vpdpbusd byte dot-product (the analog of NEON sdot); AVX2 falls back to the
-// vpmaddwd i16 path.
-pub const has_x86_avx2 = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
-pub const has_x86_avx512vnni = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx512vnni);
-
-// AVX-VNNI: the VEX-encoded vpdpbusd (Alder Lake+, Zen4+; CPUID AVX_VNNI) — a
-// separate feature bit from AVX512VNNI. No emulation substrate executes
-// AVX-VNNI, so it cannot run on a non-x86 dev machine — but it is
-// HARDWARE-EXECUTION-VALIDATED 2026-07-03 on an
-// i9-13950HX (Raptor Lake, Linux): zig build test + zig build x86dot-check
-// pass natively with checksums bit-equal to the M1/Rosetta portable runs
-// (coverage table in src/x86dot_check.zig).
-// Semantic gap to keep in mind: the AVX2 construction saturates at i16
-// (vpmaddubsw) while vpdpbusd accumulates in i32 without saturation, so
-// AVX2-validated tests do NOT prove VNNI numerics.
-pub const has_x86_avxvnni = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avxvnni);
 
 pub fn quantizeToI8(x: f32) i8 {
     const clamped = @max(-127.0, @min(127.0, roundHalfAwayFromZero(x)));
@@ -64,7 +44,7 @@ fn roundNearestEvenVec4(x: QKV4f32) QKV4f32 {
 }
 
 pub fn roundNearestEvenVec4ToI32(x: QKV4f32) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out: QKV4i32 = undefined;
         asm ("fcvtns %[out].4s, %[x].4s"
             : [out] "=w" (out),
@@ -76,7 +56,7 @@ pub fn roundNearestEvenVec4ToI32(x: QKV4f32) QKV4i32 {
 }
 
 pub fn roundHalfAwayFromZeroVec4ToI32(x: QKV4f32) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out: QKV4i32 = undefined;
         asm ("fcvtas %[out].4s, %[x].4s"
             : [out] "=w" (out),
@@ -136,8 +116,8 @@ fn dotI8x16BiasForm(a: QKV16i8, b: QKV16i8) i32 {
 pub fn dotI8x16Portable(a: QKV16i8, b: QKV16i8) i32 {
     // Either VNNI flavor: the bias form lowers to vpdpbusd (EVEX under
     // avx512vnni — execution-unverifiable here but objdump-proven; VEX under
-    // avxvnni — COMPILE-ONLY on this dev machine, see has_x86_avxvnni).
-    if (comptime has_x86_avx512vnni or has_x86_avxvnni) return dotI8x16BiasForm(a, b);
+    // avxvnni — COMPILE-ONLY on this dev machine, see isa.has_x86_avxvnni).
+    if (comptime isa.has_x86_vnni) return dotI8x16BiasForm(a, b);
     // AVX2 without VNNI: ggml-style sign-transfer dot (vpsignb + vpmaddubsw +
     // vpmaddwd). EXACTNESS DOMAIN: requires b[i] != -128 in lanes where
     // a[i] < 0 (see dotI8x16SignTrickForm below). Every call site passes
@@ -145,7 +125,7 @@ pub fn dotI8x16Portable(a: QKV16i8, b: QKV16i8) i32 {
     // quantizeToI8's explicit clamp, Q5_K/Q6_K activations via
     // quantizeRowQ8_KInto's -127/max scale construction (BlockQ8_K qs is
     // never -128).
-    if (comptime has_x86_avx2) return dotI8x16SignTrickForm(a, b);
+    if (comptime isa.has_x86_avx2) return dotI8x16SignTrickForm(a, b);
     return dotI8x16PlainForm(a, b);
 }
 
@@ -181,7 +161,7 @@ test "dotI8x16 +128-bias form equals the plain signed dot" {
 // vpmaddubsw from explicitly saturating IR (verified: a clamp-pattern @Vector
 // formulation compiles to vpmaddwd, not vpmaddubsw, at -mcpu=x86_64_v3); this
 // mirrors how the aarch64 sdot/smmla primitives above are hand-rolled asm.
-// All three helpers are only ever called under `comptime has_x86_avx2` (their
+// All three helpers are only ever called under `comptime isa.has_x86_avx2` (their
 // VEX.128 encodings need AVX/AVX2), so they never reach non-x86 codegen.
 //
 // Execution-validated on x86_64_v3 (hardware and a validated emulator)
@@ -262,9 +242,9 @@ fn dotU8I8x16MaddubsForm(a: QKV16u8, b: QKV16i8) i32 {
 
 pub fn dotU8I8x16Portable(a: QKV16u8, b: QKV16i8) i32 {
     // VNNI (either flavor): the widen form IS the vpdpbusd pattern. The
-    // avxvnni arm is COMPILE-ONLY on this dev machine (see has_x86_avxvnni).
-    if (comptime has_x86_avx512vnni or has_x86_avxvnni) return dotU8I8x16WidenForm(a, b);
-    if (comptime has_x86_avx2) return dotU8I8x16MaddubsForm(a, b);
+    // avxvnni arm is COMPILE-ONLY on this dev machine (see isa.has_x86_avxvnni).
+    if (comptime isa.has_x86_vnni) return dotU8I8x16WidenForm(a, b);
+    if (comptime isa.has_x86_avx2) return dotU8I8x16MaddubsForm(a, b);
     return dotU8I8x16WidenForm(a, b);
 }
 
@@ -277,21 +257,6 @@ pub fn dotU8I8x16Portable(a: QKV16u8, b: QKV16i8) i32 {
 // on any target (the M1 dev machine runs the twins; the asm bodies are only
 // reachable under their comptime feature gates and are hardware-executed on
 // the x86 box — see the coverage table in src/x86dot_check.zig).
-
-pub const has_x86_avx512vl = builtin.cpu.arch == .x86_64 and std.Target.x86.featureSetHas(builtin.cpu.features, .avx512vl);
-
-// The self-hosted x86_64 backend (the Debug-mode default on x86_64-linux) has
-// its own assembler that lacks the newer VEX mnemonics (vpdpbusd rejects with
-// "invalid mnemonic"); the ymm asm arms below are therefore additionally gated
-// on the LLVM backend — Debug builds execute the exact portable twins instead,
-// ReleaseSafe/ReleaseFast (LLVM) execute the real instructions.
-const has_llvm_asm = builtin.zig_backend == .stage2_llvm;
-
-// vpdpbusd-on-ymm gate: the VEX encoding needs AVX-VNNI; the EVEX.256
-// encoding needs AVX512-VNNI *and* AVX512-VL (every shipped VNNI core —
-// Ice Lake+, Zen4+ — has VL, but the assembler needs the gate to legalize
-// an encoding, so keep it explicit rather than implied).
-pub const has_x86_vnni_ymm = has_x86_avxvnni or (has_x86_avx512vnni and has_x86_avx512vl);
 
 fn strideMaskI32(comptime n: comptime_int, comptime start: comptime_int) @Vector(n, i32) {
     var m: [n]i32 = undefined;
@@ -344,14 +309,14 @@ fn dpbusdI32x8Portable(acc: QKV8i32, a: QKV32u8, b: QKV32i8) QKV8i32 {
 /// how the aarch64 sdot primitives above are hand-rolled). Exact i32 for all
 /// inputs, no saturation. AT&T operand order: src2(signed), src1(unsigned), dst.
 pub fn dpbusdI32x8(acc: QKV8i32, a: QKV32u8, b: QKV32i8) QKV8i32 {
-    if (comptime has_x86_vnni_ymm and has_llvm_asm) {
+    if (comptime isa.has_x86_vnni_ymm and isa.has_llvm_asm) {
         // ENCODING IS LOAD-BEARING: LLVM's asm parser does not feature-check
         // inline asm and resolves the bare mnemonic to the EVEX (AVX512-VNNI)
         // form, which SIGILLs on AVX-VNNI-only cores (Alder/Raptor Lake) —
         // their VEX form must be selected with the explicit {vex} prefix
         // (LLVM defines the AVX-VNNI aliases as ExplicitVEXPrefix). Cores
         // gated in via AVX512-VNNI+VL (Ice Lake, no AVX-VNNI) take EVEX.
-        const mnemonic = comptime if (has_x86_avxvnni) "{vex} vpdpbusd" else "vpdpbusd";
+        const mnemonic = comptime if (isa.has_x86_avxvnni) "{vex} vpdpbusd" else "vpdpbusd";
         var out = acc;
         asm (mnemonic ++ " %[b], %[a], %[out]"
             : [out] "+x" (out),
@@ -388,7 +353,7 @@ inline fn maddwdSumPairsI32x8(v: QKV16i16) QKV8i32 {
 /// ±32512, see accumulateQ8_0x4PackedAvx2). The portable fallback is the
 /// exact widening form, identical to the asm INSIDE that proven domain.
 pub fn maddubsDotGroupsI32x8(acc: QKV8i32, a: QKV32u8, b: QKV32i8) QKV8i32 {
-    if (comptime has_x86_avx2 and has_llvm_asm) {
+    if (comptime isa.has_x86_avx2 and isa.has_llvm_asm) {
         return acc + maddwdSumPairsI32x8(maddubsI16x16(a, b));
     }
     return dpbusdI32x8Portable(acc, a, b);
@@ -399,7 +364,7 @@ pub fn maddubsDotGroupsI32x8(acc: QKV8i32, a: QKV32u8, b: QKV32i8) QKV8i32 {
 /// with lane_base 0 for the low half and 16 for the high half. Callers
 /// duplicate a 16-entry table across both halves for a uniform lookup.
 pub fn pshufbI8x32(table: QKV32i8, idx: QKV32u8) QKV32i8 {
-    if (comptime has_x86_avx2 and has_llvm_asm) {
+    if (comptime isa.has_x86_avx2 and isa.has_llvm_asm) {
         return asm ("vpshufb %[idx], %[table], %[out]"
             : [out] "=x" (-> QKV32i8),
             : [table] "x" (table),
@@ -420,7 +385,7 @@ pub fn pshufbI8x32(table: QKV32i8, idx: QKV32u8) QKV32i8 {
 /// where x == 0, passed through where x > 0. Negation WRAPS: -(-128) stays
 /// -128 (the portable twin reproduces the wrap via -% exactly).
 pub fn psignI8x32(y: QKV32i8, x: QKV32i8) QKV32i8 {
-    if (comptime has_x86_avx2 and has_llvm_asm) {
+    if (comptime isa.has_x86_avx2 and isa.has_llvm_asm) {
         return asm ("vpsignb %[x], %[y], %[out]"
             : [out] "=x" (-> QKV32i8),
             : [y] "x" (y),
@@ -510,7 +475,7 @@ fn smmlaI8x16Portable(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
 /// mask idx to 0..15; lanes outside that range are unspecified on the
 /// portable path (NEON `tbl` would zero them, but no caller relies on it).
 pub fn tblI8x16(table: QKV16i8, idx: QKV16u8) QKV16i8 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out: QKV16i8 = undefined;
         asm ("tbl %[out].16b, {%[t].16b}, %[i].16b"
             : [out] "=w" (out),
@@ -541,7 +506,7 @@ pub fn e8m0ToF32Half(x: u8) f32 {
 }
 
 pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out = acc;
         asm ("sdot %[out].4s, %[a].16b, %[b].16b"
             : [out] "+w" (out),
@@ -554,7 +519,7 @@ pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
 }
 
 pub fn sdotI8x16Lane(comptime lane: comptime_int, acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out = acc;
         asm ("sdot %[out].4s, %[a].16b, %[b].4b[" ++ std.fmt.comptimePrint("{d}", .{lane}) ++ "]"
             : [out] "+w" (out),
@@ -570,7 +535,7 @@ pub fn smmlaI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
     // Guarded on i8mm (not just aarch64): Apple M1-class cores are aarch64 but
     // lack FEAT_I8MM, so the smmla instruction would trap there — they take the
     // portable path. Real i8mm hardware and the asm path are exercised by the test.
-    if (comptime has_aarch64_i8mm) {
+    if (comptime isa.has_aarch64_i8mm) {
         var out = acc;
         asm ("smmla %[out].4s, %[a].16b, %[b].16b"
             : [out] "+w" (out),
@@ -641,44 +606,45 @@ pub fn RangeFromTile(comptime tile: anytype) blk: {
 
 // ---------------------------------------------------------------------------
 // Q8_Kx4 lane dots shared by the K-quant column-outer kernels (q4_k, q5_k):
-// the per-ISA tier selector, the grouped u8·i8 dot-accumulate step, and the
-// four-row sub-block dot over pre-unpacked weights.
+// the grouped u8·i8 dot-accumulate step over the x86/portable tiers of
+// `isa.Tier`, and the four-row sub-block dot over pre-unpacked weights.
 // ---------------------------------------------------------------------------
-
-/// x86 and portable arms of the grouped u8·i8 dots: `vnni` = vpdpbusd,
-/// `avx2` = vpmaddubsw+vpmaddwd, `widen` = the universal @Vector form.
-pub const X86DotTier = enum { vnni, avx2, widen };
 
 /// One grouped weight·activation dot-accumulate step; `w` holds unsigned
 /// weight codes, `a` is unrestricted i8. Exactness per tier:
-///   vnni : vpdpbusd, exact i32 for all u8·i8 inputs, no saturation.
-///   avx2 : vpmaddubsw+vpmaddwd; saturation-free while pair sums stay below
-///          2^15 (w <= 15 gives 3840, w <= 31 gives 7936).
-///   widen: weight codes below 128 fit i8 (@bitCast is value-preserving) and
-///          i8·i8 products are exact in the widening dot on every target.
-pub inline fn dotGroupsI32x8(comptime tier: X86DotTier, acc: QKV8i32, w: QKV32u8, a: QKV32i8) QKV8i32 {
+///   x86_vnni: vpdpbusd, exact i32 for all u8·i8 inputs, no saturation.
+///   x86_avx2: vpmaddubsw+vpmaddwd; saturation-free while pair sums stay
+///             below 2^15 (w <= 15 gives 3840, w <= 31 gives 7936).
+///   portable: weight codes below 128 fit i8 (@bitCast is value-preserving)
+///             and i8·i8 products are exact in the widening dot on every
+///             target.
+/// The NEON tiers never reach this step: they dot with `sdot` lanes.
+pub inline fn dotGroupsI32x8(comptime tier: isa.Tier, acc: QKV8i32, w: QKV32u8, a: QKV32i8) QKV8i32 {
     return switch (tier) {
-        .vnni => dpbusdI32x8(acc, w, a),
-        .avx2 => maddubsDotGroupsI32x8(acc, w, a),
-        .widen => dotI8GroupsWidenI32x8(acc, @bitCast(w), a),
+        .x86_vnni => dpbusdI32x8(acc, w, a),
+        .x86_avx2 => maddubsDotGroupsI32x8(acc, w, a),
+        .portable => dotI8GroupsWidenI32x8(acc, @bitCast(w), a),
+        .neon_i8mm, .neon_sdot => @compileError("dotGroupsI32x8: the NEON tiers dot with sdot lanes, not the grouped ymm step"),
     };
 }
 
 /// i8 dot of one 32-wide sub-block: two 16-lane halves of unpacked weight
 /// codes against two halves of Q8_K activations.
 pub fn dotUnpackedI8x32(w0: QKV16i8, w1: QKV16i8, a0: QKV16i8, a1: QKV16i8) i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: QKV4i32 = @splat(0);
-        acc = sdotI8x16(acc, w0, a0);
-        acc = sdotI8x16(acc, w1, a1);
-        return @reduce(.Add, acc);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var acc: QKV4i32 = @splat(0);
+            acc = sdotI8x16(acc, w0, a0);
+            acc = sdotI8x16(acc, w1, a1);
+            return @reduce(.Add, acc);
+        },
+        // VNNI lowers each to vpdpbusd (via the +128 bias), AVX2 takes the
+        // sign-trick vpmaddubsw path (w is a Q4_K or Q5_K code, a comes from
+        // BlockQ8_K, i.e. quantizeRowQ8_KInto's -127/max scale construction,
+        // so a is in [-127,127]: inside the sign-trick exactness domain; see
+        // dotI8x16Portable).
+        .x86_vnni, .x86_avx2, .portable => return dotI8x16Portable(w0, a0) + dotI8x16Portable(w1, a1),
     }
-    // non-aarch64: VNNI lowers each to vpdpbusd (via the +128 bias), AVX2 takes
-    // the sign-trick vpmaddubsw path (w is a Q4_K or Q5_K code, a comes from
-    // BlockQ8_K, i.e. quantizeRowQ8_KInto's -127/max scale construction, so
-    // a is in [-127,127]: inside the sign-trick exactness domain; see
-    // dotI8x16Portable).
-    return dotI8x16Portable(w0, a0) + dotI8x16Portable(w1, a1);
 }
 
 /// Per-row activation sum of one K-quant sub-block (= two Q8_K 16-groups,
@@ -704,21 +670,21 @@ pub inline fn bsumPairQ8_Kx4(a: *const types.BlockQ8_Kx4, comptime subblock: usi
 /// Integer dots are order-independent, so this equals the per-row
 /// `dotUnpackedI8x32` path exactly.
 pub inline fn dot4RowsSubblockQ8_Kx4(a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var dot: QKV4i32 = @splat(0);
-        inline for (0..4) |g| {
-            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + g * 16 ..][0..16].*);
-            dot = sdotI8x16Lane(g, dot, ag, wv[0]);
-        }
-        inline for (0..4) |g| {
-            const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + (g + 4) * 16 ..][0..16].*);
-            dot = sdotI8x16Lane(g, dot, ag, wv[1]);
-        }
-        return dot;
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var dot: QKV4i32 = @splat(0);
+            inline for (0..4) |g| {
+                const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + g * 16 ..][0..16].*);
+                dot = sdotI8x16Lane(g, dot, ag, wv[0]);
+            }
+            inline for (0..4) |g| {
+                const ag: QKV16i8 = @bitCast(a.qs[subblock * 128 + (g + 4) * 16 ..][0..16].*);
+                dot = sdotI8x16Lane(g, dot, ag, wv[1]);
+            }
+            return dot;
+        },
+        .x86_vnni, .x86_avx2, .portable => return dot4RowsSubblockQ8_Kx4Simd(isa.tier, a, subblock, wv),
     }
-    if (comptime has_x86_vnni_ymm) return dot4RowsSubblockQ8_Kx4Simd(.vnni, a, subblock, wv);
-    if (comptime has_x86_avx2) return dot4RowsSubblockQ8_Kx4Simd(.avx2, a, subblock, wv);
-    return dot4RowsSubblockQ8_Kx4Simd(.widen, a, subblock, wv);
 }
 
 // vpermd-class (cross-lane): broadcast dword 2c to the low 128-bit lane and
@@ -741,7 +707,7 @@ inline fn broadcastPairGroupsI32x4(comptime c: comptime_int, v: QKV4i32) QKV8i32
 /// code ranges (2*31*128 = 7936). NO OVERFLOW: |sum8 lane| <= 4*4*31*128 <
 /// 2^17. Integer sums are order-independent, so the result is bit-identical
 /// to `dot4RowsSubblockQ8_Kx4Scalar` (q4_k_tests.zig, q5_k_tests.zig).
-pub fn dot4RowsSubblockQ8_Kx4Simd(comptime tier: X86DotTier, a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
+pub fn dot4RowsSubblockQ8_Kx4Simd(comptime tier: isa.Tier, a: *const types.BlockQ8_Kx4, comptime subblock: usize, wv: [2]QKV16i8) QKV4i32 {
     var sum8: QKV8i32 = @splat(0);
     inline for (0..4) |c| {
         const act: QKV32i8 = @bitCast(a.qs[subblock * 128 + c * 32 ..][0..32].*);

@@ -11,6 +11,7 @@ const qm = @import("../quant.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const isa = @import("../isa.zig");
 const q6_k = @import("q6_k.zig");
 
 const Tensor = tensor.Tensor;
@@ -303,7 +304,7 @@ test "Q6_K col-outer kernels: split column ranges are bit-identical to full rang
 // vpmaddubsw instructions (ReleaseFast/ReleaseSafe — Debug's self-hosted
 // backend runs the twins via the has_llvm_asm gate).
 
-const simd_tiers = [_]q6_k.Q6Kx4SimdTier{ .vnni, .avx2, .widen };
+const simd_tiers = [_]isa.Tier{ .x86_vnni, .x86_avx2, .portable };
 
 // Packed-weight domain: packMatmulRhsQ6_Kx4 stores q6KValue outputs, i.e.
 // SIGNED centered values in [-32,31] (see the OPERAND SHAPE note in q6_k.zig).

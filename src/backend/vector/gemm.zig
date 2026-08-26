@@ -8,7 +8,7 @@
 //! gemmNNRange/gemmTNRange/gemmNTRange are pub for the batched GEMM module.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const isa = @import("../isa.zig");
 const dtype_mod = @import("../../dtype.zig");
 const gemm_blocked = @import("gemm_blocked.zig");
 const parallel = @import("../../parallel.zig");
@@ -40,7 +40,7 @@ const Vf32Wide = common.Vf32ForF16;
 // accumulate in f32, mirroring the bf16-RHS kernels. This changes non-aarch64
 // results (one final rounding instead of per-step f16 rounding — strictly more
 // accurate); aarch64 output is bit-identical to before.
-const f16_accum_native = builtin.cpu.arch.isAARCH64();
+const f16_accum_native = isa.is_aarch64;
 
 // ---------------- MatMul (2-D) ----------------
 

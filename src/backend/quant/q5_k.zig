@@ -4,9 +4,9 @@
 //! grammar is in `quant.zig`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
+const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
@@ -430,16 +430,10 @@ pub fn matmulQ5_KCompactQ8_Kx4ColOuter(
 }
 
 fn accumulateQ5_Kx8(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ5_Kx8Aarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ5_Kx8Vnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ5_Kx8Avx2(lhs, rhs, acc);
-    }
-    return accumulateQ5_Kx8Widen(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Aarch64(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Tier(isa.tier, lhs, rhs, acc),
+    };
 }
 
 fn accumulateQ5_Kx8Rows(
@@ -457,16 +451,10 @@ fn accumulateQ5_Kx8Rows(
 }
 
 fn accumulateQ5_Kx8Q8_Kx4(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ5_Kx8Q8_Kx4Sdot(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ5_Kx8Q8_Kx4Vnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ5_Kx8Q8_Kx4Avx2(lhs, rhs, acc);
-    }
-    return accumulateQ5_Kx8Q8_Kx4Widen(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Q8_Kx4Sdot(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Q8_Kx4Tier(isa.tier, lhs, rhs, acc),
+    };
 }
 
 // pub: exercised directly by q5_k_tests.zig (bit-exact vs the scalar reference
@@ -636,7 +624,7 @@ inline fn broadcastGroupI32x8(comptime g: comptime_int, v: QKV8i32) QKV8i32 {
     return @shuffle(i32, v, undefined, [8]i32{ g, g, g, g, g, g, g, g });
 }
 
-fn accumulateQ5_Kx8Tier(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
+fn accumulateQ5_Kx8Tier(comptime tier: isa.Tier, lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
     const d0 = q4Kx8D(rhs.d, 0) * @as(QKV4f32, @splat(lhs.d));
     const d1 = q4Kx8D(rhs.d, 1) * @as(QKV4f32, @splat(lhs.d));
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
@@ -679,18 +667,18 @@ fn accumulateQ5_Kx8Tier(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K,
 }
 
 pub fn accumulateQ5_Kx8Vnni(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
-    accumulateQ5_Kx8Tier(.vnni, lhs, rhs, acc);
+    accumulateQ5_Kx8Tier(.x86_vnni, lhs, rhs, acc);
 }
 
 pub fn accumulateQ5_Kx8Avx2(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
-    accumulateQ5_Kx8Tier(.avx2, lhs, rhs, acc);
+    accumulateQ5_Kx8Tier(.x86_avx2, lhs, rhs, acc);
 }
 
 pub fn accumulateQ5_Kx8Widen(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
-    accumulateQ5_Kx8Tier(.widen, lhs, rhs, acc);
+    accumulateQ5_Kx8Tier(.portable, lhs, rhs, acc);
 }
 
-fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: common.X86DotTier, lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
+fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: isa.Tier, lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
     const rhs_d0 = q4Kx8D(rhs.d, 0);
     const rhs_d1 = q4Kx8D(rhs.d, 1);
     const rhs_dmin0 = q4Kx8D(rhs.dmin, 0);
@@ -756,15 +744,15 @@ fn accumulateQ5_Kx8Q8_Kx4Tier(comptime tier: common.X86DotTier, lhs: *const type
 }
 
 pub fn accumulateQ5_Kx8Q8_Kx4Vnni(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
-    accumulateQ5_Kx8Q8_Kx4Tier(.vnni, lhs, rhs, acc);
+    accumulateQ5_Kx8Q8_Kx4Tier(.x86_vnni, lhs, rhs, acc);
 }
 
 pub fn accumulateQ5_Kx8Q8_Kx4Avx2(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
-    accumulateQ5_Kx8Q8_Kx4Tier(.avx2, lhs, rhs, acc);
+    accumulateQ5_Kx8Q8_Kx4Tier(.x86_avx2, lhs, rhs, acc);
 }
 
 pub fn accumulateQ5_Kx8Q8_Kx4Widen(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
-    accumulateQ5_Kx8Q8_Kx4Tier(.widen, lhs, rhs, acc);
+    accumulateQ5_Kx8Q8_Kx4Tier(.portable, lhs, rhs, acc);
 }
 
 // pub: the bit-exactness reference for the Q8_Kx4 SIMD arms (q5_k_tests.zig).
@@ -835,26 +823,26 @@ pub fn accumulateQ5_Kx8Q8_Kx4Scalar(lhs: *const types.BlockQ8_Kx4, rhs: *const B
 }
 
 fn dotQ5_KQ8_K(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        const d = common.f16BitsToF32(w.dm[0]) * a.d;
-        const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
-        // d/dmin are constant for this block, so accumulate scale*acc and min*bsum in
-        // i32 across the 8 subblocks and apply f32 once at the end — fewer (and more
-        // accurate) float ops than a per-subblock f32 multiply-add chain.
-        var iscale: i32 = 0;
-        var imin: i32 = 0;
-        inline for (0..8) |subblock| {
-            const scale_min = q8k.getScaleMinK4(&w.scales, subblock);
-            const acc = dotQ5_KSubblockI32(w, a, subblock);
-            const bsum = @as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]);
-            iscale += @as(i32, scale_min.scale) * acc;
-            imin += @as(i32, scale_min.min) * bsum;
-        }
-        return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            const d = common.f16BitsToF32(w.dm[0]) * a.d;
+            const dmin = common.f16BitsToF32(w.dm[1]) * a.d;
+            // d/dmin are constant for this block, so accumulate scale*acc and min*bsum in
+            // i32 across the 8 subblocks and apply f32 once at the end — fewer (and more
+            // accurate) float ops than a per-subblock f32 multiply-add chain.
+            var iscale: i32 = 0;
+            var imin: i32 = 0;
+            inline for (0..8) |subblock| {
+                const scale_min = q8k.getScaleMinK4(&w.scales, subblock);
+                const acc = dotQ5_KSubblockI32(w, a, subblock);
+                const bsum = @as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]);
+                iscale += @as(i32, scale_min.scale) * acc;
+                imin += @as(i32, scale_min.min) * bsum;
+            }
+            return d * @as(f32, @floatFromInt(iscale)) - dmin * @as(f32, @floatFromInt(imin));
+        },
+        .x86_vnni, .x86_avx2, .portable => return dotQ5_KQ8_KSimd(isa.tier, w, a),
     }
-    if (comptime common.has_x86_vnni_ymm) return dotQ5_KQ8_KSimd(.vnni, w, a);
-    if (comptime common.has_x86_avx2) return dotQ5_KQ8_KSimd(.avx2, w, a);
-    return dotQ5_KQ8_KSimd(.widen, w, a);
 }
 
 /// x86/portable ymm arm of the Q5_K row dot (the decode/GEMV path of
@@ -871,7 +859,7 @@ fn dotQ5_KQ8_K(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
 /// Identical i32 totals (order-independent integer adds) and identical f32
 /// epilogue as the scalar reference → bit-exact (q5_k_tests.zig). pub for
 /// the sibling exact-parity tests.
-pub fn dotQ5_KQ8_KSimd(comptime tier: common.X86DotTier, w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
+pub fn dotQ5_KQ8_KSimd(comptime tier: isa.Tier, w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K) f32 {
     @setEvalBranchQuota(10000);
     var iacc8: QKV8i32 = @splat(0);
     var imin: i32 = 0;
@@ -942,19 +930,23 @@ fn dotQ5_KSubblockI32(w: *const dtype_mod.BlockQ5_K, a: *const BlockQ8_K, compti
     // q5 values are in [0,31] so they fit i8; dot in i32 — NEON sdot where
     // available, i32 multiply-reduce otherwise. Both accumulate in i32 (the old
     // i16 reduce could overflow on the 16-wide sum) and sdot is faster.
-    const w0_i8: QKV16i8 = @bitCast(qs0);
-    const w1_i8: QKV16i8 = @bitCast(qs1);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: QKV4i32 = @splat(0);
-        acc = common.sdotI8x16(acc, w0_i8, a0_i8);
-        acc = common.sdotI8x16(acc, w1_i8, a1_i8);
-        return @reduce(.Add, acc);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            const w0_i8: QKV16i8 = @bitCast(qs0);
+            const w1_i8: QKV16i8 = @bitCast(qs1);
+            var acc: QKV4i32 = @splat(0);
+            acc = common.sdotI8x16(acc, w0_i8, a0_i8);
+            acc = common.sdotI8x16(acc, w1_i8, a1_i8);
+            return @reduce(.Add, acc);
+        },
+        .x86_vnni, .x86_avx2, .portable => {
+            const w0: @Vector(16, i32) = @intCast(qs0);
+            const w1: @Vector(16, i32) = @intCast(qs1);
+            const a0: @Vector(16, i32) = @intCast(a0_i8);
+            const a1: @Vector(16, i32) = @intCast(a1_i8);
+            return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
+        },
     }
-    const w0: @Vector(16, i32) = @intCast(qs0);
-    const w1: @Vector(16, i32) = @intCast(qs1);
-    const a0: @Vector(16, i32) = @intCast(a0_i8);
-    const a1: @Vector(16, i32) = @intCast(a1_i8);
-    return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
 }
 
 pub fn dequantizeBlockQ5_KInto(dst: *[types.qk_k_block_size]f32, src: *const dtype_mod.BlockQ5_K) void {

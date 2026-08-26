@@ -4,9 +4,9 @@
 //! the naming grammar is in `quant.zig`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
+const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
@@ -308,8 +308,9 @@ pub fn matmulQ8_0RhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return matmulQ8_0RhsTileAarch64(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => return matmulQ8_0RhsTileAarch64(out, lhs_blocks, rhs, n, r0, r1, c0, c1),
+        .x86_vnni, .x86_avx2, .portable => {},
     }
 
     const blocks_per_row = rhs.rows.blocks_per_row;
@@ -790,20 +791,23 @@ pub fn matmulQ8_0x4PackedPaddedRhsRange(
 /// the operand order the AVX2 sign-trick in `dotQ8_0Q8_0` requires.
 pub fn vecDotQ8_0Q8_0(a: []const BlockQ8_0, b: []const BlockQ8_0) f32 {
     std.debug.assert(a.len == b.len);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: QKV4f32 = @splat(0);
-        for (a, b) |*ab, *bb| {
-            acc = accumulateQ8_0Aarch64(
-                acc,
-                ab.d,
-                @bitCast(ab.qs[0..16].*),
-                @bitCast(ab.qs[16..32].*),
-                bb.d,
-                @bitCast(bb.qs[0..16].*),
-                @bitCast(bb.qs[16..32].*),
-            );
-        }
-        return @reduce(.Add, acc);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var acc: QKV4f32 = @splat(0);
+            for (a, b) |*ab, *bb| {
+                acc = accumulateQ8_0Aarch64(
+                    acc,
+                    ab.d,
+                    @bitCast(ab.qs[0..16].*),
+                    @bitCast(ab.qs[16..32].*),
+                    bb.d,
+                    @bitCast(bb.qs[0..16].*),
+                    @bitCast(bb.qs[16..32].*),
+                );
+            }
+            return @reduce(.Add, acc);
+        },
+        .x86_vnni, .x86_avx2, .portable => {},
     }
     var acc: f32 = 0;
     for (a, b) |*ab, *bb| acc += dotQ8_0Q8_0(ab, bb);
@@ -814,16 +818,19 @@ pub fn vecDotQ8_0Q8_0(a: []const BlockQ8_0, b: []const BlockQ8_0) f32 {
 /// row): the cache-side block loads are amortized across both dots.
 pub fn vecDotQ8_0Q8_0Pair(a0: []const BlockQ8_0, a1: []const BlockQ8_0, b: []const BlockQ8_0) [2]f32 {
     std.debug.assert(a0.len == b.len and a1.len == b.len);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc0: QKV4f32 = @splat(0);
-        var acc1: QKV4f32 = @splat(0);
-        for (a0, a1, b) |*ab0, *ab1, *bb| {
-            const b_lo: QKV16i8 = @bitCast(bb.qs[0..16].*);
-            const b_hi: QKV16i8 = @bitCast(bb.qs[16..32].*);
-            acc0 = accumulateQ8_0Aarch64(acc0, ab0.d, @bitCast(ab0.qs[0..16].*), @bitCast(ab0.qs[16..32].*), bb.d, b_lo, b_hi);
-            acc1 = accumulateQ8_0Aarch64(acc1, ab1.d, @bitCast(ab1.qs[0..16].*), @bitCast(ab1.qs[16..32].*), bb.d, b_lo, b_hi);
-        }
-        return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var acc0: QKV4f32 = @splat(0);
+            var acc1: QKV4f32 = @splat(0);
+            for (a0, a1, b) |*ab0, *ab1, *bb| {
+                const b_lo: QKV16i8 = @bitCast(bb.qs[0..16].*);
+                const b_hi: QKV16i8 = @bitCast(bb.qs[16..32].*);
+                acc0 = accumulateQ8_0Aarch64(acc0, ab0.d, @bitCast(ab0.qs[0..16].*), @bitCast(ab0.qs[16..32].*), bb.d, b_lo, b_hi);
+                acc1 = accumulateQ8_0Aarch64(acc1, ab1.d, @bitCast(ab1.qs[0..16].*), @bitCast(ab1.qs[16..32].*), bb.d, b_lo, b_hi);
+            }
+            return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+        },
+        .x86_vnni, .x86_avx2, .portable => {},
     }
     var acc0: f32 = 0;
     var acc1: f32 = 0;
@@ -849,26 +856,28 @@ pub fn q8RowScalesInto(scales: []f32, blocks: []const BlockQ8_0) void {
 /// result r equals the single-row dot on row r bitwise.
 pub fn vecDotQ8_0Q8_0x2(q: []const BlockQ8_0, q_scales: []const f32, k0: []const BlockQ8_0, k1: []const BlockQ8_0) [2]f32 {
     std.debug.assert(q.len == k0.len and q.len == k1.len and q_scales.len == q.len);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc0: QKV4f32 = @splat(0);
-        var acc1: QKV4f32 = @splat(0);
-        for (q, q_scales, k0, k1) |*qb, qs, *k0b, *k1b| {
-            const q_lo: QKV16i8 = @bitCast(qb.qs[0..16].*);
-            const q_hi: QKV16i8 = @bitCast(qb.qs[16..32].*);
-            var dot0: QKV4i32 = @splat(0);
-            dot0 = sdotI8x16(dot0, q_lo, @bitCast(k0b.qs[0..16].*));
-            dot0 = sdotI8x16(dot0, q_hi, @bitCast(k0b.qs[16..32].*));
-            var dot1: QKV4i32 = @splat(0);
-            dot1 = sdotI8x16(dot1, q_lo, @bitCast(k1b.qs[0..16].*));
-            dot1 = sdotI8x16(dot1, q_hi, @bitCast(k1b.qs[16..32].*));
-            const s0: QKV4f32 = @splat(qs * f16BitsToF32(k0b.d));
-            const s1: QKV4f32 = @splat(qs * f16BitsToF32(k1b.d));
-            acc0 = acc0 + @as(QKV4f32, @floatFromInt(dot0)) * s0;
-            acc1 = acc1 + @as(QKV4f32, @floatFromInt(dot1)) * s1;
-        }
-        return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var acc0: QKV4f32 = @splat(0);
+            var acc1: QKV4f32 = @splat(0);
+            for (q, q_scales, k0, k1) |*qb, qs, *k0b, *k1b| {
+                const q_lo: QKV16i8 = @bitCast(qb.qs[0..16].*);
+                const q_hi: QKV16i8 = @bitCast(qb.qs[16..32].*);
+                var dot0: QKV4i32 = @splat(0);
+                dot0 = sdotI8x16(dot0, q_lo, @bitCast(k0b.qs[0..16].*));
+                dot0 = sdotI8x16(dot0, q_hi, @bitCast(k0b.qs[16..32].*));
+                var dot1: QKV4i32 = @splat(0);
+                dot1 = sdotI8x16(dot1, q_lo, @bitCast(k1b.qs[0..16].*));
+                dot1 = sdotI8x16(dot1, q_hi, @bitCast(k1b.qs[16..32].*));
+                const s0: QKV4f32 = @splat(qs * f16BitsToF32(k0b.d));
+                const s1: QKV4f32 = @splat(qs * f16BitsToF32(k1b.d));
+                acc0 = acc0 + @as(QKV4f32, @floatFromInt(dot0)) * s0;
+                acc1 = acc1 + @as(QKV4f32, @floatFromInt(dot1)) * s1;
+            }
+            return .{ @reduce(.Add, acc0), @reduce(.Add, acc1) };
+        },
+        .x86_vnni, .x86_avx2, .portable => return .{ vecDotQ8_0Q8_0(q, k0), vecDotQ8_0Q8_0(q, k1) },
     }
-    return .{ vecDotQ8_0Q8_0(q, k0), vecDotQ8_0Q8_0(q, k1) };
 }
 
 /// Two query rows x two K rows (the GQA pair kernel's 2-key step): four
@@ -883,48 +892,52 @@ pub fn vecDotQ8_0Q8_0Pairx2(
     k1: []const BlockQ8_0,
 ) [4]f32 {
     std.debug.assert(q0.len == k0.len and q1.len == k0.len and k1.len == k0.len);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc00: QKV4f32 = @splat(0);
-        var acc10: QKV4f32 = @splat(0);
-        var acc01: QKV4f32 = @splat(0);
-        var acc11: QKV4f32 = @splat(0);
-        for (q0, q1, q0_scales, q1_scales, k0, k1) |*q0b, *q1b, q0s, q1s, *k0b, *k1b| {
-            const k0_lo: QKV16i8 = @bitCast(k0b.qs[0..16].*);
-            const k0_hi: QKV16i8 = @bitCast(k0b.qs[16..32].*);
-            const k1_lo: QKV16i8 = @bitCast(k1b.qs[0..16].*);
-            const k1_hi: QKV16i8 = @bitCast(k1b.qs[16..32].*);
-            const q0_lo: QKV16i8 = @bitCast(q0b.qs[0..16].*);
-            const q0_hi: QKV16i8 = @bitCast(q0b.qs[16..32].*);
-            const q1_lo: QKV16i8 = @bitCast(q1b.qs[0..16].*);
-            const q1_hi: QKV16i8 = @bitCast(q1b.qs[16..32].*);
-            var dot00: QKV4i32 = @splat(0);
-            dot00 = sdotI8x16(dot00, q0_lo, k0_lo);
-            dot00 = sdotI8x16(dot00, q0_hi, k0_hi);
-            var dot10: QKV4i32 = @splat(0);
-            dot10 = sdotI8x16(dot10, q1_lo, k0_lo);
-            dot10 = sdotI8x16(dot10, q1_hi, k0_hi);
-            var dot01: QKV4i32 = @splat(0);
-            dot01 = sdotI8x16(dot01, q0_lo, k1_lo);
-            dot01 = sdotI8x16(dot01, q0_hi, k1_hi);
-            var dot11: QKV4i32 = @splat(0);
-            dot11 = sdotI8x16(dot11, q1_lo, k1_lo);
-            dot11 = sdotI8x16(dot11, q1_hi, k1_hi);
-            const dk0 = f16BitsToF32(k0b.d);
-            const dk1 = f16BitsToF32(k1b.d);
-            const s00: QKV4f32 = @splat(q0s * dk0);
-            const s10: QKV4f32 = @splat(q1s * dk0);
-            const s01: QKV4f32 = @splat(q0s * dk1);
-            const s11: QKV4f32 = @splat(q1s * dk1);
-            acc00 = acc00 + @as(QKV4f32, @floatFromInt(dot00)) * s00;
-            acc10 = acc10 + @as(QKV4f32, @floatFromInt(dot10)) * s10;
-            acc01 = acc01 + @as(QKV4f32, @floatFromInt(dot01)) * s01;
-            acc11 = acc11 + @as(QKV4f32, @floatFromInt(dot11)) * s11;
-        }
-        return .{ @reduce(.Add, acc00), @reduce(.Add, acc10), @reduce(.Add, acc01), @reduce(.Add, acc11) };
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => {
+            var acc00: QKV4f32 = @splat(0);
+            var acc10: QKV4f32 = @splat(0);
+            var acc01: QKV4f32 = @splat(0);
+            var acc11: QKV4f32 = @splat(0);
+            for (q0, q1, q0_scales, q1_scales, k0, k1) |*q0b, *q1b, q0s, q1s, *k0b, *k1b| {
+                const k0_lo: QKV16i8 = @bitCast(k0b.qs[0..16].*);
+                const k0_hi: QKV16i8 = @bitCast(k0b.qs[16..32].*);
+                const k1_lo: QKV16i8 = @bitCast(k1b.qs[0..16].*);
+                const k1_hi: QKV16i8 = @bitCast(k1b.qs[16..32].*);
+                const q0_lo: QKV16i8 = @bitCast(q0b.qs[0..16].*);
+                const q0_hi: QKV16i8 = @bitCast(q0b.qs[16..32].*);
+                const q1_lo: QKV16i8 = @bitCast(q1b.qs[0..16].*);
+                const q1_hi: QKV16i8 = @bitCast(q1b.qs[16..32].*);
+                var dot00: QKV4i32 = @splat(0);
+                dot00 = sdotI8x16(dot00, q0_lo, k0_lo);
+                dot00 = sdotI8x16(dot00, q0_hi, k0_hi);
+                var dot10: QKV4i32 = @splat(0);
+                dot10 = sdotI8x16(dot10, q1_lo, k0_lo);
+                dot10 = sdotI8x16(dot10, q1_hi, k0_hi);
+                var dot01: QKV4i32 = @splat(0);
+                dot01 = sdotI8x16(dot01, q0_lo, k1_lo);
+                dot01 = sdotI8x16(dot01, q0_hi, k1_hi);
+                var dot11: QKV4i32 = @splat(0);
+                dot11 = sdotI8x16(dot11, q1_lo, k1_lo);
+                dot11 = sdotI8x16(dot11, q1_hi, k1_hi);
+                const dk0 = f16BitsToF32(k0b.d);
+                const dk1 = f16BitsToF32(k1b.d);
+                const s00: QKV4f32 = @splat(q0s * dk0);
+                const s10: QKV4f32 = @splat(q1s * dk0);
+                const s01: QKV4f32 = @splat(q0s * dk1);
+                const s11: QKV4f32 = @splat(q1s * dk1);
+                acc00 = acc00 + @as(QKV4f32, @floatFromInt(dot00)) * s00;
+                acc10 = acc10 + @as(QKV4f32, @floatFromInt(dot10)) * s10;
+                acc01 = acc01 + @as(QKV4f32, @floatFromInt(dot01)) * s01;
+                acc11 = acc11 + @as(QKV4f32, @floatFromInt(dot11)) * s11;
+            }
+            return .{ @reduce(.Add, acc00), @reduce(.Add, acc10), @reduce(.Add, acc01), @reduce(.Add, acc11) };
+        },
+        .x86_vnni, .x86_avx2, .portable => {
+            const a = vecDotQ8_0Q8_0Pair(q0, q1, k0);
+            const b = vecDotQ8_0Q8_0Pair(q0, q1, k1);
+            return .{ a[0], a[1], b[0], b[1] };
+        },
     }
-    const a = vecDotQ8_0Q8_0Pair(q0, q1, k0);
-    const b = vecDotQ8_0Q8_0Pair(q0, q1, k1);
-    return .{ a[0], a[1], b[0], b[1] };
 }
 
 /// Two source V rows fused into one pass over the output row: the out
@@ -1036,19 +1049,21 @@ pub fn weightedQ8_0RowPair(comptime accumulate: bool, out0: []f32, out1: []f32, 
 
 fn dotQ8_0Q8_0(a: *const BlockQ8_0, b: *const BlockQ8_0) f32 {
     const d = f16BitsToF32(a.d) * f16BitsToF32(b.d);
-    if (comptime common.has_x86_avx2) {
-        // AVX2/VNNI int8 dot over the two 16-byte halves. Operand order is
-        // load-bearing on the AVX2 sign-trick path: the SIGN SOURCE (first
-        // arg) is b — the RHS/GGUF weight side, which the format permits to
-        // hold -128 — while a is the in-engine quantizeToI8 output, clamped to
-        // [-127,127]: exactly the sign-trick exactness domain (second operand
-        // must not be -128 in lanes where the first is negative). Bit-equal to
-        // the i8DotI32 fallback; under VNNI it lowers to vpdpbusd instead.
-        const dot = common.dotI8x16Portable(@bitCast(b.qs[0..16].*), @bitCast(a.qs[0..16].*)) +
-            common.dotI8x16Portable(@bitCast(b.qs[16..32].*), @bitCast(a.qs[16..32].*));
-        return @as(f32, @floatFromInt(dot)) * d;
+    switch (isa.tier) {
+        .x86_vnni, .x86_avx2 => {
+            // AVX2/VNNI int8 dot over the two 16-byte halves. Operand order is
+            // load-bearing on the AVX2 sign-trick path: the SIGN SOURCE (first
+            // arg) is b — the RHS/GGUF weight side, which the format permits to
+            // hold -128 — while a is the in-engine quantizeToI8 output, clamped to
+            // [-127,127]: exactly the sign-trick exactness domain (second operand
+            // must not be -128 in lanes where the first is negative). Bit-equal to
+            // the i8DotI32 fallback; under VNNI it lowers to vpdpbusd instead.
+            const dot = common.dotI8x16Portable(@bitCast(b.qs[0..16].*), @bitCast(a.qs[0..16].*)) +
+                common.dotI8x16Portable(@bitCast(b.qs[16..32].*), @bitCast(a.qs[16..32].*));
+            return @as(f32, @floatFromInt(dot)) * d;
+        },
+        .neon_i8mm, .neon_sdot, .portable => return @as(f32, @floatFromInt(common.i8DotI32(&a.qs, &b.qs))) * d,
     }
-    return @as(f32, @floatFromInt(common.i8DotI32(&a.qs, &b.qs))) * d;
 }
 
 fn accumulateQ8_0Aarch64(
@@ -1078,16 +1093,12 @@ fn accumulateQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32
 /// overlap consecutive blocks' integer pipelines while keeping the float
 /// ADD sequence — and therefore the results — bitwise unchanged.
 fn contributionQ8_0x4(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4) QKV4f32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return contributionQ8_0x4Aarch64(lhs, rhs);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return contributionQ8_0x4Vnni(lhs, rhs);
-    }
-    if (comptime common.has_x86_avx2) {
-        return contributionQ8_0x4Avx2(lhs, rhs);
-    }
-    return contributionQ8_0x4Widen(lhs, rhs);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => contributionQ8_0x4Aarch64(lhs, rhs),
+        .x86_vnni => contributionQ8_0x4Vnni(lhs, rhs),
+        .x86_avx2 => contributionQ8_0x4Avx2(lhs, rhs),
+        .portable => contributionQ8_0x4Widen(lhs, rhs),
+    };
 }
 
 fn accumulateQ8_0x4Rows(
@@ -1098,12 +1109,14 @@ fn accumulateQ8_0x4Rows(
     rhs: *const BlockQ8_0x4,
     acc: *[common.q8_0_row_block]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ8_0x4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    inline for (0..common.q8_0_row_block) |r| {
-        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-        acc[r] = accumulateQ8_0x4(lhs, rhs, acc[r]);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => return accumulateQ8_0x4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => {
+            inline for (0..common.q8_0_row_block) |r| {
+                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                acc[r] = accumulateQ8_0x4(lhs, rhs, acc[r]);
+            }
+        },
     }
 }
 
@@ -1169,16 +1182,12 @@ fn accumulateQ8_0x4RowsAarch64(
 }
 
 fn accumulateQ8_0x4Packed(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_0x4, acc: *[4]QKV4f32) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ8_0x4PackedAarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ8_0x4PackedVnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ8_0x4PackedAvx2(lhs, rhs, acc);
-    }
-    return accumulateQ8_0x4PackedWiden(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ8_0x4PackedAarch64(lhs, rhs, acc),
+        .x86_vnni => accumulateQ8_0x4PackedVnni(lhs, rhs, acc),
+        .x86_avx2 => accumulateQ8_0x4PackedAvx2(lhs, rhs, acc),
+        .portable => accumulateQ8_0x4PackedWiden(lhs, rhs, acc),
+    };
 }
 
 fn accumulateQ8_0x4PackedAarch64(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_0x4, acc: *[4]QKV4f32) void {
@@ -1237,17 +1246,15 @@ fn accumulateQ8_0x4PackedDual(
     acc_a: *[4]QKV4f32,
     acc_b: *[4]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ8_0x4PackedDualAarch64(lhs_a, lhs_b, rhs, acc_a, acc_b);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ8_0x4PackedDualAarch64(lhs_a, lhs_b, rhs, acc_a, acc_b),
+        .x86_vnni => accumulateQ8_0x4PackedDualVnni(lhs_a, lhs_b, rhs, acc_a, acc_b),
+        .x86_avx2 => accumulateQ8_0x4PackedDualAvx2(lhs_a, lhs_b, rhs, acc_a, acc_b),
+        .portable => {
+            accumulateQ8_0x4PackedWiden(lhs_a, rhs, acc_a);
+            accumulateQ8_0x4PackedWiden(lhs_b, rhs, acc_b);
+        },
     }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ8_0x4PackedDualVnni(lhs_a, lhs_b, rhs, acc_a, acc_b);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ8_0x4PackedDualAvx2(lhs_a, lhs_b, rhs, acc_a, acc_b);
-    }
-    accumulateQ8_0x4PackedWiden(lhs_a, rhs, acc_a);
-    accumulateQ8_0x4PackedWiden(lhs_b, rhs, acc_b);
 }
 
 fn accumulateQ8_0x4PackedDualAarch64(

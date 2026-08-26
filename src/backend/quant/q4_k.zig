@@ -5,9 +5,9 @@
 //! quantization from `q8k.zig`; the naming grammar is in `quant.zig`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
 const tensor = @import("../../tensor.zig");
+const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
@@ -723,43 +723,39 @@ fn dotQ4_KSubblockI32(w: *const BlockQ4_K, a: *const BlockQ8_K, comptime subbloc
     const a0_i8: QKV16i8 = @bitCast(a.qs[a_offset..][0..16].*);
     const a1_i8: QKV16i8 = @bitCast(a.qs[a_offset + 16 ..][0..16].*);
 
-    if (comptime common.has_x86_avx2) {
+    switch (isa.tier) {
         // u8 nibbles (0..15) x i8 activations on the AVX2 vpmaddubsw path:
         // pair sums are bounded by 2*15*128 = 3840 << 32767, so the saturating
         // u8·i8 multiply-add cannot saturate — exact i32, bit-equal to the
         // reduce below. Under VNNI the same call lowers to vpdpbusd instead.
-        return common.dotU8I8x16Portable(qs0, a0_i8) + common.dotU8I8x16Portable(qs1, a1_i8);
+        .x86_vnni, .x86_avx2 => return common.dotU8I8x16Portable(qs0, a0_i8) + common.dotU8I8x16Portable(qs1, a1_i8),
+        // q4 nibbles are in [0,15] so they fit i8; dot in i32 — NEON sdot
+        // (the missing arm that left the q4_k GEMV i16-widen-bound on Apple
+        // Silicon; q5_k/q6_k already had it).
+        .neon_i8mm, .neon_sdot => {
+            const w0_i8: QKV16i8 = @bitCast(qs0);
+            const w1_i8: QKV16i8 = @bitCast(qs1);
+            var acc: QKV4i32 = @splat(0);
+            acc = common.sdotI8x16(acc, w0_i8, a0_i8);
+            acc = common.sdotI8x16(acc, w1_i8, a1_i8);
+            return @reduce(.Add, acc);
+        },
+        // i32 multiply-reduce everywhere else.
+        .portable => {
+            const w0: @Vector(16, i32) = @intCast(qs0);
+            const w1: @Vector(16, i32) = @intCast(qs1);
+            const a0: @Vector(16, i32) = @intCast(a0_i8);
+            const a1: @Vector(16, i32) = @intCast(a1_i8);
+            return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
+        },
     }
-
-    // q4 nibbles are in [0,15] so they fit i8; dot in i32 — NEON sdot where
-    // available (the missing arm that left the q4_k GEMV i16-widen-bound on
-    // Apple Silicon; q5_k/q6_k already had it), i32 multiply-reduce otherwise.
-    const w0_i8: QKV16i8 = @bitCast(qs0);
-    const w1_i8: QKV16i8 = @bitCast(qs1);
-    if (comptime builtin.cpu.arch == .aarch64) {
-        var acc: QKV4i32 = @splat(0);
-        acc = common.sdotI8x16(acc, w0_i8, a0_i8);
-        acc = common.sdotI8x16(acc, w1_i8, a1_i8);
-        return @reduce(.Add, acc);
-    }
-    const w0: @Vector(16, i32) = @intCast(qs0);
-    const w1: @Vector(16, i32) = @intCast(qs1);
-    const a0: @Vector(16, i32) = @intCast(a0_i8);
-    const a1: @Vector(16, i32) = @intCast(a1_i8);
-    return @reduce(.Add, w0 * a0) + @reduce(.Add, w1 * a1);
 }
 
 fn accumulateQ4_Kx4(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ4_Kx4Aarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ4_Kx4Vnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ4_Kx4Avx2(lhs, rhs, acc);
-    }
-    return accumulateQ4_Kx4Widen(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ4_Kx4Aarch64(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ4_Kx4X86(isa.tier, lhs, rhs, acc),
+    };
 }
 
 fn accumulateQ4_Kx4Rows(
@@ -770,12 +766,14 @@ fn accumulateQ4_Kx4Rows(
     rhs: *const types.BlockQ4_Kx4,
     acc: *[common.q8_0_row_block]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ4_Kx4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    inline for (0..common.q8_0_row_block) |r| {
-        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-        acc[r] = accumulateQ4_Kx4(lhs, rhs, acc[r]);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => return accumulateQ4_Kx4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => {
+            inline for (0..common.q8_0_row_block) |r| {
+                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                acc[r] = accumulateQ4_Kx4(lhs, rhs, acc[r]);
+            }
+        },
     }
 }
 
@@ -907,16 +905,10 @@ pub fn accumulateQ4_Kx4Scalar(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_K
 }
 
 fn accumulateQ4_Kx8(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ4_Kx8Aarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ4_Kx8Vnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ4_Kx8Avx2(lhs, rhs, acc);
-    }
-    return accumulateQ4_Kx8Widen(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ4_Kx8Aarch64(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ4_Kx8X86(isa.tier, lhs, rhs, acc),
+    };
 }
 
 fn accumulateQ4_Kx8Rows(
@@ -927,12 +919,14 @@ fn accumulateQ4_Kx8Rows(
     rhs: *const BlockQ4_Kx8,
     acc: *[common.q4_kx8_row_block][2]QKV4f32,
 ) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ4_Kx8RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
-    }
-    inline for (0..common.q4_kx8_row_block) |r| {
-        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-        accumulateQ4_Kx8(lhs, rhs, &acc[r]);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => return accumulateQ4_Kx8RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => {
+            inline for (0..common.q4_kx8_row_block) |r| {
+                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                accumulateQ4_Kx8(lhs, rhs, &acc[r]);
+            }
+        },
     }
 }
 
@@ -983,27 +977,30 @@ fn accumulateQ4_Kx2Mmla(lhs: *const types.BlockQ8_Kx2Mmla, rhs: *const types.Blo
 
     inline for (0..8) |subblock| {
         var dot: QKV4i32 = @splat(0);
-        if (comptime common.has_aarch64_i8mm) {
-            inline for (0..2) |half| {
-                const base = subblock * 64 + half * 32;
-                const q4_lo: QKV16i8 = @bitCast(rhs.qs[base..][0..16].*);
-                const q4_hi: QKV16i8 = @bitCast(rhs.qs[base + 16 ..][0..16].*);
-                const q8_lo: QKV16i8 = @bitCast(lhs.qs[base..][0..16].*);
-                const q8_hi: QKV16i8 = @bitCast(lhs.qs[base + 16 ..][0..16].*);
-                dot = common.smmlaI8x16(dot, q4_lo, q8_lo);
-                dot = common.smmlaI8x16(dot, q4_hi, q8_hi);
-            }
-        } else {
-            inline for (0..32) |feature| {
-                const q40: i32 = q4Kx2MmlaValue(&rhs.qs, subblock, feature, 0);
-                const q41: i32 = q4Kx2MmlaValue(&rhs.qs, subblock, feature, 1);
-                const q80: i32 = q4Kx2MmlaValue(&lhs.qs, subblock, feature, 0);
-                const q81: i32 = q4Kx2MmlaValue(&lhs.qs, subblock, feature, 1);
-                dot[0] += q40 * q80;
-                dot[1] += q40 * q81;
-                dot[2] += q41 * q80;
-                dot[3] += q41 * q81;
-            }
+        switch (isa.tier) {
+            .neon_i8mm => {
+                inline for (0..2) |half| {
+                    const base = subblock * 64 + half * 32;
+                    const q4_lo: QKV16i8 = @bitCast(rhs.qs[base..][0..16].*);
+                    const q4_hi: QKV16i8 = @bitCast(rhs.qs[base + 16 ..][0..16].*);
+                    const q8_lo: QKV16i8 = @bitCast(lhs.qs[base..][0..16].*);
+                    const q8_hi: QKV16i8 = @bitCast(lhs.qs[base + 16 ..][0..16].*);
+                    dot = common.smmlaI8x16(dot, q4_lo, q8_lo);
+                    dot = common.smmlaI8x16(dot, q4_hi, q8_hi);
+                }
+            },
+            .neon_sdot, .x86_vnni, .x86_avx2, .portable => {
+                inline for (0..32) |feature| {
+                    const q40: i32 = q4Kx2MmlaValue(&rhs.qs, subblock, feature, 0);
+                    const q41: i32 = q4Kx2MmlaValue(&rhs.qs, subblock, feature, 1);
+                    const q80: i32 = q4Kx2MmlaValue(&lhs.qs, subblock, feature, 0);
+                    const q81: i32 = q4Kx2MmlaValue(&lhs.qs, subblock, feature, 1);
+                    dot[0] += q40 * q80;
+                    dot[1] += q40 * q81;
+                    dot[2] += q41 * q80;
+                    dot[3] += q41 * q81;
+                }
+            },
         }
 
         const scales = q4Kx2MmlaScales(&rhs.scales, subblock);
@@ -1052,16 +1049,10 @@ fn accumulateQ4_Kx2MmlaRow(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx2M
 }
 
 fn accumulateQ4_Kx8Q8_Kx4(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return accumulateQ4_Kx8Q8_Kx4Aarch64(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_vnni_ymm) {
-        return accumulateQ4_Kx8Q8_Kx4Vnni(lhs, rhs, acc);
-    }
-    if (comptime common.has_x86_avx2) {
-        return accumulateQ4_Kx8Q8_Kx4Avx2(lhs, rhs, acc);
-    }
-    return accumulateQ4_Kx8Q8_Kx4Widen(lhs, rhs, acc);
+    return switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => accumulateQ4_Kx8Q8_Kx4Aarch64(lhs, rhs, acc),
+        .x86_vnni, .x86_avx2, .portable => accumulateQ4_Kx8Q8_Kx4X86(isa.tier, lhs, rhs, acc),
+    };
 }
 
 fn accumulateQ4_Kx8Q8_Kx4Aarch64(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
@@ -1433,18 +1424,18 @@ inline fn broadcastGroupI8x32(bytes: *const [4]i8) common.QKV32i8 {
 }
 
 pub fn accumulateQ4_Kx4Vnni(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
-    return accumulateQ4_Kx4X86(.vnni, lhs, rhs, acc);
+    return accumulateQ4_Kx4X86(.x86_vnni, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx4Avx2(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
-    return accumulateQ4_Kx4X86(.avx2, lhs, rhs, acc);
+    return accumulateQ4_Kx4X86(.x86_avx2, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx4Widen(lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
-    return accumulateQ4_Kx4X86(.widen, lhs, rhs, acc);
+    return accumulateQ4_Kx4X86(.portable, lhs, rhs, acc);
 }
 
-fn accumulateQ4_Kx4X86(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
+fn accumulateQ4_Kx4X86(comptime tier: isa.Tier, lhs: *const BlockQ8_K, rhs: *const types.BlockQ4_Kx4, acc: QKV4f32) QKV4f32 {
     const d = common.f16x4BitsToF32(rhs.d) * @as(QKV4f32, @splat(lhs.d));
     const dmin = common.f16x4BitsToF32(rhs.dmin) * @as(QKV4f32, @splat(lhs.d));
     var out = acc;
@@ -1482,18 +1473,18 @@ fn accumulateQ4_Kx4X86(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, 
 }
 
 pub fn accumulateQ4_Kx8Vnni(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
-    return accumulateQ4_Kx8X86(.vnni, lhs, rhs, acc);
+    return accumulateQ4_Kx8X86(.x86_vnni, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx8Avx2(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
-    return accumulateQ4_Kx8X86(.avx2, lhs, rhs, acc);
+    return accumulateQ4_Kx8X86(.x86_avx2, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx8Widen(lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
-    return accumulateQ4_Kx8X86(.widen, lhs, rhs, acc);
+    return accumulateQ4_Kx8X86(.portable, lhs, rhs, acc);
 }
 
-fn accumulateQ4_Kx8X86(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
+fn accumulateQ4_Kx8X86(comptime tier: isa.Tier, lhs: *const BlockQ8_K, rhs: *const BlockQ4_Kx8, acc: *[2]QKV4f32) void {
     const d0 = q4Kx8D(rhs.d, 0) * @as(QKV4f32, @splat(lhs.d));
     const d1 = q4Kx8D(rhs.d, 1) * @as(QKV4f32, @splat(lhs.d));
     const dmin0 = q4Kx8D(rhs.dmin, 0) * @as(QKV4f32, @splat(lhs.d));
@@ -1545,18 +1536,18 @@ fn accumulateQ4_Kx8X86(comptime tier: common.X86DotTier, lhs: *const BlockQ8_K, 
 }
 
 pub fn accumulateQ4_Kx8Q8_Kx4Vnni(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
-    return accumulateQ4_Kx8Q8_Kx4X86(.vnni, lhs, rhs, acc);
+    return accumulateQ4_Kx8Q8_Kx4X86(.x86_vnni, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx8Q8_Kx4Avx2(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
-    return accumulateQ4_Kx8Q8_Kx4X86(.avx2, lhs, rhs, acc);
+    return accumulateQ4_Kx8Q8_Kx4X86(.x86_avx2, lhs, rhs, acc);
 }
 
 pub fn accumulateQ4_Kx8Q8_Kx4Widen(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
-    return accumulateQ4_Kx8Q8_Kx4X86(.widen, lhs, rhs, acc);
+    return accumulateQ4_Kx8Q8_Kx4X86(.portable, lhs, rhs, acc);
 }
 
-fn accumulateQ4_Kx8Q8_Kx4X86(comptime tier: common.X86DotTier, lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
+fn accumulateQ4_Kx8Q8_Kx4X86(comptime tier: isa.Tier, lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ4_Kx8, acc: *[4][2]QKV4f32) void {
     @setEvalBranchQuota(4000);
     const rhs_d0 = q4Kx8D(rhs.d, 0);
     const rhs_d1 = q4Kx8D(rhs.d, 1);

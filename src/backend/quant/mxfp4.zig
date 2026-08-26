@@ -14,22 +14,21 @@
 //! pair with the Q8_0 activation halves `qs[0..16]` / `qs[16..32]`.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../../dtype.zig");
+const isa = @import("../isa.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
 const tables = @import("../quant_tables.zig");
 
 const kvalues: common.QKV16i8 = tables.kvalues_mxfp4;
 
-// x86 ymm path: the 16-entry signed table duplicated across both vpshufb
-// lanes, plus its magnitudes for vpdpbusd's unsigned side (sign transfers
-// to the activation via vpsignb; |code| <= 12 keeps the AVX2 maddubs pair
-// sums at <= 3048, far inside i16 — exact). DOMAIN: activation codes must
-// be in [-127, 127] — vpsignb's negation wraps -128 — which the Q8_0
-// quantizer guarantees (it never emits -128); same proven-domain contract
-// as the q8_0 sign-trick kernel.
-const has_x86_fast = common.has_x86_vnni_ymm or common.has_x86_avx2;
+// x86 ymm path (the `x86_vnni`/`x86_avx2` tiers): the 16-entry signed table
+// duplicated across both vpshufb lanes, plus its magnitudes for vpdpbusd's
+// unsigned side (sign transfers to the activation via vpsignb; |code| <= 12
+// keeps the AVX2 maddubs pair sums at <= 3048, far inside i16 — exact).
+// DOMAIN: activation codes must be in [-127, 127] — vpsignb's negation wraps
+// -128 — which the Q8_0 quantizer guarantees (it never emits -128); same
+// proven-domain contract as the q8_0 sign-trick kernel.
 const kvalues_x2: common.QKV32i8 = blk: {
     var v: [32]i8 = undefined;
     for (0..16) |i| {
@@ -65,28 +64,33 @@ inline fn decodeBlock(qs: *const [16]u8) DecodedMXFP4 {
 /// dpbusd's eight 4-byte-group lanes halfwise (lane l + lane l+4). The
 /// float tail below is therefore BITWISE identical across architectures.
 inline fn blockDotI32(w: *const dtype_mod.BlockMXFP4, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4i32 {
-    if (comptime has_x86_fast) {
-        const packed_v: common.QKV16u8 = @bitCast(w.qs);
-        const lo_idx = packed_v & @as(common.QKV16u8, @splat(0x0f));
-        const hi_idx = packed_v >> @as(common.QKV16u8, @splat(4));
-        const idx: common.QKV32u8 = std.simd.join(lo_idx, hi_idx);
-        const a32: common.QKV32i8 = std.simd.join(a_lo, a_hi);
-        const svec = common.pshufbI8x32(kvalues_x2, idx);
-        const mag: common.QKV32u8 = @bitCast(common.pshufbI8x32(kmag_x2, idx));
-        // vpsignb zeroes where the code is 0 — magnitude 0 there anyway.
-        const adj = common.psignI8x32(a32, svec);
-        var acc8: common.QKV8i32 = @splat(0);
-        acc8 = if (comptime common.has_x86_vnni_ymm)
-            common.dpbusdI32x8(acc8, mag, adj)
-        else
-            common.maddubsDotGroupsI32x8(acc8, mag, adj);
-        return common.addHalvesI32x8(acc8);
+    switch (isa.tier) {
+        .x86_vnni, .x86_avx2 => {
+            const packed_v: common.QKV16u8 = @bitCast(w.qs);
+            const lo_idx = packed_v & @as(common.QKV16u8, @splat(0x0f));
+            const hi_idx = packed_v >> @as(common.QKV16u8, @splat(4));
+            const idx: common.QKV32u8 = std.simd.join(lo_idx, hi_idx);
+            const a32: common.QKV32i8 = std.simd.join(a_lo, a_hi);
+            const svec = common.pshufbI8x32(kvalues_x2, idx);
+            const mag: common.QKV32u8 = @bitCast(common.pshufbI8x32(kmag_x2, idx));
+            // vpsignb zeroes where the code is 0 — magnitude 0 there anyway.
+            const adj = common.psignI8x32(a32, svec);
+            var acc8: common.QKV8i32 = @splat(0);
+            acc8 = switch (isa.tier) {
+                .x86_vnni => common.dpbusdI32x8(acc8, mag, adj),
+                else => common.maddubsDotGroupsI32x8(acc8, mag, adj),
+            };
+            return common.addHalvesI32x8(acc8);
+        },
+        // NEON `tbl`+`sdot`, or their exact portable twins.
+        .neon_i8mm, .neon_sdot, .portable => {
+            const d = decodeBlock(&w.qs);
+            var iacc: common.QKV4i32 = @splat(0);
+            iacc = common.sdotI8x16(iacc, d.lo, a_lo);
+            iacc = common.sdotI8x16(iacc, d.hi, a_hi);
+            return iacc;
+        },
     }
-    const d = decodeBlock(&w.qs);
-    var iacc: common.QKV4i32 = @splat(0);
-    iacc = common.sdotI8x16(iacc, d.lo, a_lo);
-    iacc = common.sdotI8x16(iacc, d.hi, a_hi);
-    return iacc;
 }
 
 inline fn blockContribution(w: *const dtype_mod.BlockMXFP4, a_d: f32, a_lo: common.QKV16i8, a_hi: common.QKV16i8) common.QKV4f32 {

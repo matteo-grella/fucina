@@ -39,7 +39,7 @@
 //! result is deterministic and independent of the thread count.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const isa = @import("../isa.zig");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
@@ -52,8 +52,8 @@ const ops = @import("../ops.zig");
 //     24 four-wide accumulators + 3 B vectors + 1 A broadcast = 28 live regs.
 //   x86-64 AVX2 (16 ymm, vector_len = 8) and other targets: mr = 6,
 //     nr = 2 * vector_len -> 12 accumulators + 2 B vectors + 1 broadcast = 15.
-pub const mr: usize = if (builtin.cpu.arch.isAARCH64()) 8 else 6;
-pub const nr_vecs: usize = if (builtin.cpu.arch.isAARCH64()) 3 else 2;
+pub const mr: usize = if (isa.is_aarch64) 8 else 6;
+pub const nr_vecs: usize = if (isa.is_aarch64) 3 else 2;
 pub const nr: usize = nr_vecs * common.vector_len;
 
 pub const Orientation = ops.MatmulKind;
@@ -73,7 +73,7 @@ pub const Orientation = ops.MatmulKind;
 // vs kc=128; nc=512 and mc={72,96,192} all measured worse.
 pub const x86_default_kc: usize = 512;
 pub const BlockParams = struct {
-    kc: usize = if (builtin.cpu.arch.isAARCH64()) 128 else x86_default_kc,
+    kc: usize = if (isa.is_aarch64) 128 else x86_default_kc,
     mc: usize = 128,
     nc: usize = 1024,
 };
@@ -207,7 +207,7 @@ fn gemmBlockedImpl(
         // elsewhere small-m shapes split each ic block's columns into
         // nr-panel-aligned chunks so every worker gets a cell.
         const num_nr_panels = (nc_eff + nr - 1) / nr;
-        const num_j_chunks = if (comptime builtin.cpu.arch.isAARCH64())
+        const num_j_chunks = if (comptime isa.is_aarch64)
             1
         else if (num_ic_blocks >= threads)
             1
@@ -436,7 +436,7 @@ fn packBParallel(
     num_nr_panels: usize,
     threads: usize,
 ) void {
-    if (comptime !builtin.cpu.arch.isAARCH64()) {
+    if (comptime !isa.is_aarch64) {
         const pool = config.pool;
         if (pool != null and threads > 1 and kc_eff * nc_eff >= pack_b_parallel_min_floats) {
             const task_count = @max(@as(usize, 1), @min(threads, num_nr_panels));
