@@ -167,16 +167,29 @@ pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque, destro
 // Worker team + one-shot dot-backward worker.
 // ------------------------------------------------------------------
 
+/// The error a latched pool-init failure reports on every later request.
+pub const WorkPoolError = error{WorkPoolUnavailable};
+
+/// The worker team, created on the first call. A failed `Pool.init` is
+/// latched in `work_pool_failed`: one warning, then every later call
+/// returns `WorkPoolUnavailable` without retrying, so a context whose team
+/// could not start runs serially (`workPool` = null) instead of paying the
+/// failed init on every dispatch.
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
     self.work_pool_mutex.lock();
     defer self.work_pool_mutex.unlock();
 
+    if (self.work_pool_failed) return WorkPoolError.WorkPoolUnavailable;
     if (!self.work_pool_ready) {
         const worker_threads = parallel.cpuThreadCount(parallel.vector_max_threads) - 1;
-        try self.work_pool.init(.{
+        self.work_pool.init(.{
             .allocator = self.allocator,
             .max_workers = worker_threads,
-        });
+        }) catch |err| {
+            self.work_pool_failed = true;
+            std.log.warn("exec: worker pool init failed ({s}); this context runs kernels serially", .{@errorName(err)});
+            return err;
+        };
         self.work_pool_ready = true;
         setWorkPool(self, &self.work_pool);
     }

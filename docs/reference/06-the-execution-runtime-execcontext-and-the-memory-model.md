@@ -27,7 +27,7 @@ pub const ExecContext = struct {
     parallel_pool: std.atomic.Value(?*thread.Pool), // the published worker team (pc() snapshots it)
     buffers: BufferPool,
     tuning: tuning.Overrides,
-    work_pool: thread.Pool,          // + work_pool_ready, work_pool_mutex
+    work_pool: thread.Pool,          // + work_pool_ready, work_pool_failed, work_pool_mutex
     dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
     scope_entries, scope_depth,      // the exec-scope stack
     pin_rowwise_kernels: bool,
@@ -568,8 +568,13 @@ a kernel dispatched from another thread (dot-backward's `OneShotWorker`)
 while a lazy `tryWorkPool` retry publishes the pool also sees `Pool.init`'s
 writes.
 
+A `Pool.init` failure is latched (`work_pool_failed`): the context logs one
+warning and every later `tryWorkPool` returns `error.WorkPoolUnavailable`
+without retrying, so `workPool()` stays null and that context runs its
+kernels serially for the rest of its life.
+
 ```zig
-pub fn tryWorkPool(self: *ExecContext) !*thread.Pool   // creates on first call
+pub fn tryWorkPool(self: *ExecContext) !*thread.Pool   // creates on first call; latched on failure
 pub fn workPool(self: *ExecContext) ?*thread.Pool      // tryWorkPool catch null
 pub fn pc(self: *const ExecContext) backend.ParallelConfig // { .pool = parallel_pool.load(.acquire) }
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
@@ -834,7 +839,7 @@ What is thread-safe inside a context:
   and buffer/slab release hooks run on whatever thread drops the last
   reference (storage refcounts are atomic).
 - **Lazy initialization**: `tryWorkPool` and `dotBackwardWorker` are
-  mutex-guarded and idempotent.
+  mutex-guarded and idempotent; a failed pool init is latched, not retried.
 
 What is not:
 

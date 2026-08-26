@@ -519,6 +519,38 @@ test "exec context cross entropy ex handles ignored labels and validation" {
 // These drive the substrate alloc primitives (ctx.zeros,
 // ctx.scalar) and the elementwise reduce-broadcast VJP directly, so they
 // belong beside the other exec_tests rather than inline in exec.zig.
+test "exec context latches a failed worker pool init and stays serial" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // `Pool.init` cannot be made to fail deterministically, so the latch is
+    // set by hand: every later request must report the failure without
+    // touching `work_pool` (`work_pool_ready` stays false, so deinit skips
+    // it) and `workPool` must answer null, the serial path.
+    ctx.work_pool_failed = true;
+    try std.testing.expectError(error.WorkPoolUnavailable, ctx.tryWorkPool());
+    try std.testing.expect(ctx.workPool() == null);
+    try std.testing.expect(!ctx.work_pool_ready);
+    try std.testing.expect(ctx.pc().pool == null);
+
+    // Kernels still run (serially) on a latched context.
+    var x = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer x.deinit();
+    var y = try ctx.sumAxis(.f32, 2, &x, 0);
+    defer y.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 5, 7, 9 }, y.dataConst());
+
+    // A fresh context is unaffected and starts its team on request.
+    var fresh: ExecContext = undefined;
+    fresh.init(allocator);
+    defer fresh.deinit();
+    try std.testing.expect(fresh.workPool() != null);
+    try std.testing.expect(fresh.work_pool_ready);
+    try std.testing.expect(!fresh.work_pool_failed);
+}
+
 test "exec context reuses buffers for arbitrary broadcast materialization" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

@@ -143,6 +143,10 @@ pub const ExecContext = struct {
     tuning: tuning.Overrides = .{},
     work_pool: thread.Pool,
     work_pool_ready: bool = false,
+    /// Latched by `tryWorkPool` when `Pool.init` fails: the context then
+    /// runs every kernel serially for its whole life instead of re-paying
+    /// the failed init on each dispatch (one warning is logged).
+    work_pool_failed: bool = false,
     work_pool_mutex: thread.Mutex = .{},
     dot_backward_worker: thread.OneShotWorker,
     dot_backward_worker_ready: bool = false,
