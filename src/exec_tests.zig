@@ -11,7 +11,6 @@ const tensor = @import("tensor.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 const ExecContext = exec.ExecContext;
-const LayoutClass = exec.LayoutClass;
 const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 
@@ -533,7 +532,6 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     var middle_b = try ctx.broadcastTo(&middle, .{ 2, 4, 3 });
     defer middle_b.deinit();
 
-    try std.testing.expectEqual(LayoutClass.arbitrary, ctx.classify(&middle_b));
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
     try std.testing.expectEqual(@as(usize, 0), ctx.buffers.cachedBuffers());
 

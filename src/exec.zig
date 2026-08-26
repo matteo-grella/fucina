@@ -44,13 +44,6 @@ pub const delta_attention = @import("exec/delta_attention.zig");
 pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
-pub const LayoutClass = enum {
-    contiguous,
-    scalar,
-    tail_broadcast,
-    arbitrary,
-};
-
 pub const UnaryOp = backend_ops.UnaryOp;
 pub const GatedOp = backend_ops.GatedOp;
 pub const Gated = backend_ops.Gated;
@@ -122,7 +115,6 @@ pub const BmmKind = exec_matmul.BmmKind;
 pub const BmmBatchMode = exec_matmul.BmmBatchMode;
 pub const BmmShape = exec_matmul.BmmShape;
 pub const QuantizedMatmulOptions = exec_quant_matmul.QuantizedMatmulOptions;
-const tailBroadcastInfo = exec_elementwise.tailBroadcastInfo;
 
 /// Reusable transient-buffer pool. Defined in the `exec/buffer_pool.zig` leaf;
 /// re-exported here so `exec.BufferPool` stays reachable and the `buffers`
@@ -229,13 +221,6 @@ pub const ExecContext = struct {
     pub const dispatchRange = exec_runtime.dispatchRange;
     pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;
     pub const parallelMap = exec_runtime.parallelMap;
-
-    pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass {
-        if (x.isScalar()) return .scalar;
-        if (x.isContiguous()) return .contiguous;
-        if (tailBroadcastInfo(x) != null) return .tail_broadcast;
-        return .arbitrary;
-    }
 
     pub const broadcastTo = exec_runtime.broadcastTo;
 

@@ -40,8 +40,8 @@ facade: one line. The result's axis names are computed at compile time; the
 body just dispatches. Layer two, the lowering: validate both operands once,
 build zero-copy broadcast views — a broadcast is a zero-stride view, never a
 copy — then dispatch to rank-specialized kernels. Below this line, nothing
-re-checks anything. Layer three: kernels classify layout exactly once —
-contiguous, scalar, tail-broadcast, or arbitrary — and pick a fast path.
+re-checks anything. Layer three: the lowering inspects layout exactly once —
+both contiguous, a tail broadcast, or materialize — and picks a fast path.
 That is the entire architecture: validate once at the facade, then small
 unchecked kernels.
 **Visual:** Three code shots in descending sequence, with a small "depth
@@ -49,7 +49,8 @@ gauge" graphic on the left edge (facade → lowering → kernel) tracking the
 descent: (1) `src/ag/tensor.zig:1241–1243` (`add`, the whole method);
 (2) `src/tag_ops.zig:53–81` (`pointwise` — hold on the two `validateTensorRank`
 lines, then the two `broadcastTensorTo` view lines, then the `switch`);
-(3) `src/exec.zig:48–53` (`LayoutClass` enum).
+(3) `src/exec/elementwise.zig` (`elementwiseRankInto`: the contiguous /
+tail-broadcast / materialize dispatch).
 **Overlay:** On shot 2: "validate once — nothing below re-checks". On shot 3:
 "facade ≈ 100+ methods, raw surface ≈ 300 pub fns (counts as of the
 chapter's writing; API young and unstable, no semver)".
@@ -114,7 +115,7 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
 - **Code shots (record from the repo at current main):**
   - `src/ag/tensor.zig:1241–1243` — `add`, the entire facade method.
   - `src/tag_ops.zig:53–81` — `pointwise`, the entire lowering function.
-  - `src/exec.zig:48–53` — the `LayoutClass` enum.
+  - `src/exec/elementwise.zig` — `elementwiseRankInto`, the layout dispatch.
   - `src/ag/tensor.zig:1257–1261` — `scale`, the entire method.
   - `src/ag/tensor.zig:3747` — the `dot` signature (one line, wraps).
 - **Chapter excerpts (render from `docs/course/05-the-operation-library.md`):**

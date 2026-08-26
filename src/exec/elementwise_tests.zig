@@ -17,7 +17,6 @@ const tensor = @import("../tensor.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 const ExecContext = exec.ExecContext;
-const LayoutClass = exec.LayoutClass;
 const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 
@@ -83,7 +82,6 @@ test "exec context applies explicit tail broadcast without materializing the vie
     defer broadcast.deinit();
 
     try std.testing.expect(broadcast.buffer == bias.buffer);
-    try std.testing.expectEqual(LayoutClass.tail_broadcast, ctx.classify(&broadcast));
 
     var y = try ctx.elementwise(.f32, .add, &x, &broadcast);
     defer y.deinit();
@@ -320,7 +318,6 @@ test "exec context handles scalar broadcast and non-tail broadcast fallback" {
     defer middle.deinit();
     var middle_b = try ctx.broadcastTo(&middle, &.{ 2, 4, 3 });
     defer middle_b.deinit();
-    try std.testing.expectEqual(LayoutClass.arbitrary, ctx.classify(&middle_b));
 
     var zeros = try ctx.zeros(.f32, &.{ 2, 4, 3 });
     defer zeros.deinit();

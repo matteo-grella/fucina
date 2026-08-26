@@ -182,22 +182,15 @@ broadcast views** (a broadcast is a zero-stride view, never a materialized
 copy), then dispatch to rank-specialized kernels that *assume* shape
 correctness. Below this line, nothing re-checks anything.
 
-Third, the kernels themselves classify layout exactly once and pick a fast
-path. The dispatch key is a four-way enum (from `src/exec.zig:48`):
-
-```zig
-pub const LayoutClass = enum {
-    contiguous,
-    scalar,
-    tail_broadcast,
-    arbitrary,
-};
-```
-
-`contiguous` gets the vectorized hot loop; `scalar` and `tail_broadcast`
-(a bias-style operand: broadcast over the leading axes, with a contiguous
-trailing block) get their own specializations;
-`arbitrary` gets the honest strided fallback. And one more discipline holds
+Third, the lowering inspects layout exactly once and picks a fast path.
+There is no layout enum: the elementwise lowering
+(`elementwiseRankInto` in `src/exec/elementwise.zig`) asks three questions
+in order. Both operands contiguous? Then the backend's vectorized
+contiguous kernel. Is one operand a *tail broadcast* (a scalar, or a
+bias-style operand broadcast over the leading axes with a contiguous
+trailing block, recognised by `tailBroadcastInfo`)? Then a specialised
+loop that reads the small operand in place. Anything else is materialized
+to contiguous through the pool and takes the first path. And one more discipline holds
 across the whole kernel tier: **kernels never allocate** — every transient
 buffer they need flows through the context's pool (docs/REFERENCE.md §6.5).
 What the kernels look like inside — `@Vector`, thresholds, the worker team —

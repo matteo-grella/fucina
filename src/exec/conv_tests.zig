@@ -17,7 +17,6 @@ const tensor = @import("../tensor.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 const ExecContext = exec.ExecContext;
-const LayoutClass = exec.LayoutClass;
 const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 

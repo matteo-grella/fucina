@@ -83,7 +83,7 @@ fails this assertion in safety builds rather than silently leaking. After
 
 **Substrate methods** (everything else on `ExecContext` is an op, see [§4](04-tensor-operations.md);
 the signatures below are the `src/exec/runtime.zig` functions the struct
-aliases, except `classify`, which is defined in `src/exec.zig` itself):
+aliases):
 
 ```zig
 pub fn execScopeActive(self: *const ExecContext) bool
@@ -100,14 +100,15 @@ pub fn pc(self: *const ExecContext) backend.ParallelConfig
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
-pub fn classify(_: *const ExecContext, x: *const Tensor) LayoutClass
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value)
 pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: anytype) !Tensor
 ```
 
-`classify` buckets a raw tensor's layout into
-`LayoutClass = enum { contiguous, scalar, tail_broadcast, arbitrary }` — the
-dispatch key elementwise kernels use to pick a fast path. `broadcastTo`
+There is no layout-classification entry point: each lowering inspects
+its operands' strides itself (`isContiguous`, and for elementwise ops
+`tailBroadcastInfo` in `src/exec/elementwise.zig`, which recognises a
+scalar or bias-style operand broadcast over the leading axes) and falls back
+to `prepareContiguous` for anything else. `broadcastTo`
 returns a zero-copy view (a refcounted alias, [§6.2](06-the-execution-runtime-execcontext-and-the-memory-model.md#62-the-memory-model-who-owns-an-op-result-docsmemory-modelmd)); `shape` is either a
 `[rank]usize` array/tuple (comptime rank) or a `[]const usize` slice.
 `setTuning` installs per-context tuning overrides (`fucina.tuning.Overrides`,
