@@ -116,6 +116,8 @@ pub const BmmKind = exec_matmul.BmmKind;
 pub const BmmBatchMode = exec_matmul.BmmBatchMode;
 pub const BmmShape = exec_matmul.BmmShape;
 pub const QuantizedMatmulOptions = exec_quant_matmul.QuantizedMatmulOptions;
+pub const QuantMatmul = exec_quant_matmul.QuantMatmul;
+pub const QuantMatmulLhs = exec_quant_matmul.Lhs;
 
 /// Reusable transient-buffer pool. Defined in the `exec/buffer_pool.zig` leaf;
 /// re-exported here so `exec.BufferPool` stays reachable and the `buffers`
@@ -491,6 +493,8 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const dequantizeTensor = exec_quant_matmul.dequantizeTensor;
     pub const getRowsQuantized = exec_quant_matmul.getRowsQuantized;
+    pub const matmulQuant = exec_quant_matmul.matmulQuant;
+    pub const matmulQuantInto = exec_quant_matmul.matmulQuantInto;
     pub const matmul2DWithQuantizedTensorRhs = exec_quant_matmul.matmul2DWithQuantizedTensorRhs;
     pub const matmul2DWithQuantizedBlocksRhs = exec_quant_matmul.matmul2DWithQuantizedBlocksRhs;
     pub const packMatmulRhs = exec_quant_matmul.packMatmulRhs;
