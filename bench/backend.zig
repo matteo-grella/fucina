@@ -770,23 +770,21 @@ fn benchPackedMatMulTimed(
     comptime n_warmup: usize,
 ) !void {
     const TypedTensor = raw_backend.TensorOf(tensor_dtype);
-    const out_dtype = comptime dtype.outputDType(.matmul, tensor_dtype);
-    const OutputTensor = raw_backend.TensorOf(out_dtype);
-    const PackedRhs = raw_backend.PackedMatmulRhsFor(tensor_dtype);
+    const PackedRhs = raw_backend.PackedRhsFor(tensor_dtype);
 
-    const a_data = try randomSliceTyped(tensor_dtype, allocator, m * k, 0x71);
+    const a_data = try randomSlice(allocator, m * k, 0x71);
     defer allocator.free(a_data);
-    const b_data = try randomSliceTyped(tensor_dtype, allocator, k * n, 0x72);
+    const b_data = try randomSliceTyped(tensor_dtype, allocator, n * k, 0x72);
     defer allocator.free(b_data);
 
-    var a = try TypedTensor.fromSlice(allocator, &.{ m, k }, a_data);
+    var a = try Tensor.fromSlice(allocator, &.{ m, k }, a_data);
     defer a.deinit();
-    var b = try TypedTensor.fromSlice(allocator, &.{ k, n }, b_data);
+    var b = try TypedTensor.fromSlice(allocator, &.{ n, k }, b_data);
     defer b.deinit();
-    var out = try OutputTensor.zeros(allocator, &.{ m, n });
+    var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
 
-    var packed_rhs = try native.kernels.packHalfRhs(tensor_dtype, allocator, &b);
+    var packed_rhs = try native.kernels.packDenseRhs(tensor_dtype, allocator, &b);
     defer packed_rhs.deinit();
 
     var pool: raw_backend.ThreadPool = undefined;
@@ -795,12 +793,12 @@ fn benchPackedMatMulTimed(
     const native_config: native.ParallelConfig = .{ .pool = &pool };
 
     const ScalarRunner = struct {
-        fn run(alloc: std.mem.Allocator, o: *OutputTensor, lhs: *const TypedTensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize) !void {
+        fn run(alloc: std.mem.Allocator, o: *Tensor, lhs: *const Tensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize) !void {
             try scalar.kernels.matmulPacked(.{}, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
-        fn run(alloc: std.mem.Allocator, o: *OutputTensor, lhs: *const TypedTensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
+        fn run(alloc: std.mem.Allocator, o: *Tensor, lhs: *const Tensor, rhs: *const PackedRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
             try native.kernels.matmulPacked(config, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
