@@ -271,7 +271,28 @@ pub fn runGroupedCausalAttentionBackwardTask(task: *const GroupedCausalAttention
     groupedCausalAttentionBackwardKvHeads(task.*);
 }
 
-pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAttentionTask(KvElem)) void {
+/// The per-query attention kernel family (decode, short prefill), one body
+/// for both work-unit shapes:
+///
+/// - `head_group == 1` (`groupedCausalAttentionHeads`): one query head per
+///   work unit, arbitrary `kv_head_for_head` mapping.
+/// - `head_group == 2` (`groupedCausalAttentionHeadPairs`): the
+///   heads == 2*kv_heads adjacent-pair GQA grouping — TWO query heads sharing
+///   one KV head walk the cache together, so each K/V row is loaded once for
+///   both (the GQA pairing win).
+///
+/// Three phases per query row: score the group's heads into their scratch
+/// rows tracking each max, exp-normalize in place, then the weighted V pass —
+/// fused (pair-)row Q8_0 kernels when V is block-quantized, SIMD
+/// widen-per-lane otherwise. Every arm unrolls by `head_group` with the same
+/// per-head operations and accumulator per head, so each instantiation is
+/// bit-identical to the historical hand-written kernel it replaces.
+fn groupedCausalAttentionUnits(
+    comptime KvElem: type,
+    comptime head_group: usize,
+    task: if (head_group == 2) GroupedCausalAttentionPairTask(KvElem) else GroupedCausalAttentionTask(KvElem),
+) void {
+    comptime std.debug.assert(head_group == 1 or head_group == 2);
     const q_head_stride = task.d;
     const q_seq_stride = task.heads * task.d;
     const kv_head_stride = task.d;
@@ -280,146 +301,219 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
     const Vec = @Vector(8, f32);
     const vector_width = 8;
     const Lane = KvLane(KvElem);
-    // q8_0 KV: the query row is quantized ONCE per (query, head) and the
-    // score pass runs the integer q8xq8 dot straight on the cached K
-    // blocks — no dequant scratch, the sweep reads only the quantized
-    // bytes. The V pass fuses dequant into the weighted accumulate the
-    // same way. (The tiled prefill kernel keeps the dequant-scratch path:
-    // its per-tile row reuse already amortizes the dequant.)
-    var q_q8: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]BlockQ8_0 = undefined;
+    // q8_0 KV: each of the group's query rows is quantized ONCE per (query,
+    // unit) and the score pass runs the integer q8xq8 dot straight on the
+    // cached K blocks — no dequant scratch, the sweep reads only the
+    // quantized bytes (the shared K row is dotted for the whole group in one
+    // pass over its blocks on the pair path). The V pass fuses dequant into
+    // the weighted accumulate the same way. (The tiled prefill kernel keeps
+    // the dequant-scratch path: its per-tile row reuse already amortizes the
+    // dequant.)
+    const q8_blocks = comptime attention_q8_max_d / q8_0_block_size;
+    var q_q8: [if (KvElem == BlockQ8_0) head_group * q8_blocks else 0]BlockQ8_0 = undefined;
+    var scores: [head_group][]f32 = undefined;
+    inline for (0..head_group) |j| scores[j] = task.scores[j * task.kv_seq ..][0..task.kv_seq];
 
-    for (task.head_start..task.head_end) |head_i| {
-        const kv_head_i = task.kv_head_for_head[head_i];
+    const unit_start = if (head_group == 2) task.kv_head_start else task.head_start;
+    const unit_end = if (head_group == 2) task.kv_head_end else task.head_end;
+    for (unit_start..unit_end) |unit_i| {
+        const kv_head_i = if (head_group == 2) unit_i else task.kv_head_for_head[unit_i];
+        const head_base = unit_i * head_group;
         for (0..task.q_seq) |query_i| {
             const active = if (task.causal) task.source_offset + query_i + 1 else task.kv_seq;
             const lo = if (!task.causal or task.window == 0) 0 else active -| task.window;
-            const q_base = query_i * q_seq_stride + head_i * q_head_stride;
+            var q_base: [head_group]usize = undefined;
+            inline for (0..head_group) |j| q_base[j] = query_i * q_seq_stride + (head_base + j) * q_head_stride;
             const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
 
-            var q_scales: [if (KvElem == BlockQ8_0) attention_q8_max_d / q8_0_block_size else 0]f32 = undefined;
+            var q_scales: [if (KvElem == BlockQ8_0) head_group * q8_blocks else 0]f32 = undefined;
             if (comptime KvElem == BlockQ8_0) {
-                backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(
-                    q_q8[0 .. task.d / q8_0_block_size],
-                    task.q_data[q_base..][0..task.d],
-                );
-                backend_mod.quantized_matmul.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
+                const qm = backend_mod.quantized_matmul;
+                inline for (0..head_group) |j| {
+                    qm.q8k.quantizeRowQ8_0IntoUnchecked(q_q8[j * q8_blocks ..][0 .. task.d / q8_0_block_size], task.q_data[q_base[j]..][0..task.d]);
+                    qm.q8_0.q8RowScalesInto(q_scales[j * q8_blocks ..][0 .. task.d / q8_0_block_size], q_q8[j * q8_blocks ..][0 .. task.d / q8_0_block_size]);
+                }
             }
-            var max_score = -std.math.inf(f32);
-            if (comptime KvElem == BlockQ8_0) score: {
-                // 2-key step: two independent accumulator chains hide the
-                // per-block fma latency the single-key dot serializes on.
+            var max_score: [head_group]f32 = @splat(-std.math.inf(f32));
+            if (comptime KvElem == BlockQ8_0) {
+                // 2-key step: 2*head_group independent accumulator chains
+                // hide the per-block fma latency the single-key dot
+                // serializes on; K blocks are loaded once per step for the
+                // whole group.
                 const qm = backend_mod.quantized_matmul;
                 const bpr = task.d / q8_0_block_size;
-                const qb = q_q8[0..bpr];
-                const qs = q_scales[0..bpr];
                 const row_stride = kv_seq_stride / q8_0_block_size;
                 const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
                 var source_i = lo;
                 while (source_i + 2 <= active) : (source_i += 2) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
                     const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
-                    const dots = qm.q8_0.vecDotQ8_0Q8_0x2(qb, qs, k0, k1);
+                    // dots is 2-key x head_group, key-major.
+                    const dots = if (head_group == 2)
+                        qm.q8_0.vecDotQ8_0Q8_0Pairx2(q_q8[0..bpr], q_q8[q8_blocks..][0..bpr], q_scales[0..bpr], q_scales[q8_blocks..][0..bpr], k0, k1)
+                    else
+                        qm.q8_0.vecDotQ8_0Q8_0x2(q_q8[0..bpr], q_scales[0..bpr], k0, k1);
                     inline for (0..2) |i| {
-                        var score = dots[i] * task.scale_value;
-                        if (bias_row) |row| score += row[source_i + i];
-                        task.scores[source_i + i] = score;
-                        max_score = @max(max_score, score);
+                        inline for (0..head_group) |j| {
+                            var score = dots[head_group * i + j] * task.scale_value;
+                            if (bias_row) |row| score += row[source_i + i];
+                            scores[j][source_i + i] = score;
+                            max_score[j] = @max(max_score[j], score);
+                        }
                     }
                 }
                 if (source_i < active) {
                     const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
-                    var score = qm.q8_0.vecDotQ8_0Q8_0(qb, k0) * task.scale_value;
-                    if (bias_row) |row| score += row[source_i];
-                    task.scores[source_i] = score;
-                    max_score = @max(max_score, score);
+                    const dots: [head_group]f32 = if (head_group == 2)
+                        qm.q8_0.vecDotQ8_0Q8_0Pair(q_q8[0..bpr], q_q8[q8_blocks..][0..bpr], k0)
+                    else
+                        .{qm.q8_0.vecDotQ8_0Q8_0(q_q8[0..bpr], k0)};
+                    inline for (0..head_group) |j| {
+                        var score = dots[j] * task.scale_value;
+                        if (bias_row) |row| score += row[source_i];
+                        scores[j][source_i] = score;
+                        max_score[j] = @max(max_score[j], score);
+                    }
                 }
-                break :score;
             } else for (lo..active) |source_i| {
-                var dot_value: f32 = undefined;
+                var dot_value: [head_group]f32 = undefined;
                 {
                     const k_row = task.k_data;
                     const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
-                    var dot_vec: Vec = @splat(0);
+                    var dot_vec: [head_group]Vec = @splat(@splat(0));
                     var feature_i: usize = 0;
                     while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                        const qv: Vec = task.q_data[q_base + feature_i ..][0..vector_width].*;
                         const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
-                        dot_vec += qv * kv;
+                        inline for (0..head_group) |j| {
+                            const qv: Vec = task.q_data[q_base[j] + feature_i ..][0..vector_width].*;
+                            dot_vec[j] += qv * kv;
+                        }
                     }
-                    dot_value = @reduce(.Add, dot_vec);
+                    inline for (0..head_group) |j| dot_value[j] = @reduce(.Add, dot_vec[j]);
                     while (feature_i < task.d) : (feature_i += 1) {
-                        dot_value += task.q_data[q_base + feature_i] * widenKvScalar(Lane, k_row[k_base + feature_i]);
+                        const k_value = widenKvScalar(Lane, k_row[k_base + feature_i]);
+                        inline for (0..head_group) |j| dot_value[j] += task.q_data[q_base[j] + feature_i] * k_value;
                     }
                 }
-                var score = dot_value * task.scale_value;
-                if (bias_row) |row| score += row[source_i];
-                task.scores[source_i] = score;
-                max_score = @max(max_score, score);
+                inline for (0..head_group) |j| {
+                    var score = dot_value[j] * task.scale_value;
+                    if (bias_row) |row| score += row[source_i];
+                    scores[j][source_i] = score;
+                    max_score[j] = @max(max_score[j], score);
+                }
             }
 
-            var sum_exp: f32 = 0;
+            var sum_exp: [head_group]f32 = @splat(0);
             for (lo..active) |source_i| {
-                const weight = @exp(task.scores[source_i] - max_score);
-                task.scores[source_i] = weight;
-                sum_exp += weight;
+                inline for (0..head_group) |j| {
+                    const weight = @exp(scores[j][source_i] - max_score[j]);
+                    scores[j][source_i] = weight;
+                    sum_exp[j] += weight;
+                }
             }
-            const inv_sum = 1 / sum_exp;
+            var inv_sum: [head_group]f32 = undefined;
+            inline for (0..head_group) |j| inv_sum[j] = 1 / sum_exp[j];
             if (task.stats) |stats| {
-                const stat_base = (head_i * task.q_seq + query_i) * 2;
-                stats[stat_base] = max_score;
-                stats[stat_base + 1] = sum_exp;
+                inline for (0..head_group) |j| {
+                    const stat_base = ((head_base + j) * task.q_seq + query_i) * 2;
+                    stats[stat_base] = max_score[j];
+                    stats[stat_base + 1] = sum_exp[j];
+                }
             }
 
-            const out_base = query_i * out_seq_stride + head_i * task.d;
+            var out_base: [head_group]usize = undefined;
+            inline for (0..head_group) |j| out_base[j] = query_i * out_seq_stride + (head_base + j) * task.d;
             if (comptime KvElem == BlockQ8_0) {
-                // 2-row fused V pass: the out row loads/stores once per two
-                // source rows.
+                // 2-row fused V pass: the group's out rows load and store
+                // once per two source rows.
                 const qm = backend_mod.quantized_matmul;
-                const out_row = task.out_data[out_base..][0..task.d];
+                var out_rows: [head_group][]f32 = undefined;
+                inline for (0..head_group) |j| out_rows[j] = task.out_data[out_base[j]..][0..task.d];
                 const bpr = task.d / q8_0_block_size;
                 const row_stride = kv_seq_stride / q8_0_block_size;
                 const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
                 var source_i = lo;
                 if (active - lo >= 2) {
-                    qm.q8_0.weightedQ8_0Row2(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], task.scores[lo + 1] * inv_sum);
+                    const v0 = task.v_data[lo * row_stride + head_off ..][0..bpr];
+                    const v1 = task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr];
+                    if (head_group == 2) {
+                        qm.q8_0.weightedQ8_0RowPair2(false, out_rows[0], out_rows[1], v0, scores[0][lo] * inv_sum[0], scores[1][lo] * inv_sum[1], v1, scores[0][lo + 1] * inv_sum[0], scores[1][lo + 1] * inv_sum[1]);
+                    } else {
+                        qm.q8_0.weightedQ8_0Row2(false, out_rows[0], v0, scores[0][lo] * inv_sum[0], v1, scores[0][lo + 1] * inv_sum[0]);
+                    }
                     source_i = lo + 2;
                 } else {
-                    qm.q8_0.weightedQ8_0Row(false, out_row, task.v_data[lo * row_stride + head_off ..][0..bpr], task.scores[lo] * inv_sum);
+                    const v0 = task.v_data[lo * row_stride + head_off ..][0..bpr];
+                    if (head_group == 2) {
+                        qm.q8_0.weightedQ8_0RowPair(false, out_rows[0], out_rows[1], v0, scores[0][lo] * inv_sum[0], scores[1][lo] * inv_sum[1]);
+                    } else {
+                        qm.q8_0.weightedQ8_0Row(false, out_rows[0], v0, scores[0][lo] * inv_sum[0]);
+                    }
                     source_i = lo + 1;
                 }
                 while (source_i + 2 <= active) : (source_i += 2) {
-                    qm.q8_0.weightedQ8_0Row2(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], task.scores[source_i + 1] * inv_sum);
+                    const v0 = task.v_data[source_i * row_stride + head_off ..][0..bpr];
+                    const v1 = task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
+                    if (head_group == 2) {
+                        qm.q8_0.weightedQ8_0RowPair2(true, out_rows[0], out_rows[1], v0, scores[0][source_i] * inv_sum[0], scores[1][source_i] * inv_sum[1], v1, scores[0][source_i + 1] * inv_sum[0], scores[1][source_i + 1] * inv_sum[1]);
+                    } else {
+                        qm.q8_0.weightedQ8_0Row2(true, out_rows[0], v0, scores[0][source_i] * inv_sum[0], v1, scores[0][source_i + 1] * inv_sum[0]);
+                    }
                 }
                 if (source_i < active) {
-                    qm.q8_0.weightedQ8_0Row(true, out_row, task.v_data[source_i * row_stride + head_off ..][0..bpr], task.scores[source_i] * inv_sum);
+                    const v0 = task.v_data[source_i * row_stride + head_off ..][0..bpr];
+                    if (head_group == 2) {
+                        qm.q8_0.weightedQ8_0RowPair(true, out_rows[0], out_rows[1], v0, scores[0][source_i] * inv_sum[0], scores[1][source_i] * inv_sum[1]);
+                    } else {
+                        qm.q8_0.weightedQ8_0Row(true, out_rows[0], v0, scores[0][source_i] * inv_sum[0]);
+                    }
                 }
             } else {
                 {
-                    const weight: Vec = @splat(task.scores[lo] * inv_sum);
+                    var weight: [head_group]f32 = undefined;
+                    var weight_vec: [head_group]Vec = undefined;
+                    inline for (0..head_group) |j| {
+                        weight[j] = scores[j][lo] * inv_sum[j];
+                        weight_vec[j] = @splat(weight[j]);
+                    }
                     const v_row = task.v_data;
                     const v_base = lo * kv_seq_stride + kv_head_i * kv_head_stride;
                     var feature_i: usize = 0;
                     while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
                         const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                        task.out_data[out_base + feature_i ..][0..vector_width].* = weight * v_vec;
+                        inline for (0..head_group) |j| {
+                            task.out_data[out_base[j] + feature_i ..][0..vector_width].* = weight_vec[j] * v_vec;
+                        }
                     }
                     while (feature_i < task.d) : (feature_i += 1) {
-                        task.out_data[out_base + feature_i] = task.scores[lo] * inv_sum * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        inline for (0..head_group) |j| {
+                            task.out_data[out_base[j] + feature_i] = weight[j] * v_value;
+                        }
                     }
                 }
                 for (lo + 1..active) |source_i| {
-                    const weight: Vec = @splat(task.scores[source_i] * inv_sum);
-                    const scalar_weight = task.scores[source_i] * inv_sum;
+                    var weight: [head_group]f32 = undefined;
+                    var weight_vec: [head_group]Vec = undefined;
+                    inline for (0..head_group) |j| {
+                        weight[j] = scores[j][source_i] * inv_sum[j];
+                        weight_vec[j] = @splat(weight[j]);
+                    }
                     const v_row = task.v_data;
                     const v_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
                     var feature_i: usize = 0;
                     while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                        const current: Vec = task.out_data[out_base + feature_i ..][0..vector_width].*;
                         const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                        task.out_data[out_base + feature_i ..][0..vector_width].* = current + weight * v_vec;
+                        inline for (0..head_group) |j| {
+                            const current: Vec = task.out_data[out_base[j] + feature_i ..][0..vector_width].*;
+                            task.out_data[out_base[j] + feature_i ..][0..vector_width].* = current + weight_vec[j] * v_vec;
+                        }
                     }
                     while (feature_i < task.d) : (feature_i += 1) {
-                        task.out_data[out_base + feature_i] += scalar_weight * widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
+                        inline for (0..head_group) |j| {
+                            task.out_data[out_base[j] + feature_i] += weight[j] * v_value;
+                        }
                     }
                 }
             }
@@ -427,217 +521,16 @@ pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAtt
     }
 }
 
-/// Attention task for the heads == 2·kv_heads grouping: TWO query heads
-/// sharing one KV head walk the cache together, so each K/V row is loaded
-/// once for both (the GQA pairing win). Three phases per query row: score
-/// both heads into their scratch rows tracking the max, exp-normalize in
-/// place, then the weighted V pass — fused two-out-row Q8_0 kernels when V
-/// is block-quantized, SIMD widen-per-lane otherwise.
+/// General per-query kernel: one query head per work unit, arbitrary
+/// `kv_head_for_head` mapping (see `groupedCausalAttentionUnits`).
+pub fn groupedCausalAttentionHeads(comptime KvElem: type, task: GroupedCausalAttentionTask(KvElem)) void {
+    groupedCausalAttentionUnits(KvElem, 1, task);
+}
+
+/// Adjacent-pair GQA per-query kernel: TWO query heads sharing one KV head
+/// per work unit (see `groupedCausalAttentionUnits`).
 pub fn groupedCausalAttentionHeadPairs(comptime KvElem: type, task: GroupedCausalAttentionPairTask(KvElem)) void {
-    const q_head_stride = task.d;
-    const q_seq_stride = task.heads * task.d;
-    const kv_head_stride = task.d;
-    const kv_seq_stride = task.kv_heads * task.d;
-    const out_seq_stride = task.heads * task.d;
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
-    const Lane = KvLane(KvElem);
-    // q8_0 KV: both query rows quantize once per (query, pair); the shared
-    // K row is integer-dotted for both heads in one pass over its blocks.
-    var q_q8: [if (KvElem == BlockQ8_0) 2 * (attention_q8_max_d / q8_0_block_size) else 0]BlockQ8_0 = undefined;
-    const scores0 = task.scores[0..task.kv_seq];
-    const scores1 = task.scores[task.kv_seq..][0..task.kv_seq];
-
-    for (task.kv_head_start..task.kv_head_end) |kv_head_i| {
-        const head0 = kv_head_i * 2;
-        const head1 = head0 + 1;
-        for (0..task.q_seq) |query_i| {
-            const active = if (task.causal) task.source_offset + query_i + 1 else task.kv_seq;
-            const lo = if (!task.causal or task.window == 0) 0 else active -| task.window;
-            const q_base0 = query_i * q_seq_stride + head0 * q_head_stride;
-            const q_base1 = query_i * q_seq_stride + head1 * q_head_stride;
-            const bias_row: ?[]const f32 = if (task.bias) |bias_data| bias_data[query_i * task.kv_seq ..][0..task.kv_seq] else null;
-
-            const q8_blocks = comptime attention_q8_max_d / q8_0_block_size;
-            var q_scales: [if (KvElem == BlockQ8_0) 2 * q8_blocks else 0]f32 = undefined;
-            if (comptime KvElem == BlockQ8_0) {
-                const qm = backend_mod.quantized_matmul;
-                qm.q8k.quantizeRowQ8_0IntoUnchecked(q_q8[0 .. task.d / q8_0_block_size], task.q_data[q_base0..][0..task.d]);
-                qm.q8k.quantizeRowQ8_0IntoUnchecked(q_q8[q8_blocks..][0 .. task.d / q8_0_block_size], task.q_data[q_base1..][0..task.d]);
-                qm.q8_0.q8RowScalesInto(q_scales[0 .. task.d / q8_0_block_size], q_q8[0 .. task.d / q8_0_block_size]);
-                qm.q8_0.q8RowScalesInto(q_scales[q8_blocks..][0 .. task.d / q8_0_block_size], q_q8[q8_blocks..][0 .. task.d / q8_0_block_size]);
-            }
-            var max_score0 = -std.math.inf(f32);
-            var max_score1 = -std.math.inf(f32);
-            if (comptime KvElem == BlockQ8_0) {
-                // 2-key step: four independent accumulator chains (2 queries
-                // x 2 keys), K blocks loaded once per step for both queries.
-                const qm = backend_mod.quantized_matmul;
-                const bpr = task.d / q8_0_block_size;
-                const qb0 = q_q8[0..bpr];
-                const qb1 = q_q8[q8_blocks..][0..bpr];
-                const qs0 = q_scales[0..bpr];
-                const qs1 = q_scales[q8_blocks..][0..bpr];
-                const row_stride = kv_seq_stride / q8_0_block_size;
-                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
-                var source_i = lo;
-                while (source_i + 2 <= active) : (source_i += 2) {
-                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
-                    const k1 = task.k_data[(source_i + 1) * row_stride + head_off ..][0..bpr];
-                    const dots = qm.q8_0.vecDotQ8_0Q8_0Pairx2(qb0, qb1, qs0, qs1, k0, k1);
-                    inline for (0..2) |i| {
-                        var score0 = dots[2 * i] * task.scale_value;
-                        var score1 = dots[2 * i + 1] * task.scale_value;
-                        if (bias_row) |row| {
-                            score0 += row[source_i + i];
-                            score1 += row[source_i + i];
-                        }
-                        scores0[source_i + i] = score0;
-                        scores1[source_i + i] = score1;
-                        max_score0 = @max(max_score0, score0);
-                        max_score1 = @max(max_score1, score1);
-                    }
-                }
-                if (source_i < active) {
-                    const k0 = task.k_data[source_i * row_stride + head_off ..][0..bpr];
-                    const dots = qm.q8_0.vecDotQ8_0Q8_0Pair(qb0, qb1, k0);
-                    var score0 = dots[0] * task.scale_value;
-                    var score1 = dots[1] * task.scale_value;
-                    if (bias_row) |row| {
-                        score0 += row[source_i];
-                        score1 += row[source_i];
-                    }
-                    scores0[source_i] = score0;
-                    scores1[source_i] = score1;
-                    max_score0 = @max(max_score0, score0);
-                    max_score1 = @max(max_score1, score1);
-                }
-            } else for (lo..active) |source_i| {
-                var dot_value0: f32 = undefined;
-                var dot_value1: f32 = undefined;
-                {
-                    const k_row = task.k_data;
-                    const k_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
-                    var dot_vec0: Vec = @splat(0);
-                    var dot_vec1: Vec = @splat(0);
-                    var feature_i: usize = 0;
-                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                        const kv: Vec = widenKvVec(Lane, vector_width, k_row, k_base + feature_i);
-                        const q0v: Vec = task.q_data[q_base0 + feature_i ..][0..vector_width].*;
-                        const q1v: Vec = task.q_data[q_base1 + feature_i ..][0..vector_width].*;
-                        dot_vec0 += q0v * kv;
-                        dot_vec1 += q1v * kv;
-                    }
-                    dot_value0 = @reduce(.Add, dot_vec0);
-                    dot_value1 = @reduce(.Add, dot_vec1);
-                    while (feature_i < task.d) : (feature_i += 1) {
-                        const k_value = widenKvScalar(Lane, k_row[k_base + feature_i]);
-                        dot_value0 += task.q_data[q_base0 + feature_i] * k_value;
-                        dot_value1 += task.q_data[q_base1 + feature_i] * k_value;
-                    }
-                }
-                var score0 = dot_value0 * task.scale_value;
-                var score1 = dot_value1 * task.scale_value;
-                if (bias_row) |row| {
-                    score0 += row[source_i];
-                    score1 += row[source_i];
-                }
-                scores0[source_i] = score0;
-                scores1[source_i] = score1;
-                max_score0 = @max(max_score0, score0);
-                max_score1 = @max(max_score1, score1);
-            }
-
-            var sum_exp0: f32 = 0;
-            var sum_exp1: f32 = 0;
-            for (lo..active) |source_i| {
-                const weight0 = @exp(scores0[source_i] - max_score0);
-                const weight1 = @exp(scores1[source_i] - max_score1);
-                scores0[source_i] = weight0;
-                scores1[source_i] = weight1;
-                sum_exp0 += weight0;
-                sum_exp1 += weight1;
-            }
-            const inv_sum0 = 1 / sum_exp0;
-            const inv_sum1 = 1 / sum_exp1;
-            if (task.stats) |stats| {
-                const stat_base0 = (head0 * task.q_seq + query_i) * 2;
-                stats[stat_base0] = max_score0;
-                stats[stat_base0 + 1] = sum_exp0;
-                const stat_base1 = (head1 * task.q_seq + query_i) * 2;
-                stats[stat_base1] = max_score1;
-                stats[stat_base1 + 1] = sum_exp1;
-            }
-
-            const out_base0 = query_i * out_seq_stride + head0 * task.d;
-            const out_base1 = query_i * out_seq_stride + head1 * task.d;
-            if (comptime KvElem == BlockQ8_0) {
-                // 2-row fused V pass for the head pair: both out rows load
-                // and store once per two source rows.
-                const qm = backend_mod.quantized_matmul;
-                const out_row0 = task.out_data[out_base0..][0..task.d];
-                const out_row1 = task.out_data[out_base1..][0..task.d];
-                const bpr = task.d / q8_0_block_size;
-                const row_stride = kv_seq_stride / q8_0_block_size;
-                const head_off = kv_head_i * kv_head_stride / q8_0_block_size;
-                var source_i = lo;
-                if (active - lo >= 2) {
-                    qm.q8_0.weightedQ8_0RowPair2(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1, task.v_data[(lo + 1) * row_stride + head_off ..][0..bpr], scores0[lo + 1] * inv_sum0, scores1[lo + 1] * inv_sum1);
-                    source_i = lo + 2;
-                } else {
-                    qm.q8_0.weightedQ8_0RowPair(false, out_row0, out_row1, task.v_data[lo * row_stride + head_off ..][0..bpr], scores0[lo] * inv_sum0, scores1[lo] * inv_sum1);
-                    source_i = lo + 1;
-                }
-                while (source_i + 2 <= active) : (source_i += 2) {
-                    qm.q8_0.weightedQ8_0RowPair2(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1, task.v_data[(source_i + 1) * row_stride + head_off ..][0..bpr], scores0[source_i + 1] * inv_sum0, scores1[source_i + 1] * inv_sum1);
-                }
-                if (source_i < active) {
-                    qm.q8_0.weightedQ8_0RowPair(true, out_row0, out_row1, task.v_data[source_i * row_stride + head_off ..][0..bpr], scores0[source_i] * inv_sum0, scores1[source_i] * inv_sum1);
-                }
-            } else {
-                {
-                    const weight0: Vec = @splat(scores0[lo] * inv_sum0);
-                    const weight1: Vec = @splat(scores1[lo] * inv_sum1);
-                    const v_row = task.v_data;
-                    const v_base = lo * kv_seq_stride + kv_head_i * kv_head_stride;
-                    var feature_i: usize = 0;
-                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                        task.out_data[out_base0 + feature_i ..][0..vector_width].* = weight0 * v_vec;
-                        task.out_data[out_base1 + feature_i ..][0..vector_width].* = weight1 * v_vec;
-                    }
-                    const scalar_weight0 = scores0[lo] * inv_sum0;
-                    const scalar_weight1 = scores1[lo] * inv_sum1;
-                    while (feature_i < task.d) : (feature_i += 1) {
-                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
-                        task.out_data[out_base0 + feature_i] = scalar_weight0 * v_value;
-                        task.out_data[out_base1 + feature_i] = scalar_weight1 * v_value;
-                    }
-                }
-                for (lo + 1..active) |source_i| {
-                    const weight0: Vec = @splat(scores0[source_i] * inv_sum0);
-                    const weight1: Vec = @splat(scores1[source_i] * inv_sum1);
-                    const scalar_weight0 = scores0[source_i] * inv_sum0;
-                    const scalar_weight1 = scores1[source_i] * inv_sum1;
-                    const v_row = task.v_data;
-                    const v_base = source_i * kv_seq_stride + kv_head_i * kv_head_stride;
-                    var feature_i: usize = 0;
-                    while (feature_i + vector_width <= task.d) : (feature_i += vector_width) {
-                        const current0: Vec = task.out_data[out_base0 + feature_i ..][0..vector_width].*;
-                        const current1: Vec = task.out_data[out_base1 + feature_i ..][0..vector_width].*;
-                        const v_vec: Vec = widenKvVec(Lane, vector_width, v_row, v_base + feature_i);
-                        task.out_data[out_base0 + feature_i ..][0..vector_width].* = current0 + weight0 * v_vec;
-                        task.out_data[out_base1 + feature_i ..][0..vector_width].* = current1 + weight1 * v_vec;
-                    }
-                    while (feature_i < task.d) : (feature_i += 1) {
-                        const v_value = widenKvScalar(Lane, v_row[v_base + feature_i]);
-                        task.out_data[out_base0 + feature_i] += scalar_weight0 * v_value;
-                        task.out_data[out_base1 + feature_i] += scalar_weight1 * v_value;
-                    }
-                }
-            }
-        }
-    }
+    groupedCausalAttentionUnits(KvElem, 2, task);
 }
 
 /// Query-tiled online-softmax attention forward (long prefill).
