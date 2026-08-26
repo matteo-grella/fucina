@@ -782,22 +782,17 @@ const MoeExpertTask = struct {
     qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
     gated: Gated,
-    profile_enabled: bool,
-    io: ?std.Io,
-    gate_up_ns: i64,
-    swiglu_requant_ns: i64,
-    down_ns: i64,
+    profiler: ?*moe_chain.MoeTaskProfiler,
 };
 
 fn runMoeExpertTask(task: *const MoeExpertTask) void {
-    const task_profile = @constCast(task);
-    const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const gate_up_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     moeExpertTileDot(task.gate, task.expert_index, task.qx, task.qx8, task.gate_buf, task.out_pe, 1);
     moeExpertTileDot(task.up, task.expert_index, task.qx, task.qx8, task.up_buf, task.out_pe, 1);
-    if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .gate_up, gate_up_start);
 
     // Gated activation: g = up * act(gate). `inline else` specializes the loop per op.
-    const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const swiglu_requant_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     gatedPairs(task.gated, task.g_buf, task.gate_buf, task.up_buf);
     const requant_ok = if (task.down.wantsQ8_0Lhs())
         backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(task.qg8, task.g_buf)
@@ -807,14 +802,14 @@ fn runMoeExpertTask(task: *const MoeExpertTask) void {
         @memset(task.out, 0);
         return;
     };
-    if (task.profile_enabled) task_profile.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .swiglu_requant, swiglu_requant_start);
 
-    const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const down_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     moeExpertTileDot(task.down, task.expert_index, task.qg, task.qg8, task.out, task.hidden, 1);
     if (task.weight != 1.0) {
         for (task.out) |*o| o.* *= task.weight;
     }
-    if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .down, down_start);
 }
 
 const MoeDecodeChainState = struct {
@@ -834,10 +829,8 @@ const MoeDecodeChainState = struct {
     qg8: []dtype_mod.BlockQ8_0,
     out: []f32,
     gated: Gated,
-    profile_enabled: bool,
-    io: ?std.Io,
+    profiler: ?*moe_chain.MoeTaskProfiler,
     remaining_gate_up: std.atomic.Value(u32),
-    swiglu_requant_ns: i64,
     down_task0: usize,
 };
 
@@ -846,37 +839,36 @@ const MoeDecodeChainTask = struct {
     kind: enum { gate_up, down },
     c0: usize,
     c1: usize,
-    elapsed_ns: i64,
 };
 
 fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) void {
     const state = task.state;
     switch (task.kind) {
         .gate_up => {
-            const gate_up_start = moeBatchProfileStart(state.profile_enabled, state.io);
+            const gate_up_start = moe_chain.MoeTaskProfiler.start(state.profiler);
             moeExpertTileDotRange(state.gate, state.expert_index, state.qx, state.qx8, state.gate_buf, state.out_pe, 1, task.c0, task.c1);
             moeExpertTileDotRange(state.up, state.expert_index, state.qx, state.qx8, state.up_buf, state.out_pe, 1, task.c0, task.c1);
-            if (state.profile_enabled) task.elapsed_ns += moeBatchProfileElapsed(gate_up_start, state.io);
+            moe_chain.MoeTaskProfiler.add(state.profiler, .gate_up, gate_up_start);
 
             if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
-                const swiglu_requant_start = moeBatchProfileStart(state.profile_enabled, state.io);
+                const swiglu_requant_start = moe_chain.MoeTaskProfiler.start(state.profiler);
                 gatedPairs(state.gated, state.g_buf, state.gate_buf, state.up_buf);
                 if (state.down.wantsQ8_0Lhs())
                     backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(state.qg8, state.g_buf)
                 else
                     backend_mod.quantized_matmul.q8k.quantizeRowQ8_KIntoUnchecked(state.qg, state.g_buf);
-                if (state.profile_enabled) state.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, state.io);
+                moe_chain.MoeTaskProfiler.add(state.profiler, .swiglu_requant, swiglu_requant_start);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
             }
         },
         .down => {
-            const down_start = moeBatchProfileStart(state.profile_enabled, state.io);
+            const down_start = moe_chain.MoeTaskProfiler.start(state.profiler);
             moeExpertTileDotRange(state.down, state.expert_index, state.qg, state.qg8, state.out, state.hidden, 1, task.c0, task.c1);
             if (state.weight != 1.0) {
                 for (state.out[task.c0..task.c1]) |*o| o.* *= state.weight;
             }
-            if (state.profile_enabled) task.elapsed_ns += moeBatchProfileElapsed(down_start, state.io);
+            moe_chain.MoeTaskProfiler.add(state.profiler, .down, down_start);
         },
     }
 }
@@ -905,8 +897,7 @@ const MoeDecodeChainBuild = struct {
     blocks_per_g: usize,
     blocks_per_g8: usize,
     act: Gated,
-    profile_enabled: bool,
-    io: ?std.Io,
+    profiler: ?*moe_chain.MoeTaskProfiler,
     gate_split: usize,
     down_split: usize,
 
@@ -935,21 +926,19 @@ const MoeDecodeChainBuild = struct {
             .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
             .out = b.outs[j * b.hidden ..][0..b.hidden],
             .gated = b.act,
-            .profile_enabled = b.profile_enabled,
-            .io = b.io,
+            .profiler = b.profiler,
             .remaining_gate_up = .init(2),
-            .swiglu_requant_ns = 0,
             .down_task0 = down_task0,
         };
-        tasks[2 * w] = .{ .state = state, .kind = .gate_up, .c0 = 0, .c1 = b.gate_split, .elapsed_ns = 0 };
-        tasks[2 * w + 1] = .{ .state = state, .kind = .gate_up, .c0 = b.gate_split, .c1 = b.out_pe, .elapsed_ns = 0 };
-        tasks[down_task0] = .{ .state = state, .kind = .down, .c0 = 0, .c1 = b.down_split, .elapsed_ns = 0 };
-        tasks[down_task0 + 1] = .{ .state = state, .kind = .down, .c0 = b.down_split, .c1 = b.hidden, .elapsed_ns = 0 };
+        tasks[2 * w] = .{ .state = state, .kind = .gate_up, .c0 = 0, .c1 = b.gate_split };
+        tasks[2 * w + 1] = .{ .state = state, .kind = .gate_up, .c0 = b.gate_split, .c1 = b.out_pe };
+        tasks[down_task0] = .{ .state = state, .kind = .down, .c0 = 0, .c1 = b.down_split };
+        tasks[down_task0 + 1] = .{ .state = state, .kind = .down, .c0 = b.down_split, .c1 = b.hidden };
     }
 
     /// Serial fallback for one original slot `j` (no worker team): the same
     /// whole-expert task the single-dispatch path runs.
-    fn runSerial(b: *const MoeDecodeChainBuild, j: usize, profile: ?*MoeBatchProfile) void {
+    fn runSerial(b: *const MoeDecodeChainBuild, j: usize) void {
         var t = MoeExpertTask{
             .gate = b.gate,
             .up = b.up,
@@ -967,32 +956,23 @@ const MoeDecodeChainBuild = struct {
             .qg8 = b.qg8_all[j * b.blocks_per_g8 ..][0..b.blocks_per_g8],
             .out = b.outs[j * b.hidden ..][0..b.hidden],
             .gated = b.act,
-            .profile_enabled = b.profile_enabled,
-            .io = b.io,
-            .gate_up_ns = 0,
-            .swiglu_requant_ns = 0,
-            .down_ns = 0,
+            .profiler = b.profiler,
         };
         runMoeExpertTask(&t);
-        if (profile) |p| {
-            p.gate_up_ns += t.gate_up_ns;
-            p.swiglu_requant_ns += t.swiglu_requant_ns;
-            p.down_ns += t.down_ns;
-        }
     }
 };
 
 /// Dispatch one wave of decode experts (`js` = original selection slots):
 /// a wave-local chain over the leading `4 * js.len` tasks, with the serial
-/// per-expert path as fallback. Chain profile times accumulate here because
-/// the next wave reuses the same state/task storage.
+/// per-expert path as fallback. Profile times go straight to the build's
+/// shared `MoeTaskProfiler`, so reusing the state/task storage across
+/// waves loses nothing.
 fn runMoeDecodeChainWave(
     ctx: *ExecContext,
     build: *const MoeDecodeChainBuild,
     states: []MoeDecodeChainState,
     tasks: []MoeDecodeChainTask,
     js: []const usize,
-    profile: ?*MoeBatchProfile,
 ) void {
     const n_wave = js.len;
     if (n_wave == 0) return;
@@ -1002,15 +982,7 @@ fn runMoeDecodeChainWave(
         used_chain = pool.parallelChained(MoeDecodeChainTask, tasks[0 .. 4 * n_wave], 2 * n_wave, runMoeDecodeChainTask);
     }
     if (!used_chain) {
-        for (js) |j| build.runSerial(j, profile);
-        return;
-    }
-    if (profile) |p| {
-        for (tasks[0 .. 4 * n_wave]) |*t| switch (t.kind) {
-            .gate_up => p.gate_up_ns += t.elapsed_ns,
-            .down => p.down_ns += t.elapsed_ns,
-        };
-        for (states[0..n_wave]) |*state| p.swiglu_requant_ns += state.swiglu_requant_ns;
+        for (js) |j| build.runSerial(j);
     }
 }
 
@@ -1047,6 +1019,8 @@ pub fn moeExpertFfn(
     _ = try validatePackedMoeInputs(gate, up, down, selected, weights, top_k, hidden, out_pe);
     const profile_enabled = profile != null;
     const total_start = moeBatchProfileStart(profile_enabled, io);
+    var task_prof: moe_chain.MoeTaskProfiler = undefined;
+    const prof = moe_chain.MoeTaskProfiler.arm(&task_prof, profile_enabled, io);
 
     // Streamed experts, wave-split: START the miss reads (I/O pool only)
     // and resolve what is already resident, so the resident experts'
@@ -1119,8 +1093,7 @@ pub fn moeExpertFfn(
         .blocks_per_g = blocks_per_g,
         .blocks_per_g8 = blocks_per_g8,
         .act = act,
-        .profile_enabled = profile_enabled,
-        .io = io,
+        .profiler = prof,
         .gate_split = gate_split,
         .down_split = down_split,
     };
@@ -1135,13 +1108,7 @@ pub fn moeExpertFfn(
             used_chain = pool.parallelChained(MoeDecodeChainTask, tasks, chain_initial_count, runMoeDecodeChainTask);
         }
         if (!used_chain) {
-            for (0..top_k) |j| build.runSerial(j, profile);
-        } else if (profile) |p| {
-            for (tasks) |*t| switch (t.kind) {
-                .gate_up => p.gate_up_ns += t.elapsed_ns,
-                .down => p.down_ns += t.elapsed_ns,
-            };
-            for (sv.states) |*state| p.swiglu_requant_ns += state.swiglu_requant_ns;
+            for (0..top_k) |j| build.runSerial(j);
         }
     } else {
         // Wave 1: the resident experts compute under the in-flight miss
@@ -1160,12 +1127,13 @@ pub fn moeExpertFfn(
                 n_miss += 1;
             }
         }
-        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, hit_js[0..n_hit], profile);
+        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, hit_js[0..n_hit]);
         try stream_guard.store.?.acquireFinish();
-        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, miss_js[0..n_miss], profile);
+        runMoeDecodeChainWave(ctx, &build, sv.states, tasks, miss_js[0..n_miss]);
     }
     if (profile) |p| {
         p.expert_wall_ns += moeBatchProfileElapsed(expert_wall_start, io);
+        if (prof) |tp| tp.drainInto(p);
         p.batches += 1;
         p.pairs += top_k;
         p.active_experts += top_k;
@@ -1216,19 +1184,13 @@ const MoeBatchTask = struct {
     qg8: []dtype_mod.BlockQ8_0 = &.{},
     down_buf: []f32,
     gated: Gated,
-    profile_enabled: bool,
-    io: ?std.Io,
-    gather_quant_ns: i128,
-    gate_up_ns: i128,
-    swiglu_requant_ns: i128,
-    down_ns: i128,
+    profiler: ?*moe_chain.MoeTaskProfiler,
 };
 
 fn runMoeBatchTask(task: *const MoeBatchTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
-    const task_profile = @constCast(task);
     const out_pe = task.out_pe;
     const hidden = task.hidden;
     const bpc_in = task.bpc_in;
@@ -1239,7 +1201,7 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
 
     // Gather this expert's input rows and quantize them to the experts'
     // activation format (Q8_K, or Q8_0 for q8_0/mxfp4 experts).
-    const gather_quant_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const gather_quant_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     for (0..m) |i| {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * hidden ..][0..hidden];
@@ -1252,7 +1214,7 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
             return;
         };
     }
-    if (task.profile_enabled) task_profile.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .gather_quant, gather_quant_start);
 
     const no_qk: []const dtype_mod.BlockQ8_K = &.{};
     const no_q8: []const dtype_mod.BlockQ8_0 = &.{};
@@ -1262,12 +1224,12 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     const up_out = task.up_buf[base * out_pe ..][0 .. m * out_pe];
     const g_out = task.g_buf[base * out_pe ..][0 .. m * out_pe];
 
-    const gate_up_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const gate_up_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     moeExpertTileDot(task.gate, task.expert, qx, qx8, gate_out, out_pe, m);
     moeExpertTileDot(task.up, task.expert, qx, qx8, up_out, out_pe, m);
-    if (task.profile_enabled) task_profile.gate_up_ns += moeBatchProfileElapsed(gate_up_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .gate_up, gate_up_start);
 
-    const swiglu_requant_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const swiglu_requant_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     gatedPairs(task.gated, g_out, gate_out, up_out);
     for (0..m) |i| {
         const quant_err = if (q8_lhs)
@@ -1279,13 +1241,13 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
             return;
         };
     }
-    if (task.profile_enabled) task_profile.swiglu_requant_ns += moeBatchProfileElapsed(swiglu_requant_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .swiglu_requant, swiglu_requant_start);
 
     const qg = if (q8_lhs) no_qk else task.qg[base * bpc_g ..][0 .. m * bpc_g];
     const qg8 = if (q8_lhs) task.qg8[base * bpc_g ..][0 .. m * bpc_g] else no_q8;
-    const down_start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const down_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     moeExpertTileDot(task.down, task.expert, qg, qg8, task.down_buf[base * hidden ..][0 .. m * hidden], hidden, m);
-    if (task.profile_enabled) task_profile.down_ns += moeBatchProfileElapsed(down_start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .down, down_start);
 }
 
 const MoeBatchGatherTask = struct {
@@ -1304,17 +1266,14 @@ const MoeBatchGatherTask = struct {
     // expert's first Q8_Kx4 group index (prefix sum of ceil(m/4)).
     qx_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
     x4_group_start: usize,
-    profile_enabled: bool,
-    io: ?std.Io,
-    gather_quant_ns: i128,
+    profiler: ?*moe_chain.MoeTaskProfiler,
 };
 
 fn runMoeBatchGatherTask(task: *const MoeBatchGatherTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
-    const task_profile = @constCast(task);
-    const start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     for (0..m) |i| {
         const token = task.order[base + i] / task.top_k;
@@ -1338,7 +1297,7 @@ fn runMoeBatchGatherTask(task: *const MoeBatchGatherTask) void {
             task.bpc_in,
         );
     }
-    if (task.profile_enabled) task_profile.gather_quant_ns += moeBatchProfileElapsed(start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .gather_quant, start);
 }
 
 fn runMoeBatchGatherTaskOpaque(ctx: *anyopaque) void {
@@ -1364,16 +1323,16 @@ const MoeBatchMatmulTask = struct {
     out: []f32,
     c0: usize,
     c1: usize,
-    profile_enabled: bool,
-    io: ?std.Io,
-    elapsed_ns: i128,
+    profiler: ?*moe_chain.MoeTaskProfiler,
+    /// Which profile slot this projection's time lands in (`.gate_up` or
+    /// `.down`): one task type serves both phases.
+    phase: moe_chain.MoeTaskProfiler.Phase,
 };
 
 fn runMoeBatchMatmulTask(task: *const MoeBatchMatmulTask) void {
     const m = task.m;
     if (m == 0) return;
-    const task_profile = @constCast(task);
-    const start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
     if (task.qlhs_x4.len > 0 and m >= 4) {
@@ -1389,7 +1348,7 @@ fn runMoeBatchMatmulTask(task: *const MoeBatchMatmulTask) void {
         const no_q8: []const dtype_mod.BlockQ8_0 = &.{};
         moeExpertTileDotRange(task.rhs, task.expert, q, no_q8, out, task.out_dim, m, task.c0, task.c1);
     }
-    if (task.profile_enabled) task_profile.elapsed_ns += moeBatchProfileElapsed(start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, task.phase, start);
 }
 
 fn runMoeBatchMatmulTaskOpaque(ctx: *anyopaque) void {
@@ -1413,17 +1372,14 @@ const MoeBatchSwiGluTask = struct {
     row_start: usize,
     m: usize,
     gated: Gated,
-    profile_enabled: bool,
-    io: ?std.Io,
-    swiglu_requant_ns: i128,
+    profiler: ?*moe_chain.MoeTaskProfiler,
 };
 
 fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
     const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
-    const task_profile = @constCast(task);
-    const start = moeBatchProfileStart(task.profile_enabled, task.io);
+    const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     const out_pe = task.out_pe;
     const gate_out = task.gate_buf[base * out_pe ..][0 .. m * out_pe];
@@ -1447,7 +1403,7 @@ fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
             task.blocks_per_g,
         );
     }
-    if (task.profile_enabled) task_profile.swiglu_requant_ns += moeBatchProfileElapsed(start, task.io);
+    moe_chain.MoeTaskProfiler.add(task.profiler, .swiglu_requant, start);
 }
 
 fn runMoeBatchSwiGluTaskOpaque(ctx: *anyopaque) void {
@@ -1495,6 +1451,8 @@ fn runMoeBatchPhased(
     profile: ?*MoeBatchProfile,
 ) !void {
     const n_expert = count.len;
+    var task_prof: moe_chain.MoeTaskProfiler = undefined;
+    const prof = moe_chain.MoeTaskProfiler.arm(&task_prof, profile_enabled, io);
     // The lane-packed Q5_K kernel only applies to q5_k experts; per-projection
     // tag check selects the packed LHS (built in the gather/swiglu phases) vs the
     // per-row tile. Empty `qx_x4`/`qg_x4` (non-q5_k model) keeps everything as-is.
@@ -1562,9 +1520,7 @@ fn runMoeBatchPhased(
             .qx8 = qx8,
             .qx_x4 = qx_x4,
             .x4_group_start = group_offset[e],
-            .profile_enabled = profile_enabled,
-            .io = io,
-            .gather_quant_ns = 0,
+            .profiler = prof,
         };
         swiglu_tasks[e] = .{
             .gate_buf = gate_buf,
@@ -1579,9 +1535,7 @@ fn runMoeBatchPhased(
             .row_start = offset[e],
             .m = count[e],
             .gated = act,
-            .profile_enabled = profile_enabled,
-            .io = io,
-            .swiglu_requant_ns = 0,
+            .profiler = prof,
         };
     }
 
@@ -1610,9 +1564,8 @@ fn runMoeBatchPhased(
                 .out = gate_buf,
                 .c0 = bounds.c0,
                 .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
+                .profiler = prof,
+                .phase = .gate_up,
             };
             gate_up_i += 1;
             gate_up_tasks[gate_up_i] = .{
@@ -1629,9 +1582,8 @@ fn runMoeBatchPhased(
                 .out = up_buf,
                 .c0 = bounds.c0,
                 .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
+                .profiler = prof,
+                .phase = .gate_up,
             };
             gate_up_i += 1;
         }
@@ -1655,9 +1607,8 @@ fn runMoeBatchPhased(
                 .out = down_buf,
                 .c0 = bounds.c0,
                 .c1 = bounds.c1,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .elapsed_ns = 0,
+                .profiler = prof,
+                .phase = .down,
             };
             down_i += 1;
         }
@@ -1713,10 +1664,7 @@ fn runMoeBatchPhased(
 
     if (profile) |p| {
         p.expert_wall_ns += expert_wall_ns;
-        for (gather_tasks) |*t| p.gather_quant_ns += t.gather_quant_ns;
-        for (gate_up_tasks) |*t| p.gate_up_ns += t.elapsed_ns;
-        for (swiglu_tasks) |*t| p.swiglu_requant_ns += t.swiglu_requant_ns;
-        for (down_tasks) |*t| p.down_ns += t.elapsed_ns;
+        if (prof) |tp| tp.drainInto(p);
     }
 }
 
@@ -1777,6 +1725,9 @@ pub fn moeExpertFfnBatch(
     // batch-union streaming); released after compute.
     var stream_guard = try acquireMoeStreamed(gate, up, down, selected);
     defer stream_guard.release();
+
+    var task_prof: moe_chain.MoeTaskProfiler = undefined;
+    const prof = moe_chain.MoeTaskProfiler.arm(&task_prof, profile_enabled, io);
 
     // Blocks per row in the ACTIVE activation format (32-elem Q8_0 blocks
     // in q8_lhs mode, 256-elem Q8_K otherwise) — every per-row stride below
@@ -1905,12 +1856,7 @@ pub fn moeExpertFfnBatch(
                 .qg8 = qg8,
                 .down_buf = down_buf,
                 .gated = act,
-                .profile_enabled = profile_enabled,
-                .io = io,
-                .gather_quant_ns = 0,
-                .gate_up_ns = 0,
-                .swiglu_requant_ns = 0,
-                .down_ns = 0,
+                .profiler = prof,
             };
         }
 
@@ -1922,12 +1868,7 @@ pub fn moeExpertFfnBatch(
         }
         if (profile) |p| {
             p.expert_wall_ns += moeBatchProfileElapsed(expert_wall_start, io);
-            for (tasks) |*t| {
-                p.gather_quant_ns += t.gather_quant_ns;
-                p.gate_up_ns += t.gate_up_ns;
-                p.swiglu_requant_ns += t.swiglu_requant_ns;
-                p.down_ns += t.down_ns;
-            }
+            if (prof) |tp| tp.drainInto(p);
         }
     }
     if (profile) |p| {

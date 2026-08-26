@@ -20,6 +20,66 @@ pub fn moeBatchProfileElapsed(start: i128, io: ?std.Io) i64 {
     return @intCast(std.Io.Clock.awake.now(io.?).nanoseconds - start);
 }
 
+/// Shared per-phase profile collector for one MoE layer call. The
+/// dispatching entry arms one on its stack (`arm`) and hands every task a
+/// single optional pointer — replacing the per-task enabled/io/elapsed
+/// fields and the const-cast write-back the tasks used to carry — then
+/// drains the phase slots into the caller's `MoeBatchProfile` once the
+/// dispatch has joined (`drainInto`). Slots are atomic because tasks on
+/// different workers finish concurrently (profiling-mode contention only:
+/// a disarmed profiler makes `start`/`add` free and touches nothing).
+pub const MoeTaskProfiler = struct {
+    io: std.Io,
+    gather_quant_ns: std.atomic.Value(i64) = .init(0),
+    gate_up_ns: std.atomic.Value(i64) = .init(0),
+    swiglu_requant_ns: std.atomic.Value(i64) = .init(0),
+    down_ns: std.atomic.Value(i64) = .init(0),
+
+    pub const Phase = enum { gather_quant, gate_up, swiglu_requant, down };
+
+    /// Arm `storage` and return it when profiling is on; null keeps every
+    /// timer call free. Profiling requires the caller's `io` — the same
+    /// contract as `moeBatchProfileStart`.
+    pub fn arm(storage: *MoeTaskProfiler, enabled: bool, io: ?std.Io) ?*MoeTaskProfiler {
+        if (!enabled) return null;
+        storage.* = .{ .io = io.? };
+        return storage;
+    }
+
+    /// Wall-clock start of one timed section; 0 when profiling is off.
+    pub fn start(profiler: ?*MoeTaskProfiler) i128 {
+        const p = profiler orelse return 0;
+        return std.Io.Clock.awake.now(p.io).nanoseconds;
+    }
+
+    /// Accumulate one section into `phase`'s slot (monotonic: the slots
+    /// are plain counters, read only after the dispatch joins).
+    pub fn add(profiler: ?*MoeTaskProfiler, phase: Phase, started: i128) void {
+        const p = profiler orelse return;
+        const elapsed: i64 = @intCast(std.Io.Clock.awake.now(p.io).nanoseconds - started);
+        _ = p.slot(phase).fetchAdd(elapsed, .monotonic);
+    }
+
+    fn slot(self: *MoeTaskProfiler, phase: Phase) *std.atomic.Value(i64) {
+        return switch (phase) {
+            .gather_quant => &self.gather_quant_ns,
+            .gate_up => &self.gate_up_ns,
+            .swiglu_requant => &self.swiglu_requant_ns,
+            .down => &self.down_ns,
+        };
+    }
+
+    /// Fold the phase slots into the matching `MoeBatchProfile`
+    /// accumulators (`anytype`: the profile type lives in `moe.zig`, which
+    /// imports this file).
+    pub fn drainInto(self: *MoeTaskProfiler, profile: anytype) void {
+        profile.gather_quant_ns += self.gather_quant_ns.load(.monotonic);
+        profile.gate_up_ns += self.gate_up_ns.load(.monotonic);
+        profile.swiglu_requant_ns += self.swiglu_requant_ns.load(.monotonic);
+        profile.down_ns += self.down_ns.load(.monotonic);
+    }
+};
+
 pub fn moeDecodeColumnSplit(dim: usize, alignment: usize) usize {
     if (dim <= 1) return dim;
     var split = dim / 2;
