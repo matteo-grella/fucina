@@ -115,8 +115,8 @@ in return types, so shape errors in tag terms surface as compile errors at the
 call site.
 
 ```zig
-pub fn removeTag(comptime tags: anytype, comptime tag: Tag) [tags.len - 1]Tag
-pub fn removeTags(comptime tags: anytype, comptime remove_tags: anytype) [tags.len - remove_tags.len]Tag
+pub inline fn removeTag(comptime tags: anytype, comptime tag: Tag) []const Tag
+pub inline fn removeTags(comptime tags: anytype, comptime remove_tags: anytype) []const Tag
 pub fn replaceTag(comptime tags: anytype, comptime old_tag: Tag, comptime new_tag: Tag) [tags.len]Tag
 pub fn insertTagAt(comptime tags: anytype, comptime tag: Tag, comptime axis_index: usize) [tags.len + 1]Tag
 pub fn splitTags(comptime tags: anytype, comptime tag: Tag, comptime split_tags: anytype) [tags.len + split_tags.len - 1]Tag
@@ -159,9 +159,12 @@ maps to its source axis or to `inserted_axis`. These back the facade's
 ## 7.4 Result-tag computation: pointwise and dot (`src/tags.zig`)
 
 ```zig
-pub fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) [pointwiseResultLen(...)]Tag
-pub fn pointwiseResultLen(comptime left_tags: anytype, comptime right_tags: anytype) usize
+pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) []const Tag
 ```
+
+The set-building helpers return comptime `[]const Tag` slices: the length is
+comptime-known whenever the arguments are, so `result.len` still works as an
+array length and the slices feed `Tensor(...)` / the other helpers directly.
 
 Pointwise result tags are the **union in operand order**: all left tags in
 left order, then every right-only tag appended in right order. Operand order
@@ -173,15 +176,12 @@ For a contraction over `contract_tag`, the operands' tags partition into
 three comptime classes:
 
 - **batch tags** — present in both operands and not the contract tag
-  (`dotBatchTags`/`dotBatchLen`), in left-operand order;
-- **left free tags** — left-only, non-contract
-  (`dotLeftFreeTags`/`dotLeftFreeLen`);
-- **right free tags** — right-only, non-contract
-  (`dotRightFreeTags`/`dotRightFreeLen`).
+  (`dotBatchTags`), in left-operand order;
+- **left free tags** — left-only, non-contract (`dotLeftFreeTags`);
+- **right free tags** — right-only, non-contract (`dotRightFreeTags`).
 
 ```zig
-pub fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotResultLen(...)]Tag
-pub fn dotResultLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize
+pub inline fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag
 ```
 
 `dotResultTags` = batch ++ left free ++ right free. The contract tag must be
@@ -210,8 +210,7 @@ The einsum generalization derives every axis role from tag membership alone
 pub const EinsumPart = enum { batch, contract, left_free, right_free, left_summed, right_summed };
 pub fn einsumClassOfLeft(comptime right_tags: anytype, comptime out_tags: anytype, comptime tag: Tag) EinsumPart
 pub fn einsumClassOfRight(comptime left_tags: anytype, comptime out_tags: anytype, comptime tag: Tag) EinsumPart
-pub fn einsumPartTags(comptime left_tags, right_tags, out_tags: anytype, comptime part: EinsumPart) [einsumPartLen(...)]Tag
-pub fn einsumPartLen(comptime left_tags, right_tags, out_tags: anytype, comptime part: EinsumPart) usize
+pub inline fn einsumPartTags(comptime left_tags, right_tags, out_tags: anytype, comptime part: EinsumPart) []const Tag
 pub fn einsumValidate(comptime left_tags: anytype, comptime right_tags: anytype, comptime out_tags: anytype) void
 ```
 
@@ -219,9 +218,9 @@ pub fn einsumValidate(comptime left_tags: anytype, comptime right_tags: anytype,
 shared parts (batch, contract) are reported in LEFT order, matching the
 `dot*` convention. `einsumValidate` compile-errors on duplicate output tags,
 an output tag missing from both operands, or a result rank past `max_rank`.
-The set helpers `unionTags`/`unionTagsLen` (the first tuple followed by
+The set helpers `unionTags` (the first tuple followed by
 the second's tags not already present — a membership set, deliberately not
-capped by `max_rank`) and `intersectTags`/`intersectTagsLen` (tags of the
+capped by `max_rank`) and `intersectTags` (tags of the
 first tuple also present in the second, first-tuple order) support the
 einsum lowering and are general-purpose.
 

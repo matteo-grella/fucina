@@ -128,12 +128,12 @@ chapter in `docs/course/`" · "Next: The operation library".
   - `README.md:24–41` — `Model` struct + `forward` (segments 2 and 3).
   - `README.md:56–60` — Fortran shape-discipline paragraph (segment 6 quote
     card).
-  - `src/ag/tensor.zig:3747` — the `dot` signature with `dotResultTags` in
-    return type position (segments 3 and 4).
+  - `src/ag/tensor/float/matmul.zig:130` — the `dot` signature with
+    `dotResultTags` in return type position (segments 3 and 4).
   - `src/tags.zig:185–188` — `tagIndexOrCompileError` with the
     `"tensor tag not found"` message (optional inset during segment 4).
-  - `src/tags.zig:386–392` — `dotResultLen` (optional inset during segment 3
-    if pacing allows).
+  - `src/tags.zig:343–347` — `dotResultTags`' validating head (optional
+    inset during segment 3 if pacing allows).
 - **Code shots (chapter course code / quoted snippets, from
   `docs/course/04-axes-with-names.md`):**
   - §4.7 `bad()` snippet and the verbatim compiler trace below it (segment
@@ -170,7 +170,7 @@ chapter in `docs/course/`" · "Next: The operation library".
   it must appear on screen somewhere: keep it in the segment-2 overlay, or
   move it to the segment-6 end card if that overlay is reworked.
 - **Trim order if long:** first the segment-6 `@sizeOf` inset (keep the
-  Fortran quote card), then the segment-3 `dotResultLen` inset, then shorten
+  Fortran quote card), then the segment-3 `dotResultTags` inset, then shorten
   the segment-1 diagram animation to a still. Never trim segments 4 or 5.
 - **Spoken forms:** read `.in` as "in", `dot(ctx, &m.w1, .in)` as "dot,
   contracting in"; read `error.ShapeMismatch` as "error ShapeMismatch";

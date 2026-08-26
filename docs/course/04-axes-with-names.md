@@ -283,13 +283,15 @@ pub fn normalizeTags(comptime tags_spec: anytype) [tagSpecLen(tags_spec)]Tag {
 Two teaching points hide here. First, **comptime introspection**:
 `isTensorSpec` switches on `@typeInfo(@TypeOf(tags_spec))` to recognize a
 non-tuple struct, `@hasField` asks what it carries, and recursion flattens
-three input shapes to one form. Second, the **"Len twin" pattern** in the
-return type: `[tagSpecLen(tags_spec)]Tag`. Zig array types carry their
-length, and you cannot return an array of unknown length — so every
-tuple-rewriting function in `src/tags.zig` comes as a pair, one computing
-the length, one filling the array, the second naming the first in its own
-return type. Watch for it throughout: `pointwiseResultLen` /
-`pointwiseResultTags`, `dotResultLen` / `dotResultTags`, and friends.
+three input shapes to one form. Second, the return type
+`[tagSpecLen(tags_spec)]Tag`: a Zig array type carries its length, so a
+function returning an array must name that length in its own signature —
+here by calling a second comptime function. The set-building algebra
+(`pointwiseResultTags`, `dotResultTags`, and friends) sidesteps that
+pairing: each is an `inline fn` whose `comptime` body fills a local buffer
+and returns a `[]const Tag` slice of it — comptime memory persists, and the
+slice's `.len` is still comptime-known wherever the arguments are, so the
+result can size arrays and build types just like an array would.
 
 `max_rank` is 8 (src/tensor.zig:9). Every result-tag computation enforces it
 with `@compileError("too many tensor tags")` — a *rank overflow* is a
@@ -585,36 +587,44 @@ view valid even after the source value is gone (docs/REFERENCE.md §7.5).
 ## 4.6 Pointwise: broadcasting by name
 
 Now the first *result-tag computation* — the comptime function deciding
-what type `x.add(ctx, &bias)` returns (src/tags.zig:343–366):
+what type `x.add(ctx, &bias)` returns (src/tags.zig:323–341):
 
 ```zig
-pub fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) [pointwiseResultLen(left_tags, right_tags)]Tag {
-    var out: [pointwiseResultLen(left_tags, right_tags)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (left_tags) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    inline for (right_tags) |tag| {
-        if (comptime tagIndex(left_tags, tag) == null) {
+pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) []const Tag {
+    comptime {
+        var out: [left_tags.len + right_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (left_tags) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
+        for (right_tags) |tag| {
+            if (tagIndex(left_tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        if (out_i > tensor_mod.max_rank) @compileError("too many tensor tags");
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
 }
 ```
 
 The result tags are the **union in operand order**: all left tags in left
-order, then every right-only tag appended in right order. The Len twin
-(`pointwiseResultLen`, same file) counts the union and carries the rank cap
-— `@compileError("too many tensor tags")` past `max_rank`. And the facade
-`add` puts the computation directly in its return type
-(src/ag/tensor.zig:1241; `sub`/`mul`/`div`/`maximum`/`minimum` are
-identical in shape):
+order, then every right-only tag appended in right order, capped at
+`max_rank` — `@compileError("too many tensor tags")` past it. The
+`const final = out[0..out_i].*; return &final;` tail is the comptime-slice
+idiom: copy the filled prefix into a const array and return a pointer to
+it — comptime memory persists, so the slice outlives the call. And the
+facade `add` puts the computation directly in its return type
+(src/ag/tensor/elementwise.zig:318; `sub`/`mul`/`div`/`maximum`/`minimum`
+are identical in shape — `Out(result_tags)` is the mixin's shorthand for
+`Tensor(.{ .dtype = dtype, .tags = result_tags })`, the branch's own
+dtype):
 
 ```zig
-pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags))
+pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags))
 ```
 
 > **Zig note** — `other: anytype` accepts a value or a pointer;
@@ -686,21 +696,20 @@ into three comptime classes (docs/REFERENCE.md §7.4):
 and the result is `batch ++ left free ++ right free`. That one sentence
 covers vector·vector (result `{}` — a scalar), matrix·vector,
 matrix·matrix, and batched matmul, none of them special cases at the API.
-The gatekeeper is `dotResultLen` (src/tags.zig:386–392):
+The gatekeeper is `dotResultTags` itself — its first two statements
+(src/tags.zig:343–347):
 
 ```zig
-pub fn dotResultLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize {
-    _ = tagIndexOrCompileError(left_tags, contract_tag);
-    _ = tagIndexOrCompileError(right_tags, contract_tag);
-    const len = dotBatchLen(left_tags, right_tags, contract_tag) + dotLeftFreeLen(left_tags, right_tags, contract_tag) + dotRightFreeLen(left_tags, right_tags, contract_tag);
-    if (len > tensor_mod.max_rank) @compileError("too many tensor tags");
-    return len;
-}
+pub inline fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag {
+    comptime {
+        _ = tagIndexOrCompileError(left_tags, contract_tag);
+        _ = tagIndexOrCompileError(right_tags, contract_tag);
+        // ... concatenate batch ++ left free ++ right free, cap at max_rank ...
 ```
 
-The contract tag must exist in **both** operands before this function will
-even report a length. And because the facade `dot` calls it in the *return
-type position* (src/ag/tensor.zig:3747):
+The contract tag must exist in **both** operands before the function will
+even start assembling the result. And because the facade `dot` calls it in
+the *return type position* (src/ag/tensor/float/matmul.zig:130):
 
 ```zig
 pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag))
@@ -728,19 +737,17 @@ pub fn bad(
 }
 ```
 
-The compiler's verdict, verbatim (absolute path prefixes trimmed):
+The compiler's verdict, verbatim (absolute path prefixes and the trailing
+referenced-by footer trimmed):
 
 ```
 src/tags.zig:187:5: error: tensor tag not found
     @compileError("tensor tag not found");
     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-src/tags.zig:388:31: note: called at comptime here
-    _ = tagIndexOrCompileError(right_tags, contract_tag);
-        ~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~
-src/tags.zig:368:122: note: called at comptime here
-pub fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotResultLen(left_tags, right_tags, contract_tag)]Tag {
-                                                                                                             ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-src/ag/tensor.zig:3747:123: note: generic function instantiated here
+src/tags.zig:346:35: note: called at comptime here
+        _ = tagIndexOrCompileError(right_tags, contract_tag);
+            ~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~
+src/ag/tensor/float/matmul.zig:130:123: note: called at comptime here
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag)) {
                                                                                                              ~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 repro_facade_error.zig:8:22: note: generic function instantiated here
@@ -749,11 +756,11 @@ repro_facade_error.zig:8:22: note: generic function instantiated here
 ```
 
 Read the note chain bottom-up — it is the teaching gold. Your call site
-instantiated `dot`; `dot`'s **return type** called `dotResultTags`; *its*
-return type called `dotResultLen`; which demanded `.k` exist in the right
-operand's tags; it doesn't; compilation over. The message is domain
-vocabulary, the trace names your line, and no wrong-shaped tensor was ever
-describable, let alone constructed.
+instantiated `dot`; `dot`'s **return type** called `dotResultTags`; whose
+first act was to demand `.k` exist in the right operand's tags; it doesn't;
+compilation over. The message is domain vocabulary, the trace names your
+line, and no wrong-shaped tensor was ever describable, let alone
+constructed.
 
 > **ML note** — Compare the standard failure mode: the framework happily
 > contracts positions, the shapes work out by coincidence, and you discover

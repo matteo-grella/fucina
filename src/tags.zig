@@ -233,98 +233,78 @@ pub fn squeezeAxes(comptime rank: usize, comptime axis_index: usize) [rank - 1]u
     return out;
 }
 
-pub fn removeTag(comptime tags: anytype, comptime tag: Tag) [removeTagLen(tags)]Tag {
-    _ = tagIndexOrCompileError(tags, tag);
-    var out: [removeTagLen(tags)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (tags) |candidate| {
-        if (comptime !tagEqual(candidate, tag)) {
-            out[out_i] = candidate;
-            out_i += 1;
+pub inline fn removeTag(comptime tags: anytype, comptime tag: Tag) []const Tag {
+    comptime {
+        _ = tagIndexOrCompileError(tags, tag);
+        var out: [tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (tags) |candidate| {
+            if (!tagEqual(candidate, tag)) {
+                out[out_i] = candidate;
+                out_i += 1;
+            }
         }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
 }
 
-fn removeTagLen(comptime tags: anytype) usize {
-    return if (tags.len == 0) 0 else tags.len - 1;
-}
-
-pub fn removeTags(comptime tags: anytype, comptime remove_tags: anytype) [removeTagsLen(tags, remove_tags)]Tag {
+pub inline fn removeTags(comptime tags: anytype, comptime remove_tags: anytype) []const Tag {
     comptime {
         validateUniqueTags(remove_tags);
         for (remove_tags) |tag| _ = tagIndexOrCompileError(tags, tag);
-    }
-    var out: [removeTagsLen(tags, remove_tags)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (tags) |tag| {
-        if (comptime tagIndex(remove_tags, tag) == null) {
-            out[out_i] = tag;
-            out_i += 1;
+        var out: [tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (tags) |tag| {
+            if (tagIndex(remove_tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
         }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
-}
-
-fn removeTagsLen(comptime tags: anytype, comptime remove_tags: anytype) usize {
-    comptime {
-        validateUniqueTags(remove_tags);
-        for (remove_tags) |tag| _ = tagIndexOrCompileError(tags, tag);
-    }
-    return tags.len - remove_tags.len;
 }
 
 /// Set union: `tags` followed by the tags of `other` not already present.
 /// Unlike `pointwiseResultTags` there is NO rank cap — the result is a
 /// membership set, not a tensor tag tuple (an einsum's operand-tag union may
 /// legally exceed `max_rank` even though every tensor involved fits it).
-pub fn unionTags(comptime tags: anytype, comptime other: anytype) [unionTagsLen(tags, other)]Tag {
-    @setEvalBranchQuota(100_000);
-    var out: [unionTagsLen(tags, other)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (tags) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    inline for (other) |tag| {
-        if (comptime tagIndex(tags, tag) == null) {
+pub inline fn unionTags(comptime tags: anytype, comptime other: anytype) []const Tag {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var out: [tags.len + other.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (tags) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
+        for (other) |tag| {
+            if (tagIndex(tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
-}
-
-pub fn unionTagsLen(comptime tags: anytype, comptime other: anytype) usize {
-    @setEvalBranchQuota(100_000);
-    var len: usize = tags.len;
-    inline for (other) |tag| {
-        if (comptime tagIndex(tags, tag) == null) len += 1;
-    }
-    return len;
 }
 
 /// Tags of `tags` that are also present in `other`, in `tags` order.
-pub fn intersectTags(comptime tags: anytype, comptime other: anytype) [intersectTagsLen(tags, other)]Tag {
-    @setEvalBranchQuota(100_000);
-    var out: [intersectTagsLen(tags, other)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (tags) |tag| {
-        if (comptime tagIndex(other, tag) != null) {
-            out[out_i] = tag;
-            out_i += 1;
+pub inline fn intersectTags(comptime tags: anytype, comptime other: anytype) []const Tag {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var out: [tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (tags) |tag| {
+            if (tagIndex(other, tag) != null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
         }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
-}
-
-pub fn intersectTagsLen(comptime tags: anytype, comptime other: anytype) usize {
-    @setEvalBranchQuota(100_000);
-    var len: usize = 0;
-    inline for (tags) |tag| {
-        if (comptime tagIndex(other, tag) != null) len += 1;
-    }
-    return len;
 }
 
 pub fn replaceTag(comptime tags: anytype, comptime old_tag: Tag, comptime new_tag: Tag) [tags.len]Tag {
@@ -340,118 +320,98 @@ pub fn replaceTag(comptime tags: anytype, comptime old_tag: Tag, comptime new_ta
     return out;
 }
 
-pub fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) [pointwiseResultLen(left_tags, right_tags)]Tag {
-    var out: [pointwiseResultLen(left_tags, right_tags)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (left_tags) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    inline for (right_tags) |tag| {
-        if (comptime tagIndex(left_tags, tag) == null) {
+pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) []const Tag {
+    comptime {
+        var out: [left_tags.len + right_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (left_tags) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
+        for (right_tags) |tag| {
+            if (tagIndex(left_tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        if (out_i > tensor_mod.max_rank) @compileError("too many tensor tags");
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
 }
 
-pub fn pointwiseResultLen(comptime left_tags: anytype, comptime right_tags: anytype) usize {
-    var len = left_tags.len;
-    inline for (right_tags) |tag| {
-        if (comptime tagIndex(left_tags, tag) == null) len += 1;
-    }
-    if (len > tensor_mod.max_rank) @compileError("too many tensor tags");
-    return len;
-}
-
-pub fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotResultLen(left_tags, right_tags, contract_tag)]Tag {
-    var out: [dotResultLen(left_tags, right_tags, contract_tag)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (dotBatchTags(left_tags, right_tags, contract_tag)) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    inline for (dotLeftFreeTags(left_tags, right_tags, contract_tag)) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    inline for (dotRightFreeTags(left_tags, right_tags, contract_tag)) |tag| {
-        out[out_i] = tag;
-        out_i += 1;
-    }
-    return out;
-}
-
-pub fn dotResultLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize {
-    _ = tagIndexOrCompileError(left_tags, contract_tag);
-    _ = tagIndexOrCompileError(right_tags, contract_tag);
-    const len = dotBatchLen(left_tags, right_tags, contract_tag) + dotLeftFreeLen(left_tags, right_tags, contract_tag) + dotRightFreeLen(left_tags, right_tags, contract_tag);
-    if (len > tensor_mod.max_rank) @compileError("too many tensor tags");
-    return len;
-}
-
-pub fn dotBatchTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotBatchLen(left_tags, right_tags, contract_tag)]Tag {
-    var out: [dotBatchLen(left_tags, right_tags, contract_tag)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (left_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) != null)) {
+pub inline fn dotResultTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag {
+    comptime {
+        _ = tagIndexOrCompileError(left_tags, contract_tag);
+        _ = tagIndexOrCompileError(right_tags, contract_tag);
+        const batch = dotBatchTags(left_tags, right_tags, contract_tag);
+        const left_free = dotLeftFreeTags(left_tags, right_tags, contract_tag);
+        const right_free = dotRightFreeTags(left_tags, right_tags, contract_tag);
+        if (batch.len + left_free.len + right_free.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+        var out: [batch.len + left_free.len + right_free.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (batch) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
-    }
-    return out;
-}
-
-pub fn dotBatchLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize {
-    var len: usize = 0;
-    inline for (left_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) != null)) len += 1;
-    }
-    return len;
-}
-
-pub fn dotLeftFreeTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotLeftFreeLen(left_tags, right_tags, contract_tag)]Tag {
-    var out: [dotLeftFreeLen(left_tags, right_tags, contract_tag)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (left_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) == null)) {
+        for (left_free) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
-    }
-    return out;
-}
-
-pub fn dotLeftFreeLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize {
-    var len: usize = 0;
-    inline for (left_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) == null)) len += 1;
-    }
-    return len;
-}
-
-pub fn dotRightFreeTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) [dotRightFreeLen(left_tags, right_tags, contract_tag)]Tag {
-    @setEvalBranchQuota(10_000);
-    var out: [dotRightFreeLen(left_tags, right_tags, contract_tag)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (right_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(left_tags, tag) == null)) {
+        for (right_free) |tag| {
             out[out_i] = tag;
             out_i += 1;
         }
+        const final = out;
+        return &final;
     }
-    return out;
 }
 
-pub fn dotRightFreeLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) usize {
-    @setEvalBranchQuota(10_000);
-    _ = tagIndexOrCompileError(right_tags, contract_tag);
-    var len: usize = 0;
-    inline for (right_tags) |tag| {
-        if (comptime (!tagEqual(tag, contract_tag) and tagIndex(left_tags, tag) == null)) len += 1;
+pub inline fn dotBatchTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag {
+    comptime {
+        var out: [left_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (left_tags) |tag| {
+            if (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) != null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return len;
+}
+
+pub inline fn dotLeftFreeTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag {
+    comptime {
+        var out: [left_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (left_tags) |tag| {
+            if (!tagEqual(tag, contract_tag) and tagIndex(right_tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        const final = out[0..out_i].*;
+        return &final;
+    }
+}
+
+pub inline fn dotRightFreeTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime contract_tag: Tag) []const Tag {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        _ = tagIndexOrCompileError(right_tags, contract_tag);
+        var out: [right_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        for (right_tags) |tag| {
+            if (!tagEqual(tag, contract_tag) and tagIndex(left_tags, tag) == null) {
+                out[out_i] = tag;
+                out_i += 1;
+            }
+        }
+        const final = out[0..out_i].*;
+        return &final;
+    }
 }
 
 pub fn insertTagAt(comptime tags: anytype, comptime tag: Tag, comptime axis_index: usize) [tags.len + 1]Tag {
@@ -483,42 +443,31 @@ pub fn einsumClassOfRight(comptime left_tags: anytype, comptime out_tags: anytyp
     return if (kept) .right_free else .right_summed;
 }
 
-pub fn einsumPartLen(comptime left_tags: anytype, comptime right_tags: anytype, comptime out_tags: anytype, comptime part: EinsumPart) usize {
-    @setEvalBranchQuota(100_000);
-    var len: usize = 0;
-    switch (part) {
-        .batch, .contract, .left_free, .left_summed => inline for (left_tags) |tag| {
-            if (comptime einsumClassOfLeft(right_tags, out_tags, tag) == part) len += 1;
-        },
-        .right_free, .right_summed => inline for (right_tags) |tag| {
-            if (comptime einsumClassOfRight(left_tags, out_tags, tag) == part) len += 1;
-        },
-    }
-    return len;
-}
-
 /// Tags of one einsum part in the owning operand's axis order; the shared
 /// parts (batch, contract) are reported in LEFT-operand order, matching the
 /// `dot*` convention that the right operand aligns to the left.
-pub fn einsumPartTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime out_tags: anytype, comptime part: EinsumPart) [einsumPartLen(left_tags, right_tags, out_tags, part)]Tag {
-    @setEvalBranchQuota(100_000);
-    var out: [einsumPartLen(left_tags, right_tags, out_tags, part)]Tag = undefined;
-    var out_i: usize = 0;
-    switch (part) {
-        .batch, .contract, .left_free, .left_summed => inline for (left_tags) |tag| {
-            if (comptime einsumClassOfLeft(right_tags, out_tags, tag) == part) {
-                out[out_i] = tag;
-                out_i += 1;
-            }
-        },
-        .right_free, .right_summed => inline for (right_tags) |tag| {
-            if (comptime einsumClassOfRight(left_tags, out_tags, tag) == part) {
-                out[out_i] = tag;
-                out_i += 1;
-            }
-        },
+pub inline fn einsumPartTags(comptime left_tags: anytype, comptime right_tags: anytype, comptime out_tags: anytype, comptime part: EinsumPart) []const Tag {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var out: [left_tags.len + right_tags.len]Tag = undefined;
+        var out_i: usize = 0;
+        switch (part) {
+            .batch, .contract, .left_free, .left_summed => for (left_tags) |tag| {
+                if (einsumClassOfLeft(right_tags, out_tags, tag) == part) {
+                    out[out_i] = tag;
+                    out_i += 1;
+                }
+            },
+            .right_free, .right_summed => for (right_tags) |tag| {
+                if (einsumClassOfRight(left_tags, out_tags, tag) == part) {
+                    out[out_i] = tag;
+                    out_i += 1;
+                }
+            },
+        }
+        const final = out[0..out_i].*;
+        return &final;
     }
-    return out;
 }
 
 /// Validates an einsum equation at comptime: unique output tags, every output

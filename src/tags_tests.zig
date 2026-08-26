@@ -57,8 +57,8 @@ test "einsum tag algebra reports shared parts in left order and multi-tag groups
         const contract = tags_mod.einsumPartTags(l, r, out, .contract);
         if (contract.len != 2 or contract[0] != .k2 or contract[1] != .k1) @compileError("contract part must follow left order");
 
-        if (tags_mod.einsumPartLen(l, r, out, .batch) != 0) @compileError("unexpected batch part");
-        if (tags_mod.einsumPartLen(l, r, out, .left_summed) != 0) @compileError("unexpected left summed part");
+        if (tags_mod.einsumPartTags(l, r, out, .batch).len != 0) @compileError("unexpected batch part");
+        if (tags_mod.einsumPartTags(l, r, out, .left_summed).len != 0) @compileError("unexpected left summed part");
     }
 }
 
@@ -66,6 +66,6 @@ test "intersectTags keeps first-operand order" {
     comptime {
         const kept = tags_mod.intersectTags(.{ .a, .b, .c, .d }, .{ .d, .b });
         if (kept.len != 2 or kept[0] != .b or kept[1] != .d) @compileError("unexpected intersection");
-        if (tags_mod.intersectTagsLen(.{ .a, .b }, .{ .c, .d }) != 0) @compileError("expected empty intersection");
+        if (tags_mod.intersectTags(.{ .a, .b }, .{ .c, .d }).len != 0) @compileError("expected empty intersection");
     }
 }

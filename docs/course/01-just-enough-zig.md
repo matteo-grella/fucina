@@ -1103,8 +1103,8 @@ disagrees with something you read elsewhere, imitate this repo — then run
    field's *type* is computed from the first's spec.
 5. **(Harder) Read one real comptime function end to end.** Annotate
    `dotResultTags` in `src/tags.zig`: which values exist only at comptime,
-   where `inline for` unrolls, and what the returned array's *length* being
-   computed by another comptime function (`dotResultLen`) implies about how
+   why the whole body sits in a `comptime` block, and what the returned
+   `[]const Tag` slice's *length* being comptime-known implies about how
    Zig types depend on values. Predict the result tags for
    `(.{ .batch, .in }) · (.{ .in, .out })` contracting `.in`, then check
    against the first program's comment.

@@ -24,9 +24,9 @@ const dotResultTags = tags_mod.dotResultTags;
 const tagsEqual = tags_mod.tagsEqual;
 const dotLeftOrder = tags_mod.dotLeftOrder;
 const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
-const dotBatchLen = tags_mod.dotBatchLen;
-const dotLeftFreeLen = tags_mod.dotLeftFreeLen;
-const dotRightFreeLen = tags_mod.dotRightFreeLen;
+const dotBatchTags = tags_mod.dotBatchTags;
+const dotLeftFreeTags = tags_mod.dotLeftFreeTags;
+const dotRightFreeTags = tags_mod.dotRightFreeTags;
 const alignTensorTo = tag_ops.alignTensorTo;
 const contiguousForReshape = tag_ops.contiguousForReshape;
 const dotResultShape = tag_ops.dotResultShape;
@@ -350,8 +350,8 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = dotResultTags(tags, weight_tags, contract_tag);
             comptime {
                 if (Weight.dtype != .f32) @compileError("dotTernarySte requires an f32 latent weight");
-                if (dotBatchLen(tags, weight_tags, contract_tag) != 0) @compileError("dotTernarySte does not support shared batch tags");
-                if (dotRightFreeLen(tags, weight_tags, contract_tag) != 1) @compileError("dotTernarySte requires one weight free axis");
+                if (dotBatchTags(tags, weight_tags, contract_tag).len != 0) @compileError("dotTernarySte does not support shared batch tags");
+                if (dotRightFreeTags(tags, weight_tags, contract_tag).len != 1) @compileError("dotTernarySte requires one weight free axis");
                 if (!tagsEqual(weight_tags, dotRightTransBOrder(tags, weight_tags, contract_tag)))
                     @compileError("dotTernarySte requires weight storage order [free, contract], e.g. weight tags {.out, .in}");
                 if (tagIndexOrCompileError(tags, contract_tag) != tags.len - 1)
@@ -366,7 +366,7 @@ pub fn Ops(comptime Self: type) type {
             if (self.asRawTensor().shape.at(tag_rank - 1) != k) return TensorError.ShapeMismatch;
             if (k == 0 or k % dtype_mod.qk_k_block_size != 0) return error.TernaryContractDimNotBlockAligned;
 
-            const left_free_rank = comptime dotLeftFreeLen(tags, weight_tags, contract_tag);
+            const left_free_rank = comptime dotLeftFreeTags(tags, weight_tags, contract_tag).len;
             var left_aligned = try alignTensorTo(.f32, tags, self.asRawTensor(), dotLeftOrder(tags, weight_tags, contract_tag));
             defer left_aligned.deinit();
             const m = productRange(.f32, &left_aligned, 0, left_free_rank);

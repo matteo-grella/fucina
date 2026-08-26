@@ -12,7 +12,6 @@ const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const rawRank = tags_mod.rawRank;
-const tagIndex = tags_mod.tagIndex;
 const removeTags = tags_mod.removeTags;
 const tagsEqual = tags_mod.tagsEqual;
 
@@ -46,24 +45,10 @@ pub fn taggedShapeArray(comptime tags: anytype, raw_shape: [rawRank(tags.len)]us
     return out;
 }
 
-pub fn tagsDifference(comptime tags: anytype, comptime keep_tags: anytype) [tagsDifferenceLen(tags, keep_tags)]Tag {
-    var out: [tagsDifferenceLen(tags, keep_tags)]Tag = undefined;
-    var out_i: usize = 0;
-    inline for (tags) |tag| {
-        if (comptime tagIndex(keep_tags, tag) == null) {
-            out[out_i] = tag;
-            out_i += 1;
-        }
-    }
-    return out;
-}
-
-pub fn tagsDifferenceLen(comptime tags: anytype, comptime keep_tags: anytype) usize {
-    var len: usize = 0;
-    inline for (tags) |tag| {
-        if (comptime tagIndex(keep_tags, tag) == null) len += 1;
-    }
-    return len;
+/// Tags of `tags` not present in `keep_tags` (`keep_tags` need not be a
+/// subset, unlike `removeTags`' remove list).
+pub inline fn tagsDifference(comptime tags: anytype, comptime keep_tags: anytype) []const Tag {
+    return removeTags(tags, tags_mod.intersectTags(tags, keep_tags));
 }
 
 /// Sum-reduce a result-tagged gradient back to an operand's tags/shape (the

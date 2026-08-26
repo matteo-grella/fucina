@@ -30,9 +30,9 @@ const tagsEqual = tags_mod.tagsEqual;
 const dotLeftOrder = tags_mod.dotLeftOrder;
 const dotRightOrder = tags_mod.dotRightOrder;
 const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
-const dotBatchLen = tags_mod.dotBatchLen;
-const dotLeftFreeLen = tags_mod.dotLeftFreeLen;
-const dotRightFreeLen = tags_mod.dotRightFreeLen;
+const dotBatchTags = tags_mod.dotBatchTags;
+const dotLeftFreeTags = tags_mod.dotLeftFreeTags;
+const dotRightFreeTags = tags_mod.dotRightFreeTags;
 const alignTensorTo = tag_ops.alignTensorTo;
 const contiguousForReshape = tag_ops.contiguousForReshape;
 const dotResultShape = tag_ops.dotResultShape;
@@ -316,42 +316,28 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// Tags an intermediate must keep: every tag of the pair still needed by the
         /// remaining operands or the output, in group-nested (batch, then acc-free,
         /// then operand-free) order so the next contraction stays direct-lowerable.
-        pub fn einsumManyKeepTags(comptime acc_tags: anytype, comptime op_tags: anytype, comptime needed: anytype) [einsumManyKeepLen(acc_tags, op_tags, needed)]Tag {
-            const shared = tags_mod.intersectTags(acc_tags, op_tags);
-            const op_shared = tags_mod.intersectTags(op_tags, acc_tags);
-            return tags_mod.intersectTags(shared, needed) ++
-                tags_mod.intersectTags(removeTags(acc_tags, shared), needed) ++
-                tags_mod.intersectTags(removeTags(op_tags, op_shared), needed);
-        }
-
-        pub fn einsumManyKeepLen(comptime acc_tags: anytype, comptime op_tags: anytype, comptime needed: anytype) usize {
-            const shared = tags_mod.intersectTags(acc_tags, op_tags);
-            const op_shared = tags_mod.intersectTags(op_tags, acc_tags);
-            return tags_mod.intersectTagsLen(shared, needed) +
-                tags_mod.intersectTagsLen(removeTags(acc_tags, shared), needed) +
-                tags_mod.intersectTagsLen(removeTags(op_tags, op_shared), needed);
+        pub inline fn einsumManyKeepTags(comptime acc_tags: anytype, comptime op_tags: anytype, comptime needed: anytype) []const Tag {
+            comptime {
+                const shared = tags_mod.intersectTags(acc_tags, op_tags);
+                const op_shared = tags_mod.intersectTags(op_tags, acc_tags);
+                return tags_mod.intersectTags(shared, needed) ++
+                    tags_mod.intersectTags(removeTags(acc_tags, shared), needed) ++
+                    tags_mod.intersectTags(removeTags(op_tags, op_shared), needed);
+            }
         }
 
         /// Union of the output tags and every remaining operand's tags, used purely
         /// as a membership set (may exceed the tensor rank limit, unlike
         /// `pointwiseResultTags`).
-        pub fn einsumManyNeededTags(comptime OperandsT: type, comptime out_tags: anytype, comptime from: usize) [einsumManyNeededLen(OperandsT, out_tags, from)]Tag {
-            const fields = @typeInfo(OperandsT).@"struct".fields;
-            if (comptime from == fields.len) {
-                return normalizeTags(out_tags);
-            } else {
+        pub inline fn einsumManyNeededTags(comptime OperandsT: type, comptime out_tags: anytype, comptime from: usize) []const Tag {
+            comptime {
+                const fields = @typeInfo(OperandsT).@"struct".fields;
+                if (from == fields.len) {
+                    const final = normalizeTags(out_tags);
+                    return &final;
+                }
                 const rest = einsumManyNeededTags(OperandsT, out_tags, from + 1);
                 return tags_mod.unionTags(rest, TensorObject(fields[from].type).axis_tags);
-            }
-        }
-
-        pub fn einsumManyNeededLen(comptime OperandsT: type, comptime out_tags: anytype, comptime from: usize) usize {
-            const fields = @typeInfo(OperandsT).@"struct".fields;
-            if (comptime from == fields.len) {
-                return normalizeTags(out_tags).len;
-            } else {
-                const rest = einsumManyNeededTags(OperandsT, out_tags, from + 1);
-                return tags_mod.unionTagsLen(rest, TensorObject(fields[from].type).axis_tags);
             }
         }
 
@@ -423,9 +409,9 @@ pub fn Mod(comptime ag_tensor: type) type {
             comptime contract_tag: Tag,
         ) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
             const result_shape = try dotResultShape(tensor_dtype, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
-            const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
-            const right_free_rank = comptime dotRightFreeLen(left_tags, right_tags, contract_tag);
+            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
+            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
+            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
 
             const left_order = dotLeftOrder(left_tags, right_tags, contract_tag);
             var left_aligned = try alignTensorTo(tensor_dtype, left_tags, left, left_order);
@@ -493,11 +479,11 @@ pub fn Mod(comptime ag_tensor: type) type {
             comptime if (!dtype_mod.supportsQuantizedMatmulRhs(rhs_dtype)) @compileError("RHS dtype does not support quantized matmul");
 
             const result_shape = try dotResultShape(.f32, rhs_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
+            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
             if (comptime batch_rank != 0) @compileError("quantized RHS dot does not support shared batch tags yet");
 
-            const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
-            const right_free_rank = comptime dotRightFreeLen(left_tags, right_tags, contract_tag);
+            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
+            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
             if (comptime right_free_rank != 1) @compileError("quantized RHS dot requires one RHS free axis");
 
             const expected_right_order = dotRightTransBOrder(left_tags, right_tags, contract_tag);
@@ -543,9 +529,9 @@ pub fn Mod(comptime ag_tensor: type) type {
         ) !RawTensor {
             comptime std.debug.assert(rhs_dtype == .f16 or rhs_dtype == .bf16);
             const result_shape = try dotResultShape(.f32, rhs_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
-            const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
-            const right_free_rank = comptime dotRightFreeLen(left_tags, right_tags, contract_tag);
+            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
+            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
+            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
 
             const expected_right_order = dotRightTransBOrder(left_tags, right_tags, contract_tag);
             if (comptime batch_rank == 0 and right_free_rank == 1 and tagsEqual(right_tags, expected_right_order)) {
