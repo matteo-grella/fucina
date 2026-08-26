@@ -1,6 +1,7 @@
 //! Quantized matmul: the block and RHS type vocabulary, the W8A8 (i8
-//! blockwise) quantizers and kernel, the per-dtype row dispatch switches,
-//! and the child modules that own each GGML format's kernels.
+//! blockwise) quantizers and kernel, the one `gemm` entry over an
+//! `ops.QuantGemm` request (each child's tile bodies behind one comptime
+//! selection), and the child modules that own each GGML format's kernels.
 //!
 //! Child modules, each addressed as `quant.<child>.<fn>`:
 //!   types    - interleaved block layouts, RHS container types and block sizes.
@@ -42,6 +43,7 @@ const tensor = @import("../tensor.zig");
 pub const types = @import("quant/types.zig");
 pub const common = @import("quant/common.zig");
 const isa = @import("isa.zig");
+const ops = @import("ops.zig");
 pub const q8k = @import("quant/q8k.zig");
 pub const q8_0 = @import("quant/q8_0.zig");
 pub const q4_k = @import("quant/q4_k.zig");
@@ -405,6 +407,23 @@ pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
     return types.blockCountExact(comptime dtype_mod.blockSize(tensor_dtype), len);
 }
 
+/// The one quantized GEMM entry over a request `g` (`backend/ops.zig`
+/// `QuantGemm`): dispatches at comptime to the owning format file's
+/// `gemm`, which selects the tile body for `.{ g.rhs, g.lhs, g.order }`.
+/// The output row stride is `rhs.n`; `tile` bounds the rows and columns
+/// written; an unsupported combination is a compile error naming it
+/// (`QuantGemm.supported` is the matrix).
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    switch (comptime g.weight) {
+        .q4_k => q4_k.gemm(g, out, lhs, rhs, tile),
+        .q5_k => q5_k.gemm(g, out, lhs, rhs, tile),
+        .q6_k => q6_k.gemm(g, out, lhs, rhs, tile),
+        .q8_0 => q8_0.gemm(g, out, lhs, rhs, tile),
+        .tq2_0, .q2_0 => ternary.gemm(g, out, lhs, rhs, tile),
+        else => cold.gemm(g, out, lhs, rhs, tile),
+    }
+}
+
 /// The compact (GGUF-native block layout) matmul RHS view for the K-quant
 /// formats: the same five fields per format ({allocator, blocks, k, n,
 /// blocks_per_column}), one view type per block struct. This is the
@@ -432,36 +451,26 @@ pub fn hasCompactColOuter(comptime dt: DType) bool {
     };
 }
 
-/// Row-outer tile over a compact RHS view, by format.
+/// Row-outer tile over a compact RHS view, by format: the
+/// `.{ .rows, .q8_k, .row_outer }` gemm selection (the MoE expert tile's
+/// entry; `n` must be the view's width).
 pub fn matmulCompactRhsTile(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
-    switch (comptime dt) {
-        .q2_k => cold.matmulQ2_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
-        .q3_k => cold.matmulQ3_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
-        .q4_k => q4_k.matmulQ4_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
-        .q5_k => q5_k.matmulQ5_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
-        .q6_k => q6_k.matmulQ6_KRhsTile(out, qlhs, view, n, r0, m, c0, c1),
-        else => comptime unreachable,
-    }
+    std.debug.assert(view.n == n);
+    gemm(.{ .weight = dt, .lhs = .q8_k }, out, qlhs, view, .{ .r0 = r0, .r1 = m, .c0 = c0, .c1 = c1 });
 }
 
-/// Batched column-outer compact kernel (the `hasCompactColOuter` formats).
+/// Batched column-outer compact kernel (the `hasCompactColOuter` formats):
+/// the `.{ .rows, .q8_k, .col_outer }` gemm selection.
 pub fn matmulCompactColOuter(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
-    switch (comptime dt) {
-        .q4_k => q4_k.matmulQ4_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
-        .q5_k => q5_k.matmulQ5_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
-        .q6_k => q6_k.matmulQ6_KRhsCompactColOuter(out, qlhs, view, n, r0, m, c0, c1),
-        else => comptime unreachable,
-    }
+    std.debug.assert(view.n == n);
+    gemm(.{ .weight = dt, .lhs = .q8_k, .order = .col_outer }, out, qlhs, view, .{ .r0 = r0, .r1 = m, .c0 = c0, .c1 = c1 });
 }
 
-/// Lane-packed (Q8_Kx4 LHS) column-outer compact kernel.
+/// Lane-packed (Q8_Kx4 LHS) column-outer compact kernel: the
+/// `.{ .rows, .q8_kx4, .col_outer }` gemm selection.
 pub fn matmulCompactQ8_Kx4ColOuter(comptime dt: DType, out: []f32, lhs_x4: []const types.BlockQ8_Kx4, view: *const CompactRhs(dt), n: usize, m: usize, c0: usize, c1: usize) void {
-    switch (comptime dt) {
-        .q4_k => q4_k.matmulQ4_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
-        .q5_k => q5_k.matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
-        .q6_k => q6_k.matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs_x4, view, n, m, c0, c1),
-        else => comptime unreachable,
-    }
+    std.debug.assert(view.n == n);
+    gemm(.{ .weight = dt, .lhs = .q8_kx4, .order = .col_outer }, out, lhs_x4, view, .{ .r1 = m, .c0 = c0, .c1 = c1 });
 }
 
 pub fn dequantizeRowForDType(

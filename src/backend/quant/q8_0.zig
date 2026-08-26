@@ -10,6 +10,7 @@ const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
@@ -597,7 +598,7 @@ pub fn matmulQ8_0x4RhsTile(
 
 pub const matmulQ8_0x4RhsRange = common.RangeFromTile(matmulQ8_0x4RhsTile);
 
-pub fn matmulQ8_0x4PackedRhsTile(
+fn matmulQ8_0x4PackedRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0x4,
     rhs: *const types.QuantizedMatmulRhsQ8_0x4,
@@ -727,7 +728,7 @@ fn matmulQ8_0x4PackedRhsTileColsFirst(
 
 pub const matmulQ8_0x4PackedRhsRange = common.RangeFromTile(matmulQ8_0x4PackedRhsTile);
 
-pub fn matmulQ8_0x4PackedPaddedRhsTile(
+fn matmulQ8_0x4PackedPaddedRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0x4,
     rhs: *const types.QuantizedMatmulRhsQ8_0x4,
@@ -1814,5 +1815,30 @@ test "attention q8 primitives: pair == single bitwise; weighted V row matches f6
         weightedQ8_0RowPair(true, &outp0_seq, &outp1_seq, &k2, w1, w0);
         try std.testing.expectEqualSlices(f32, &outp0_seq, &outp0_two);
         try std.testing.expectEqualSlices(f32, &outp1_seq, &outp1_two);
+    }
+}
+
+/// The one Q8_0 GEMM entry (`ops.QuantGemm`): comptime-selects the tile
+/// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
+/// The `.col_outer` q8_0x4-LHS form is the padded kernel: full row range
+/// (`tile.r0 == 0`), masked writes for `tile.r1 % 4 != 0`.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime std.debug.assert(g.weight == .q8_0);
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.rhs) {
+        .rows => matmulQ8_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .x4 => switch (comptime g.lhs) {
+            .q8_0 => matmulQ8_0x4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .q8_0x4 => switch (comptime g.order) {
+                .row_outer => matmulQ8_0x4PackedRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+                .col_outer => {
+                    std.debug.assert(tile.r0 == 0);
+                    matmulQ8_0x4PackedPaddedRhsTile(out, lhs, rhs, tile.r1, n, tile.c0, tile.c1);
+                },
+            },
+            else => comptime unreachable,
+        },
+        else => comptime unreachable,
     }
 }

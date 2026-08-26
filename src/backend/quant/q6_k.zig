@@ -10,6 +10,7 @@ const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
@@ -1270,4 +1271,29 @@ test "ggml_q6_k dot and matmul consume loaded blocks" {
 
 test {
     _ = @import("q6_k_tests.zig");
+}
+
+/// The one Q6_K GEMM entry (`ops.QuantGemm`): comptime-selects the tile
+/// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
+/// The fused gate/up pair kernel (`matmulQ6_Kx4RhsPairTile`) is a
+/// two-output contract outside the single-GEMM seam and keeps its name.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime std.debug.assert(g.weight == .q6_k);
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.rhs) {
+        .rows => switch (comptime g.order) {
+            .row_outer => matmulQ6_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .col_outer => switch (comptime g.lhs) {
+                .q8_k => matmulQ6_KRhsCompactColOuter(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+                .q8_kx4 => {
+                    std.debug.assert(tile.r0 == 0);
+                    matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, tile.r1, tile.c0, tile.c1);
+                },
+                else => comptime unreachable,
+            },
+        },
+        .x4 => matmulQ6_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        else => comptime unreachable,
+    }
 }

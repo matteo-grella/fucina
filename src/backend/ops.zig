@@ -368,3 +368,153 @@ pub const Gemm = struct {
         return g.a == .f32 and g.b == .f32 and g.out == .f32;
     }
 };
+
+const quant_types = @import("quant/types.zig");
+
+/// Column-interleave layout of a quantized GEMM RHS. Defined beside the
+/// containers that carry it (`quant/types.zig`, each as `pub const pack`);
+/// re-exported here beside the request it keys.
+pub const RhsPack = quant_types.RhsPack;
+
+/// The activation (LHS) representation a quantized kernel consumes: raw
+/// f32 rows, Q8_K/Q8_0/Q8_1 block rows, or the lane-packed group forms
+/// (`BlockQ8_Kx4`, `BlockQ8_Kx2Mmla`, `BlockQ8_0x4`).
+pub const LhsForm = enum { f32, q8_k, q8_kx4, q8_kx2mmla, q8_0, q8_0x4, q8_1 };
+
+/// Loop nest of the tile body: `.row_outer` walks output rows outermost
+/// (the decode/GEMV shape); `.col_outer` walks output columns outermost
+/// over the whole row range (the batched compact K-quant kernels, and the
+/// padded Q8_0x4 form that masks writes so `r1` need not be a multiple of
+/// the LHS row group).
+pub const LoopOrder = enum { row_outer, col_outer };
+
+/// An output tile `[r0, r1) x [c0, c1)` of a quantized GEMM. The output
+/// row stride is the full width `rhs.n`; a `.col_outer` request covers the
+/// whole row range, so its `r0` must be 0.
+pub const Tile = struct {
+    r0: usize = 0,
+    r1: usize,
+    c0: usize = 0,
+    c1: usize,
+
+    /// The full output: all `m` rows at width `n`.
+    pub fn rows(m: usize, n: usize) Tile {
+        return .{ .r1 = m, .c1 = n };
+    }
+
+    /// A full-width row band `[r0, r1)` at width `n` (the Range spelling).
+    pub fn range(r0: usize, r1: usize, n: usize) Tile {
+        return .{ .r0 = r0, .r1 = r1, .c1 = n };
+    }
+};
+
+/// A quantized GEMM request at the kernel seam: `weight` names the RHS
+/// block format, `rhs` its interleave, `lhs` the activation form, `order`
+/// the loop nest. `supported` is the one matrix of existing kernels; each
+/// format file's `gemm(comptime g, out, lhs, rhs, tile)` rejects anything
+/// outside it at compile time, naming the combination.
+pub const QuantGemm = struct {
+    weight: dtype_mod.DType,
+    rhs: RhsPack = .rows,
+    lhs: LhsForm = .f32,
+    order: LoopOrder = .row_outer,
+
+    /// The default `.rows` request for `weight`: the activation form its
+    /// compact kernel consumes (Q8_K for the K-quant/IQ family, Q8_0 for
+    /// the 32-block family, Q8_1 for Q4_1/Q5_1).
+    pub fn rowsFor(comptime weight: dtype_mod.DType) QuantGemm {
+        return .{ .weight = weight, .lhs = rowsLhs(weight) };
+    }
+
+    /// The activation form the `.rows` kernel of `weight` consumes.
+    pub fn rowsLhs(comptime weight: dtype_mod.DType) LhsForm {
+        return switch (weight) {
+            .q1_0, .q2_0, .q4_0, .q5_0, .q8_0, .iq4_nl, .mxfp4, .nvfp4 => .q8_0,
+            .q4_1, .q5_1 => .q8_1,
+            .q2_k, .q3_k, .q4_k, .q5_k, .q6_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .tq1_0, .tq2_0 => .q8_k,
+            else => @compileError("QuantGemm.rowsLhs: no quantized rows kernel for weight ." ++ @tagName(weight)),
+        };
+    }
+
+    /// The one matrix of existing kernels, transcribed from the per-format
+    /// tile bodies. A combination outside it has no kernel.
+    pub fn supported(comptime g: QuantGemm) bool {
+        return switch (g.weight) {
+            .q4_k => switch (g.rhs) {
+                .rows => (g.lhs == .q8_k) or (g.lhs == .q8_kx4 and g.order == .col_outer),
+                .x4 => g.lhs == .q8_k and g.order == .row_outer,
+                .x8 => (g.lhs == .q8_k or g.lhs == .q8_kx4) and g.order == .row_outer,
+                .x2mmla => (g.lhs == .q8_k or g.lhs == .q8_kx2mmla) and g.order == .row_outer,
+            },
+            .q5_k, .q6_k => switch (g.rhs) {
+                .rows => (g.lhs == .q8_k) or (g.lhs == .q8_kx4 and g.order == .col_outer),
+                .x4 => g.weight == .q6_k and g.lhs == .q8_k and g.order == .row_outer,
+                .x8 => g.weight == .q5_k and (g.lhs == .q8_k or g.lhs == .q8_kx4) and g.order == .row_outer,
+                .x2mmla => false,
+            },
+            .q8_0 => switch (g.rhs) {
+                .rows => g.lhs == .q8_0 and g.order == .row_outer,
+                // The `.col_outer` q8_0x4 form is the padded kernel: full
+                // row range, masked writes for r1 % 4 != 0.
+                .x4 => (g.lhs == .q8_0 and g.order == .row_outer) or g.lhs == .q8_0x4,
+                else => false,
+            },
+            .tq2_0 => g.rhs == .rows and (g.lhs == .q8_k or g.lhs == .f32) and g.order == .row_outer,
+            .q1_0, .q2_0, .q4_0, .q5_0, .q4_1, .q5_1, .q2_k, .q3_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .mxfp4, .nvfp4 => g.rhs == .rows and g.lhs == rowsLhs(g.weight) and g.order == .row_outer,
+            else => false,
+        };
+    }
+
+    /// `@compileError` naming the combination unless `supported`.
+    pub fn check(comptime g: QuantGemm) void {
+        if (comptime !g.supported()) @compileError(std.fmt.comptimePrint(
+            "QuantGemm: no kernel for weight .{s} with rhs .{s}, lhs .{s}, order .{s}",
+            .{ @tagName(g.weight), @tagName(g.rhs), @tagName(g.lhs), @tagName(g.order) },
+        ));
+    }
+};
+
+/// The LHS slice type of `gemm(g)`.
+pub fn LhsOf(comptime g: QuantGemm) type {
+    return switch (g.lhs) {
+        .f32 => []const f32,
+        .q8_k => []const dtype_mod.BlockQ8_K,
+        .q8_0 => []const dtype_mod.BlockQ8_0,
+        .q8_1 => []const dtype_mod.BlockQ8_1,
+        .q8_kx4 => []const quant_types.BlockQ8_Kx4,
+        .q8_kx2mmla => []const quant_types.BlockQ8_Kx2Mmla,
+        .q8_0x4 => []const quant_types.BlockQ8_0x4,
+    };
+}
+
+/// The RHS container pointer type of `gemm(g)`: the container whose
+/// `pack` matches `g.rhs` for `g.weight`.
+pub fn RhsOf(comptime g: QuantGemm) type {
+    return switch (g.rhs) {
+        .rows => switch (g.weight) {
+            .q4_0 => *const quant_types.QuantizedMatmulRhsQ4_0,
+            .q8_0 => *const quant_types.QuantizedMatmulRhsQ8_0,
+            .q2_k => *const quant_types.QuantizedMatmulRhsQ2_K,
+            .q3_k => *const quant_types.QuantizedMatmulRhsQ3_K,
+            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_K,
+            .q5_k => *const quant_types.QuantizedMatmulRhsQ5_K,
+            .q6_k => *const quant_types.QuantizedMatmulRhsQ6_K,
+            else => *const quant_types.QuantizedMatmulRhsRowsFor(g.weight),
+        },
+        .x4 => switch (g.weight) {
+            .q8_0 => *const quant_types.QuantizedMatmulRhsQ8_0x4,
+            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx4,
+            .q6_k => *const quant_types.QuantizedMatmulRhsQ6_Kx4,
+            else => @compileError("RhsOf: no x4 pack for weight ." ++ @tagName(g.weight)),
+        },
+        .x8 => switch (g.weight) {
+            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx8,
+            .q5_k => *const quant_types.QuantizedMatmulRhsQ5_Kx8,
+            else => @compileError("RhsOf: no x8 pack for weight ." ++ @tagName(g.weight)),
+        },
+        .x2mmla => switch (g.weight) {
+            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx2Mmla,
+            else => @compileError("RhsOf: no x2mmla pack for weight ." ++ @tagName(g.weight)),
+        },
+    };
+}

@@ -27,6 +27,7 @@ const dtype_mod = @import("../../dtype.zig");
 const isa = @import("../isa.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -1196,7 +1197,7 @@ pub fn dotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
 }
 
 /// Dense f32 LHS x TQ2_0 RHS tiles — the no-activation-quantization forward.
-pub fn matmulTQ2_0F32RhsTile(
+fn matmulTQ2_0F32RhsTile(
     out: []f32,
     lhs: []const f32,
     rhs: *const types.QuantizedMatmulRhsTQ2_0,
@@ -1222,4 +1223,23 @@ pub const matmulTQ2_0F32RhsRange = common.RangeFromTile(matmulTQ2_0F32RhsTile);
 
 test {
     _ = @import("ternary_tests.zig");
+}
+
+/// The TQ2_0/Q2_0 GEMM entry (`ops.QuantGemm`): comptime-selects the tile
+/// body for `.{ g.weight, g.lhs }`. Output row stride is `rhs.n`. The
+/// slice-fed X4 and folded-plane kernels (PTQTP trit planes) take raw
+/// block slices instead of an RHS container and keep their names.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime std.debug.assert(g.weight == .tq2_0 or g.weight == .q2_0);
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.weight) {
+        .tq2_0 => switch (comptime g.lhs) {
+            .q8_k => matmulTQ2_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .f32 => matmulTQ2_0F32RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            else => comptime unreachable,
+        },
+        .q2_0 => matmulQ2_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        else => comptime unreachable,
+    }
 }

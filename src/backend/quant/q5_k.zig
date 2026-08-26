@@ -10,6 +10,7 @@ const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
@@ -90,7 +91,7 @@ pub fn packMatmulRhsQ5_Kx8(
     };
 }
 
-pub fn matmulQ5_Kx8RhsTile(
+fn matmulQ5_Kx8RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
@@ -208,7 +209,7 @@ fn matmulQ5_Kx8RhsTailRows(
 
 pub const matmulQ5_Kx8RhsRange = common.RangeFromTile(matmulQ5_Kx8RhsTile);
 
-pub fn matmulQ5_Kx8Q8_Kx4RhsTile(
+fn matmulQ5_Kx8Q8_Kx4RhsTile(
     out: []f32,
     lhs_blocks: []const types.BlockQ8_Kx4,
     rhs: *const types.QuantizedMatmulRhsQ5_Kx8,
@@ -1118,4 +1119,31 @@ test "ggml_q5_k dot and matmul consume loaded blocks" {
 
 test {
     _ = @import("q5_k_tests.zig");
+}
+
+/// The one Q5_K GEMM entry (`ops.QuantGemm`): comptime-selects the tile
+/// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime std.debug.assert(g.weight == .q5_k);
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.rhs) {
+        .rows => switch (comptime g.order) {
+            .row_outer => matmulQ5_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .col_outer => switch (comptime g.lhs) {
+                .q8_k => matmulQ5_KRhsCompactColOuter(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+                .q8_kx4 => {
+                    std.debug.assert(tile.r0 == 0);
+                    matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, tile.r1, tile.c0, tile.c1);
+                },
+                else => comptime unreachable,
+            },
+        },
+        .x8 => switch (comptime g.lhs) {
+            .q8_k => matmulQ5_Kx8RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .q8_kx4 => matmulQ5_Kx8Q8_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            else => comptime unreachable,
+        },
+        else => comptime unreachable,
+    }
 }

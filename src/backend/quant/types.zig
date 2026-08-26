@@ -35,6 +35,14 @@ pub const QuantizedFormatError = error{
     InvalidQuantizedLength,
 };
 
+/// Column-interleave layout of a quantized matmul RHS container: `.rows`
+/// is the compact block-per-output-column layout (GGUF-native);
+/// `.x4`/`.x8` interleave 4/8 output columns for the sdot lanes;
+/// `.x2mmla` pairs columns for the aarch64 smmla path. Every container
+/// below states its layout with `pub const pack`; `backend/ops.zig`
+/// re-exports the enum beside `QuantGemm`.
+pub const RhsPack = enum { rows, x4, x8, x2mmla };
+
 pub fn checkedProduct(a: usize, b: usize) QuantizedFormatError!usize {
     return std.math.mul(usize, a, b) catch QuantizedFormatError.InvalidQuantizedLength;
 }
@@ -162,6 +170,7 @@ pub fn QuantizedMatmulRhsRowsFor(comptime block_dtype: DType) type {
 
         const Self = @This();
         pub const dtype: DType = block_dtype;
+        pub const pack: RhsPack = .rows;
 
         pub fn deinit(self: *Self) void {
             self.rows.deinit();
@@ -244,6 +253,7 @@ pub const QuantizedMatmulRhsQ8_0 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q8_0;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         self.rows.deinit();
@@ -264,6 +274,7 @@ pub const QuantizedMatmulRhsQ8_0x4 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q8_0;
+    pub const pack: RhsPack = .x4;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);
@@ -282,6 +293,7 @@ pub const QuantizedMatmulRhsQ4_0 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q4_0;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         self.rows.deinit();
@@ -304,6 +316,7 @@ pub const QuantizedMatmulRhsQ2_K = struct {
 
     const Self = @This();
     pub const dtype: DType = .q2_k;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         if (self.allocator) |allocator| allocator.free(self.blocks);
@@ -326,6 +339,7 @@ pub const QuantizedMatmulRhsQ3_K = struct {
 
     const Self = @This();
     pub const dtype: DType = .q3_k;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         if (self.allocator) |allocator| allocator.free(self.blocks);
@@ -348,6 +362,7 @@ pub const QuantizedMatmulRhsQ4_K = struct {
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         if (self.allocator) |allocator| allocator.free(self.blocks);
@@ -368,6 +383,7 @@ pub const QuantizedMatmulRhsQ4_Kx4 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
+    pub const pack: RhsPack = .x4;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);
@@ -388,6 +404,7 @@ pub const QuantizedMatmulRhsQ4_Kx8 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
+    pub const pack: RhsPack = .x8;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);
@@ -408,6 +425,7 @@ pub const QuantizedMatmulRhsQ4_Kx2Mmla = struct {
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
+    pub const pack: RhsPack = .x2mmla;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);
@@ -430,6 +448,7 @@ pub const QuantizedMatmulRhsQ5_K = struct {
 
     const Self = @This();
     pub const dtype: DType = .q5_k;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         if (self.allocator) |allocator| allocator.free(self.blocks);
@@ -450,6 +469,7 @@ pub const QuantizedMatmulRhsQ5_Kx8 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q5_k;
+    pub const pack: RhsPack = .x8;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);
@@ -472,6 +492,7 @@ pub const QuantizedMatmulRhsQ6_K = struct {
 
     const Self = @This();
     pub const dtype: DType = .q6_k;
+    pub const pack: RhsPack = .rows;
 
     pub fn deinit(self: *Self) void {
         if (self.allocator) |allocator| allocator.free(self.blocks);
@@ -492,6 +513,7 @@ pub const QuantizedMatmulRhsQ6_Kx4 = struct {
 
     const Self = @This();
     pub const dtype: DType = .q6_k;
+    pub const pack: RhsPack = .x4;
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.blocks);

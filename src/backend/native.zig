@@ -224,13 +224,12 @@ pub const kernels = struct {
     pub const quantizeMatmulRhsQ4_0 = native.quantizeMatmulRhsQ4_0;
     pub const quantizeMatmulRhsQ8_0 = native.quantizeMatmulRhsQ8_0;
     pub const matmul2DQuantizedRhs = native.matmul2DQuantizedRhs;
-    pub const matmulQuantizedRhs = native.matmulQuantizedRhs;
     pub const matmulPacked = native.matmulPacked;
     pub const matmul2DPackedQ8_0x4LhsRhs = native.matmul2DPackedQ8_0x4LhsRhs;
+    pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
     pub const matmulPackedSlice = native.matmulPackedSlice;
     pub const unaryRowSlice = native.unaryRowSlice;
     pub const mulRowSlice = native.mulRowSlice;
-    pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32
@@ -416,27 +415,9 @@ pub fn matmul2DQuantizedRhs(
 ) !void {
     return switch (rhs) {
         .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8(pc, allocator, out, a, qrhs, m, n, k),
-        .q1_0 => |qrhs| matmul2DQuantizedRhsQ1_0(pc, allocator, out, a, qrhs, m, n, k),
+        // Q2_0 keeps its BLAS dequant-crossover arm.
         .q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0(pc, allocator, out, a, qrhs, m, n, k),
-        .q4_0 => |qrhs| matmul2DQuantizedRhsQ4_0(pc, allocator, out, a, qrhs, m, n, k),
-        .q4_1 => |qrhs| matmul2DQuantizedRhsQ4_1(pc, allocator, out, a, qrhs, m, n, k),
-        .q5_0 => |qrhs| matmul2DQuantizedRhsQ5_0(pc, allocator, out, a, qrhs, m, n, k),
-        .q5_1 => |qrhs| matmul2DQuantizedRhsQ5_1(pc, allocator, out, a, qrhs, m, n, k),
-        .q8_0 => |qrhs| matmul2DQuantizedRhsQ8_0(pc, allocator, out, a, qrhs, m, n, k),
-        inline .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => |qrhs, tag| matmulQuantizedRhs(pc, @field(DType, @tagName(tag)), allocator, out, a, qrhs, m, n, k),
-        .iq1_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_s, allocator, out, a, qrhs, m, n, k),
-        .iq1_m => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq1_m, allocator, out, a, qrhs, m, n, k),
-        .iq2_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xxs, allocator, out, a, qrhs, m, n, k),
-        .iq2_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_xs, allocator, out, a, qrhs, m, n, k),
-        .iq2_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq2_s, allocator, out, a, qrhs, m, n, k),
-        .iq3_xxs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_xxs, allocator, out, a, qrhs, m, n, k),
-        .iq3_s => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq3_s, allocator, out, a, qrhs, m, n, k),
-        .iq4_nl => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .iq4_nl, allocator, out, a, qrhs, m, n, k),
-        .iq4_xs => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .iq4_xs, allocator, out, a, qrhs, m, n, k),
-        .tq1_0 => |qrhs| matmul2DQuantizedRhsTableQ8_K(pc, .tq1_0, allocator, out, a, qrhs, m, n, k),
-        .tq2_0 => |qrhs| matmul2DQuantizedRhsTQ2_0(pc, allocator, out, a, qrhs, m, n, k),
-        .mxfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .mxfp4, allocator, out, a, qrhs, m, n, k),
-        .nvfp4 => |qrhs| matmul2DQuantizedRhsTableQ8_0(pc, .nvfp4, allocator, out, a, qrhs, m, n, k),
+        inline else => |qrhs, tag| matmulQuantRows(pc, comptime ops.QuantGemm.rowsFor(@field(DType, @tagName(tag))), allocator, out, a, qrhs, m, n, k),
     };
 }
 
@@ -466,95 +447,70 @@ pub fn matmul2DQuantizedRhsI8(
     vector.matmul_quant.matmul2DI8BlockwiseInto(pc, cd, qa, a_scales, rhs.qw.dataConst(), rhs.scales.dataConst(), m, n, k, rhs.group_size, rhs.num_groups);
 }
 
-fn matmul2DQuantizedRhsQ8_0Rows(
+/// The Q8_0x4 GEMM request family (`ops.QuantGemm`): the exact packed
+/// form, the padded (`.col_outer`, masked-writes) form, and the per-row
+/// Q8_0-LHS fallback.
+const q8_0x4_packed_gemm: ops.QuantGemm = .{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4 };
+const q8_0x4_padded_gemm: ops.QuantGemm = .{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4, .order = .col_outer };
+const q8_0x4_rows_gemm: ops.QuantGemm = .{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0 };
+
+/// The weights with a BLAS dequant-crossover for batched m (the
+/// table-decoded families; policy gate `table_blas_min_m`).
+fn tableBlasFormat(comptime dt: DType) bool {
+    return switch (dt) {
+        .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .mxfp4, .nvfp4 => true,
+        else => false,
+    };
+}
+
+/// f32 [m, k] x a quantized RHS container -> f32 [m, n], over the request
+/// `g`: the table families' BLAS crossover first, then one LHS row
+/// quantization into `g.lhs`'s block form (Q8_0 rows on the stack below
+/// `q8_0_lhs_stack_blocks`), then the one parallel vector entry
+/// (`vector.matmul_quant.gemm2D`).
+fn matmulQuantRows(
     pc: ParallelConfig,
-    comptime kernel: anytype,
+    comptime g: ops.QuantGemm,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: anytype,
+    rhs: ops.RhsOf(g),
     m: usize,
     n: usize,
     k: usize,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
+    if (comptime build_options.use_blas and tableBlasFormat(g.weight)) {
+        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
+            return matmul2DQuantizedRhsTableBlas(pc, g.weight, allocator, out, a, rhs, m, n, k);
+        }
+    }
     const cd = contiguousData(out, m * n);
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-    const block_count = m * blocks_per_row;
-    var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
-    const qlhs_blocks = if (block_count <= stack_blocks.len)
-        stack_blocks[0..block_count]
-    else
-        try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
-    defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
-
-    quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
-    kernel(pc, cd, qlhs_blocks, rhs, m, n, k);
-}
-
-fn matmul2DQuantizedRhsQ8_1Rows(
-    pc: ParallelConfig,
-    comptime kernel: anytype,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: anytype,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    const cd = contiguousData(out, m * n);
-    var qlhs = try quantized_matmul.cold.quantizeRowsQ8_1(allocator, a);
-    defer qlhs.deinit();
-    kernel(pc, cd, qlhs.blocks, rhs, m, n, k);
-}
-
-fn matmul2DQuantizedRhsQ8_KRows(
-    pc: ParallelConfig,
-    comptime kernel: anytype,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: anytype,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    const cd = contiguousData(out, m * n);
-    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
-    defer allocator.free(qlhs);
-    kernel(pc, cd, qlhs, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_0(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ4_0RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ1_0(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ1_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ1_0RhsInto, allocator, out, a, rhs, m, n, k);
+    switch (comptime g.lhs) {
+        .q8_0 => {
+            const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+            const block_count = m * blocks_per_row;
+            var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
+            const qlhs_blocks = if (block_count <= stack_blocks.len)
+                stack_blocks[0..block_count]
+            else
+                try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
+            defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+            quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
+            vector.matmul_quant.gemm2D(pc, g, cd, qlhs_blocks, rhs, m, n, k);
+        },
+        .q8_1 => {
+            var qlhs = try quantized_matmul.cold.quantizeRowsQ8_1(allocator, a);
+            defer qlhs.deinit();
+            vector.matmul_quant.gemm2D(pc, g, cd, qlhs.blocks, rhs, m, n, k);
+        },
+        .q8_k => {
+            const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
+            defer allocator.free(qlhs);
+            vector.matmul_quant.gemm2D(pc, g, cd, qlhs, rhs, m, n, k);
+        },
+        else => @compileError("matmulQuantRows: LHS form ." ++ @tagName(g.lhs) ++ " is quantized by the caller, not this entry"),
+    }
 }
 
 /// Q2_0 BLAS crossover and panel budget: src/parallel.zig's policy table.
@@ -646,59 +602,7 @@ pub fn matmul2DQuantizedRhsQ2_0(
             return matmul2DQuantizedRhsQ2_0Blas(pc, allocator, out, a, rhs, m, n, k);
         }
     }
-    return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ2_0RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ4_1(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ4_1,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_1Rows(pc, vector.matmul_quant.matmul2DQ4_1RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_0(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ5_0RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ5_1(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ5_1,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_1Rows(pc, vector.matmul_quant.matmul2DQ5_1RhsInto, allocator, out, a, rhs, m, n, k);
-}
-
-pub fn matmul2DQuantizedRhsQ8_0(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ8_0RhsInto, allocator, out, a, rhs, m, n, k);
+    return matmulQuantRows(pc, comptime ops.QuantGemm.rowsFor(.q2_0), allocator, out, a, rhs, m, n, k);
 }
 
 fn matmulPackedQ8_0x4(
@@ -727,13 +631,13 @@ fn matmulPackedQ8_0x4(
             defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
             quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4PaddedGroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, row_groups);
-            vector.matmul_quant.matmul2DQ8_0x4PackedPaddedRhsInto(pc, cd, qlhs_blocks, rhs, m, n, k);
+            vector.matmul_quant.gemm2D(pc, q8_0x4_padded_gemm, cd, qlhs_blocks, rhs, m, n, k);
             return;
         }
         if (m >= parallel.vector_column_min_m) {
             return matmul2DQuantizedRhsQ8_0x4BulkTail(pc, allocator, out, a, rhs, m, n, k);
         }
-        return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ8_0x4RhsInto, allocator, out, a, rhs, m, n, k);
+        return matmulQuantRows(pc, q8_0x4_rows_gemm, allocator, out, a, rhs, m, n, k);
     }
 
     const cd = contiguousData(out, m * n);
@@ -747,7 +651,7 @@ fn matmulPackedQ8_0x4(
     defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
     quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m / 4);
-    vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd, qlhs_blocks, rhs, m, n, k);
+    vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd, qlhs_blocks, rhs, m, n, k);
 }
 
 // m >= vector_column_min_m with m % 4 != 0: the multiple-of-4 bulk runs
@@ -781,7 +685,7 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
         defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
         quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, ad[0 .. bulk_rows * k], bulk_rows, k, blocks_per_row, bulk_rows / 4);
-        vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd[0 .. bulk_rows * n], qlhs_blocks, rhs, bulk_rows, n, k);
+        vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd[0 .. bulk_rows * n], qlhs_blocks, rhs, bulk_rows, n, k);
     }
 
     const tail_rows = m - bulk_rows;
@@ -797,7 +701,7 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
     // The <=3-row remainder runs after the bulk kernel completes; the caller's
     // `pc` passes through so it can column-split like a decode-shaped matmul
     // (a parallel split never changes per-element math).
-    vector.matmul_quant.matmul2DQ8_0x4RhsInto(pc, cd[bulk_rows * n .. m * n], tail_blocks, rhs, tail_rows, n, k);
+    vector.matmul_quant.gemm2D(pc, q8_0x4_rows_gemm, cd[bulk_rows * n .. m * n], tail_blocks, rhs, tail_rows, n, k);
 }
 
 pub fn matmul2DPackedQ8_0x4LhsRhs(
@@ -814,7 +718,24 @@ pub fn matmul2DPackedQ8_0x4LhsRhs(
     const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
     if (lhs_blocks.len != try checkedQuantizedProduct(m / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
     const cd = contiguousData(out, try checkedTensorProduct(m, n));
-    vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd, lhs_blocks, rhs, m, n, k);
+    vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd, lhs_blocks, rhs, m, n, k);
+}
+
+/// The padded twin: `ceil(m / 4)` LHS groups, masked writes, any `m`.
+pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
+    pc: ParallelConfig,
+    out: *Tensor,
+    lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
+    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
+    m: usize,
+    n: usize,
+    k: usize,
+) !void {
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
+    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    vector.matmul_quant.gemm2D(pc, q8_0x4_padded_gemm, cd, lhs_blocks, rhs, m, n, k);
 }
 
 /// Pre-quantized-LHS K-quant GEMM entry for the fused split-activation
@@ -829,22 +750,7 @@ pub fn matmulPackedSlice(pc: ParallelConfig, out: []f32, lhs_blocks: anytype, rh
     const x4_lhs = Lhs == quantized_matmul.BlockQ8_Kx4;
     comptime if (!x4_lhs and Lhs != dtype_mod.BlockQ8_K)
         @compileError("matmulPackedSlice: unsupported LHS block type " ++ @typeName(Lhs));
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8) {
-        if (comptime x4_lhs)
-            vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k)
-        else
-            vector.matmul_quant.matmul2DQ4_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8) {
-        if (comptime x4_lhs)
-            vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k)
-        else
-            vector.matmul_quant.matmul2DQ5_Kx8RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-    } else if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4) {
-        comptime if (x4_lhs) @compileError("matmulPackedSlice: the Q6_Kx4 pack has no lane-packed LHS kernel");
-        vector.matmul_quant.matmul2DQ6_Kx4RhsInto(pc, out, lhs_blocks, rhs, m, n, k);
-    } else {
-        comptime unreachable; // no kernel for this packed RHS container
-    }
+    vector.matmul_quant.gemm2D(pc, comptime .{ .weight = Rhs.dtype, .rhs = Rhs.pack, .lhs = if (x4_lhs) .q8_kx4 else .q8_k }, out, lhs_blocks, rhs, m, n, k);
 }
 
 // Single-row slice kernels for fused per-row activation math (exact same
@@ -857,25 +763,9 @@ pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
     vector.primitives.vecMul(z, x, y);
 }
 
-pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
-    pc: ParallelConfig,
-    out: *Tensor,
-    lhs_blocks: []const quantized_matmul.BlockQ8_0x4,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ8_0x4,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-    if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
-    vector.matmul_quant.matmul2DQ8_0x4PackedPaddedRhsInto(pc, cd, lhs_blocks, rhs, m, n, k);
-}
-
-/// f32 [m, k] x plain (non-interleaved) K-quant RHS [n, k] -> f32 [m, n]:
-/// one Q8_K LHS quantization, then the per-dtype row kernel. One entry
-/// replaces the per-format forwards; `dt` names the RHS block format.
+/// f32 [m, k] x a plain (compact `.rows`) quantized RHS [n, k] -> f32
+/// [m, n] for a comptime weight dtype: the `QuantGemm.rowsFor(dt)`
+/// selection (one LHS quantization, then the format's row kernel).
 pub fn matmulQuantizedRhs(
     pc: ParallelConfig,
     comptime dt: DType,
@@ -887,14 +777,7 @@ pub fn matmulQuantizedRhs(
     n: usize,
     k: usize,
 ) !void {
-    return matmul2DQuantizedRhsQ8_KRows(pc, switch (dt) {
-        .q2_k => vector.matmul_quant.matmul2DQ2_KRhsInto,
-        .q3_k => vector.matmul_quant.matmul2DQ3_KRhsInto,
-        .q4_k => vector.matmul_quant.matmul2DQ4_KRhsInto,
-        .q5_k => vector.matmul_quant.matmul2DQ5_KRhsInto,
-        .q6_k => vector.matmul_quant.matmul2DQ6_KRhsInto,
-        else => @compileError("matmulQuantizedRhs serves the plain K-quant containers (q2_k..q6_k)"),
-    }, allocator, out, a, rhs, m, n, k);
+    return matmulQuantRows(pc, comptime ops.QuantGemm.rowsFor(dt), allocator, out, a, rhs, m, n, k);
 }
 
 /// f32 activations x a pre-packed RHS -> [m, n]; the container type selects
@@ -915,45 +798,15 @@ pub fn matmulPacked(
     const Rhs = @TypeOf(rhs.*);
     if (comptime Rhs == packed_matmul.PackedDenseRhs)
         return matmulPackedDense(pc, out, a, rhs, m, n, k);
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ8_0x4)
+    if (comptime Rhs.pack == .x4 and Rhs.dtype == .q8_0)
         return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ6_Kx4)
-        return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ6_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx4)
-        return matmul2DQuantizedRhsQ8_KRows(pc, vector.matmul_quant.matmul2DQ4_Kx4RhsInto, allocator, out, a, rhs, m, n, k);
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx8)
-        return matmul2DQuantizedRhsQ8_Kx4Prefix(
-            pc,
-            vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto,
-            vector.matmul_quant.matmul2DQ4_Kx8RhsInto,
-            allocator,
-            out,
-            a,
-            rhs,
-            m,
-            n,
-            k,
-            q4_k_x4_min_rows,
-            true,
-        );
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ5_Kx8)
-        return matmul2DQuantizedRhsQ8_Kx4Prefix(
-            pc,
-            vector.matmul_quant.matmul2DQ5_Kx8Q8_Kx4RhsInto,
-            vector.matmul_quant.matmul2DQ5_Kx8RhsInto,
-            allocator,
-            out,
-            a,
-            rhs,
-            m,
-            n,
-            k,
-            q5_k_x4_prefix_min_rows,
-            false,
-        );
-    if (comptime Rhs == quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla)
+    if (comptime Rhs.pack == .x4 and (Rhs.dtype == .q4_k or Rhs.dtype == .q6_k))
+        return matmulQuantRows(pc, comptime .{ .weight = Rhs.dtype, .rhs = .x4, .lhs = .q8_k }, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs.pack == .x8)
+        return matmul2DQuantizedRhsQ8_Kx4Prefix(pc, comptime .{ .weight = Rhs.dtype, .rhs = .x8, .lhs = .q8_kx4 }, allocator, out, a, rhs, m, n, k);
+    if (comptime Rhs.pack == .x2mmla and Rhs.dtype == .q4_k)
         return matmulPackedQ4_Kx2Mmla(pc, allocator, out, a, rhs, m, n, k);
-    comptime unreachable; // no kernel for this packed RHS container
+    @compileError("matmulPacked: no kernel for packed RHS container " ++ @typeName(Rhs));
 }
 
 fn matmulPackedQ4_Kx2Mmla(
@@ -978,7 +831,7 @@ fn matmulPackedQ4_Kx2Mmla(
         defer allocator.free(qlhs_x2);
 
         quantizeLhsUnits(pc, quantized_matmul.BlockQ8_Kx2Mmla, quantized_matmul.q8k.quantizeRowsQ8_Kx2MmlaGroupsInto, qlhs_x2, ad[0 .. prefix_rows * k], prefix_rows, k, blocks_per_row, prefix_rows / 2);
-        vector.matmul_quant.matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsInto(pc, cd[0 .. prefix_rows * n], qlhs_x2, rhs, prefix_rows, n, k);
+        vector.matmul_quant.gemm2D(pc, comptime .{ .weight = .q4_k, .rhs = .x2mmla, .lhs = .q8_kx2mmla }, cd[0 .. prefix_rows * n], qlhs_x2, rhs, prefix_rows, n, k);
     }
 
     if (prefix_rows == m) return;
@@ -986,23 +839,28 @@ fn matmulPackedQ4_Kx2Mmla(
     const tail_pc = if (prefix_rows == 0) pc else ParallelConfig{};
     const tail_blocks = try quantizedLhsQ8_K(tail_pc, allocator, ad[prefix_rows * k .. m * k], m - prefix_rows, k);
     defer allocator.free(tail_blocks);
-    vector.matmul_quant.matmul2DQ4_Kx2MmlaRhsInto(tail_pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
+    vector.matmul_quant.gemm2D(tail_pc, comptime .{ .weight = .q4_k, .rhs = .x2mmla, .lhs = .q8_k }, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
 }
 
+/// The x8-pack dispatch: the `.q8_kx4` prefix (lane-packed LHS groups)
+/// plus the `.q8_k` per-row remainder, over the request `g` (the
+/// `.q8_kx4` form). Policy per weight: Q4_K pads every row through the
+/// padded group quantizer above `q4_k_x4_min_rows`; Q5_K keeps the
+/// unpadded bulk + per-row tail split above `q5_k_x4_prefix_min_rows`.
 fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     pc: ParallelConfig,
-    comptime x4: anytype,
-    comptime rows: anytype,
+    comptime g: ops.QuantGemm,
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: anytype,
+    rhs: ops.RhsOf(g),
     m: usize,
     n: usize,
     k: usize,
-    prefix_min_rows: usize,
-    comptime pad_x4_rows: bool,
 ) !void {
+    const pad_x4_rows = comptime g.weight == .q4_k;
+    const prefix_min_rows = if (pad_x4_rows) q4_k_x4_min_rows else q5_k_x4_prefix_min_rows;
+    const rows_g = comptime ops.QuantGemm{ .weight = g.weight, .rhs = g.rhs, .lhs = .q8_k };
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = contiguousData(out, try checkedTensorProduct(m, n));
@@ -1017,7 +875,7 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     const prefix_rows = if (!use_x4) 0 else if (pad_x4_rows) m else m - m % 4;
 
     if (prefix_rows == 0) {
-        return matmul2DQuantizedRhsQ8_KRows(pc, rows, allocator, out, a, rhs, m, n, k);
+        return matmulQuantRows(pc, rows_g, allocator, out, a, rhs, m, n, k);
     }
 
     const row_groups = if (pad_x4_rows) (prefix_rows + 3) / 4 else prefix_rows / 4;
@@ -1029,7 +887,7 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     // padded form there and a no-op otherwise.
     const ad = try lhsRows(a, m, k);
     quantizeLhsUnits(pc, quantized_matmul.BlockQ8_Kx4, quantized_matmul.q8k.quantizeRowsQ8_Kx4GroupsInto, qlhs_x4, ad[0 .. prefix_rows * k], prefix_rows, k, blocks_per_row, row_groups);
-    x4(pc, cd[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
+    vector.matmul_quant.gemm2D(pc, g, cd[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
 
     if (prefix_rows == m) return;
 
@@ -1038,7 +896,7 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     // The <=3-row remainder runs after the x4 kernel completes; the caller's
     // `pc` passes through so it can column-split like a decode-shaped matmul
     // (a parallel split never changes per-element math).
-    rows(pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
+    vector.matmul_quant.gemm2D(pc, rows_g, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
 }
 
 /// Table-format BLAS crossover: src/parallel.zig's policy table.
@@ -1189,76 +1047,6 @@ pub fn matmulFoldedx4Blas(
         );
     }
     return true;
-}
-
-fn matmul2DQuantizedRhsTableQ8_0(
-    pc: ParallelConfig,
-    comptime rhs_dtype: DType,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    if (comptime build_options.use_blas) {
-        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
-            return matmul2DQuantizedRhsTableBlas(pc, rhs_dtype, allocator, out, a, rhs, m, n, k);
-        }
-    }
-
-    const cd = contiguousData(out, m * n);
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-    const qlhs = try allocator.alloc(dtype_mod.BlockQ8_0, try checkedQuantizedProduct(m, blocks_per_row));
-    defer allocator.free(qlhs);
-    quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs, try lhsRows(a, m, k), m, k, blocks_per_row, m);
-    vector.matmul_quant.matmul2DTableQ8_0RhsInto(pc, rhs_dtype, cd, qlhs, rhs, m, n, k);
-}
-
-fn matmul2DQuantizedRhsTableQ8_K(
-    pc: ParallelConfig,
-    comptime rhs_dtype: DType,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    if (comptime build_options.use_blas) {
-        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
-            return matmul2DQuantizedRhsTableBlas(pc, rhs_dtype, allocator, out, a, rhs, m, n, k);
-        }
-    }
-
-    const cd = contiguousData(out, m * n);
-    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
-    defer allocator.free(qlhs);
-    vector.matmul_quant.matmul2DTableQ8_KRhsInto(pc, rhs_dtype, cd, qlhs, rhs, m, n, k);
-}
-
-fn matmul2DQuantizedRhsTQ2_0(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsTQ2_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    const cd = contiguousData(out, m * n);
-    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
-    defer allocator.free(qlhs);
-    vector.matmul_quant.matmul2DTQ2_0RhsInto(pc, cd, qlhs, rhs, m, n, k);
 }
 
 /// Batched dense f32 GEMM over `kind` (`ops.MatmulKind`), strides in

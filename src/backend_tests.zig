@@ -178,7 +178,7 @@ fn runSplitDispatch(
 // Row-kernel reference over m rows (the exact path the dispatcher's remainder
 // takes for q8_k-lhs formats); caller frees the returned output.
 fn rowsRefQ8_K(
-    comptime rowsKernel: anytype,
+    comptime g: ops.QuantGemm,
     allocator: std.mem.Allocator,
     rhs: anytype,
     lhs_values: []const f32,
@@ -190,7 +190,7 @@ fn rowsRefQ8_K(
     defer allocator.free(qlhs);
     const out = try allocator.alloc(f32, m * split_test_n);
     errdefer allocator.free(out);
-    rowsKernel(.{}, out, qlhs, rhs, m, split_test_n, split_test_k);
+    vector.matmul_quant.gemm2D(.{}, g, out, qlhs, rhs, m, split_test_n, split_test_k);
     return out;
 }
 
@@ -208,7 +208,7 @@ fn rowsRefQ8_0(
     try quant.q8k.quantizeRowsQ8_0Into(qlhs, &lhs);
     const out = try allocator.alloc(f32, m * split_test_n);
     errdefer allocator.free(out);
-    vector.matmul_quant.matmul2DQ8_0x4RhsInto(.{}, out, qlhs, rhs, m, split_test_n, split_test_k);
+    vector.matmul_quant.gemm2D(.{}, .{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0 }, out, qlhs, rhs, m, split_test_n, split_test_k);
     return out;
 }
 
@@ -228,7 +228,7 @@ fn paddedTailRefQ4_Kx8(
     try quant.q8k.quantizeRowsQ8_Kx4PaddedInto(qlhs, &lhs);
     const out = try allocator.alloc(f32, tail_rows * split_test_n);
     errdefer allocator.free(out);
-    vector.matmul_quant.matmul2DQ4_Kx8Q8_Kx4RhsInto(.{}, out, qlhs, rhs, tail_rows, split_test_n, split_test_k);
+    vector.matmul_quant.gemm2D(.{}, .{ .weight = .q4_k, .rhs = .x8, .lhs = .q8_kx4 }, out, qlhs, rhs, tail_rows, split_test_n, split_test_k);
     return out;
 }
 
@@ -354,7 +354,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         const full = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, m, .{});
         defer allocator.free(full);
 
-        const all_rows = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ5_Kx8RhsInto, allocator, &rhs, lhs_values, m);
+        const all_rows = try rowsRefQ8_K(.{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_k }, allocator, &rhs, lhs_values, m);
         defer allocator.free(all_rows);
 
         if (m < 128) {
@@ -368,7 +368,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
         defer allocator.free(prefix);
         try expectBitEqualF32(prefix, full[0 .. bulk_rows * split_test_n]);
 
-        const tail_ref = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ5_Kx8RhsInto, allocator, &rhs, lhs_values[bulk_rows * split_test_k ..], m - bulk_rows);
+        const tail_ref = try rowsRefQ8_K(.{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_k }, allocator, &rhs, lhs_values[bulk_rows * split_test_k ..], m - bulk_rows);
         defer allocator.free(tail_ref);
         try expectBitEqualF32(tail_ref, full[bulk_rows * split_test_n .. m * split_test_n]);
 
@@ -409,7 +409,7 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
         defer allocator.free(tail_ref);
         try expectBitEqualF32(tail_ref, full[bulk_rows * split_test_n .. m * split_test_n]);
 
-        const all_rows = try rowsRefQ8_K(vector.matmul_quant.matmul2DQ4_Kx8RhsInto, allocator, &rhs, lhs_values, m);
+        const all_rows = try rowsRefQ8_K(.{ .weight = .q4_k, .rhs = .x8, .lhs = .q8_k }, allocator, &rhs, lhs_values, m);
         defer allocator.free(all_rows);
         try expectSplitApprox(all_rows, full);
     }

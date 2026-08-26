@@ -11,6 +11,7 @@ const tables = @import("../quant_tables.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
@@ -921,7 +922,7 @@ fn writeQh(qh: []u8, value: u32) void {
     qh[3] = @intCast((value >> 24) & 0xff);
 }
 
-pub fn matmulQ4_0RhsTile(
+fn matmulQ4_0RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ4_0,
@@ -964,7 +965,7 @@ pub fn matmulQ4_0RhsTile(
 
 pub const matmulQ4_0RhsRange = common.RangeFromTile(matmulQ4_0RhsTile);
 
-pub fn matmulQ1_0RhsTile(
+fn matmulQ1_0RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ1_0,
@@ -995,7 +996,7 @@ pub fn matmulQ1_0RhsTile(
 
 pub const matmulQ1_0RhsRange = common.RangeFromTile(matmulQ1_0RhsTile);
 
-pub fn matmulQ4_1RhsTile(
+fn matmulQ4_1RhsTile(
     out: []f32,
     lhs_blocks: []const dtype_mod.BlockQ8_1,
     rhs: *const types.QuantizedMatmulRhsQ4_1,
@@ -1024,7 +1025,7 @@ pub fn matmulQ4_1RhsTile(
 
 pub const matmulQ4_1RhsRange = common.RangeFromTile(matmulQ4_1RhsTile);
 
-pub fn matmulQ5_0RhsTile(
+fn matmulQ5_0RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ5_0,
@@ -1053,7 +1054,7 @@ pub fn matmulQ5_0RhsTile(
 
 pub const matmulQ5_0RhsRange = common.RangeFromTile(matmulQ5_0RhsTile);
 
-pub fn matmulQ5_1RhsTile(
+fn matmulQ5_1RhsTile(
     out: []f32,
     lhs_blocks: []const dtype_mod.BlockQ8_1,
     rhs: *const types.QuantizedMatmulRhsQ5_1,
@@ -1082,7 +1083,7 @@ pub fn matmulQ5_1RhsTile(
 
 pub const matmulQ5_1RhsRange = common.RangeFromTile(matmulQ5_1RhsTile);
 
-pub fn matmulQ2_KRhsTile(
+fn matmulQ2_KRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ2_K,
@@ -1125,7 +1126,7 @@ pub fn matmulQ2_KRhsTile(
 
 pub const matmulQ2_KRhsRange = common.RangeFromTile(matmulQ2_KRhsTile);
 
-pub fn matmulQ3_KRhsTile(
+fn matmulQ3_KRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ3_K,
@@ -1182,7 +1183,7 @@ pub fn matmulTableQ8_0RhsRange(
     matmulTableQ8_0RhsTile(rhs_dtype, out, lhs_blocks, rhs, n, row_start, row_end, 0, n);
 }
 
-pub fn matmulTableQ8_0RhsTile(
+fn matmulTableQ8_0RhsTile(
     comptime rhs_dtype: DType,
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
@@ -1858,7 +1859,7 @@ pub fn dotQ2_0RowQ8_0(wblocks: []const dtype_mod.BlockQ2_0, arow: []const BlockQ
 
 /// Reference Q2_0 matmul tile (scalar-backend path; the hot kernel's
 /// bitwise oracle). RHS convention: rhs row c is output column c.
-pub fn matmulQ2_0RhsRefTile(
+fn matmulQ2_0RhsRefTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_0,
     rhs: *const types.QuantizedMatmulRhsQ2_0,
@@ -2779,4 +2780,27 @@ test "iq4_xs decoded tile matmul matches the per-row generic path bitwise" {
         matmulTableQ8_KRhsTile(.iq4_xs, &out_ref, &ablocks, &rhs, cols, row, row + 1, 0, cols);
     }
     try std.testing.expectEqualSlices(f32, &out_ref, &out_tiled);
+}
+
+/// The cold-family GEMM entry (`ops.QuantGemm`): the direct 32-block and
+/// K-quant reference tiles, and the table-decoded families over Q8_0 or
+/// Q8_K activations (the tile binds `g.weight` as the table dtype).
+/// Output row stride is `rhs.n`. The Q2_0 scalar reference twin
+/// (`matmulQ2_0RhsRefRange`) is the scalar provider's bespoke arm, outside
+/// the seam.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.weight) {
+        .q1_0 => matmulQ1_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q4_0 => matmulQ4_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q4_1 => matmulQ4_1RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q5_0 => matmulQ5_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q5_1 => matmulQ5_1RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q2_k => matmulQ2_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .q3_k => matmulQ3_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .iq4_nl, .mxfp4, .nvfp4 => matmulTableQ8_0RhsTile(g.weight, out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .tq1_0 => matmulTableQ8_KRhsTile(g.weight, out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        else => comptime unreachable,
+    }
 }

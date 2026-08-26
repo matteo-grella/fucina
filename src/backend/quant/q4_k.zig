@@ -11,6 +11,7 @@ const isa = @import("../isa.zig");
 const q8k = @import("q8k.zig");
 const types = @import("types.zig");
 const common = @import("common.zig");
+const ops = @import("../ops.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
@@ -374,7 +375,7 @@ pub fn matmulQ4_KRhsTile(
 
 pub const matmulQ4_KRhsRange = common.RangeFromTile(matmulQ4_KRhsTile);
 
-pub fn matmulQ4_Kx4RhsTile(
+fn matmulQ4_Kx4RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx4,
@@ -431,7 +432,7 @@ pub fn matmulQ4_Kx4RhsTile(
 
 pub const matmulQ4_Kx4RhsRange = common.RangeFromTile(matmulQ4_Kx4RhsTile);
 
-pub fn matmulQ4_Kx8RhsTile(
+fn matmulQ4_Kx8RhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx8,
@@ -549,7 +550,7 @@ fn matmulQ4_Kx8RhsTailRows(
 
 pub const matmulQ4_Kx8RhsRange = common.RangeFromTile(matmulQ4_Kx8RhsTile);
 
-pub fn matmulQ4_Kx8Q8_Kx4RhsTile(
+fn matmulQ4_Kx8Q8_Kx4RhsTile(
     out: []f32,
     lhs_blocks: []const types.BlockQ8_Kx4,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx8,
@@ -614,7 +615,7 @@ pub fn matmulQ4_Kx8Q8_Kx4RhsTile(
 
 pub const matmulQ4_Kx8Q8_Kx4RhsRange = common.RangeFromTile(matmulQ4_Kx8Q8_Kx4RhsTile);
 
-pub fn matmulQ4_Kx2MmlaRhsTile(
+fn matmulQ4_Kx2MmlaRhsTile(
     out: []f32,
     lhs_blocks: []const BlockQ8_K,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx2Mmla,
@@ -647,7 +648,7 @@ pub fn matmulQ4_Kx2MmlaRhsTile(
 
 pub const matmulQ4_Kx2MmlaRhsRange = common.RangeFromTile(matmulQ4_Kx2MmlaRhsTile);
 
-pub fn matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile(
+fn matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile(
     out: []f32,
     lhs_blocks: []const types.BlockQ8_Kx2Mmla,
     rhs: *const types.QuantizedMatmulRhsQ4_Kx2Mmla,
@@ -1930,4 +1931,38 @@ test "ggml_q4_k randomized blocks: dot kernel matches scalar reference bit-exact
 
 test {
     _ = @import("q4_k_tests.zig");
+}
+
+/// The one Q4_K GEMM entry (`ops.QuantGemm`): comptime-selects the tile
+/// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`;
+/// `tile` bounds the rows and columns written. Unsupported combinations
+/// are compile errors naming the combination.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime std.debug.assert(g.weight == .q4_k);
+    comptime g.check();
+    const n = rhs.n;
+    switch (comptime g.rhs) {
+        .rows => switch (comptime g.order) {
+            .row_outer => matmulQ4_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .col_outer => switch (comptime g.lhs) {
+                .q8_k => matmulQ4_KRhsCompactColOuter(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+                .q8_kx4 => {
+                    std.debug.assert(tile.r0 == 0);
+                    matmulQ4_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, tile.r1, tile.c0, tile.c1);
+                },
+                else => comptime unreachable,
+            },
+        },
+        .x4 => matmulQ4_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+        .x8 => switch (comptime g.lhs) {
+            .q8_k => matmulQ4_Kx8RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .q8_kx4 => matmulQ4_Kx8Q8_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            else => comptime unreachable,
+        },
+        .x2mmla => switch (comptime g.lhs) {
+            .q8_k => matmulQ4_Kx2MmlaRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            .q8_kx2mmla => matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
+            else => comptime unreachable,
+        },
+    }
 }

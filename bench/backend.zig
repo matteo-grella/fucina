@@ -1029,28 +1029,12 @@ fn benchQuantizedGGMLMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            switch (tensor_dtype) {
-                .q1_0 => try scalar.matmul2DQuantizedRhsQ1_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_0 => try scalar.matmul2DQuantizedRhsQ4_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_1 => try scalar.matmul2DQuantizedRhsQ4_1(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_0 => try scalar.matmul2DQuantizedRhsQ5_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_1 => try scalar.matmul2DQuantizedRhsQ5_1(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                .q8_0 => try scalar.matmul2DQuantizedRhsQ8_0(.{}, alloc, o, lhs, rhs, rows, cols, inner),
-                else => unreachable,
-            }
+            try scalar.matmulQuantizedRhs(.{}, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize, config: native.ParallelConfig) !void {
-            switch (tensor_dtype) {
-                .q1_0 => try native.matmul2DQuantizedRhsQ1_0(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_0 => try native.matmul2DQuantizedRhsQ4_0(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q4_1 => try native.matmul2DQuantizedRhsQ4_1(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_0 => try native.matmul2DQuantizedRhsQ5_0(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q5_1 => try native.matmul2DQuantizedRhsQ5_1(config, alloc, o, lhs, rhs, rows, cols, inner),
-                .q8_0 => try native.matmul2DQuantizedRhsQ8_0(config, alloc, o, lhs, rhs, rows, cols, inner),
-                else => unreachable,
-            }
+            try native.matmulQuantizedRhs(config, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
 
