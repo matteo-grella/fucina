@@ -31,6 +31,7 @@ const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
+const Fmt = gpu_provider.QuantFormat;
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 const tuning = @import("../tuning.zig");
@@ -48,13 +49,6 @@ pub const enabled = build_options.gpu_kind == .metal;
 /// the plain CPU story. Must be `enabled and ...`: a false `enabled` keeps
 /// the whole module comptime-dead on other builds (extern symbols, libc).
 pub const has_quant_gemm = enabled;
-/// Q5_K currently has a CUDA dequant kernel only. Keeping this capability
-/// explicit lets the shared exec/weight layer retain Metal's CPU fallback.
-pub const has_q5_k_quant = false;
-/// Ternary TQ2_0 dequant-in-kernel GEMM (fucina_mul_mm_tq2_0_f32).
-pub const has_tq2_0_quant = true;
-/// Folded tie-fitted PTQTP pair GEMM (fucina_mul_mm_tq2_0_folded_f32).
-pub const has_tq2_0_folded_quant = true;
 
 pub const Orient = gpu_provider.Orient;
 
@@ -1192,35 +1186,33 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
 // Kernel: metal/ggml_mul_mm.metal (vendored llama.cpp legacy mul_mm).
 // ---------------------------------------------------------------------------
 
-/// Kernel-side ABI tags for the weight block formats the quantized kernel
-/// reads directly. Must mirror the FUCINA_QFMT_* enum in shim.m. The tag
-/// names are spelled like their `DType` so `kernelTag` maps by name;
-/// `tq2_0_folded` is the fused PTQTP plane-pair layout with no `DType`.
-/// A wire tag, not a format identity: `DType` is the identity.
-pub const KernelFormatTag = enum(c_int) {
+/// Kernel-side ABI integers for the weight block formats the quantized
+/// kernel reads directly. Must mirror the FUCINA_QFMT_* enum in shim.m.
+/// Provider-private: the format identity is `gpu_provider.QuantFormat`
+/// (tag names match, so `abiValue` maps by name; `tq2_0_folded` is the
+/// fused PTQTP plane-pair layout with no `DType`).
+const AbiTag = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
     tq2_0 = 3,
     tq2_0_folded = 4,
-
-    /// K (the reduced dim) must be a whole number of blocks.
-    pub fn kMultiple(self: KernelFormatTag) usize {
-        return switch (self) {
-            .q8_0 => 32,
-            .q6_k => 256,
-            .q4_k => 256,
-            .tq2_0 => 256,
-            .tq2_0_folded => 256,
-        };
-    }
 };
 
-/// The kernel tag for a weight dtype, or null when this provider has no
-/// kernel for it.
-pub fn kernelTag(comptime dt: dtype_mod.DType) ?KernelFormatTag {
-    if (!@hasField(KernelFormatTag, @tagName(dt))) return null;
-    return @field(KernelFormatTag, @tagName(dt));
+/// The kernel-side ABI integer for `fmt`, or null when this provider has
+/// no kernel for it (null IS the capability answer: `offload.supportsQuant`
+/// derives from it).
+pub fn abiValue(comptime fmt: Fmt) ?c_int {
+    if (!@hasField(AbiTag, @tagName(fmt))) return null;
+    return @intFromEnum(@field(AbiTag, @tagName(fmt)));
+}
+
+/// Runtime form for the dispatch entries; unsupported formats are gated out
+/// before dispatch, so reaching one here is a bug.
+fn abi(fmt: Fmt) c_int {
+    return switch (fmt) {
+        inline else => |f| if (comptime abiValue(f)) |v| v else unreachable,
+    };
 }
 
 /// One 32-row output tile of one expert group. Must mirror FucinaQMMTile in
@@ -1267,7 +1259,7 @@ const MetalQuantWork = struct {
 /// the ordinary output Work. The 4 KiB command-data tile limit admits up to
 /// 8192 rows per call; longer rare prompts retain the blocking chunk fallback.
 pub fn gemmQuantNtAsync(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1293,7 +1285,7 @@ pub fn gemmQuantNtAsync(
     const submit_started = tstart();
     const ticket = fucina_metal_gemm_q_dense_nt_async(
         ctx,
-        @intFromEnum(format),
+        abi(format),
         rhs_bytes.ptr,
         @intCast(rhs_bytes.len),
         @intCast(nb01),
@@ -1510,7 +1502,7 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// freeing. A cached wrap of freed-and-reused pages reads stale data.
 /// Returns false when the GPU didn't run — caller falls back to CPU.
 pub fn gemmQGroupedNt(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1527,7 +1519,7 @@ pub fn gemmQGroupedNt(
     const timer = tstart();
     const rc = fucina_metal_gemm_q_grouped_nt(
         ctx,
-        @intFromEnum(format),
+        abi(format),
         rhs_bytes.ptr,
         @intCast(rhs_bytes.len),
         @intFromBool(rhs_cacheable),
@@ -1571,7 +1563,7 @@ fn rowsCoveredByTiles(tiles: []const QMMTile) usize {
 /// transient buffers. A cached wrap of a freed-and-reused page reads stale
 /// data.
 pub fn gemmQuantNt(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1616,7 +1608,7 @@ pub fn gemmQuantNt(
 /// into one Metal command, while the caller still owns an ordinary CPU-visible
 /// result tensor. `nb02` is the byte stride between consecutive RHS operands.
 pub fn gemmQuantNtSharedABatch(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -1692,11 +1684,12 @@ pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
 }
 
-pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuant(format: Fmt, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
         .q4_k, .q8_0, .tq2_0, .tq2_0_folded => state.min_work_qmoe,
+        .q5_k => unreachable, // no Metal Q5_K kernel (supportsQuant gates first)
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1704,13 +1697,14 @@ pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
 }
 
 /// Dense model-weight gate against the load-time-packed CPU fallback.
-pub fn shouldUseGpuDenseQuantPacked(format: KernelFormatTag, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuantPacked(format: Fmt, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q4_k => state.min_work_packed_q4,
         .q6_k => state.min_work_packed_q6,
         .q8_0 => state.min_work_packed_q8,
         .tq2_0, .tq2_0_folded => state.min_work_packed_tq2,
+        .q5_k => unreachable, // no Metal Q5_K kernel (supportsQuant gates first)
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -1745,7 +1739,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
 /// Quantized decode-GEMV gate — the decode arm of `offload.quantGemmAccepts`
 /// (`src/exec/quant_matmul.zig`). The Metal provider keeps decode on CPU by
 /// design — always false; the CUDA provider opts in via FUCINA_GPU_DECODE=1.
-pub fn shouldUseGpuQuantDecode(format: KernelFormatTag, m: usize, n: usize, k: usize) bool {
+pub fn shouldUseGpuQuantDecode(format: Fmt, m: usize, n: usize, k: usize) bool {
     _ = format;
     _ = m;
     _ = n;
@@ -1967,13 +1961,14 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q8_0, KernelFormatTag.tq2_0 }) |fmt| {
+    inline for (.{ Fmt.q6_k, Fmt.q4_k, Fmt.q8_0, Fmt.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
             .tq2_0 => dtype_mod.BlockTQ2_0,
             .tq2_0_folded => unreachable, // covered by its dedicated parity test
+            .q5_k => unreachable, // no Metal Q5_K kernel
         };
         const k_mult = comptime fmt.kMultiple();
         const cases = [_]Case{
@@ -2075,13 +2070,14 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
 
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q8_0, KernelFormatTag.tq2_0 }) |fmt| {
+    inline for (.{ Fmt.q6_k, Fmt.q4_k, Fmt.q8_0, Fmt.tq2_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q8_0 => dtype_mod.BlockQ8_0,
             .tq2_0 => dtype_mod.BlockTQ2_0,
             .tq2_0_folded => unreachable, // covered by its dedicated parity test
+            .q5_k => unreachable, // no Metal Q5_K kernel
         };
         const m = 65;
         const n = 68;

@@ -41,47 +41,25 @@ pub const setQmoeMinFillForTest = gpu.setQmoeMinFillForTest;
 // Quantized GEMM
 // ---------------------------------------------------------------------------
 
-/// The quantized RHS layouts an accelerator may take. `tq2_0_folded` is the
-/// ternary folded-plane layout (`weights/ptqtp.zig`).
-pub const QuantFormat = enum {
-    q8_0,
-    q4_k,
-    q5_k,
-    q6_k,
-    tq2_0,
-    tq2_0_folded,
+/// The quantized RHS layouts an accelerator may take — the one format
+/// vocabulary (`gpu_provider.QuantFormat`; `tq2_0_folded` is the ternary
+/// folded-plane layout, `weights/ptqtp.zig`). A provider's kernel-side
+/// integer for a format is its private ABI (`abiValue`), never seen here.
+pub const QuantFormat = gpu_provider.QuantFormat;
 
-    pub fn fromDType(comptime dt: DType) ?QuantFormat {
-        return switch (dt) {
-            .q8_0 => .q8_0,
-            .q4_k => .q4_k,
-            .q5_k => .q5_k,
-            .q6_k => .q6_k,
-            .tq2_0 => .tq2_0,
-            else => null,
-        };
-    }
-};
-
-/// The provider's tag for `fmt`; null when the provider has no kernel for
-/// it (the provider's tag set is checked against its capability flags in
-/// `gpu_provider.zig`).
-fn providerTag(comptime fmt: QuantFormat) ?gpu.KernelFormatTag {
-    if (!@hasField(gpu.KernelFormatTag, @tagName(fmt))) return null;
-    return @field(gpu.KernelFormatTag, @tagName(fmt));
-}
-
-/// `providerTag` for a runtime format.
-fn providerTagAt(fmt: QuantFormat) ?gpu.KernelFormatTag {
-    return switch (fmt) {
-        inline else => |f| comptime providerTag(f),
-    };
-}
-
-/// The provider has a kernel for `fmt`.
+/// The provider has a kernel for `fmt` — THE per-format capability
+/// predicate (`abiValue(fmt) != null`); every layer above asks this, never
+/// a re-spelled format list.
 pub fn supportsQuant(comptime fmt: QuantFormat) bool {
     if (!enabled) return false;
-    return providerTag(fmt) != null;
+    return gpu.abiValue(fmt) != null;
+}
+
+/// `supportsQuant` for a runtime format.
+pub fn supportsQuantAt(fmt: QuantFormat) bool {
+    return switch (fmt) {
+        inline else => |f| comptime supportsQuant(f),
+    };
 }
 
 /// `supportsQuant` over a storage dtype (false for non-quantized dtypes).
@@ -109,14 +87,15 @@ fn quantWork(m: usize, n: usize, k: usize) u64 {
 /// ternary layout has no decode kernel), plus the layout preconditions.
 pub fn quantGemmAccepts(comptime fmt: QuantFormat, m: usize, n: usize, k: usize, input_contiguous: bool, comptime arm: QuantGemmArm) bool {
     if (comptime !enabled) return false;
-    const tag = (comptime providerTag(fmt)) orelse return false;
+    if (comptime !supportsQuant(fmt)) return false;
     const work = quantWork(m, n, k);
     const prefill_arm = m >= 32 and switch (arm) {
-        .panels => gpu.shouldUseGpuDenseQuantPacked(tag, work),
-        .blocks => gpu.shouldUseGpuDenseQuant(tag, work),
+        .panels => gpu.shouldUseGpuDenseQuantPacked(fmt, work),
+        .blocks => gpu.shouldUseGpuDenseQuant(fmt, work),
     };
-    const decode_arm = fmt != .tq2_0_folded and m <= 8 and gpu.shouldUseGpuQuantDecode(tag, m, n, k);
-    return (prefill_arm or decode_arm) and k % tag.kMultiple() == 0 and n % 4 == 0 and input_contiguous;
+    const decode_arm = fmt != .tq2_0_folded and m <= 8 and gpu.shouldUseGpuQuantDecode(fmt, m, n, k);
+    const k_mult = comptime fmt.kMultiple();
+    return (prefill_arm or decode_arm) and k % k_mult == 0 and n % 4 == 0 and input_contiguous;
 }
 
 /// Run the quantized GEMM the caller asked `quantGemmAccepts` about, into
@@ -125,8 +104,8 @@ pub fn quantGemmAccepts(comptime fmt: QuantFormat, m: usize, n: usize, k: usize,
 /// the provider declined (the caller frees `out` and runs the CPU path).
 pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bool, nb01: usize, input: *const Tensor, out: *Tensor, m: usize, n: usize, k: usize) bool {
     if (comptime !enabled) return false;
-    const tag = (comptime providerTag(fmt)) orelse return false;
-    if (cacheable and gpu.gemmQuantNtAsync(tag, rhs_bytes, true, nb01, 0, input, out, 1, m, n, k)) return true;
+    if (comptime !supportsQuant(fmt)) return false;
+    if (cacheable and gpu.gemmQuantNtAsync(fmt, rhs_bytes, true, nb01, 0, input, out, 1, m, n, k)) return true;
 
     const in_data = input.dataConst();
     const in_elems = std.math.mul(usize, m, k) catch return false;
@@ -137,7 +116,7 @@ pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bo
     var row0: usize = 0;
     while (row0 < m) : (row0 += rows_per) {
         const rows = @min(rows_per, m - row0);
-        if (!gpu.gemmQuantNt(tag, rhs_bytes, cacheable, nb01, in_data[row0 * k .. (row0 + rows) * k], out.data()[row0 * n .. (row0 + rows) * n], rows, n, k)) return false;
+        if (!gpu.gemmQuantNt(fmt, rhs_bytes, cacheable, nb01, in_data[row0 * k .. (row0 + rows) * k], out.data()[row0 * n .. (row0 + rows) * n], rows, n, k)) return false;
     }
     return true;
 }
@@ -146,22 +125,23 @@ pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bo
 /// against `batch_count` quantized RHS slabs (`nb02` bytes apart).
 pub fn quantGemmSharedInputAccepts(comptime fmt: QuantFormat, batch_count: usize, m: usize, n: usize, k: usize, input_contiguous: bool) bool {
     if (comptime !enabled) return false;
-    const tag = (comptime providerTag(fmt)) orelse return false;
+    if (comptime !supportsQuant(fmt)) return false;
     if (batch_count == 0) return false;
     const per_work = quantWork(m, n, k);
     const work = std.math.mul(u64, per_work, @as(u64, @intCast(batch_count))) catch std.math.maxInt(u64);
-    return m >= 32 and k % tag.kMultiple() == 0 and n % 4 == 0 and input_contiguous and gpu.shouldUseGpuDenseQuant(tag, work);
+    const k_mult = comptime fmt.kMultiple();
+    return m >= 32 and k % k_mult == 0 and n % 4 == 0 and input_contiguous and gpu.shouldUseGpuDenseQuant(fmt, work);
 }
 
 /// Run the shared-input batch into `out[batch_count * m, n]`.
 pub fn gemmQuantSharedInput(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bool, nb01: usize, nb02: usize, input: *const Tensor, out: *Tensor, batch_count: usize, m: usize, n: usize, k: usize) bool {
     if (comptime !enabled) return false;
-    const tag = (comptime providerTag(fmt)) orelse return false;
-    if (cacheable and gpu.gemmQuantNtAsync(tag, rhs_bytes, true, nb01, nb02, input, out, batch_count, m, n, k)) return true;
+    if (comptime !supportsQuant(fmt)) return false;
+    if (cacheable and gpu.gemmQuantNtAsync(fmt, rhs_bytes, true, nb01, nb02, input, out, batch_count, m, n, k)) return true;
     const in_data = input.dataConst();
     const in_elems = std.math.mul(usize, m, k) catch return false;
     if (m > 2048 or in_data.len != in_elems) return false;
-    return gpu.gemmQuantNtSharedABatch(tag, rhs_bytes, cacheable, nb01, nb02, in_data, out.data(), batch_count, m, n, k);
+    return gpu.gemmQuantNtSharedABatch(fmt, rhs_bytes, cacheable, nb01, nb02, in_data, out.data(), batch_count, m, n, k);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +256,8 @@ pub const QMoeSession = struct {
     pub fn gemmGrouped(self: *const QMoeSession, fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bool, nb01: usize, nb02: usize, n: usize, k: usize, tiles: []const QMMTile) bool {
         _ = self;
         if (comptime !enabled) return false;
-        const tag = providerTagAt(fmt) orelse return false;
-        return gpu.gemmQGroupedNt(tag, rhs_bytes, cacheable, nb01, nb02, n, k, tiles);
+        if (!supportsQuantAt(fmt)) return false;
+        return gpu.gemmQGroupedNt(fmt, rhs_bytes, cacheable, nb01, nb02, n, k, tiles);
     }
 
     pub fn end(self: *QMoeSession) void {

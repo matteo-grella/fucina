@@ -6,22 +6,20 @@
 //! cuda-check` for the CUDA arm) instead of a link error or a silent
 //! capability hole.
 //!
-//! Two things are deliberately NOT unified:
-//!
-//!   * `KernelFormatTag` is per-provider. Its integer values are the ABI
-//!     the provider's own shaders/kernels switch on, and the sets differ:
-//!     Metal has `tq2_0`/`tq2_0_folded` where CUDA has `q5_k`, so tag 3
-//!     means different formats on the two sides. It is a wire tag, not a
-//!     format identity (`DType` is): callers map a dtype to its tag with
-//!     the provider's `kernelTag(dt)` (null when no kernel exists) and
-//!     gate on the capability flags, never by assuming a tag exists;
-//!     `assertConforms` checks flag and tag agree.
-//!   * Provider-private test hooks (CUDA's `setDecodeForTest`,
-//!     `setTransientFloorForTest`) are extras, not interface members.
+//! The format vocabulary is ONE enum: `QuantFormat` below names every
+//! quantized RHS layout an accelerator may take, and every interface entry
+//! speaks it. A provider's kernel-side integer for a format is its private
+//! ABI (Metal has ternary kernels where CUDA has Q5_K, so the integers
+//! differ), exported only as `abiValue(fmt)` — null when the provider has
+//! no kernel, which IS the capability answer (`offload.supportsQuant`
+//! derives from it). Provider-private test hooks (CUDA's
+//! `setDecodeForTest`, `setTransientFloorForTest`) are extras, not
+//! interface members.
 //!
 //! Layer stack: docs/ARCHITECTURE.md.
 
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const ops = @import("ops.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -32,6 +30,39 @@ const TensorBf16 = tensor.TensorOf(.bf16);
 
 /// GEMM operand orientation, as the provider kernels take it.
 pub const Orient = ops.MatmulKind;
+
+/// The quantized RHS layouts an accelerator may take — the one format
+/// vocabulary above the providers. `tq2_0_folded` is the ternary
+/// folded-plane layout (`weights/ptqtp.zig`); it has no `DType` of its own.
+pub const QuantFormat = enum {
+    q8_0,
+    q4_k,
+    q5_k,
+    q6_k,
+    tq2_0,
+    tq2_0_folded,
+
+    pub fn fromDType(comptime dt: dtype_mod.DType) ?QuantFormat {
+        return switch (dt) {
+            .q8_0 => .q8_0,
+            .q4_k => .q4_k,
+            .q5_k => .q5_k,
+            .q6_k => .q6_k,
+            .tq2_0 => .tq2_0,
+            else => null,
+        };
+    }
+
+    /// K (the reduced dim) must be a whole number of blocks: the format's
+    /// block length, straight from `dtype.blockSize` (the folded pair
+    /// layout keeps TQ2_0's).
+    pub fn kMultiple(self: QuantFormat) usize {
+        return switch (self) {
+            inline .q8_0, .q4_k, .q5_k, .q6_k, .tq2_0 => |f| comptime dtype_mod.blockSize(@field(dtype_mod.DType, @tagName(f))),
+            .tq2_0_folded => comptime dtype_mod.blockSize(.tq2_0),
+        };
+    }
+};
 
 /// One grouped-MoE tile: which expert, which rows of the batch, how many.
 /// `extern` because the tile table crosses to the kernel side verbatim.
@@ -52,24 +83,13 @@ pub const QMoeStage = struct {
 pub const FlatDType = enum(usize) { f16 = 0, f32 = 1 };
 
 /// Capability flags every provider declares. `enabled` says the provider
-/// is the selected one; the rest gate per-arm support and MUST agree with
-/// the provider's own `KernelFormatTag` tag set (checked below).
+/// is the selected one; `has_quant_gemm`/`has_attention_fwd` gate whole
+/// kernel families. Per-format capability is NOT a flag: it is
+/// `abiValue(fmt) != null` (`offload.supportsQuant`).
 const capability_flags = [_][]const u8{
     "enabled",
     "has_quant_gemm",
-    "has_q5_k_quant",
-    "has_tq2_0_quant",
-    "has_tq2_0_folded_quant",
     "has_attention_fwd",
-};
-
-/// Capability flag -> the `KernelFormatTag` tag it promises. A flag that is true
-/// without its tag (or a tag present with the flag false) is a compile
-/// error: that pairing is exactly what dispatch code keys on.
-const format_capabilities = [_]struct { flag: []const u8, tag: []const u8 }{
-    .{ .flag = "has_q5_k_quant", .tag = "q5_k" },
-    .{ .flag = "has_tq2_0_quant", .tag = "tq2_0" },
-    .{ .flag = "has_tq2_0_folded_quant", .tag = "tq2_0_folded" },
 };
 
 /// The wire types a provider must re-export from THIS module (identical
@@ -97,111 +117,109 @@ const Signature = struct {
 };
 
 /// Every function on the interface, with its exact parameter and return
-/// types. `P.KernelFormatTag` resolves per-provider (see the header).
-fn signatures(comptime P: type) []const Signature {
-    const KernelFormatTag = P.KernelFormatTag;
-    return &[_]Signature{
-        // Dispatch tracing (`FUCINA_GPU_TRACE`); the reset/dump pair is a
-        // no-op when tracing is off, so callers invoke unconditionally.
-        .{ .name = "traceEnabled", .params = &.{}, .ret = bool },
-        .{ .name = "traceReset", .params = &.{}, .ret = void },
-        .{ .name = "traceDump", .params = &.{}, .ret = void },
-        .{ .name = "deviceName", .params = &.{}, .ret = ?[]const u8 },
+/// types. Format-taking entries speak `QuantFormat`; the kernel-side
+/// integer never crosses this seam.
+const interface_signatures = [_]Signature{
+    // Dispatch tracing (`FUCINA_GPU_TRACE`); the reset/dump pair is a
+    // no-op when tracing is off, so callers invoke unconditionally.
+    .{ .name = "traceEnabled", .params = &.{}, .ret = bool },
+    .{ .name = "traceReset", .params = &.{}, .ret = void },
+    .{ .name = "traceDump", .params = &.{}, .ret = void },
+    .{ .name = "deviceName", .params = &.{}, .ret = ?[]const u8 },
 
-        // Work gates: should this shape go to the GPU at all.
-        .{ .name = "shouldUseGpu", .params = &.{ usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuBatched", .params = &.{ usize, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuF16", .params = &.{ usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuF16ForRhs", .params = &.{ *const TensorF16, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuBf16ForRhs", .params = &.{ *const TensorBf16, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuGemv", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuForRhs", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuBatchedForRhs", .params = &.{ *const Tensor, usize, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuAttentionFwd", .params = &.{ usize, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuQMoe", .params = &.{u64}, .ret = bool },
-        .{ .name = "qmoeFillAcceptable", .params = &.{ usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuDenseQuant", .params = &.{ KernelFormatTag, u64 }, .ret = bool },
-        .{ .name = "shouldUseGpuDenseQuantPacked", .params = &.{ KernelFormatTag, u64 }, .ret = bool },
-        .{ .name = "shouldUseGpuQuantDecode", .params = &.{ KernelFormatTag, usize, usize, usize }, .ret = bool },
-        .{ .name = "shouldUseGpuAttn", .params = &.{ usize, usize, usize, usize }, .ret = bool },
+    // Work gates: should this shape go to the GPU at all.
+    .{ .name = "shouldUseGpu", .params = &.{ usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuBatched", .params = &.{ usize, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuF16", .params = &.{ usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuF16ForRhs", .params = &.{ *const TensorF16, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuBf16ForRhs", .params = &.{ *const TensorBf16, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuGemv", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuForRhs", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuBatchedForRhs", .params = &.{ *const Tensor, usize, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuAttentionFwd", .params = &.{ usize, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuQMoe", .params = &.{u64}, .ret = bool },
+    .{ .name = "qmoeFillAcceptable", .params = &.{ usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuDenseQuant", .params = &.{ QuantFormat, u64 }, .ret = bool },
+    .{ .name = "shouldUseGpuDenseQuantPacked", .params = &.{ QuantFormat, u64 }, .ret = bool },
+    .{ .name = "shouldUseGpuQuantDecode", .params = &.{ QuantFormat, usize, usize, usize }, .ret = bool },
+    .{ .name = "shouldUseGpuAttn", .params = &.{ usize, usize, usize, usize }, .ret = bool },
 
-        // Seams the shared conformance suite drives (see gpu_conformance.zig):
-        // a device probe that is exactly "the provider has a live context",
-        // and save/restore access to the grouped-MoE occupancy gate.
-        .{ .name = "deviceAvailableForTest", .params = &.{}, .ret = bool },
-        .{ .name = "setMinWorkQMoeForTest", .params = &.{u64}, .ret = void },
-        .{ .name = "qmoeMinFillForTest", .params = &.{}, .ret = u64 },
-        .{ .name = "setQmoeMinFillForTest", .params = &.{u64}, .ret = void },
+    // Seams the shared conformance suite drives (see gpu_conformance.zig):
+    // a device probe that is exactly "the provider has a live context",
+    // and save/restore access to the grouped-MoE occupancy gate.
+    .{ .name = "deviceAvailableForTest", .params = &.{}, .ret = bool },
+    .{ .name = "setMinWorkQMoeForTest", .params = &.{u64}, .ret = void },
+    .{ .name = "qmoeMinFillForTest", .params = &.{}, .ret = u64 },
+    .{ .name = "setQmoeMinFillForTest", .params = &.{u64}, .ret = void },
 
-        // Attention forward.
-        .{
-            .name = "attentionFwdF32",
-            .params = &.{ []const f32, []const f32, []const f32, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
-            .ret = bool,
-        },
-        .{
-            .name = "attentionFwdF16Kv",
-            .params = &.{ []const f32, []const f16, []const f16, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
-            .ret = bool,
-        },
-        .{
-            .name = "attnPrefillF16",
-            .params = &.{ []const f32, []const f16, []const f16, []f32, []const i32, usize, usize, usize, usize, usize, usize, f32, usize, bool },
-            .ret = bool,
-        },
+    // Attention forward.
+    .{
+        .name = "attentionFwdF32",
+        .params = &.{ []const f32, []const f32, []const f32, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
+        .ret = bool,
+    },
+    .{
+        .name = "attentionFwdF16Kv",
+        .params = &.{ []const f32, []const f16, []const f16, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
+        .ret = bool,
+    },
+    .{
+        .name = "attnPrefillF16",
+        .params = &.{ []const f32, []const f16, []const f16, []f32, []const i32, usize, usize, usize, usize, usize, usize, f32, usize, bool },
+        .ret = bool,
+    },
 
-        // Dense GEMM: blocking host-slice forms and eager async forms.
-        .{ .name = "gemmF16Nt", .params = &.{ []const f16, []const f16, usize, usize, usize, bool }, .ret = ?[]const f16 },
-        .{ .name = "gemmF32", .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize }, .ret = bool },
-        .{
-            .name = "gemmBatchedF32",
-            .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize, usize, usize, usize, usize },
-            .ret = bool,
-        },
-        .{
-            .name = "gemmBatchedF32Async",
-            .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize, usize, usize, usize, usize },
-            .ret = bool,
-        },
-        .{ .name = "gemmF32Async", .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize }, .ret = bool },
-        .{ .name = "gemmF16NtAsync", .params = &.{ *const TensorF16, *const TensorF16, *Tensor, usize, usize, usize }, .ret = bool },
-        .{ .name = "gemmBf16NtAsync", .params = &.{ *const Tensor, *const TensorBf16, *Tensor, usize, usize, usize }, .ret = bool },
+    // Dense GEMM: blocking host-slice forms and eager async forms.
+    .{ .name = "gemmF16Nt", .params = &.{ []const f16, []const f16, usize, usize, usize, bool }, .ret = ?[]const f16 },
+    .{ .name = "gemmF32", .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize }, .ret = bool },
+    .{
+        .name = "gemmBatchedF32",
+        .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize, usize, usize, usize, usize },
+        .ret = bool,
+    },
+    .{
+        .name = "gemmBatchedF32Async",
+        .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize, usize, usize, usize, usize },
+        .ret = bool,
+    },
+    .{ .name = "gemmF32Async", .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize }, .ret = bool },
+    .{ .name = "gemmF16NtAsync", .params = &.{ *const TensorF16, *const TensorF16, *Tensor, usize, usize, usize }, .ret = bool },
+    .{ .name = "gemmBf16NtAsync", .params = &.{ *const Tensor, *const TensorBf16, *Tensor, usize, usize, usize }, .ret = bool },
 
-        // Quantized GEMM: dense (blocking + async) and grouped MoE.
-        .{
-            .name = "gemmQuantNtAsync",
-            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, *const Tensor, *Tensor, usize, usize, usize, usize },
-            .ret = bool,
-        },
-        .{
-            .name = "gemmQuantNt",
-            .params = &.{ KernelFormatTag, []const u8, bool, usize, []const f32, []f32, usize, usize, usize },
-            .ret = bool,
-        },
-        .{
-            .name = "gemmQuantNtSharedABatch",
-            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, []const f32, []f32, usize, usize, usize, usize },
-            .ret = bool,
-        },
-        .{
-            .name = "gemmQGroupedNt",
-            .params = &.{ KernelFormatTag, []const u8, bool, usize, usize, usize, usize, []const QMMTile },
-            .ret = bool,
-        },
-        .{ .name = "qmoeStage", .params = &.{ usize, usize }, .ret = ?QMoeStage },
+    // Quantized GEMM: dense (blocking + async) and grouped MoE.
+    .{
+        .name = "gemmQuantNtAsync",
+        .params = &.{ QuantFormat, []const u8, bool, usize, usize, *const Tensor, *Tensor, usize, usize, usize, usize },
+        .ret = bool,
+    },
+    .{
+        .name = "gemmQuantNt",
+        .params = &.{ QuantFormat, []const u8, bool, usize, []const f32, []f32, usize, usize, usize },
+        .ret = bool,
+    },
+    .{
+        .name = "gemmQuantNtSharedABatch",
+        .params = &.{ QuantFormat, []const u8, bool, usize, usize, []const f32, []f32, usize, usize, usize, usize },
+        .ret = bool,
+    },
+    .{
+        .name = "gemmQGroupedNt",
+        .params = &.{ QuantFormat, []const u8, bool, usize, usize, usize, usize, []const QMMTile },
+        .ret = bool,
+    },
+    .{ .name = "qmoeStage", .params = &.{ usize, usize }, .ret = ?QMoeStage },
 
-        // Device-owned bytes for loader residency.
-        .{ .name = "allocResidentBytes", .params = &.{usize}, .ret = ?[]u8 },
-        .{ .name = "freeResidentBytes", .params = &.{[]const u8}, .ret = void },
+    // Device-owned bytes for loader residency.
+    .{ .name = "allocResidentBytes", .params = &.{usize}, .ret = ?[]u8 },
+    .{ .name = "freeResidentBytes", .params = &.{[]const u8}, .ret = void },
 
-        // Flat-parameter device kernels: seed-regenerated noise algebra over
-        // a flat byte slice (perturb, z-scored weighted update, anchor
-        // decay). Consumer-neutral contract; fucina.es is the consumer today.
-        .{ .name = "flatPerturb", .params = &.{ FlatDType, []u8, u64, f32, usize }, .ret = bool },
-        .{ .name = "flatWeightedUpdate", .params = &.{ FlatDType, []u8, []const u64, []const f32, f32, usize }, .ret = bool },
-        .{ .name = "flatAnchorDecay", .params = &.{ FlatDType, []u8, []const u8, f32, bool, usize }, .ret = bool },
-    };
-}
+    // Flat-parameter device kernels: seed-regenerated noise algebra over
+    // a flat byte slice (perturb, z-scored weighted update, anchor
+    // decay). Consumer-neutral contract; fucina.es is the consumer today.
+    .{ .name = "flatPerturb", .params = &.{ FlatDType, []u8, u64, f32, usize }, .ret = bool },
+    .{ .name = "flatWeightedUpdate", .params = &.{ FlatDType, []u8, []const u64, []const f32, f32, usize }, .ret = bool },
+    .{ .name = "flatAnchorDecay", .params = &.{ FlatDType, []u8, []const u8, f32, bool, usize }, .ret = bool },
+};
 
 /// Compile-error unless `P` implements the whole interface. Signature-only:
 /// this never takes a function's address, so asserting conformance does not
@@ -230,24 +248,15 @@ pub fn assertConforms(comptime P: type) void {
                     entry.name ++ "`, found a distinct type " ++ @typeName(@field(P, entry.name)));
         }
 
-        if (!@hasDecl(P, "KernelFormatTag")) @compileError(who ++ " is missing `KernelFormatTag`");
-        if (!@hasDecl(P, "kernelTag")) @compileError(who ++ " is missing `kernelTag` (the DType -> KernelFormatTag map)");
-        const KernelFormatTag = P.KernelFormatTag;
-        const qinfo = @typeInfo(KernelFormatTag);
-        if (qinfo != .@"enum" or qinfo.@"enum".tag_type != c_int)
-            @compileError(who ++ ".KernelFormatTag must be an `enum(c_int)` (its values are the kernel-side ABI)");
-        if (!@hasDecl(KernelFormatTag, "kMultiple"))
-            @compileError(who ++ ".KernelFormatTag is missing `kMultiple` (the per-format K block granularity)");
-        for (format_capabilities) |entry| {
-            const flag = @field(P, entry.flag);
-            const has_tag = @hasField(KernelFormatTag, entry.tag);
-            if (flag and !has_tag)
-                @compileError(who ++ "." ++ entry.flag ++ " is true but its KernelFormatTag tag `" ++ entry.tag ++ "` does not exist");
-            if (!flag and has_tag)
-                @compileError(who ++ ".KernelFormatTag declares `" ++ entry.tag ++ "` but " ++ entry.flag ++ " is false");
+        if (!@hasDecl(P, "abiValue"))
+            @compileError(who ++ " is missing `abiValue` (the QuantFormat -> kernel-side ABI integer map; null = no kernel)");
+        for (@typeInfo(QuantFormat).@"enum".fields) |f| {
+            const v = P.abiValue(@field(QuantFormat, f.name));
+            if (@TypeOf(v) != ?c_int)
+                @compileError(who ++ ".abiValue must return `?c_int` (the kernel-side ABI integer, or null for no kernel)");
         }
 
-        for (signatures(P)) |sig| {
+        for (interface_signatures) |sig| {
             if (!@hasDecl(P, sig.name)) @compileError(who ++ " is missing GPU provider function `" ++ sig.name ++ "`");
             const info = @typeInfo(@TypeOf(@field(P, sig.name)));
             if (info != .@"fn") @compileError(who ++ "." ++ sig.name ++ " must be a function");

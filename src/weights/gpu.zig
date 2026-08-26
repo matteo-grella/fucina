@@ -57,11 +57,7 @@ pub const ResidentByteRegistry = struct {
 };
 
 pub fn dtypeHasDenseQuantGpuKernel(comptime dtype: DType) bool {
-    return switch (comptime dtype) {
-        .q4_k, .q6_k, .q8_0 => true,
-        .q5_k => offload.supportsQuant(.q5_k),
-        else => false,
-    };
+    return comptime offload.supportsQuantDType(dtype);
 }
 
 /// Wrap freshly copied device-resident blocks (`internal.gpu.allocResidentBytes`)
@@ -147,12 +143,7 @@ pub fn makeGpuResidentDenseWeight(comptime dtype: DType, comptime Facade: type, 
 }
 
 pub fn makeGpuResidentQuantWeight(comptime dtype: DType, ctx: *ExecContext, value: *QuantWeight(dtype)) !bool {
-    if (comptime !offload.enabled) return false;
-    switch (comptime dtype) {
-        .q4_k, .q6_k, .q8_0 => {},
-        .q5_k => if (!offload.supportsQuant(.q5_k)) return false,
-        else => return false,
-    }
+    if (comptime !offload.supportsQuantDType(dtype)) return false;
     const blocks = try value.dataConst();
     const bytes = std.mem.sliceAsBytes(blocks);
     const dev = offload.allocResidentBytes(bytes.len) orelse return false;

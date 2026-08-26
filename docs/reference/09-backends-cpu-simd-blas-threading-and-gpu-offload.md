@@ -705,9 +705,12 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   `offload.quantGemmAccepts` and runs `offload.gemmQuant`; the seam offloads
   `m ≥ 32` stable-weight matmuls behind the compact/raw or packed-CPU
   per-format gate when
-  `k % KernelFormatTag.kMultiple() == 0` (32 for q8_0, 256 for
-  q4_k/q6_k/tq2_0; the seam maps `offload.QuantFormat` to the provider's
-  tag) and `n % 4 == 0`. `gemmQuantNtAsync` binds input/output tensor storage
+  `k % QuantFormat.kMultiple() == 0` (32 for q8_0, 256 for
+  q4_k/q6_k/tq2_0 — the format's block length, derived from
+  `dtype.blockSize`) and `n % 4 == 0`. `offload.QuantFormat` is the one
+  format vocabulary above the providers; a provider's kernel-side integer
+  for a format is its private ABI (`abiValue(fmt)`, null = no kernel).
+  `gemmQuantNtAsync` binds input/output tensor storage
   directly and copies its ≤4 KiB tile table into command-owned bytes (up to
   8192 rows); shared-input batches encode multiple weight matrices without
   replicating input rows. Transient RHS or longer prompts retain the blocking
@@ -718,8 +721,8 @@ by the ObjC shim (`src/backend/metal/shim.m`): the MLX "steel" f32/f16 GEMM
   outputs sum on the CPU (K = 1 returns the async tensor directly). A
   tie-fitted K = 2 pair whose folded pack is resident takes
   `tryMatmulTernaryFolded` instead — ONE `fucina_mul_mm_tq2_0_folded_f32`
-  dispatch, async return, no plane sum — behind the provider capability
-  `has_tq2_0_folded_quant`. Both arms share the ternary work gate
+  dispatch, async return, no plane sum — behind
+  `offload.supportsQuant(.tq2_0_folded)`. Both arms share the ternary work gate
   (`FUCINA_GPU_MIN_WORK_DENSE_TQ2`, [§2.6](02-toolchain-build-and-project-wiring.md#26-runtime-environment-variables)); any refusal falls through to
   the x4 interleaved CPU kernels wholesale. Not bitwise vs the CPU chain —
   the same accepted numerics stance as the q4_k/q6_k/q8_0 dense offload.

@@ -6,7 +6,6 @@
 //! value their callers already handle (false, null, no-op); the format
 //! tag set is empty in effect, so format-keyed dispatch never survives
 //! comptime resolution.
-const dtype_mod = @import("../dtype.zig");
 const gpu_provider = @import("gpu_provider.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -32,21 +31,10 @@ pub const FlatDType = gpu_provider.FlatDType;
 pub var f16_lock: thread.Mutex = .{};
 pub var qmoe_lock: thread.Mutex = .{};
 
-/// No kernels exist. The placeholder tag is never produced (`kernelTag`
-/// maps every dtype to null), so no dispatch reaches `kMultiple`.
-pub const KernelFormatTag = enum(c_int) {
-    none = 0,
-
-    pub fn kMultiple(self: KernelFormatTag) usize {
-        return switch (self) {
-            .none => unreachable,
-        };
-    }
-};
-
-/// Null map: no dtype has a kernel, so tag-keyed call sites comptime-elide.
-pub fn kernelTag(comptime dt: dtype_mod.DType) ?KernelFormatTag {
-    _ = dt;
+/// No kernels exist: every format answers null, so format-keyed call
+/// sites comptime-elide (`offload.supportsQuant` is false for all).
+pub fn abiValue(comptime fmt: gpu_provider.QuantFormat) ?c_int {
+    _ = fmt;
     return null;
 }
 
@@ -94,13 +82,13 @@ pub fn shouldUseGpuQMoe(_: u64) bool {
 pub fn qmoeFillAcceptable(_: usize, _: usize) bool {
     return false;
 }
-pub fn shouldUseGpuDenseQuant(_: KernelFormatTag, _: u64) bool {
+pub fn shouldUseGpuDenseQuant(_: gpu_provider.QuantFormat, _: u64) bool {
     return false;
 }
-pub fn shouldUseGpuDenseQuantPacked(_: KernelFormatTag, _: u64) bool {
+pub fn shouldUseGpuDenseQuantPacked(_: gpu_provider.QuantFormat, _: u64) bool {
     return false;
 }
-pub fn shouldUseGpuQuantDecode(_: KernelFormatTag, _: usize, _: usize, _: usize) bool {
+pub fn shouldUseGpuQuantDecode(_: gpu_provider.QuantFormat, _: usize, _: usize, _: usize) bool {
     return false;
 }
 pub fn shouldUseGpuAttn(_: usize, _: usize, _: usize, _: usize) bool {
@@ -152,16 +140,16 @@ pub fn gemmBf16NtAsync(_: *const Tensor, _: *const TensorBf16, _: *Tensor, _: us
 }
 
 // Quantized GEMM: never handled.
-pub fn gemmQuantNtAsync(_: KernelFormatTag, _: []const u8, _: bool, _: usize, _: usize, _: *const Tensor, _: *Tensor, _: usize, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNtAsync(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: *const Tensor, _: *Tensor, _: usize, _: usize, _: usize, _: usize) bool {
     return false;
 }
-pub fn gemmQuantNt(_: KernelFormatTag, _: []const u8, _: bool, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNt(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize) bool {
     return false;
 }
-pub fn gemmQuantNtSharedABatch(_: KernelFormatTag, _: []const u8, _: bool, _: usize, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNtSharedABatch(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize, _: usize) bool {
     return false;
 }
-pub fn gemmQGroupedNt(_: KernelFormatTag, _: []const u8, _: bool, _: usize, _: usize, _: usize, _: usize, _: []const QMMTile) bool {
+pub fn gemmQGroupedNt(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: usize, _: usize, _: []const QMMTile) bool {
     return false;
 }
 pub fn qmoeStage(_: usize, _: usize) ?QMoeStage {

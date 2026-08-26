@@ -52,6 +52,7 @@ const build_options = @import("build_options");
 const dtype_mod = @import("../dtype.zig");
 const storage = @import("../storage.zig");
 const gpu_provider = @import("gpu_provider.zig");
+const Fmt = gpu_provider.QuantFormat;
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -67,12 +68,6 @@ pub const enabled = build_options.gpu_kind == .cuda;
 /// MoE) is implemented. Must stay `enabled and ...` so the module is
 /// comptime-dead on non-cuda builds.
 pub const has_quant_gemm = enabled;
-/// CUDA's vendored dequant kernels cover Q5_K in addition to the common
-/// Q4_K/Q6_K/Q8_0 provider surface. Metal deliberately leaves Q5_K on CPU.
-pub const has_q5_k_quant = enabled;
-/// No ternary CUDA kernel yet — the exec seam prunes the tq2_0 arm.
-pub const has_tq2_0_quant = false;
-pub const has_tq2_0_folded_quant = false;
 
 pub const Orient = gpu_provider.Orient;
 
@@ -1415,30 +1410,33 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
 // Metal provider exactly so exec/models consumers compile unchanged.
 // ---------------------------------------------------------------------------
 
-/// Kernel-side ABI tags for the weight block formats the quantized kernel
-/// reads directly. The integer values are what the PTX switches on; the
-/// tag names are spelled like their `DType` so `kernelTag` maps by name.
-/// A wire tag, not a format identity: `DType` is the identity.
-pub const KernelFormatTag = enum(c_int) {
+/// Kernel-side ABI integers for the weight block formats the quantized
+/// kernel reads directly (CUDA covers Q5_K in addition to the common
+/// Q4_K/Q6_K/Q8_0 surface; no ternary kernel yet). The integer values are
+/// what the PTX switches on and how the kernel tables are indexed.
+/// Provider-private: the format identity is `gpu_provider.QuantFormat`
+/// (tag names match, so `abiValue` maps by name).
+const AbiTag = enum(c_int) {
     q8_0 = 0,
     q6_k = 1,
     q4_k = 2,
     q5_k = 3,
-
-    /// K (the reduced dim) must be a whole number of blocks.
-    pub fn kMultiple(self: KernelFormatTag) usize {
-        return switch (self) {
-            .q8_0 => 32,
-            .q4_k, .q5_k, .q6_k => 256,
-        };
-    }
 };
 
-/// The kernel tag for a weight dtype, or null when this provider has no
-/// kernel for it.
-pub fn kernelTag(comptime dt: dtype_mod.DType) ?KernelFormatTag {
-    if (!@hasField(KernelFormatTag, @tagName(dt))) return null;
-    return @field(KernelFormatTag, @tagName(dt));
+/// The kernel-side ABI integer for `fmt`, or null when this provider has
+/// no kernel for it (null IS the capability answer: `offload.supportsQuant`
+/// derives from it).
+pub fn abiValue(comptime fmt: Fmt) ?c_int {
+    if (!@hasField(AbiTag, @tagName(fmt))) return null;
+    return @intFromEnum(@field(AbiTag, @tagName(fmt)));
+}
+
+/// Runtime form for the dispatch entries; unsupported formats are gated out
+/// before dispatch, so reaching one here is a bug.
+fn abi(fmt: Fmt) c_int {
+    return switch (fmt) {
+        inline else => |f| if (comptime abiValue(f)) |v| v else unreachable,
+    };
 }
 
 /// One 32-row output tile of one expert group (the CPU-built tile table
@@ -1760,7 +1758,7 @@ const kernels_ptx = @embedFile("cuda/kernels.ptx");
 const kernels_src = @embedFile("cuda/kernels.cu");
 
 const Kernels = struct {
-    mul_mm: [4]api.CUfunction, // indexed by @intFromEnum(KernelFormatTag)
+    mul_mm: [4]api.CUfunction, // indexed by the AbiTag integer
     mul_mm_mma: [4]?api.CUfunction,
     mul_mm_mma_n32: [4]?api.CUfunction,
     reduce_split_k: ?api.CUfunction,
@@ -1886,8 +1884,8 @@ const QuantMulMmLaunch = struct {
     split_k: c_uint = 1,
 };
 
-fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: KernelFormatTag, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
-    const index: usize = @intCast(@intFromEnum(format));
+fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: Fmt, grid_x: usize, n: usize, k: usize, allow_split_k: bool) QuantMulMmLaunch {
+    const index: usize = @intCast(abi(format));
     if (state.quant_mma and ctx.compute_major >= 7) {
         if (ctx.sm_count > 0) {
             const n64_tiles = n / 64 + @intFromBool(n % 64 != 0);
@@ -1912,6 +1910,7 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: KernelForm
                 const split_cap: usize = switch (format) {
                     .q6_k => 3,
                     .q4_k, .q5_k, .q8_0 => 2,
+                    .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel (supportsQuant gates first)
                 };
                 const max_split = @min(split_cap, @max(@as(usize, 1), k / 128));
                 const split_k = @min(desired_split, max_split);
@@ -1935,7 +1934,7 @@ fn quantMulMmLaunch(ctx: *const Ctx, kernels: *const Kernels, format: KernelForm
     return .{ .kernel = kernels.mul_mm[index], .n_tile = 64, .block_y = 16 };
 }
 
-fn quantDecodeUsesGemv(format: KernelFormatTag, m: usize) bool {
+fn quantDecodeUsesGemv(format: Fmt, m: usize) bool {
     // Q5_K switches to Fucina's lane-packed CPU kernel at m=4. Keep its
     // warp-per-row CUDA path on the compact-decode rows (m<4); the tiled MMA
     // path is the relevant GPU contender for batch rows 4..8.
@@ -1948,7 +1947,7 @@ fn quantDecodeUsesGemv(format: KernelFormatTag, m: usize) bool {
 /// batch_count > 1 the same input is consumed by one launch per weight matrix
 /// without materializing repeated activation rows.
 pub fn gemmQuantNtAsync(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2018,7 +2017,7 @@ pub fn gemmQuantNtAsync(
         };
         const warps_per_block = 4;
         const grid: c_uint = @intCast((n + warps_per_block - 1) / warps_per_block);
-        const f = ks.gemv[@intCast(@intFromEnum(format))];
+        const f = ks.gemv[@intCast(abi(format))];
         if (d.cuLaunchKernel(f, grid, 1, 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) return false;
     } else {
         const tiles_per_batch = (m + 31) / 32;
@@ -2049,7 +2048,7 @@ pub fn gemmQuantNtAsync(
             quantMulMmLaunch(ctx, ks, format, tiles_per_batch, n, k, true)
         else
             QuantMulMmLaunch{
-                .kernel = ks.mul_mm[@intCast(@intFromEnum(format))],
+                .kernel = ks.mul_mm[@intCast(abi(format))],
                 .n_tile = 64,
                 .block_y = 16,
             };
@@ -2188,7 +2187,7 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// (managed registry hit) dispatches with zero weight transfer; a transient
 /// RHS streams. Returns false when the GPU didn't run.
 pub fn gemmQGroupedNt(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2286,7 +2285,7 @@ pub fn gemmQGroupedNt(
 /// refuses and the caller stays on CPU. f32 dequant (no f16 rounding),
 /// same 5e-3 quant tier. Takes `dispatch_lock` (shares the f32 staging bufs).
 fn gemvQuant(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2326,7 +2325,7 @@ fn gemvQuant(
     };
     const warps_per_block = 4;
     const grid: c_uint = @intCast((n + warps_per_block - 1) / warps_per_block);
-    const f = ks.gemv[@intCast(@intFromEnum(format))];
+    const f = ks.gemv[@intCast(abi(format))];
     if (d.cuLaunchKernel(f, grid, 1, 1, 32 * warps_per_block, 1, 1, 0, ctx.stream, &params, null) != 0) {
         if (trace_on) tinc(&trace.cuda_err, 1);
         return false;
@@ -2342,7 +2341,7 @@ fn gemvQuant(
 /// wrapper shape as the Metal provider; takes `qmoe_lock` itself. With
 /// FUCINA_GPU_DECODE=1 it takes the selected decode route instead.
 pub fn gemmQuantNt(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2385,7 +2384,7 @@ pub fn gemmQuantNt(
 /// eager command-batching seam, one launch via the expert dimension. Same
 /// wrapper shape as the Metal provider.
 pub fn gemmQuantNtSharedABatch(
-    format: KernelFormatTag,
+    format: Fmt,
     rhs_bytes: []const u8,
     rhs_cacheable: bool,
     nb01: usize,
@@ -2453,12 +2452,13 @@ pub fn qmoeFillAcceptable(rows: usize, n_tiles: usize) bool {
     return filled >= @as(u64, n_tiles) * 32 * state.qmoe_min_fill_pct;
 }
 
-pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuant(format: Fmt, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q6_k => state.min_work_dense_q6,
         .q5_k => state.min_work_packed_q5,
         .q4_k, .q8_0 => state.min_work_qmoe,
+        .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel (supportsQuant gates first)
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -2466,13 +2466,14 @@ pub fn shouldUseGpuDenseQuant(format: KernelFormatTag, total_work: u64) bool {
 }
 
 /// Dense model-weight gate against Fucina's load-time-packed CPU fallback.
-pub fn shouldUseGpuDenseQuantPacked(format: KernelFormatTag, total_work: u64) bool {
+pub fn shouldUseGpuDenseQuantPacked(format: Fmt, total_work: u64) bool {
     ensureConfig();
     const min_work = switch (format) {
         .q4_k => state.min_work_packed_q4,
         .q5_k => state.min_work_packed_q5,
         .q6_k => state.min_work_packed_q6,
         .q8_0 => state.min_work_packed_q8,
+        .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel (supportsQuant gates first)
     };
     const pass = state.gpu_enabled and total_work >= min_work;
     tgate(pass);
@@ -2508,7 +2509,7 @@ pub fn setQmoeMinFillForTest(v: u64) void {
 /// (`src/exec/quant_matmul.zig`): FUCINA_GPU_DECODE=1 opts in, default off
 /// pending a sampled-token parity-oracle pass; Q5_K additionally clears its
 /// own work floor.
-pub fn shouldUseGpuQuantDecode(format: KernelFormatTag, m: usize, n: usize, k: usize) bool {
+pub fn shouldUseGpuQuantDecode(format: Fmt, m: usize, n: usize, k: usize) bool {
     ensureConfig();
     if (!state.decode_enabled) return false;
     if (format != .q5_k) return true;
@@ -2843,12 +2844,13 @@ test "cuda quant gemm q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     const random = prng.random();
 
     const Case = struct { m: usize, n: usize, k: usize };
-    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
+    inline for (.{ Fmt.q6_k, Fmt.q4_k, Fmt.q5_k, Fmt.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel
         };
         const k_mult = comptime fmt.kMultiple();
         const cases = [_]Case{
@@ -2924,12 +2926,13 @@ test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storag
 
     var prng = std.Random.DefaultPrng.init(31);
     const random = prng.random();
-    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
+    inline for (.{ Fmt.q6_k, Fmt.q4_k, Fmt.q5_k, Fmt.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel
         };
         const m = 65;
         const n = 68;
@@ -2987,12 +2990,13 @@ test "cuda decode gemv q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
     var prng = std.Random.DefaultPrng.init(29);
     const random = prng.random();
 
-    inline for (.{ KernelFormatTag.q6_k, KernelFormatTag.q4_k, KernelFormatTag.q5_k, KernelFormatTag.q8_0 }) |fmt| {
+    inline for (.{ Fmt.q6_k, Fmt.q4_k, Fmt.q5_k, Fmt.q8_0 }) |fmt| {
         const Block = switch (fmt) {
             .q6_k => dtype_mod.BlockQ6_K,
             .q4_k => dtype_mod.BlockQ4_K,
             .q5_k => dtype_mod.BlockQ5_K,
             .q8_0 => dtype_mod.BlockQ8_0,
+            .tq2_0, .tq2_0_folded => unreachable, // no CUDA ternary kernel
         };
         const k = 2 * comptime fmt.kMultiple();
         const n = 68; // n % 4 == 0, not a multiple of the warp group

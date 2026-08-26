@@ -160,12 +160,13 @@ test "gpu conformance: quant gemm grouped expert tiles parity" {
     var prng = std.Random.DefaultPrng.init(23);
     const random = prng.random();
 
-    // Every quantized format THIS provider declares, so a newly added format
-    // is covered without editing the suite. The fused PTQTP pair layout has
-    // no standalone dtype and keeps its provider-local parity test.
-    inline for (comptime std.meta.fields(impl.KernelFormatTag)) |field| {
-        if (comptime !std.mem.eql(u8, field.name, "tq2_0_folded")) {
-            const fmt = @field(impl.KernelFormatTag, field.name);
+    // Every quantized format THIS provider has a kernel for
+    // (`abiValue(fmt) != null`), so a newly added format is covered without
+    // editing the suite. The fused PTQTP pair layout has no standalone dtype
+    // and keeps its provider-local parity test.
+    inline for (comptime std.meta.fields(gpu.provider.QuantFormat)) |field| {
+        const fmt = @field(gpu.provider.QuantFormat, field.name);
+        if (comptime impl.abiValue(fmt) != null and fmt != .tq2_0_folded) {
             const Block = test_util.BlockFor(fmt);
             const k = 2 * comptime fmt.kMultiple();
             const n = 64;

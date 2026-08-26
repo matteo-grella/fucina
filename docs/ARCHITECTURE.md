@@ -569,8 +569,9 @@ from it, and GGUF derives its type mapping from the same rows. No second
 enum names these formats: every RHS container carries `pub const dtype:
 DType` (the W8A8 `QuantizedMatmulRhsI8` is not a block format and carries
 only its group-size policy), `AnyQuantizedMatmulRhs`'s union tags are
-`DType` tags, and the per-provider GPU `KernelFormatTag` is a kernel-side
-ABI value reached through the provider's `kernelTag(dt)`, not an identity.
+`DType` tags, and the GPU seam's `QuantFormat` (`backend/gpu_provider.zig`)
+names the offloadable subset once — a provider's kernel-side integer for a
+format is private ABI (`abiValue(fmt)`, null = no kernel), not an identity.
 Layout choices are comptime functions of `DType` and the target:
 `backend.PackedRhsFor(dt)` (aliased as `fucina.PackedRhs`) is the one
 dtype-to-packed-container map (dense f32/f16/bf16 share the f32 panel;

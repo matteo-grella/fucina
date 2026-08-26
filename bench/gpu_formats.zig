@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (opts.section == .all or opts.section == .quant) {
         inline for (.{ raw.DType.q4_k, raw.DType.q5_k, raw.DType.q6_k, raw.DType.q8_0 }) |dtype| {
-            if (comptime dtype != .q5_k or gpu.has_q5_k_quant) {
+            if (comptime dtype != .q5_k or raw.offload.supportsQuant(.q5_k)) {
                 const wanted = switch (dtype) {
                     .q4_k => opts.format == .all or opts.format == .q4_k,
                     .q5_k => opts.format == .all or opts.format == .q5_k,
@@ -286,7 +286,7 @@ fn benchQuant(
     defer gpu_out.deinit();
     const queued = try allocOutputs(allocator, queue_depth, m, n);
     defer freeOutputs(allocator, queued);
-    const format = comptime gpu.kernelTag(dtype) orelse unreachable;
+    const format = comptime raw.offload.QuantFormat.fromDType(dtype).?;
 
     try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
     if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
