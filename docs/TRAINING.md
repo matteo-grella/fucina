@@ -406,6 +406,10 @@ checkpoint/
     prefix and matches stream entries BY NAME, so entry order is free; strict
     (the default) demands a one-to-one match, non-strict skips unknown stream
     entries. A standalone state dict is a valid safetensors file.
+    `loadStateDictFromFile` is the same load over a parsed
+    `safetensors.File`: open a full-weight checkpoint with `File.loadMmap`
+    and the copy pass streams from the mapping instead of staging a second
+    model in RAM (what `es-finetune --mode full` does on resume).
 - `opt.saveState(writer)` / `opt.loadState(reader)` — moments, step counts,
   and the structural config fields, validated on load
   (`error.CheckpointConfigMismatch` on e.g. a changed APOLLO rank or scale

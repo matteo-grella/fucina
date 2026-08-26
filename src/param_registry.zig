@@ -18,6 +18,7 @@
 const std = @import("std");
 const tensor_mod = @import("tensor.zig");
 const state_dict = @import("state_dict.zig");
+const safetensors = @import("safetensors.zig");
 const ag_core = @import("ag/core.zig");
 
 const Allocator = std.mem.Allocator;
@@ -240,9 +241,29 @@ pub const ParamRegistry = struct {
         try state_dict.saveStateDict(self.allocator, writer, entries);
     }
 
+    /// Stream form of the load: one safetensors frame from `reader`, staged
+    /// in RAM before the copy (`state_dict.loadStateDict`). Full-weight
+    /// registries resume through `loadStateDictFromFile` instead.
     pub fn loadStateDict(self: *ParamRegistry, reader: *std.Io.Reader, options: state_dict.LoadOptions) !void {
-        const entries = try self.allocator.alloc(state_dict.NamedTensorMut, self.params.items.len);
+        const entries = try self.mutEntries();
         defer self.allocator.free(entries);
+        try state_dict.loadStateDict(self.allocator, reader, entries, options);
+    }
+
+    /// File form of the load: the destinations copy straight out of a parsed
+    /// safetensors `File` (`state_dict.loadStateDictFromFile`). With a
+    /// `safetensors.File.loadMmap` file the payload is never staged, so a
+    /// full-model checkpoint resumes at one model of resident memory.
+    pub fn loadStateDictFromFile(self: *ParamRegistry, file: *const safetensors.File, options: state_dict.LoadOptions) !void {
+        const entries = try self.mutEntries();
+        defer self.allocator.free(entries);
+        try state_dict.loadStateDictFromFile(self.allocator, file, entries, options);
+    }
+
+    /// Every registered entry as a mutable state-dict destination, in
+    /// registration order. Caller frees.
+    fn mutEntries(self: *const ParamRegistry) ![]state_dict.NamedTensorMut {
+        const entries = try self.allocator.alloc(state_dict.NamedTensorMut, self.params.items.len);
         for (self.params.items, entries) |*param, *entry| {
             entry.* = .{
                 .name = param.name,
@@ -251,7 +272,7 @@ pub const ParamRegistry = struct {
                 .bytes = param.bytes,
             };
         }
-        try state_dict.loadStateDict(self.allocator, reader, entries, options);
+        return entries;
     }
 
     fn validateNewName(self: *const ParamRegistry, name: []const u8) !void {

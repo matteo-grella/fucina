@@ -120,7 +120,25 @@ pub fn saveStateDict(allocator: Allocator, writer: *std.Io.Writer, entries: []co
 /// Load a state dict saved by `saveStateDict` into `entries`, matching stream
 /// entries by NAME (any order). Shape and dtype must match the destination
 /// exactly. Strict (the default) demands a one-to-one match.
+///
+/// Stream form: consumes exactly one safetensors frame from `reader`, staged
+/// whole in RAM (header + payload) before the copy pass, so the peak is one
+/// payload over the destinations. For a file-backed checkpoint whose payload
+/// rivals the model (a full-weight resume), open it with
+/// `safetensors.File.loadMmap` and use `loadStateDictFromFile`.
 pub fn loadStateDict(allocator: Allocator, reader: *std.Io.Reader, entries: []const NamedTensorMut, options: LoadOptions) !void {
+    var file = try safetensors.readPrefix(allocator, reader);
+    defer file.deinit();
+    try loadStateDictFromFile(allocator, &file, entries, options);
+}
+
+/// `loadStateDict` over an already-parsed safetensors `File`: validates
+/// every entry from the header and copies straight from the file's tensor
+/// bytes. With a `File.loadMmap` file the pages stream from the mapping as
+/// they are copied, so nothing beyond the destinations is resident. Same
+/// name matching, alias remap, strictness, and transactional guarantee as
+/// the stream form.
+pub fn loadStateDictFromFile(allocator: Allocator, file: *const safetensors.File, entries: []const NamedTensorMut, options: LoadOptions) !void {
     var index = std.StringHashMap(usize).init(allocator);
     defer index.deinit();
     try index.ensureTotalCapacity(@intCast(entries.len));
@@ -137,9 +155,6 @@ pub fn loadStateDict(allocator: Allocator, reader: *std.Io.Reader, entries: []co
     const srcs = try allocator.alloc(?[]const u8, entries.len);
     defer allocator.free(srcs);
     @memset(srcs, null);
-
-    var file = try safetensors.readPrefix(allocator, reader);
-    defer file.deinit();
 
     // Pass 1 — validate only; no live buffer is written.
     for (file.tensors) |*tensor| {

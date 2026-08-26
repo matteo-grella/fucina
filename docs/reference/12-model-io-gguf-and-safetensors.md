@@ -718,8 +718,11 @@ not `"__metadata__"`); dtypes map through `dtypeFromFucina`/`dtypeToFucina`
 ([§12.5](12-model-io-gguf-and-safetensors.md#125-safetensors-srcsafetensorszig)), with only F32/F16/BF16/I64 produced or accepted; tensor payloads are
 raw little-endian storage bytes, no conversion in either direction.
 `loadStateDict` consumes one frame from a stream via `readPrefix` ([§11.8](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#118-safetensors-readwrite-surface-srcsafetensorszig)),
-so a state dict can be embedded in a longer stream. Any safetensors
-consumer can read the file; GGUF remains a separate interop/export codec.
+so a state dict can be embedded in a longer stream; `loadStateDictFromFile`
+takes a parsed `File` instead (a `File.loadMmap` mapping for payloads the
+size of the model, [§12.5](12-model-io-gguf-and-safetensors.md#125-safetensors-srcsafetensorszig)), copying out of
+the file's tensor bytes with no staging. Any safetensors consumer can read
+the file; GGUF remains a separate interop/export codec.
 
 ## 12.7 Training-checkpoint directory and native optimizer frames (`src/training_checkpoint.zig`, `src/optim.zig`)
 

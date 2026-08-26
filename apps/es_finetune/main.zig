@@ -808,13 +808,14 @@ fn loadEsCheckpoint(
             try trainer.loadAdapters(&reader.interface);
         },
         .full => {
+            // The payload IS the model: map it and let the copy pass fault
+            // the pages in, instead of staging a second model in RAM
+            // through the stream reader.
             const model_path = try training_checkpoint.pathJoin(allocator, dir_path, training_checkpoint.model_state_file);
             defer allocator.free(model_path);
-            var file = try std.Io.Dir.cwd().openFile(io, model_path, .{});
-            defer file.close(io);
-            var buffer: [64 * 1024]u8 = undefined;
-            var reader = file.reader(io, &buffer);
-            try full_registry.loadStateDict(&reader.interface, .{});
+            var file = try fucina.safetensors.File.loadMmap(allocator, io, model_path);
+            defer file.deinit();
+            try full_registry.loadStateDictFromFile(&file, .{});
         },
     }
     return state;

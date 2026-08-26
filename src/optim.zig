@@ -115,6 +115,7 @@ pub const NamedTensorMut = state_dict.NamedTensorMut;
 pub const LoadOptions = state_dict.LoadOptions;
 pub const saveStateDict = state_dict.saveStateDict;
 pub const loadStateDict = state_dict.loadStateDict;
+pub const loadStateDictFromFile = state_dict.loadStateDictFromFile;
 
 test {
     _ = common;

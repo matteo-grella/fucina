@@ -25,6 +25,14 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `state_dict.loadStateDictFromFile` (re-exported as
+  `optim.loadStateDictFromFile`) and `ParamRegistry.loadStateDictFromFile`:
+  the named state-dict load over a parsed `safetensors.File`, copying out of
+  the file's tensor bytes with the same matching, alias remap, strictness,
+  and transactional guarantee as the stream form. Over a `File.loadMmap`
+  mapping a full-model checkpoint resumes at one model of resident memory
+  (the stream form stages the whole frame first); `es-finetune --mode full`
+  resumes through it.
 - `fucina-run --spec`: draft-model-free speculative decode for every
   rewind-capable registered family (the cascade SAM + token-recycling
   draft source over the shared `SpeculativeDecoder`; greedy-only, same

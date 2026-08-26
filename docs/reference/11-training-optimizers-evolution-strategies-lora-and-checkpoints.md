@@ -458,7 +458,8 @@ named form.
 
 **Named, dtype-aware state dicts.** Re-exported from `fucina.state_dict`
 ([§11.7](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#117-state-dicts-srcstate_dictzig)) for convenience: `optim.NamedTensor`, `optim.NamedTensorMut`,
-`optim.LoadOptions`, `optim.saveStateDict`, `optim.loadStateDict`. Entries
+`optim.LoadOptions`, `optim.saveStateDict`, `optim.loadStateDict`,
+`optim.loadStateDictFromFile`. Entries
 carry a unique name, dtype (f32/f16/bf16/i64, raw byte passthrough), shape,
 and bytes; the wire format is a valid safetensors file; the load matches
 stream entries BY NAME so entry order is free. This is the portable format — it is
@@ -600,6 +601,7 @@ pub const ParamRegistry = struct {
     pub fn addParamsTo(self: *const ParamRegistry, opt: anytype) !void
     pub fn saveStateDict(self: *const ParamRegistry, writer: *std.Io.Writer) !void
     pub fn loadStateDict(self: *ParamRegistry, reader: *std.Io.Reader, options: state_dict.LoadOptions) !void
+    pub fn loadStateDictFromFile(self: *ParamRegistry, file: *const safetensors.File, options: state_dict.LoadOptions) !void
 };
 pub const ParamView = struct { name, dtype, shape, bytes: []u8, trainable: bool }; // also `fucina.ParamView`
 ```
@@ -632,8 +634,12 @@ pub const ParamView = struct { name, dtype, shape, bytes: []u8, trainable: bool 
   `opt.addParamNamed(&param, name)` — so trainers delegate registration and
   checkpoint identity to the registry in one call, and optimizer slot names
   automatically equal the state-dict paths.
-- `saveStateDict`/`loadStateDict` wrap `fucina.state_dict` over the full
-  entry set (frozen included).
+- `saveStateDict`/`loadStateDict`/`loadStateDictFromFile` wrap
+  `fucina.state_dict` over the full entry set (frozen included). The stream
+  load stages one frame in RAM; the file load copies out of a parsed
+  `safetensors.File`, so a full-weight registry resumes from a
+  `File.loadMmap` mapping without a second model of resident memory (the
+  `es-finetune --mode full` resume path).
 
 **Names are the on-disk schema.** A registered name is a checkpoint field
 path: strict loading matches by exact name, so RENAMING a parameter path
@@ -705,6 +711,7 @@ pub const Alias = struct { old: []const u8, new: []const u8 };
 pub const LoadOptions = struct { strict: bool = true, aliases: []const Alias = &.{} };
 pub fn saveStateDict(allocator, writer: *std.Io.Writer, entries: []const NamedTensor) !void
 pub fn loadStateDict(allocator, reader: *std.Io.Reader, entries: []const NamedTensorMut, options: LoadOptions) !void
+pub fn loadStateDictFromFile(allocator, file: *const safetensors.File, entries: []const NamedTensorMut, options: LoadOptions) !void
 ```
 
 `NamedTensor.of` accepts a pointer to any contiguous f32/f16/bf16/i64
@@ -731,6 +738,15 @@ transactional: every stream entry validates against its destination before
 any destination byte is written; pass 2 commits with plain `@memcpy`s, so
 any error leaves every destination byte-unchanged. Error set:
 `state_dict.Error` (the same checkpoint error names as `optim.OptimError`).
+
+`loadStateDict` stages the whole frame in RAM (`readPrefix`) before the
+copy pass, so its peak is one payload on top of the destinations.
+`loadStateDictFromFile` is the same load over an already-parsed
+`safetensors.File`: it validates from the header and copies out of the
+file's tensor bytes, with identical matching, remap, strictness, and
+transactional behavior. Over a `File.loadMmap` file the pages stream from
+the mapping as they are copied, which is how a full-model checkpoint (a
+payload the size of the model) resumes at one model of resident memory.
 
 ```zig
 test "state_dict: named save/load round-trip" {
@@ -768,7 +784,8 @@ directly: `File` (`parse`, `parseOwned`, `load`, `loadMmap`, `deinit`,
 `*.safetensors.index.json` multi-file layout; `isIndexPath` recognizes it),
 `TensorInfo` (+ `sliceBytesAlloc` with `TensorInfo.Slice` ranges),
 `readPrefix` (one safetensors payload from a stream — what `loadStateDict`
-uses), `serialize` / `serializeAlloc` / `saveFileAtomic`, `Tensor`,
+uses; `loadStateDictFromFile` takes a `File` directly), `serialize` /
+`serializeAlloc` / `saveFileAtomic`, `Tensor`,
 `MetadataEntry`, `DType` (+ `bitsize`, `string`), `dtypeFromFucina` /
 `dtypeToFucina`, `max_header_size`, `Error`. Container format, dtype
 coverage, and mmap semantics are [§12](12-model-io-gguf-and-safetensors.md).
