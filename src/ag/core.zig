@@ -26,7 +26,7 @@ pub const BackwardFunction = struct {
 
     pub const VTable = struct {
         operands: *const fn (*const anyopaque) []const ?*GradState,
-        backward: *const fn (*const anyopaque, *ExecContext, *const Tensor, []const bool, []?Tensor) anyerror!void,
+        backward: *const fn (*anyopaque, *ExecContext, *const Tensor, []?Tensor) anyerror!void,
         deinit: *const fn (*anyopaque, Allocator) void,
         prefer_async_backward: bool = false,
         estimated_work: ?*const fn (*const anyopaque) usize = null,
@@ -36,14 +36,8 @@ pub const BackwardFunction = struct {
         return self.vtable.operands(self.ptr);
     }
 
-    pub fn backward(
-        self: BackwardFunction,
-        ctx: *ExecContext,
-        gy: *const Tensor,
-        needs_grad: []const bool,
-        out: []?Tensor,
-    ) !void {
-        return self.vtable.backward(self.ptr, ctx, gy, needs_grad, out);
+    pub fn backward(self: BackwardFunction, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+        return self.vtable.backward(self.ptr, ctx, gy, out);
     }
 
     pub fn deinit(self: BackwardFunction, allocator: Allocator) void {
@@ -120,13 +114,29 @@ pub fn destroyNode(comptime Record: type, allocator: Allocator, record: *Record)
     allocator.destroy(node);
 }
 
+/// The operand slots of a record: its `parents` field (an array or a
+/// slice of `?*GradState`) or, for the records that name it so, `states`.
+pub fn recordOperands(record: anytype) []const ?*GradState {
+    const Record = @TypeOf(record.*);
+    if (comptime @hasField(Record, "parents")) return record.parents[0..];
+    if (comptime @hasField(Record, "states")) return record.states[0..];
+    @compileError(@typeName(Record) ++ " has neither a `parents` nor a `states` field");
+}
+
+/// True when operand slot `i` needs a gradient: the slot holds a state.
+/// The engine sizes `out` to the operand count, so this is the only test a
+/// VJP needs before writing `out[i]`.
+pub fn needs(record: anytype, i: usize) bool {
+    return recordOperands(record)[i] != null;
+}
+
 /// Synthesize a record's `BackwardFunction.VTable` from its typed decls,
 /// replacing the hand-written anyopaque plumbing every record used to
 /// repeat:
-/// - `operands` returns `self.parents[0..]` (array or slice field alike);
-/// - `backward` casts and delegates to
-///   `Record.vjp(self, ctx, gy, needs_grad, out)` — the record's typed
-///   backward body, verbatim minus the cast lines;
+/// - `operands` returns the record's operand slots (`recordOperands`);
+/// - `backward` casts and delegates to `Record.vjp(self, ctx, gy, out)`,
+///   the record's typed backward body (`core.needs(self, i)` says which
+///   `out[i]` to fill);
 /// - `deinit` releases the operand references (`releaseParents`), runs
 ///   `Record.deinitFields(self, allocator)` iff declared (records owning
 ///   tensors/slices release them there), then frees the co-allocated node;
@@ -138,23 +148,17 @@ pub fn recordVTable(comptime Record: type) BackwardFunction.VTable {
     const Shim = struct {
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Record = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
+            return recordOperands(self);
         }
 
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            const self: *const Record = @ptrCast(@alignCast(ptr));
-            return Record.vjp(self, ctx, gy, needs_grad, out);
+        fn backward(ptr: *anyopaque, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) anyerror!void {
+            const self: *Record = @ptrCast(@alignCast(ptr));
+            return Record.vjp(self, ctx, gy, out);
         }
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Record = @ptrCast(@alignCast(ptr));
-            releaseParents(self.parents[0..]);
+            releaseParents(recordOperands(self));
             if (comptime @hasDecl(Record, "deinitFields")) self.deinitFields(allocator);
             destroyNode(Record, allocator, self);
         }
@@ -388,20 +392,6 @@ pub const GradState = struct {
         const local_gy = gy orelse return;
 
         const stack_operand_capacity = 8;
-        var needs_grad_stack: [stack_operand_capacity]bool = undefined;
-        var needs_grad_heap: ?[]bool = null;
-        defer if (needs_grad_heap) |buf| engine.allocator.free(buf);
-        const needs_grad = if (operands.len <= stack_operand_capacity)
-            needs_grad_stack[0..operands.len]
-        else blk: {
-            const buf = try engine.allocator.alloc(bool, operands.len);
-            needs_grad_heap = buf;
-            break :blk buf;
-        };
-        for (operands, needs_grad) |operand, *need| {
-            need.* = operand != null;
-        }
-
         var gxs_stack: [stack_operand_capacity]?Tensor = undefined;
         var gxs_heap: ?[]?Tensor = null;
         defer if (gxs_heap) |buf| engine.allocator.free(buf);
@@ -422,13 +412,13 @@ pub const GradState = struct {
             }
         }
 
-        function.backward(engine.ctx, local_gy, needs_grad, gxs) catch |err| {
-            for (operands, gxs, needs_grad) |operand, *gx, need| {
+        function.backward(engine.ctx, local_gy, gxs) catch |err| {
+            for (operands, gxs) |operand, *gx| {
                 if (gx.*) |*owned| {
                     owned.deinit();
                     gx.* = null;
                 }
-                if (need) operand.?.finishGradContribution(engine);
+                if (operand) |state| state.finishGradContribution(engine);
             }
             return err;
         };
@@ -447,22 +437,20 @@ pub const GradState = struct {
 
         var missing_backward_gradient = false;
         var first_error: ?anyerror = null;
-        for (operands, gxs, needs_grad) |operand, *gx, need| {
-            if (need) {
-                if (gx.*) |owned| {
-                    gx.* = null;
-                    const state = operand.?;
-                    if (state.accGradOwnedReady(engine, owned) catch |err| blk: {
-                        if (first_error == null) first_error = err;
-                        break :blk false;
-                    }) {
-                        ready[ready_len] = state;
-                        ready_len += 1;
-                    }
-                } else {
-                    operand.?.finishGradContribution(engine);
-                    missing_backward_gradient = true;
+        for (operands, gxs) |operand, *gx| {
+            const state = operand orelse continue;
+            if (gx.*) |owned| {
+                gx.* = null;
+                if (state.accGradOwnedReady(engine, owned) catch |err| blk: {
+                    if (first_error == null) first_error = err;
+                    break :blk false;
+                }) {
+                    ready[ready_len] = state;
+                    ready_len += 1;
                 }
+            } else {
+                state.finishGradContribution(engine);
+                missing_backward_gradient = true;
             }
         }
 
@@ -708,42 +696,19 @@ test {
 
 test "backward scheduler releases pending operand on missing gradient" {
     const MissingGradientBackward = struct {
-        parent: ?*GradState,
+        parents: [1]?*GradState,
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return @as([*]const ?*GradState, @ptrCast(&self.parent))[0..1];
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            _ = ptr;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
             _ = ctx;
             _ = gy;
-            try std.testing.expectEqual(@as(usize, 1), needs_grad.len);
-            try std.testing.expect(needs_grad[0]);
+            try std.testing.expect(needs(self, 0));
             try std.testing.expectEqual(@as(usize, 1), out.len);
             out[0] = null;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            releaseParents(operands(ptr));
-            destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -760,7 +725,7 @@ test "backward scheduler releases pending operand on missing gradient" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(ctx.allocator, MissingGradientBackward{ .parent = parent });
+    const output = try createNode(ctx.allocator, MissingGradientBackward{ .parents = .{parent} });
     defer output.release();
 
     try std.testing.expectError(AgError.MissingBackwardGradient, backwardGradOne(&ctx, output, &output_value));
@@ -770,43 +735,20 @@ test "backward scheduler releases pending operand on missing gradient" {
 
 test "backward scheduler releases pending operand on backward error" {
     const FailingBackward = struct {
-        parent: ?*GradState,
+        parents: [1]?*GradState,
 
         const Self = @This();
         const BackwardError = error{FailedBackward};
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return @as([*]const ?*GradState, @ptrCast(&self.parent))[0..1];
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            _ = ptr;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
             _ = ctx;
             _ = gy;
-            _ = out;
-            try std.testing.expectEqual(@as(usize, 1), needs_grad.len);
-            try std.testing.expect(needs_grad[0]);
+            try std.testing.expect(needs(self, 0));
+            try std.testing.expectEqual(@as(usize, 1), out.len);
             return BackwardError.FailedBackward;
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            releaseParents(operands(ptr));
-            destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -823,7 +765,7 @@ test "backward scheduler releases pending operand on backward error" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(ctx.allocator, FailingBackward{ .parent = parent });
+    const output = try createNode(ctx.allocator, FailingBackward{ .parents = .{parent} });
     defer output.release();
 
     try std.testing.expectError(FailingBackward.BackwardError.FailedBackward, backwardGradOne(&ctx, output, &output_value));

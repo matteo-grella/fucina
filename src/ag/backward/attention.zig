@@ -30,10 +30,10 @@ pub const GroupedCausalAttentionBackward = struct {
     causal: bool,
     estimated_work: usize,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const need_q = needs_grad.len > 0 and needs_grad[0];
-        const need_k = needs_grad.len > 1 and needs_grad[1];
-        const need_v = needs_grad.len > 2 and needs_grad[2];
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        const need_q = core.needs(self, 0);
+        const need_k = core.needs(self, 1);
+        const need_v = core.needs(self, 2);
         var grads = try ctx.groupedAttentionBackward(.{
             .q = &self.q,
             .k = &self.k,

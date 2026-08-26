@@ -670,8 +670,9 @@ Backward execution (`backwardGrad`/`backwardGradSerial` in `ag/core.zig`):
 - Uses the `ExecContext` thread pool for async-capable backward records;
   `backwardGradSerial` disables node-level spawning (required by the
   checkpoint recompute's threadlocal nesting guard).
-- Passes `needs_grad` into backward records so unnecessary gradients are not
-  computed, and accumulates gradients in-place under a per-state mutex.
+- Backward records fill only the operand slots that hold a state
+  (`core.needs`), so unnecessary gradients are not computed, and gradients
+  accumulate in-place under a per-state mutex.
 
 Backward coverage spans the pointwise/reduction/view/norm/softmax/RoPE/
 cross-entropy surface plus conv1d/convTranspose1d, snake, groupNorm,

@@ -41,19 +41,17 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
             return std.math.mul(usize, x.len(), weight.shape.at(0) * branches) catch std.math.maxInt(usize);
         }
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_x = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_x = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
             // The record exclusively owns its saved logits and the VJP
-            // consumes them in place; the const-cast is the scheduler's
-            // `*const` record pointer meeting that single-writer ownership.
-            const mut_self: *Self = @constCast(self);
+            // consumes them in place (single-writer ownership).
             if (self.consumed) return error.LinearCrossEntropyBackwardConsumed;
-            mut_self.consumed = true;
+            self.consumed = true;
             var grads = try ctx.linearCrossEntropyBackwardUpstream(
-                &mut_self.x,
-                &mut_self.weight,
-                &mut_self.logits,
+                &self.x,
+                &self.weight,
+                &self.logits,
                 self.labels,
                 options,
                 gy,
@@ -115,18 +113,17 @@ pub const LinearDistillBackward = struct {
         return std.math.mul(usize, x_sel.len(), weight.shape.at(0) * @max(branches, 1)) catch std.math.maxInt(usize);
     }
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        const need_x = needs_grad.len > 0 and needs_grad[0];
-        const need_weight = needs_grad.len > 1 and needs_grad[1];
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        const need_x = core.needs(self, 0);
+        const need_weight = core.needs(self, 1);
         // Single-writer in-place consumption of the saved logits, as
         // LinearCrossEntropyBackward.
-        const mut_self: *Self = @constCast(self);
         if (self.consumed) return error.LinearDistillBackwardConsumed;
-        mut_self.consumed = true;
+        self.consumed = true;
         var grads = try ctx.linearDistillBackwardUpstream(
-            &mut_self.x_sel,
-            &mut_self.weight,
-            &mut_self.logits,
+            &self.x_sel,
+            &self.weight,
+            &self.logits,
             self.sel_rows,
             self.row_count,
             self.local_rows,
@@ -180,8 +177,8 @@ pub fn CrossEntropyExtBackward(comptime tags: anytype, comptime axis: usize, com
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             // For `.mean`/`.sum` the upstream gy must be a scalar; for `.none`
             // it's the per-position gradient tensor (class axis removed).
             var stats_options = options;
@@ -212,11 +209,11 @@ fn ElementwiseLossBackward(comptime Options: type, comptime options: Options, co
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try upstream_fn(ctx, &self.input, &self.target, options, gy, .input);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try upstream_fn(ctx, &self.input, &self.target, options, gy, .target);
             }
         }

@@ -36,14 +36,14 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = if (comptime trans_b)
                     try ctx.matmul(.f32, .plain, gy, &self.right)
                 else
                     try ctx.matmul(.f32, .trans_b, gy, &self.right);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = if (comptime trans_b)
                     try ctx.matmul(.f32, .trans_a, gy, &self.left)
                 else
@@ -69,8 +69,8 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 var full = switch (kind) {
                     .plain => try ctx.bmm(.f32, .trans_b, gy, &self.right),
                     .trans_a => try ctx.bmm(.f32, .trans_b, &self.right, gy),
@@ -80,7 +80,7 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
                 out[0] = try ctx.reduceBroadcast(&full, self.left.shape.slice());
             }
 
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var full = switch (kind) {
                     .plain => try ctx.bmm(.f32, .trans_a, &self.left, gy),
                     .trans_a => try ctx.bmm(.f32, .plain, &self.left, gy),
@@ -138,9 +138,9 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
             err: ?anyerror = null,
         };
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_left = needs_grad.len > 0 and needs_grad[0];
-            const need_right = needs_grad.len > 1 and needs_grad[1];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_left = core.needs(self, 0);
+            const need_right = core.needs(self, 1);
 
             if (comptime exec_mod.parallel_dot_backward_branches) {
                 if (need_left and need_right) {
@@ -251,10 +251,10 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
             err: ?anyerror = null,
         };
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_base = needs_grad.len > 0 and needs_grad[0];
-            const need_left = needs_grad.len > 1 and needs_grad[1];
-            const need_right = needs_grad.len > 2 and needs_grad[2];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_base = core.needs(self, 0);
+            const need_left = core.needs(self, 1);
+            const need_right = core.needs(self, 2);
 
             if (need_base) {
                 out[0] = try gy.cloneView();
@@ -369,8 +369,8 @@ pub fn ConstRhsEinsumBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
                     try ctx.dequantizeTensor(rhs_dtype, &self.right_value)
                 else
@@ -383,7 +383,7 @@ pub fn ConstRhsEinsumBackward(
                 defer grad.deinit();
                 out[0] = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
                 defer grad.deinit();
                 out[1] = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
@@ -437,7 +437,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             return parallel.saturatedMul3(result_elems, k, branches);
         }
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             const m = self.left.shape.at(0);
             const k = self.left.shape.at(1);
             const n = self.rhs.n;
@@ -447,7 +447,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             var gy2d = try gy_ready.reshape(&.{ m, n });
             defer gy2d.deinit();
 
-            if (needs_grad.len > 0 and needs_grad[0]) {
+            if (core.needs(self, 0)) {
                 var right_f32 = try ctx.empty(.f32, .{ n, k });
                 defer right_f32.deinit();
                 const rows = right_f32.data();
@@ -464,7 +464,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
                 out[0] = dx;
             }
 
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.matmul(.f32, .trans_a, &gy2d, &self.left);
             }
         }

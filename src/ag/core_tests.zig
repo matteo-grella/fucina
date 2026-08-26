@@ -11,7 +11,6 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const Tensor = tensor.Tensor;
 
-const BackwardFunction = core.BackwardFunction;
 const GradState = core.GradState;
 const backwardGrad = core.backwardGrad;
 const backwardGradOne = core.backwardGradOne;
@@ -22,42 +21,19 @@ test "backward scheduler handles more operands than stack scratch capacity" {
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents;
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
             _ = gy;
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            try std.testing.expectEqual(self.parents.len, needs_grad.len);
             try std.testing.expectEqual(self.parents.len, out.len);
-
-            for (needs_grad, out, 0..) |need, *slot, i| {
-                if (need) {
-                    slot.* = try ctx.scalar(.f32, @floatFromInt(i + 1));
-                }
+            for (out, 0..) |*slot, i| {
+                if (core.needs(self, i)) slot.* = try ctx.scalar(.f32, @floatFromInt(i + 1));
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(self.parents);
+        pub fn deinitFields(self: *Self, allocator: Allocator) void {
             allocator.free(self.parents);
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -112,41 +88,15 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parents[0..];
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            _ = ptr;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
             _ = ctx;
-            try std.testing.expectEqual(@as(usize, 3), needs_grad.len);
             try std.testing.expectEqual(@as(usize, 3), out.len);
-
-            for (needs_grad, out) |need, *slot| {
-                if (need) {
-                    slot.* = try gy.cloneView();
-                }
+            for (out, 0..) |*slot, i| {
+                if (core.needs(self, i)) slot.* = try gy.cloneView();
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(operands(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -186,40 +136,16 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
 
 test "multi-output backward adds a seed when a prior output already touched that grad" {
     const ScaleToParentBackward = struct {
-        parent: [1]?*GradState,
+        parents: [1]?*GradState,
         factor: f32,
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parent[0..];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
         }
 
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            if (needs_grad[0]) {
-                out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
-            }
-        }
-
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(operands(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -233,10 +159,10 @@ test "multi-output backward adds a seed when a prior output already touched that
     const x = try GradState.leaf(ctx.allocator);
     defer x.release();
 
-    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 3 });
+    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
     defer z.release();
 
-    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{z}, .factor = 2 });
+    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{z}, .factor = 2 });
     defer y.release();
 
     var y_value = try ctx.scalar(.f32, 0);
@@ -257,40 +183,16 @@ test "multi-output backward adds a seed when a prior output already touched that
 
 test "failed output seeding leaves the graph re-runnable" {
     const ScaleToParentBackward = struct {
-        parent: [1]?*GradState,
+        parents: [1]?*GradState,
         factor: f32,
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.parent[0..];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
         }
 
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const Tensor,
-            needs_grad: []const bool,
-            out: []?Tensor,
-        ) anyerror!void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            if (needs_grad[0]) {
-                out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
-            }
-        }
-
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(operands(ptr));
-            core.destroyNode(Self, allocator, self);
-        }
-
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -304,10 +206,10 @@ test "failed output seeding leaves the graph re-runnable" {
     const x = try GradState.leaf(ctx.allocator);
     defer x.release();
 
-    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 2 });
+    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 2 });
     defer y.release();
 
-    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 3 });
+    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
     defer z.release();
 
     var y_value = try ctx.scalar(.f32, 0);

@@ -27,8 +27,8 @@ pub fn RopeBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.rope(rawRank(tags.len), gy, position_axis, feature_axis, .{ .positions = self.positions, .theta_base = self.theta_base }, mode, true);
         }
 
@@ -56,8 +56,8 @@ pub fn RopeTableBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             // Mirrors the forward: the partial entry self-falls-back to the
             // full kernel when the table spans the whole feature axis.
             out[0] = try ctx.ropeWithTable(rawRank(tags.len), gy, position_axis, feature_axis, &self.inverse_table, mode);

@@ -236,9 +236,11 @@ materializes a private copy when the buffer is shared — a VJP may therefore
 hand back cheap refcounted *views* of `gy` without risking cross-state
 aliasing (`src/ag/core_tests.zig` pins this copy-on-write behavior).
 
-**`needs_grad` pruning.** Each VJP receives `needs_grad: []const bool`
-(true where the operand slot has a `GradState`), so gradients for constant
-operands — frozen weights, masks, cached KV — are never computed.
+**Operand pruning.** A VJP fills `out[i]` only for the operand slots that
+hold a `GradState` (`core.needs(record, i)`), so gradients for constant
+operands — frozen weights, masks, cached KV — are never computed. The
+`customVjp` Spec keeps its `needs_grad: []const bool` view of the same
+information.
 
 **Parallel backward vs `backwardGradSerial`.** The engine grabs the
 context's work pool (`ctx.tryWorkPool()`, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)). When several *independent*

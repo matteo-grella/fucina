@@ -26,8 +26,8 @@ pub fn SumBackward(comptime source_tags: anytype, comptime result_tags: anytype)
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
         }
 
@@ -42,8 +42,8 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var expanded = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
             defer expanded.deinit();
@@ -67,8 +67,8 @@ pub fn MaskedSumBackward(comptime source_tags: anytype, comptime result_tags: an
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try gateGradientByMask(mask_dtype, result_tags, source_tags, ctx, gy, &self.mask, self.source_shape);
         }
 
@@ -98,8 +98,8 @@ pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: a
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             // Divide at the RESULT shape (one value per lane) before
             // broadcasting, so the divide runs over the small tensor. A lane
@@ -139,9 +139,8 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = self;
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.cumsumReverse(.f32, rawRank(source_tags.len), gy, axis);
         }
 
@@ -163,8 +162,8 @@ pub fn SegmentSumBackward(comptime source_tags: anytype, comptime axis: usize) t
             allocator.free(self.offsets);
         }
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.segmentBroadcast(rawRank(source_tags.len), gy, axis, self.offsets, self.n);
         }
 
@@ -189,10 +188,10 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_b = needs_grad.len > 0 and needs_grad[0];
-            const need_a = needs_grad.len > 1 and needs_grad[1];
-            const need_init = needs_grad.len > 2 and needs_grad[2];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_b = core.needs(self, 0);
+            const need_a = core.needs(self, 1);
+            const need_init = core.needs(self, 2);
             if (!need_b and !need_a and !need_init) return;
             const initial_ptr: ?*const RawTensor = if (self.initial_value) |*ini| ini else null;
             var grads = try ctx.linearRecurrenceBackward(rawRank(source_tags.len), gy, &self.a_view, &self.h_value, initial_ptr, axis, need_a, need_init);
@@ -235,8 +234,8 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
             defer x_ready.deinit();
@@ -297,8 +296,8 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
             defer x_ready.deinit();

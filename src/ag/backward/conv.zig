@@ -34,8 +34,8 @@ pub fn CausalDepthwiseConv1dBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.causalDepthwiseConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
@@ -45,7 +45,7 @@ pub fn CausalDepthwiseConv1dBackward(
                     self.dilation,
                 );
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.causalDepthwiseConv1dBackwardKernel(
                     rawRank(input_tags.len),
                     &self.input_value,
@@ -99,8 +99,8 @@ pub fn CausalConv1dBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.causalConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
@@ -110,7 +110,7 @@ pub fn CausalConv1dBackward(
                     self.dilation,
                 );
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.causalConv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
@@ -166,8 +166,8 @@ pub fn GroupedCausalConv1dBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.groupedCausalConv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
@@ -178,7 +178,7 @@ pub fn GroupedCausalConv1dBackward(
                     self.groups,
                 );
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.groupedCausalConv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
@@ -243,14 +243,14 @@ pub const Conv2dBackward = struct {
         return std.math.mul(usize, parallel.saturatedMul3(input.shape.at(0) * input.shape.at(1), weight.shape.at(3), weight.shape.at(0)), weight.shape.at(1) * weight.shape.at(2)) catch std.math.maxInt(usize);
     }
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len > 0 and needs_grad[0]) {
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (core.needs(self, 0)) {
             out[0] = try ctx.conv2dBackwardInput(gy, &self.weight_value, self.input_shape[0], self.input_shape[1], self.stride, self.pad, self.groups);
         }
-        if (needs_grad.len > 1 and needs_grad[1]) {
+        if (core.needs(self, 1)) {
             out[1] = try ctx.conv2dBackwardWeight(&self.input_value, gy, self.weight_shape[1], self.weight_shape[2], self.stride, self.pad, self.groups);
         }
-        if (needs_grad.len > 2 and needs_grad[2]) {
+        if (core.needs(self, 2)) {
             var s0 = try ctx.sumAxis(.f32, 3, gy, 0); // Σ over oh -> [ow, cout]
             defer s0.deinit();
             out[2] = try ctx.sumAxis(.f32, 2, &s0, 0); // Σ over ow -> [cout]
@@ -278,8 +278,8 @@ pub const UnfoldBackward = struct {
 
     const Self = @This();
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
         out[0] = try ctx.fold(gy, self.output_size, self.kernel, self.stride, self.pad);
     }
 
@@ -297,8 +297,8 @@ pub const FoldBackward = struct {
 
     const Self = @This();
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
         out[0] = try ctx.unfold(gy, self.kernel, self.stride, self.pad);
     }
 
@@ -325,8 +325,8 @@ pub fn Conv1dBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.conv1dBackwardInput(
                     rawRank(input_tags.len),
                     gy,
@@ -340,7 +340,7 @@ pub fn Conv1dBackward(
                     self.groups,
                 );
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.conv1dBackwardWeight(
                     rawRank(input_tags.len),
                     &self.input_value,
@@ -386,7 +386,7 @@ pub fn Conv1dBackward(
 /// `output_pad` rows, onto which the forward broadcast the bias. The weight
 /// gradient is wrt the PACKED `[K*OC, IC]` weight2 layout exactly as passed
 /// to the forward. The bias operand is optional: its parent slot is null when
-/// the forward had no bias, so its needs_grad flag can never be set.
+/// the forward had no bias, so it never receives a gradient.
 pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
     return struct {
         parents: [3]?*GradState,
@@ -400,10 +400,10 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
-            const need_bias = needs_grad.len > 2 and needs_grad[2];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
+            const need_bias = core.needs(self, 2);
 
             if (need_input or need_weight) {
                 var gcol = try ctx.col2im1dBackward(

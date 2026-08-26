@@ -68,14 +68,8 @@ pub fn PointwiseBackward(
             return tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, result_tags, &weight);
         }
 
-        pub fn vjp(
-            self: *const Self,
-            ctx: *ExecContext,
-            gy: *const RawTensor,
-            needs_grad: []const bool,
-            out: []?RawTensor,
-        ) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 var g = switch (op) {
                     .add, .sub => try gy.cloneView(),
                     .mul => try tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, right_tags, &self.right_value.?),
@@ -85,7 +79,7 @@ pub fn PointwiseBackward(
                 defer g.deinit();
                 out[0] = try reduceGradientToTags(result_tags, left_tags, ctx, &g, self.left_shape);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var g = switch (op) {
                     .add => try gy.cloneView(),
                     .sub => try ctx.scale(.f32, gy, -1),
@@ -128,9 +122,8 @@ pub fn IdentityBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = self;
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try contiguousForRead(ctx, gy);
         }
 
@@ -144,8 +137,8 @@ pub const ReluBackward = struct {
     parents: [1]?*GradState,
     input: RawTensor,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var x = try contiguousForRead(ctx, &self.input);
         defer x.deinit();
@@ -178,8 +171,8 @@ pub const SoftcapBackward = struct {
     output: RawTensor,
     cap: f32,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var y = try contiguousForRead(ctx, &self.output);
         defer y.deinit();
@@ -211,8 +204,8 @@ pub const LeakyReluBackward = struct {
     input: RawTensor,
     negative_slope: f32,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var x = try contiguousForRead(ctx, &self.input);
         defer x.deinit();
@@ -283,8 +276,8 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var x = try contiguousForRead(ctx, &self.input);
             defer x.deinit();
@@ -358,8 +351,8 @@ pub fn ScaleBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.scale(.f32, gy, self.scalar_value);
         }
 
@@ -380,8 +373,8 @@ pub fn DropoutBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.dropoutBackward(gy, self.p, self.seed);
         }
 
@@ -397,8 +390,8 @@ pub const ClampBackward = struct {
     min_value: f32,
     max_value: f32,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var x = try contiguousForRead(ctx, &self.input);
         defer x.deinit();
@@ -437,8 +430,8 @@ pub fn GatedBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if ((needs_grad.len == 0 or !needs_grad[0]) and (needs_grad.len < 2 or !needs_grad[1])) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0) and !core.needs(self, 1)) return;
 
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
@@ -456,7 +449,7 @@ pub fn GatedBackward(
             const left_data = left_ready.dataConst();
             const right_data = right_ready.dataConst();
 
-            if (needs_grad.len > 0 and needs_grad[0]) {
+            if (core.needs(self, 0)) {
                 var g = try ctx.empty(.f32, self.result_shape[0..]);
                 if (comptime gatedSourceIsIdentity(op)) {
                     for (gyd, right_data, g.data()) |grad, gate, *dst| {
@@ -471,7 +464,7 @@ pub fn GatedBackward(
                 out[0] = try reduceGradientToTags(result_tags, left_tags, ctx, &g, self.left_shape);
             }
 
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var g = try ctx.empty(.f32, self.result_shape[0..]);
                 for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
                     dst.* = grad * gatedSource(op, left) * gatedActivationDerivative(op, gate);
@@ -498,8 +491,8 @@ pub fn SplitSwiGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.splitSwiGluBackward(rawRank(tags.len), &self.input, gy, axis);
         }
 
@@ -519,8 +512,8 @@ pub fn SplitGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.splitGluBackward(rawRank(tags.len), &self.input, gy, axis);
         }
 
@@ -542,9 +535,8 @@ pub fn AddScalarBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            _ = self;
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.scale(.f32, gy, 1); // identity passthrough as a fresh owned tensor
         }
 
@@ -562,8 +554,8 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var x = try contiguousForRead(ctx, &self.input);
             defer x.deinit();
@@ -596,8 +588,8 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             var m = try contiguousForReadTyped(mask_dtype, ctx, &self.mask);
             defer m.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
@@ -629,12 +621,12 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             var c = try contiguousForReadTyped(cond_dtype, ctx, &self.cond);
             defer c.deinit();
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
-            if (needs_grad.len > 0 and needs_grad[0]) {
+            if (core.needs(self, 0)) {
                 var gx = try ctx.empty(.f32, c.shape.slice());
                 errdefer gx.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gx.data()) |cv, grad, *dst| {
@@ -642,7 +634,7 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
                 }
                 out[0] = gx;
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var gyy = try ctx.empty(.f32, c.shape.slice());
                 errdefer gyy.deinit();
                 for (c.dataConst(), gy_ready.dataConst(), gyy.data()) |cv, grad, *dst| {
@@ -841,11 +833,11 @@ pub const PreluChannelsBackward = struct {
 
     const Self = @This();
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len > 0 and needs_grad[0]) {
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (core.needs(self, 0)) {
             out[0] = try ctx.preluChannelsBackwardInput(gy, &self.input_value, &self.alpha_value);
         }
-        if (needs_grad.len > 1 and needs_grad[1]) {
+        if (core.needs(self, 1)) {
             out[1] = try ctx.preluChannelsBackwardAlpha(gy, &self.input_value, self.channels);
         }
     }
@@ -870,16 +862,16 @@ pub const ChannelAffineBackward = struct {
 
     const Self = @This();
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len > 0 and needs_grad[0]) {
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (core.needs(self, 0)) {
             out[0] = try ctx.channelAffine(gy, &self.scale_value, null);
         }
-        if (needs_grad.len > 1 and needs_grad[1]) {
+        if (core.needs(self, 1)) {
             var prod = try ctx.elementwise(.f32, .mul, gy, &self.input_value);
             defer prod.deinit();
             out[1] = try ctx.reduceBroadcast(&prod, &.{self.channels});
         }
-        if (needs_grad.len > 2 and needs_grad[2]) {
+        if (core.needs(self, 2)) {
             out[2] = try ctx.reduceBroadcast(gy, &.{self.channels});
         }
     }
@@ -909,12 +901,12 @@ pub fn SnakeBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.snakeRowsBackwardInput(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
             }
-            const need_alpha = needs_grad.len > 1 and needs_grad[1];
-            const need_inv_b = needs_grad.len > 2 and needs_grad[2];
+            const need_alpha = core.needs(self, 1);
+            const need_inv_b = core.needs(self, 2);
             if (need_alpha or need_inv_b) {
                 var params = try ctx.snakeRowsBackwardParams(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
                 if (need_alpha) out[1] = params.alpha else params.alpha.deinit();

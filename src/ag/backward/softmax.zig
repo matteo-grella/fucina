@@ -25,8 +25,8 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var x_ready = try contiguousForRead(ctx, &self.input);
             defer x_ready.deinit();
@@ -80,8 +80,8 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             var y_ready = try contiguousForRead(ctx, &self.output);
             defer y_ready.deinit();
@@ -129,8 +129,8 @@ pub fn SoftmaxBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.softmaxBackward(rawRank(tags.len), &self.output, gy, axis, 1);
         }
 
@@ -151,8 +151,8 @@ pub fn SoftmaxExtBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.softmaxBackward(rawRank(tags.len), &self.output, gy, axis, self.scale);
         }
 

@@ -23,8 +23,8 @@ pub fn RmsNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = (try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
         }
 
@@ -46,9 +46,9 @@ pub fn RmsNormMulBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
             if (!need_input and !need_weight) return;
             const result = try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
             out[0] = result.input;
@@ -74,15 +74,15 @@ pub fn RmsNormMulAddBackward(comptime tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
             if (need_input or need_weight) {
                 const result = try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
                 out[0] = result.input;
                 if (need_weight) out[1] = result.weight;
             }
-            if (needs_grad.len > 2 and needs_grad[2]) {
+            if (core.needs(self, 2)) {
                 out[2] = try gy.cloneView();
             }
         }
@@ -105,8 +105,8 @@ pub fn LayerNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = (try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
         }
 
@@ -128,10 +128,10 @@ pub fn LayerNormAffineBackward(comptime tags: anytype, comptime axis: usize) typ
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
-            const need_bias = needs_grad.len > 2 and needs_grad[2];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
+            const need_bias = core.needs(self, 2);
             if (!need_input and !need_weight and !need_bias) return;
 
             const result = try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });
@@ -165,9 +165,9 @@ pub fn RmsNormMulRopeBackward(
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
             if (!need_input and !need_weight) return;
 
             const rank = comptime rawRank(tags.len);
@@ -206,10 +206,10 @@ pub fn GroupNormBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            const need_input = needs_grad.len > 0 and needs_grad[0];
-            const need_weight = needs_grad.len > 1 and needs_grad[1];
-            const need_bias = needs_grad.len > 2 and needs_grad[2];
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            const need_input = core.needs(self, 0);
+            const need_weight = core.needs(self, 1);
+            const need_bias = core.needs(self, 2);
             if (!need_input and !need_weight and !need_bias) return;
 
             const result = try ctx.groupNormBackward(&self.input_value, gy, self.groups, self.eps, .{ .weight = if (self.weight_value) |*w| w else null, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });

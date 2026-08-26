@@ -23,8 +23,8 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             const rank = comptime rawRank(source_tags.len);
             var gy_ready = try contiguousForRead(ctx, gy);

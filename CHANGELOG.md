@@ -203,6 +203,15 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The backward record contract is derived (`core.recordVTable`): the
+  operand slots come from a `parents` array or a `states` slice, `vjp`
+  takes `*Self` and no `needs_grad` slice (`core.needs(self, i)` reads the
+  slot; the engine sizes `out` to the operand count, so the 127
+  `needs_grad.len > i` guards are gone), and `BackwardFunction.VTable.backward`
+  takes a mutable record pointer (the two `@constCast`s in the linear
+  losses go). `customVjp` and `checkpoint` records use the same vtable
+  synthesis instead of hand-written shims; the public `customVjp` Spec
+  still receives its `needs_grad` slice. Internal.
 - Backward records are typed struct literals built by the op
   (`finishOp(tags, ctx, value, Record{ .parents = ..., ... })`;
   `core.createNode(allocator, record)` moves the record into the

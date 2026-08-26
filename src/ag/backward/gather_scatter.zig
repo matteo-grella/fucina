@@ -28,8 +28,8 @@ pub const RelposShiftBackward = struct {
     parents: [1]?*GradState,
     p: usize,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
@@ -69,8 +69,8 @@ pub fn GatherBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.scatterAdd(rawRank(source_tags.len), gy, self.source_shape, axis, self.indices);
         }
 
@@ -90,11 +90,11 @@ pub fn SetSliceBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.zeroSlice(rawRank(tags.len), gy, axis, self.start, self.update_shape[axis]);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 var view = try ctx.narrowAxis(.f32, rawRank(tags.len), gy, axis, self.start, self.update_shape[axis]);
                 defer view.deinit();
                 out[1] = try ctx.materialize(.f32, &view);
@@ -112,11 +112,11 @@ pub fn SetRowsBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 out[0] = try ctx.zeroRows(rawRank(tags.len), gy, axis, self.indices);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.gatherAxis(.f32, rawRank(tags.len), gy, axis, self.indices);
             }
         }
@@ -138,8 +138,8 @@ pub fn TakeAlongBackward(comptime tags: anytype, comptime axis: usize) type {
         const Self = @This();
         const rank = rawRank(tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             // Adjoint of the elementwise gather: scatter-add gy into zeros.
             var zeros_base = try ctx.zeros(.f32, self.source_shape[0..]);
             defer zeros_base.deinit();
@@ -163,8 +163,8 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
         const Self = @This();
         const rank = rawRank(tags.len);
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len > 0 and needs_grad[0]) {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (core.needs(self, 0)) {
                 if (comptime accumulate) {
                     // scatter-add: d/dbase is the identity.
                     out[0] = try contiguousForRead(ctx, gy);
@@ -190,7 +190,7 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
                     out[0] = gb;
                 }
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 // d/dsrc gathers the written slots (the torch formula; on
                 // overwrite-duplicates every writer reads the winner's
                 // gradient, matching torch.scatter's backward).
@@ -213,14 +213,14 @@ pub fn IndexAddBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             // out = self + scatterAdd(update): d/dself is the identity;
             // d/dupdate gathers the addressed rows (duplicate indices each
             // receive their position's gradient — the accumulation adjoint).
-            if (needs_grad.len > 0 and needs_grad[0]) {
+            if (core.needs(self, 0)) {
                 out[0] = try contiguousForRead(ctx, gy);
             }
-            if (needs_grad.len > 1 and needs_grad[1]) {
+            if (core.needs(self, 1)) {
                 out[1] = try ctx.gatherAxis(.f32, rawRank(tags.len), gy, axis, self.indices);
             }
         }
@@ -241,8 +241,8 @@ pub fn ZeroSliceBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.zeroSlice(rawRank(tags.len), gy, axis, self.start, self.length);
         }
 
@@ -257,8 +257,8 @@ pub fn ZeroRowsBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.zeroRows(rawRank(tags.len), gy, axis, self.indices);
         }
 

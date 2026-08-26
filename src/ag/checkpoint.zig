@@ -53,7 +53,6 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 const GradState = core.GradState;
-const BackwardFunction = core.BackwardFunction;
 
 /// Run `block` under activation checkpointing: forward stores only the inputs
 /// (refcounted views); intermediates are freed immediately; backward re-runs
@@ -287,23 +286,11 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.states[0..];
-        }
-
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const RawTensor,
-            needs_grad: []const bool,
-            out: []?RawTensor,
-        ) anyerror!void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             // Wide input tuples (a packed LoRA layer runs 15) push the
             // unrolled per-input loops past the default comptime quota.
             @setEvalBranchQuota(1000 * (n + 1));
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            std.debug.assert(needs_grad.len == n and out.len == n);
+            std.debug.assert(out.len == n);
 
             // The recompute frame: a scope stack owned by this backward
             // call, installed for the calling thread so the re-run facade
@@ -335,7 +322,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             inline for (0..n) |i| {
                 var view = try self.views[i].cloneView();
                 errdefer view.deinit();
-                rewrapped[i] = if (needs_grad[i])
+                rewrapped[i] = if (core.needs(self, i))
                     try facade_types[i].variable(ctx, view)
                 else
                     try facade_types[i].constant(ctx, view);
@@ -358,25 +345,19 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             // states: they must survive the scope close below. On error the
             // engine deinits any slots already filled (core.executeBackward).
             inline for (0..n) |i| {
-                if (needs_grad[i]) {
+                if (core.needs(self, i)) {
                     out[i] = (try rewrapped[i].grad_state.?.gradClone(ctx.allocator)) orelse
                         return error.CheckpointMissingInputGradient;
                 }
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(self.states[0..]);
+        pub fn deinitFields(self: *Self, allocator: Allocator) void {
+            _ = allocator;
             for (&self.views) |*view| view.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 

@@ -26,8 +26,8 @@ pub fn BroadcastBackward(comptime source_tags: anytype, comptime result_tags: an
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try reduceGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
         }
 
@@ -43,8 +43,8 @@ pub fn NarrowBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             out[0] = try ctx.sliceGradient(rawRank(source_tags.len), gy, self.source_shape, axis, self.start);
         }
 
@@ -63,8 +63,8 @@ pub fn PadBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
             var view = try ctx.narrowAxis(.f32, rawRank(source_tags.len), gy, axis, self.before, self.source_shape[axis]);
             defer view.deinit();
             out[0] = try ctx.materialize(.f32, &view);
@@ -81,11 +81,11 @@ pub fn ConcatBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             var start: usize = 0;
             for (self.sizes, 0..) |size, i| {
                 defer start += size;
-                if (i >= needs_grad.len or !needs_grad[i]) continue;
+                if (!core.needs(self, i)) continue;
                 var view = try ctx.narrowAxis(.f32, rawRank(tags.len), gy, axis, start, size);
                 defer view.deinit();
                 out[i] = try ctx.materialize(.f32, &view);
@@ -107,8 +107,8 @@ pub const ReshapeBackward = struct {
     parents: [1]?*GradState,
     source_shape: []usize,
 
-    pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-        if (needs_grad.len == 0 or !needs_grad[0]) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
         var ready = if (gy.isContiguous()) try gy.cloneView() else try ctx.materialize(.f32, gy);
         defer ready.deinit();
@@ -129,8 +129,8 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
 
         const Self = @This();
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             if (comptime source_tags.len == 0) {
                 out[0] = try gy.clone(ctx.allocator);
@@ -195,8 +195,8 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
             };
         }
 
-        pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
-            if (needs_grad.len == 0 or !needs_grad[0]) return;
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            if (!core.needs(self, 0)) return;
 
             if (!self.gyShapeMatches(gy)) return tensor_mod.TensorError.ShapeMismatch;
 

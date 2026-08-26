@@ -33,7 +33,6 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 const GradState = core.GradState;
-const BackwardFunction = core.BackwardFunction;
 
 pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs: anytype) !Spec.Output {
     comptime {
@@ -109,27 +108,19 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
 
         const Self = @This();
 
-        fn operands(ptr: *const anyopaque) []const ?*GradState {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            return self.states[0..];
-        }
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            std.debug.assert(out.len == n);
 
-        fn backward(
-            ptr: *const anyopaque,
-            ctx: *ExecContext,
-            gy: *const RawTensor,
-            needs_grad: []const bool,
-            out: []?RawTensor,
-        ) anyerror!void {
-            const self: *const Self = @ptrCast(@alignCast(ptr));
-            std.debug.assert(needs_grad.len == n and out.len == n);
-
+            // The public Spec contract keeps its `needs_grad` slice: one
+            // flag per input, true where the input carries a state.
             var raw_inputs: [n]*const RawTensor = undefined;
+            var needs_grad: [n]bool = undefined;
             inline for (0..n) |i| {
                 raw_inputs[i] = &self.views[i];
+                needs_grad[i] = core.needs(self, i);
             }
 
-            try Spec.backward(ctx, self.extra, raw_inputs[0..], &self.output, gy, needs_grad, out);
+            try Spec.backward(ctx, self.extra, raw_inputs[0..], &self.output, gy, needs_grad[0..], out);
             inline for (0..n) |i| {
                 if (needs_grad[i]) {
                     if (out[i]) |*grad| {
@@ -141,19 +132,13 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
             }
         }
 
-        fn deinit(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            core.releaseParents(self.states[0..]);
+        pub fn deinitFields(self: *Self, allocator: Allocator) void {
+            _ = allocator;
             for (&self.views) |*view| view.deinit();
             self.output.deinit();
-            core.destroyNode(Self, allocator, self);
         }
 
-        pub const vtable = BackwardFunction.VTable{
-            .operands = operands,
-            .backward = backward,
-            .deinit = deinit,
-        };
+        pub const vtable = core.recordVTable(Self);
     };
 }
 
