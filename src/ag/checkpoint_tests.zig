@@ -720,11 +720,11 @@ test "checkpoint flows gradients to every input and prunes non-grad inputs" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scope_entries.items.len;
+        const base = ctx.scopes.entries.items.len;
         const h = try checkpoint(&ctx, Blocks.layer1, .{ &x_const, &w_const, &b_const });
         try std.testing.expect(!h.requiresGrad());
         try std.testing.expect(h.scope_owned);
-        try std.testing.expectEqual(base + 1, ctx.scope_entries.items.len);
+        try std.testing.expectEqual(base + 1, ctx.scopes.entries.items.len);
     }
 }
 
@@ -810,12 +810,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const plain_gx, const plain_gw, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scope_entries.items.len;
+        const base = ctx.scopes.entries.items.len;
         var h = try Blocks.square(&ctx, &x, &w);
         for (1..chain_len) |_| {
             h = try Blocks.square(&ctx, &h, &w);
         }
-        plain_entries = ctx.scope_entries.items.len - base;
+        plain_entries = ctx.scopes.entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -836,12 +836,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const ck_gx, const ck_gw, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scope_entries.items.len;
+        const base = ctx.scopes.entries.items.len;
         var h = try checkpoint(&ctx, Blocks.square, .{ &x, &w });
         for (1..chain_len) |_| {
             h = try checkpoint(&ctx, Blocks.square, .{ &h, &w });
         }
-        ck_entries = ctx.scope_entries.items.len - base;
+        ck_entries = ctx.scopes.entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1009,14 +1009,20 @@ test "recompute error propagates from backward without leaking" {
     try std.testing.expectError(error.InducedRecomputeFailure, loss.backward(&ctx));
 }
 
-test "nested checkpoint recompute is rejected instead of deadlocking" {
+test "nested checkpoint recomputes on its own frame and matches plain backward bitwise" {
     const Nested = struct {
         fn inner(ctx: *ExecContext, x: *const Tensor(.{.d})) !Tensor(.{.d}) {
             return x.mul(ctx, x);
         }
 
         fn outer(ctx: *ExecContext, x: *const Tensor(.{.d})) !Tensor(.{.d}) {
-            return checkpoint(ctx, inner, .{x});
+            const sq = try checkpoint(ctx, inner, .{x});
+            return sq.mul(ctx, x);
+        }
+
+        fn plain(ctx: *ExecContext, x: *const Tensor(.{.d})) !Tensor(.{.d}) {
+            const sq = try inner(ctx, x);
+            return sq.mul(ctx, x);
         }
     };
 
@@ -1028,17 +1034,85 @@ test "nested checkpoint recompute is rejected instead of deadlocking" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{3}, &.{ 1, 2, 3 });
-    defer x.deinit();
+    var grads: [2][]f32 = undefined;
+    var built: usize = 0;
+    defer for (grads[0..built]) |g| allocator.free(g);
+    for (0..2) |which| {
+        var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{3}, &.{ 1, 2, 3 });
+        defer x.deinit();
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        // The outer recompute re-creates the inner checkpoint node, whose
+        // backward runs a recompute of its own inside the outer frame.
+        const h = if (which == 0) try checkpoint(&ctx, Nested.outer, .{&x}) else try Nested.plain(&ctx, &x);
+        const loss = try h.sumAll(&ctx);
+        try loss.backward(&ctx);
+        grads[which] = try gradData(&ctx, &x);
+        built = which + 1;
+    }
+    // d/dx sum(x^3) = 3x^2.
+    try std.testing.expectEqualSlices(f32, &.{ 3, 12, 27 }, grads[0]);
+    try std.testing.expectEqualSlices(f32, grads[1], grads[0]);
+}
 
-    const scope = ctx.openExecScope();
-    defer ctx.closeExecScope(scope);
-    // Forward is fine (no recompute lock is held)...
-    const h = try checkpoint(&ctx, Nested.outer, .{&x});
-    const loss = try h.sumAll(&ctx);
-    // ...but the outer recompute re-creates the inner checkpoint node, whose
-    // backward would re-enter the recompute lock on this thread.
-    try std.testing.expectError(error.NestedCheckpointRecompute, loss.backward(&ctx));
+test "checkpoint recomputes on two contexts from two threads run concurrently and stay exact" {
+    // Two threads, each driving its own ExecContext through many
+    // forward+backward rounds of a checkpointed block. With a process-wide
+    // recompute lock the rounds would serialize; with per-recompute frames
+    // they only share the allocator-level locks. Each thread checks every
+    // gradient against the closed form, so any cross-talk between the two
+    // frames (a value adopted into the wrong stack, a stack released under
+    // the other thread) surfaces as a wrong number or a leak.
+    const Worker = struct {
+        const rounds = 64;
+        const n = 8;
+
+        fn block(ctx: *ExecContext, x: *const Tensor(.{.d})) !Tensor(.{.d}) {
+            const sq = try x.mul(ctx, x);
+            return sq.mul(ctx, x);
+        }
+
+        fn run(seed: u32, failed: *std.atomic.Value(u32)) void {
+            runInner(seed) catch {
+                _ = failed.fetchAdd(1, .monotonic);
+            };
+        }
+
+        fn runInner(seed: u32) !void {
+            var gpa = std.heap.DebugAllocator(.{}){};
+            defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+            const allocator = gpa.allocator();
+            var ctx: ExecContext = undefined;
+            ctx.init(allocator);
+            defer ctx.deinit();
+
+            var values: [n]f32 = undefined;
+            for (&values, 0..) |*v, i| v.* = @as(f32, @floatFromInt(seed)) * 0.25 + @as(f32, @floatFromInt(i)) * 0.5;
+            for (0..rounds) |_| {
+                var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{n}, &values);
+                defer x.deinit();
+                const scope = ctx.openExecScope();
+                defer ctx.closeExecScope(scope);
+                const h = try checkpoint(&ctx, block, .{&x});
+                const loss = try h.sumAll(&ctx);
+                try loss.backward(&ctx);
+                var grad = (try x.grad(&ctx)) orelse return error.MissingGrad;
+                defer grad.deinit();
+                // d/dx sum(x^3) = 3x^2: the values are dyadic rationals with
+                // few bits, so every product and sum is exact.
+                for (try grad.dataConst(), values) |g, v| {
+                    if (g != 3 * (v * v)) return error.WrongGradient;
+                }
+            }
+        }
+    };
+
+    var failed = std.atomic.Value(u32).init(0);
+    const a = try std.Thread.spawn(.{}, Worker.run, .{ 1, &failed });
+    const b = try std.Thread.spawn(.{}, Worker.run, .{ 2, &failed });
+    a.join();
+    b.join();
+    try std.testing.expectEqual(@as(u32, 0), failed.load(.acquire));
 }
 
 test "checkpointed dropout block matches the un-checkpointed block bitwise" {
@@ -1320,12 +1394,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const plain_gx, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scope_entries.items.len;
+        const base = ctx.scopes.entries.items.len;
         var h = try ContextBlocks.square(&ctx, &chain_ctx, &x);
         for (1..chain_len) |_| {
             h = try ContextBlocks.square(&ctx, &chain_ctx, &h);
         }
-        plain_entries = ctx.scope_entries.items.len - base;
+        plain_entries = ctx.scopes.entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1341,12 +1415,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const ck_gx, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scope_entries.items.len;
+        const base = ctx.scopes.entries.items.len;
         var h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&x});
         for (1..chain_len) |_| {
             h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&h});
         }
-        ck_entries = ctx.scope_entries.items.len - base;
+        ck_entries = ctx.scopes.entries.items.len - base;
         const loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();

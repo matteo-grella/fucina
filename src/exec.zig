@@ -151,8 +151,13 @@ pub const ExecContext = struct {
     dot_backward_worker: thread.OneShotWorker,
     dot_backward_worker_ready: bool = false,
     dot_backward_worker_mutex: thread.Mutex = .{},
-    scope_entries: std.ArrayList(exec_runtime.ScopeEntry) = .empty,
-    scope_depth: usize = 0,
+    /// The context's own exec-scope stack. Scope traffic on a thread that
+    /// has installed a recompute frame (`installScopeStack`, the
+    /// checkpoint backward) goes to that frame instead.
+    scopes: exec_runtime.ScopeStack = .{},
+    /// Open `disableQuantDotGpu` scopes on this context (any thread); the
+    /// quantized-RHS facade dot offloads only while zero.
+    quant_dot_gpu_disabled: std.atomic.Value(u32) = .init(0),
     /// Speculation-verify kernel pinning (toggle through
     /// `pinRowwiseKernels`). While set, every batched
     /// quant-matmul entry reproduces the m == 1 kernel numerics exactly:
@@ -209,15 +214,25 @@ pub const ExecContext = struct {
     // them so the user doesn't have to.
     //
     // Scopes nest with strict stack discipline (close in reverse order) and
-    // are not thread-safe — open/close/ops on one ctx from one thread, like
-    // every other ctx mutation.
+    // a stack is not thread-safe — open/close/ops on one ctx from one
+    // thread, like every other ctx mutation. The one sanctioned multi-thread
+    // shape is a checkpoint recompute in backward: it installs a stack of
+    // its own for the calling thread (`installScopeStack`), so every frame
+    // has a private stack and the context's own is never touched from a
+    // pool thread.
     // ------------------------------------------------------------------
+    pub const ScopeStack = exec_runtime.ScopeStack;
+    pub const installScopeStack = exec_runtime.installScopeStack;
+    pub const restoreScopeStack = exec_runtime.restoreScopeStack;
     pub const execScopeActive = exec_runtime.execScopeActive;
     pub const openExecScope = exec_runtime.openExecScope;
     pub const closeExecScope = exec_runtime.closeExecScope;
     pub const reserveScopeSlot = exec_runtime.reserveScopeSlot;
     pub const adoptScopeValueAssumeCapacity = exec_runtime.adoptScopeValueAssumeCapacity;
     pub const adoptScopeNodeAssumeCapacity = exec_runtime.adoptScopeNodeAssumeCapacity;
+    pub const QuantDotGpuDisabledScope = exec_runtime.QuantDotGpuDisabledScope;
+    pub const disableQuantDotGpu = exec_runtime.disableQuantDotGpu;
+    pub const quantDotGpuEnabled = exec_runtime.quantDotGpuEnabled;
     pub const tryWorkPool = exec_runtime.tryWorkPool;
     pub const workPool = exec_runtime.workPool;
     pub const pc = exec_runtime.pc;

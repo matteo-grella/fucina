@@ -987,10 +987,10 @@ subgraph — the engine is reentrant enough to be its own building block
 
             // Seed the recomputed output with the incoming gradient and run
             // a full backward over the recomputed subgraph. The SERIAL
-            // variant keeps every recomputed node on this thread: a nested
-            // checkpoint node scheduled onto a pool thread would pass the
-            // threadlocal `recompute_active` check and deadlock on the held
-            // `recompute_mutex` instead of erroring.
+            // variant keeps every recomputed node on this thread, where the
+            // frame is installed: a nested checkpoint node scheduled onto a
+            // pool thread would recompute on that thread's view of the
+            // context (its own stack), not on this frame.
             out_state.setGrad(try gy.cloneView());
             try core.backwardGradSerial(ctx, &.{out_state}, &.{recomputed.asRawTensor()});
 ```
@@ -1023,8 +1023,9 @@ wrong gradients", the documented failure mode of an impure block
 (`docs/TRAINING.md` §12). Everything non-differentiable a block needs —
 frozen quantized weights, RoPE tables, config — travels through
 `checkpointWithContext`'s `extra`: stored by value, pointees valid until
-backward, never receiving gradients. Nested checkpoints are rejected with
-`error.NestedCheckpointRecompute` rather than deadlocking.
+backward, never receiving gradients. Nested checkpoints recompute on nested
+frames: each recompute installs a scope stack of its own for its thread, so
+nothing is shared between recomputes and nothing can deadlock.
 
 Usage is pleasantly boring (machine-verified as
 `test "checkpointed layer backward"`, `docs/REFERENCE.md` §5.5):

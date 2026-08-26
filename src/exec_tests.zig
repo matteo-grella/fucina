@@ -109,6 +109,32 @@ fn testNaiveCrossEntropy(
     return .{ .loss = loss, .row_losses = row_losses, .grads = grads };
 }
 
+test "quant dot GPU disable scope nests per context and restores" {
+    var ctx: exec.ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+    var other: exec.ExecContext = undefined;
+    other.init(std.testing.allocator);
+    defer other.deinit();
+
+    try std.testing.expect(ctx.quantDotGpuEnabled());
+    var outer = ctx.disableQuantDotGpu();
+    defer outer.close();
+    try std.testing.expect(!ctx.quantDotGpuEnabled());
+    // Per context: the pin on one context says nothing about another.
+    try std.testing.expect(other.quantDotGpuEnabled());
+    {
+        var inner = ctx.disableQuantDotGpu();
+        defer inner.close();
+        try std.testing.expect(!ctx.quantDotGpuEnabled());
+    }
+    try std.testing.expect(!ctx.quantDotGpuEnabled());
+    outer.close();
+    try std.testing.expect(ctx.quantDotGpuEnabled());
+    outer.close(); // idempotent
+    try std.testing.expect(ctx.quantDotGpuEnabled());
+}
+
 test "exec context reuses released output buffers" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

@@ -6,7 +6,6 @@ const std = @import("std");
 const backend_mod = @import("../../backend.zig");
 const dtype_mod = @import("../../dtype.zig");
 const exec_mod = @import("../../exec.zig");
-const control = @import("../control.zig");
 const core = @import("../core.zig");
 const ag_tensor = @import("../tensor.zig");
 const gradcheck_mod = @import("../gradcheck.zig");
@@ -216,7 +215,7 @@ test "quant RHS dot under gradients: GPU dispatch matches the CPU kernels" {
     var runs_built: usize = 0;
     defer for (runs[0..runs_built]) |*run| run.free(allocator);
     for (&runs, 0..) |*run, ri| {
-        var disable: ?control.QuantDotGpuDisabledScope = if (ri == 1) control.disableQuantDotGpu() else null;
+        var disable: ?exec_mod.ExecContext.QuantDotGpuDisabledScope = if (ri == 1) ctx.disableQuantDotGpu() else null;
         defer if (disable) |*scope| scope.close();
 
         var x = try X.variableFromSlice(&ctx, .{ m, k }, x_values);

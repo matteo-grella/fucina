@@ -39,6 +39,18 @@ this point; earlier history is `git log`.
   slot's undo log to the new flip count, and drops the per-iteration noise
   cache; field assignment into `trainer.config` bypassed all three.
   `es-finetune --load` resumes through it.
+- `ExecContext.ScopeStack` + `installScopeStack`/`restoreScopeStack`: the
+  exec-scope stack is a value (`ctx.scopes`, replacing the `scope_entries`
+  + `scope_depth` fields), and a thread can install a stack of its own for
+  scope traffic. The checkpoint recompute runs on such a frame instead of
+  under a process-wide lock, so recomputes on different contexts (and
+  independent checkpoint nodes of one backward) no longer serialize, and a
+  nested `checkpoint` inside a block now recomputes on a nested frame
+  instead of failing with `error.NestedCheckpointRecompute` (removed).
+- `ExecContext.disableQuantDotGpu()` / `quantDotGpuEnabled()`: the
+  quantized-RHS dot's GPU pin is a per-context atomic depth count
+  (`ctx.quant_dot_gpu_disabled`) instead of the thread-local
+  `ag.control.disableQuantDotGpu` / `isQuantDotGpuEnabled` (removed).
 - `fucina-run --spec`: draft-model-free speculative decode for every
   rewind-capable registered family (the cascade SAM + token-recycling
   draft source over the shared `SpeculativeDecoder`; greedy-only, same

@@ -26,13 +26,19 @@
 //! - deterministic and pure in its inputs: the recompute must rebuild the
 //!   exact forward values (RNG-using ops such as dropout must derive their
 //!   stream from explicit stored seeds, not from ambient RNG state);
-//! - no nested `checkpoint` call inside a block: the recompute lock is not
-//!   reentrant, so a nested recompute is rejected with
-//!   `error.NestedCheckpointRecompute` instead of deadlocking. The recompute
-//!   backward is intentionally single-threaded at the NODE level
-//!   (`core.backwardGradSerial`; kernel-level `parallelChunks` parallelism
-//!   inside VJPs is unaffected) — that is what keeps a nested checkpoint node
-//!   on the recompute thread, where the threadlocal guard can see it.
+//! - nesting is allowed: a `checkpoint` inside a block is recomputed on a
+//!   frame of its own, inside the outer recompute. The recompute backward
+//!   is single-threaded at the NODE level (`core.backwardGradSerial`;
+//!   kernel-level `parallelChunks` parallelism inside VJPs is unaffected),
+//!   which is what confines a recompute frame to the thread running it.
+//!
+//! Threading: each recompute runs its facade ops on a scope stack that
+//! lives in the recompute frame (`ExecContext.installScopeStack`), never on
+//! the context's own stack, so independent checkpoint nodes driven from
+//! pool threads, and recomputes on different contexts, proceed without any
+//! shared lock. Checkpoint nodes themselves always execute synchronously on
+//! the scheduling thread (`prefer_async_backward` stays false and
+//! `estimated_work` stays null, see core.canRunAsync).
 //!
 //! Blocks that also need frozen state — quantized/f16/bf16 const facade
 //! tensors, RoPE tables, config values, layer struct pointers — take it
@@ -41,8 +47,6 @@
 const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
-const thread = @import("../thread.zig");
-const control = @import("control.zig");
 const core = @import("core.zig");
 
 const Allocator = std.mem.Allocator;
@@ -50,21 +54,6 @@ const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 const GradState = core.GradState;
 const BackwardFunction = core.BackwardFunction;
-
-/// Recomputes re-run facade ops, which adopt their results into
-/// `ctx.scope_entries` — not thread-safe — and the backward engine may invoke
-/// independent checkpoint nodes from pool threads. One process-wide lock
-/// serializes every recompute. Checkpoint nodes themselves always execute
-/// synchronously on the scheduling thread (`prefer_async_backward` stays
-/// false and `estimated_work` stays null, see core.canRunAsync).
-var recompute_mutex: thread.Mutex = .{};
-
-/// Detects a nested checkpoint recompute on the same thread, which would
-/// self-deadlock on the non-reentrant `recompute_mutex`. Sound only because
-/// the recompute's inner backward runs node-serial (`core.backwardGradSerial`
-/// below): a nested checkpoint node can never be scheduled onto another
-/// thread while a recompute is active.
-threadlocal var recompute_active: bool = false;
 
 /// Run `block` under activation checkpointing: forward stores only the inputs
 /// (refcounted views); intermediates are freed immediately; backward re-runs
@@ -141,7 +130,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
     var out_value = value: {
         const inner = ctx.openExecScope();
         defer ctx.closeExecScope(inner);
-        var quant_gpu_scope = control.disableQuantDotGpu();
+        var quant_gpu_scope = ctx.disableQuantDotGpu();
         defer quant_gpu_scope.close();
 
         var consts: FacadeTuple(Inputs) = undefined;
@@ -323,21 +312,22 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             const self: *const Self = @ptrCast(@alignCast(ptr));
             std.debug.assert(needs_grad.len == n and out.len == n);
 
-            // A nested recompute on this thread would self-deadlock on the
-            // non-reentrant mutex; fail loudly instead.
-            if (recompute_active) return error.NestedCheckpointRecompute;
-            recompute_mutex.lock();
-            recompute_active = true;
-            defer {
-                recompute_active = false;
-                recompute_mutex.unlock();
-            }
-
-            // Rebuild the block subgraph inside an inner scope so the
-            // recomputed intermediates are released on every exit path.
+            // The recompute frame: a scope stack owned by this backward
+            // call, installed for the calling thread so the re-run facade
+            // ops adopt into it rather than into the context's own stack
+            // (which another thread may be driving). Nothing is shared, so
+            // recomputes never serialize on each other, and a nested
+            // checkpoint inside the block simply installs its own frame
+            // and hands this one back. The defers unwind in order: close
+            // the scope, restore the outer frame, release the stack — so
+            // every recomputed intermediate is freed on every exit path.
+            var frame = ExecContext.ScopeStack{};
+            defer frame.deinit(ctx.allocator);
+            const outer_frame = ExecContext.installScopeStack(&frame);
+            defer ExecContext.restoreScopeStack(outer_frame);
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
-            var quant_gpu_scope = control.disableQuantDotGpu();
+            var quant_gpu_scope = ctx.disableQuantDotGpu();
             defer quant_gpu_scope.close();
 
             // Inputs that need gradients come back as variables (fresh leaf
@@ -364,10 +354,10 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
 
             // Seed the recomputed output with the incoming gradient and run
             // a full backward over the recomputed subgraph. The SERIAL
-            // variant keeps every recomputed node on this thread: a nested
-            // checkpoint node scheduled onto a pool thread would pass the
-            // threadlocal `recompute_active` check and deadlock on the held
-            // `recompute_mutex` instead of erroring.
+            // variant keeps every recomputed node on this thread, where the
+            // frame is installed: a nested checkpoint node scheduled onto a
+            // pool thread would recompute on that thread's view of the
+            // context (its own stack), not on this frame.
             out_state.setGrad(try gy.cloneView());
             try core.backwardGradSerial(ctx, &.{out_state}, &.{recomputed.asRawTensor()});
 

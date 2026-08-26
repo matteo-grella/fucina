@@ -477,9 +477,9 @@ Contract for `block` (violations are compile errors where detectable):
   stored seeds — `dropout(p, seed)` qualifies by construction (its mask is a
   pure function of `(seed, element index)` and is never stored); ambient RNG
   state does not.
-- **no nested `checkpoint` inside a block**: the recompute lock is not
-  reentrant; a nested recompute is rejected at backward time with
-  `error.NestedCheckpointRecompute` instead of deadlocking.
+- **nesting is allowed**: a `checkpoint` inside a block is recomputed on a
+  frame of its own inside the outer recompute (pinned bitwise against the
+  plain graph by test).
 
 Contract for `extra` (`checkpointWithContext` only): it sits between
 `*ExecContext` and the inputs in the block signature, is stored **by value**
@@ -498,14 +498,16 @@ Runtime behavior and constraints:
   (same adoption tail as any facade op). The result follows the standard
   ownership contract: caller-owned with no scope open, a `scope_owned`
   borrow otherwise.
-- Recomputes are serialized by one process-wide mutex (re-run facade ops
-  adopt into `ctx` scope entries, which is not thread-safe), and the inner
-  backward runs via `backwardGradSerial` so the threadlocal nested-recompute
-  guard can see any nested node. Checkpoint nodes themselves always execute
+- Each recompute runs its facade ops on a scope stack that lives in the
+  recompute frame (`ExecContext.installScopeStack`), never on the context's
+  own stack, so independent checkpoint nodes driven from pool threads, and
+  recomputes on different contexts, proceed without any shared lock; the
+  inner backward runs via `backwardGradSerial`, which confines a frame to
+  the thread running it. Checkpoint nodes themselves always execute
   synchronously on the scheduling thread.
-- Block runs (forward and recompute) disable GPU quant-dot offload for their
-  duration (an internal `disableQuantDotGpu` scope) so both runs take the
-  same kernels.
+- Block runs (forward and recompute) pin the quantized-RHS dot to the CPU
+  kernels for their duration (`ctx.disableQuantDotGpu()`, a per-context
+  atomic depth count) so both runs take the same kernels.
 - The recompute errors with `error.CheckpointOutputNotDifferentiable` if the
   re-run block's output carries no graph, and
   `error.CheckpointMissingInputGradient` if a grad-requiring input received

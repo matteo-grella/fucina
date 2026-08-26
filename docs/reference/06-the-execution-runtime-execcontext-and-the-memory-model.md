@@ -29,7 +29,8 @@ pub const ExecContext = struct {
     tuning: tuning.Overrides,
     work_pool: thread.Pool,          // + work_pool_ready, work_pool_failed, work_pool_mutex
     dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
-    scope_entries, scope_depth,      // the exec-scope stack
+    scopes: ScopeStack,              // the context's own exec-scope stack
+    quant_dot_gpu_disabled: std.atomic.Value(u32), // open disableQuantDotGpu scopes
     pin_rowwise_kernels: bool,
     fp_env_at_init: ?fpenv.Environment,
     moe_scratch: MoeDecodeScratch,   // grow-only MoE decode scratch
@@ -50,7 +51,8 @@ Fields (internal but observable, reached as `ctx.<field>`):
 | `buffers` | `BufferPool` | at `init` ([§6.5](06-the-execution-runtime-execcontext-and-the-memory-model.md#65-bufferpool-transient-reuse-and-scratch-leases-srcexecbuffer_poolzig)) |
 | `work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
 | `dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
-| `scope_entries`, `scope_depth` | scope stack | at `init`, empty ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) |
+| `scopes` | `ScopeStack` (entries + open depth) | at `init`, empty ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) |
+| `quant_dot_gpu_disabled` | `std.atomic.Value(u32)` | at `init`, zero; the open `disableQuantDotGpu` scopes ([§5.5](05-automatic-differentiation.md)) |
 
 **The init(self-pointer) pattern.** `init` takes `self: *ExecContext` and
 returns `void` instead of returning a value: the context is self-referential
@@ -294,8 +296,14 @@ Semantics:
 - **Error safety for free:** if an op fails mid-forward, the scope already
   owns the prefix of results, so model code inside a scope needs no
   `errdefer` chains.
-- **Not thread-safe:** open/close and the ops between them run on one thread,
-  like every other context mutation ([§6.9](06-the-execution-runtime-execcontext-and-the-memory-model.md#69-the-thread-safety-contract)).
+- **A stack is not thread-safe:** open/close and the ops between them run
+  on one thread, like every other context mutation ([§6.9](06-the-execution-runtime-execcontext-and-the-memory-model.md#69-the-thread-safety-contract)).
+  The scope functions route to the context's own `scopes` stack unless the
+  calling thread has installed a stack of its own (`ScopeStack`,
+  `installScopeStack(&stack)` / `restoreScopeStack(previous)`): the
+  checkpoint recompute in backward does exactly that, so a recompute driven
+  from a pool thread adopts into its own frame and never touches the
+  context's stack ([§5.5](05-automatic-differentiation.md)).
 
 The canonical training-step pattern — a per-iteration scope, no keeps, no
 defers on intermediates:
@@ -845,7 +853,11 @@ What is not:
 
 - **Op execution, scope open/close, and every other context mutation are
   single-threaded**: drive one `ExecContext` from one thread at a time. CPU
-  ops fan work out to the team and join before returning. Eligible f32/f16/dense-quant
+  ops fan work out to the team and join before returning. The backward
+  engine is the documented exception: it may run VJPs, and checkpoint
+  recomputes, on pool threads, and a recompute installs a scope stack of
+  its own for its thread ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) so the context's stack stays
+  single-threaded. Eligible f32/f16/dense-quant
   GPU ops submit before return and keep program order through their provider
   queue/stream; a later CPU access performs the storage readiness wait. The
   external call order remains serial.

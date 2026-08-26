@@ -374,10 +374,11 @@ parity (both asserted in `src/ag/checkpoint_tests.zig`).
   remain valid until backward completes (no deep copy, no refcount);
   everything reachable through `extra` is a constant (never receives
   gradients); the block stays deterministic in (`extra`, `inputs`).
-- Recomputes are serialized by a module-level mutex (re-run facade ops adopt
-  into ctx exec-scope state, which is not thread-safe); a nested checkpoint inside
-  a block is rejected with `error.NestedCheckpointRecompute` instead of
-  deadlocking.
+- Each recompute runs on a scope stack of its own (installed for the
+  recompute thread), never on the context's exec-scope stack, so
+  independent checkpoint nodes driven from pool threads and recomputes on
+  different contexts never serialize on a lock; a nested checkpoint inside
+  a block simply recomputes on a nested frame.
 
 Real-model cost: per-layer checkpointing of the Qwen3-0.6B LoRA fine-tune
 (`--checkpoint-layers`, §9) reproduced digit-identical losses at ~+8.5% step
@@ -819,8 +820,6 @@ q/k/v, never from the forward output.
 - A checkpoint block that is not deterministic in (`extra`, `inputs`) →
   silently wrong gradients (the recompute diverges from the forward). RNG
   must come from stored seeds; `extra` pointees must outlive backward.
-- A nested `checkpoint` inside a block → `error.NestedCheckpointRecompute`
-  (caught; the recompute lock is not reentrant).
 - LoRA `delta`/`apply` (or any composite op) backward()'d without a scope →
   the same dangling-node UB as the first bullet; `qwen3.train.Trainer.loss`
   checks and returns `Error.ExecScopeRequired` instead.

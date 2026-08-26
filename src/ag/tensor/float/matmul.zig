@@ -117,9 +117,9 @@ pub fn Ops(comptime Self: type) type {
                 // other. Backend gates own the economics per memory
                 // system (Metal: size; CUDA: residency-aware floors).
                 // Checkpoint blocks still pin BOTH passes to the CPU
-                // kernels through the disable scope, keeping the
-                // recompute bitwise against pass 1.
-                const allow_gpu = control.isQuantDotGpuEnabled();
+                // kernels through the context's disable scope, keeping
+                // the recompute bitwise against pass 1.
+                const allow_gpu = ctx.quantDotGpuEnabled();
                 var value = try quantizedRhsDotRaw(Other.dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag, allow_gpu);
                 errdefer value.deinit();
                 return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, null, self.asRawTensor(), other_ptr.asRawTensor() });

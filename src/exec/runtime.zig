@@ -39,6 +39,63 @@ pub const ExecScope = struct {
     index: usize,
 };
 
+/// The exec-scope stack: the adopted entries plus the open-scope depth.
+/// Every context owns one (`ExecContext.scopes`); a checkpoint recompute
+/// installs a second one for its own frame (`installScopeStack`) so the
+/// re-run facade ops adopt into the recompute instead of into a stack
+/// another thread may be driving.
+pub const ScopeStack = struct {
+    entries: std.ArrayList(ScopeEntry) = .empty,
+    depth: usize = 0,
+
+    /// Releases anything still adopted (scopes left open), then the storage.
+    pub fn deinit(self: *ScopeStack, allocator: Allocator) void {
+        self.releaseTo(0);
+        self.entries.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn releaseTo(self: *ScopeStack, index: usize) void {
+        std.debug.assert(index <= self.entries.items.len);
+        while (self.entries.items.len > index) {
+            var entry = self.entries.pop().?;
+            if (entry.value) |*value| value.deinit();
+            if (entry.node) |node| entry.destroy_node(node);
+        }
+    }
+};
+
+/// The calling thread's scope-stack override; null routes scope traffic to
+/// the context's own stack. Thread-local by design: a recompute frame is
+/// confined to the thread running it (its inner backward is node-serial),
+/// so the override never leaks into another thread's view of the same
+/// context, and two frames on two threads never share a stack.
+threadlocal var installed_scope_stack: ?*ScopeStack = null;
+
+/// Route this thread's scope traffic (open/close/active/adopt) to `stack`
+/// until `restoreScopeStack(previous)`. Returns the stack that was
+/// installed before, so frames nest (a checkpoint inside a recomputed
+/// block installs its own frame and hands the outer one back on exit).
+pub fn installScopeStack(stack: *ScopeStack) ?*ScopeStack {
+    const previous = installed_scope_stack;
+    installed_scope_stack = stack;
+    return previous;
+}
+
+pub fn restoreScopeStack(previous: ?*ScopeStack) void {
+    installed_scope_stack = previous;
+}
+
+/// The stack scope traffic goes to on this thread: the installed frame if
+/// one is active, else the context's own.
+fn activeScopes(self: *ExecContext) *ScopeStack {
+    return installed_scope_stack orelse &self.scopes;
+}
+
+fn activeScopesConst(self: *const ExecContext) *const ScopeStack {
+    return installed_scope_stack orelse &self.scopes;
+}
+
 pub fn init(self: *ExecContext, allocator: Allocator) void {
     // Every defaulted field takes its declared default from the struct
     // literal, so the initial state has ONE source (the field decls in
@@ -106,8 +163,7 @@ pub fn deinit(self: *ExecContext) void {
         setWorkPool(self, null);
         self.work_pool.deinit();
     }
-    releaseScopeTo(self, 0); // defensive: scopes left open at teardown
-    self.scope_entries.deinit(self.allocator);
+    self.scopes.deinit(self.allocator); // releases scopes left open at teardown
     self.buffers.deinit();
     self.* = undefined;
 }
@@ -117,50 +173,77 @@ pub fn deinit(self: *ExecContext) void {
 // ------------------------------------------------------------------
 
 pub fn execScopeActive(self: *const ExecContext) bool {
-    return self.scope_depth > 0;
+    return activeScopesConst(self).depth > 0;
 }
 
 /// Open a scope; close it with `closeExecScope(mark)` (typically `defer`).
 pub fn openExecScope(self: *ExecContext) ExecScope {
-    self.scope_depth += 1;
-    return .{ .index = self.scope_entries.items.len };
+    const scopes = activeScopes(self);
+    scopes.depth += 1;
+    return .{ .index = scopes.entries.items.len };
 }
 
 /// Release every tensor adopted since `mark`, newest first. Only safe
 /// once no backward() over tensors adopted in the scope is pending.
 pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void {
-    std.debug.assert(self.scope_depth > 0);
-    self.scope_depth -= 1;
-    releaseScopeTo(self, mark.index);
-}
-
-fn releaseScopeTo(self: *ExecContext, index: usize) void {
-    std.debug.assert(index <= self.scope_entries.items.len);
-    while (self.scope_entries.items.len > index) {
-        var entry = self.scope_entries.pop().?;
-        if (entry.value) |*value| value.deinit();
-        if (entry.node) |node| entry.destroy_node(node);
-    }
+    const scopes = activeScopes(self);
+    std.debug.assert(scopes.depth > 0);
+    scopes.depth -= 1;
+    scopes.releaseTo(mark.index);
 }
 
 /// Two-phase adoption so op construction can stay infallible after its
 /// "consumes the value on success" point: reserve BEFORE building the
 /// result, adopt (cannot fail) after.
 pub fn reserveScopeSlot(self: *ExecContext) !void {
-    try self.scope_entries.ensureUnusedCapacity(self.allocator, 1);
+    try activeScopes(self).entries.ensureUnusedCapacity(self.allocator, 1);
 }
 
 pub fn adoptScopeValueAssumeCapacity(self: *ExecContext, value: Tensor, node: ?*anyopaque, destroy_node: ScopeNodeDestroy) void {
-    std.debug.assert(self.scope_depth > 0);
-    self.scope_entries.appendAssumeCapacity(.{ .value = value, .node = node, .destroy_node = destroy_node });
+    const scopes = activeScopes(self);
+    std.debug.assert(scopes.depth > 0);
+    scopes.entries.appendAssumeCapacity(.{ .value = value, .node = node, .destroy_node = destroy_node });
 }
 
 /// Adopt a node-only entry: the value (any dtype) lives inside the
 /// type-erased payload, which the destructor must free along with any
 /// attached per-op state.
 pub fn adoptScopeNodeAssumeCapacity(self: *ExecContext, node: *anyopaque, destroy_node: ScopeNodeDestroy) void {
-    std.debug.assert(self.scope_depth > 0);
-    self.scope_entries.appendAssumeCapacity(.{ .value = null, .node = node, .destroy_node = destroy_node });
+    const scopes = activeScopes(self);
+    std.debug.assert(scopes.depth > 0);
+    scopes.entries.appendAssumeCapacity(.{ .value = null, .node = node, .destroy_node = destroy_node });
+}
+
+// ------------------------------------------------------------------
+// Quantized-RHS facade dot: GPU pin.
+// ------------------------------------------------------------------
+
+/// Handle returned by `disableQuantDotGpu`; `close` lifts the pin (nests).
+pub const QuantDotGpuDisabledScope = struct {
+    ctx: *ExecContext,
+    active: bool = true,
+
+    pub fn close(self: *QuantDotGpuDisabledScope) void {
+        if (!self.active) return;
+        const old = self.ctx.quant_dot_gpu_disabled.fetchSub(1, .acq_rel);
+        std.debug.assert(old > 0);
+        self.active = false;
+    }
+};
+
+/// Pin the quantized-RHS facade dot to the CPU kernels on this context
+/// while the returned scope is open. A depth count, atomic because
+/// checkpoint recomputes may hold it from several backward threads at
+/// once: the dot takes the GPU only when no scope is open anywhere on the
+/// context. Checkpoint blocks pin both the forward run and the recompute
+/// so the two passes take the same kernels and stay bitwise.
+pub fn disableQuantDotGpu(self: *ExecContext) QuantDotGpuDisabledScope {
+    _ = self.quant_dot_gpu_disabled.fetchAdd(1, .acq_rel);
+    return .{ .ctx = self };
+}
+
+pub fn quantDotGpuEnabled(self: *const ExecContext) bool {
+    return self.quant_dot_gpu_disabled.load(.acquire) == 0;
 }
 
 // ------------------------------------------------------------------
