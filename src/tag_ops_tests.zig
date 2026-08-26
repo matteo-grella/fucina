@@ -258,6 +258,56 @@ test "tag library: sumManyTensor reduces multiple named axes" {
     try std.testing.expectEqualSlices(f32, &.{ 22, 26, 30 }, summed.dataConst());
 }
 
+test "tag library: sumManyTensor merges adjacent reduce axes into one pass" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // [batch=3, seq=5, d=7]: reducing {batch, seq} is one merged axis of 15
+    // rows over d; the reference sums those rows in row-major (batch, seq)
+    // order, which is the merged axis's index order.
+    const shape = [3]usize{ 3, 5, 7 };
+    var x = try ctx.zeros(.f32, shape);
+    defer x.deinit();
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    for (x.data()) |*v| v.* = random.float(f32) * 2 - 1;
+
+    var summed = try sumManyTensor(.{ .batch, .seq, .d }, &x, &ctx, .{ .batch, .seq });
+    defer summed.deinit();
+    try std.testing.expectEqualSlices(usize, &.{7}, summed.shape.slice());
+    var want: [7]f32 = @splat(0);
+    for (0..15) |row| for (0..7) |i| {
+        want[i] += x.dataConst()[row * 7 + i];
+    };
+    try std.testing.expectEqualSlices(f32, &want, summed.dataConst());
+
+    // Non-adjacent {batch, d}: two passes, innermost-first (d, then batch).
+    var mixed = try sumManyTensor(.{ .batch, .seq, .d }, &x, &ctx, .{ .batch, .d });
+    defer mixed.deinit();
+    try std.testing.expectEqualSlices(usize, &.{5}, mixed.shape.slice());
+    var want_mixed: [5]f32 = @splat(0);
+    for (0..3) |b| for (0..5) |s| {
+        var row: f32 = 0;
+        for (0..7) |i| row += x.dataConst()[(b * 5 + s) * 7 + i];
+        want_mixed[s] += row;
+    };
+    for (want_mixed, mixed.dataConst()) |w, g| try std.testing.expectApproxEqRel(w, g, 1e-5);
+
+    // A non-contiguous source (a permuted view) is materialized before the
+    // merged reshape; the result matches the contiguous copy's bitwise.
+    var permuted = try x.viewWithStrides(&.{ 5, 3, 7 }, &.{ 7, 35, 1 }); // [seq, batch, d] view
+    defer permuted.deinit();
+    var copy = try ctx.materialize(.f32, &permuted);
+    defer copy.deinit();
+    var from_view = try sumManyTensor(.{ .seq, .batch, .d }, &permuted, &ctx, .{ .seq, .batch });
+    defer from_view.deinit();
+    var from_copy = try sumManyTensor(.{ .seq, .batch, .d }, &copy, &ctx, .{ .seq, .batch });
+    defer from_copy.deinit();
+    try std.testing.expectEqualSlices(f32, from_copy.dataConst(), from_view.dataConst());
+}
+
 test "tag library: dot follows matrix multiplication tag ordering" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

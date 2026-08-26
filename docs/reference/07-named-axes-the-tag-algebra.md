@@ -484,9 +484,13 @@ through the ExecContext first (owned result either way).
 
 **`sumManyTensor`** reduces away `reduce_tags` (comptime: unique, subset of
 `tags`). Fast paths: an empty reduce set returns a `cloneView`; reducing every
-tag lowers to the full reduction `ctx.sum` (scalar `{1}`). Otherwise it strips
-one axis per step with `ctx.sumAxis`, innermost-first via
-`reduceAxesDescending` ([§7.3](07-named-axes-the-tag-algebra.md#73-tuple-rewrites-and-axis-maps-srctagszig)) so remaining axis indices stay valid.
+tag lowers to the full reduction `ctx.sum` (scalar `{1}`). Otherwise it walks
+the reduce axes innermost-first via `reduceAxesDescending`
+([§7.3](07-named-axes-the-tag-algebra.md#73-tuple-rewrites-and-axis-maps-srctagszig)) so remaining axis indices stay valid: a run of
+adjacent reduce axes (the bias-gradient case `{batch, seq}` of
+`[batch, seq, d]`) is one merged axis (a contiguous reshape; a non-contiguous
+source is materialized first) and takes one `ctx.sumAxis` pass, every other
+axis one pass each.
 
 Facade equivalents ([§4](04-tensor-operations.md)): `split`, `merge` (both differentiable view ops),
 `flatten(ctx, out_tag)` → `Tensor(.{out_tag})`, `sumMany` →

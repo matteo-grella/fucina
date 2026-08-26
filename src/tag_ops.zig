@@ -199,8 +199,11 @@ fn taggedEinsumF32(
     return value;
 }
 
-/// Sums away `reduce_tags` one axis at a time (innermost-first), returning the
-/// reduced tensor tagged `removeTags(tags, reduce_tags)` on the caller's side.
+/// Sums away `reduce_tags` innermost-first, returning the reduced tensor
+/// tagged `removeTags(tags, reduce_tags)` on the caller's side. A run of
+/// adjacent reduce axes is one merged axis (a contiguous reshape, so the
+/// `(outer, axis, inner)` decomposition covers the run) and takes one
+/// `sumAxis` pass; the remaining axes take one pass each.
 pub fn sumManyTensor(
     comptime tags: anytype,
     source: *const RawTensor,
@@ -220,12 +223,41 @@ pub fn sumManyTensor(
     errdefer current.deinit();
 
     const axes = comptime reduceAxesDescending(tags, reduce_tags);
-    inline for (axes, 0..) |axis, step| {
-        const rank_now = comptime tags.len - step;
-        const axis_now = comptime axis;
-        const next = try ctx.sumAxis(.f32, rank_now, &current, axis_now);
-        current.deinit();
-        current = next;
+    comptime var rank_now: usize = tags.len;
+    comptime var i: usize = 0;
+    inline while (i < axes.len) {
+        comptime var run_len: usize = 1;
+        inline while (i + run_len < axes.len and axes[i + run_len] + run_len == axes[i]) run_len += 1;
+        const hi = comptime axes[i];
+        const lo = comptime hi + 1 - run_len;
+        if (comptime run_len > 1) {
+            const merged_rank = comptime rank_now - run_len + 1;
+            var merged_shape: [merged_rank]usize = undefined;
+            var merged_dim: usize = 1;
+            inline for (0..rank_now) |d| {
+                if (d < lo) {
+                    merged_shape[d] = current.shape.at(d);
+                } else if (d <= hi) {
+                    merged_dim *= current.shape.at(d);
+                } else {
+                    merged_shape[d + 1 - run_len] = current.shape.at(d);
+                }
+            }
+            merged_shape[lo] = merged_dim;
+            var contiguous = if (current.isContiguous()) try current.cloneView() else try ctx.materialize(.f32, &current);
+            defer contiguous.deinit();
+            var merged = try contiguous.reshape(&merged_shape);
+            defer merged.deinit();
+            const next = try ctx.sumAxis(.f32, merged_rank, &merged, lo);
+            current.deinit();
+            current = next;
+        } else {
+            const next = try ctx.sumAxis(.f32, rank_now, &current, hi);
+            current.deinit();
+            current = next;
+        }
+        rank_now -= run_len;
+        i += run_len;
     }
     return current;
 }

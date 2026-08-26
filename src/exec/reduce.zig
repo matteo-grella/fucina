@@ -44,6 +44,104 @@ fn intSumContribution(comptime dtype: DType, value: dtype_mod.Scalar(dtype)) i64
     return if (comptime dtype == .bool) @intFromBool(value) else @as(i64, value);
 }
 
+// ---------------------------------------------------------------------------
+// Non-last-axis reductions: the streaming (outer, axis, inner) walk.
+// ---------------------------------------------------------------------------
+
+/// How one axis value folds into its output lane.
+const AxisFold = enum { sum, prod, int_sum };
+
+/// Minimum inner lanes per task when a single outer block splits across
+/// the pool by lane range: below this the strided row reads are too short
+/// for the dispatch to pay.
+const axis_fold_min_inner_lanes = 256;
+
+/// A non-last-axis reduction over a contiguous `[outer, axis_dim, inner]`
+/// input into `[outer, inner]`: for each outer block the `axis_dim` input
+/// rows fold into the output row lane by lane. Every output element meets
+/// its axis values in index order, the order the element-linear walk
+/// visits them, so the result is bitwise that walk's; the arrays are read
+/// contiguously with no per-element delinearization; and outer blocks (or,
+/// for one block, inner-lane ranges) split across the pool with disjoint
+/// outputs, so any task count gives the same bits.
+fn AxisFoldTask(comptime dtype: DType, comptime fold: AxisFold) type {
+    return struct {
+        input: []const In,
+        output: []Out,
+        axis_dim: usize,
+        inner: usize,
+        outer_start: usize,
+        outer_end: usize,
+        inner_start: usize,
+        inner_end: usize,
+
+        const In = dtype_mod.Scalar(dtype);
+        const output_dtype = if (fold == .int_sum) .i64 else dtype_mod.outputDType(.reduction, dtype);
+        const Out = dtype_mod.Scalar(output_dtype);
+        const compute_dtype = if (fold == .int_sum) .i64 else dtype_mod.computeDType(.reduction, dtype);
+
+        fn run(task: *const @This()) void {
+            const lanes = task.inner_end - task.inner_start;
+            for (task.outer_start..task.outer_end) |outer_i| {
+                const out_row = task.output[outer_i * task.inner + task.inner_start ..][0..lanes];
+                const block = outer_i * task.axis_dim;
+                for (0..task.axis_dim) |a| {
+                    const in_row = task.input[(block + a) * task.inner + task.inner_start ..][0..lanes];
+                    for (out_row, in_row) |*acc, value| {
+                        switch (comptime fold) {
+                            .sum => if (comptime dtype == .f32) {
+                                acc.* += value;
+                            } else {
+                                const next = dtype_mod.castFloat(output_dtype, compute_dtype, acc.*) + dtype_mod.castFloat(dtype, compute_dtype, value);
+                                acc.* = dtype_mod.castFloat(compute_dtype, output_dtype, next);
+                            },
+                            .prod => acc.* *= value,
+                            .int_sum => acc.* +%= intSumContribution(dtype, value),
+                        }
+                    }
+                }
+            }
+        }
+    };
+}
+
+/// Fold axis `axis_dim` of the contiguous `[outer, axis_dim, inner]` input
+/// into `output` (`[outer, inner]`, pre-filled with the fold's identity).
+/// Above the row-kernel work threshold the outer blocks split across the
+/// pool, or the inner lanes when there are fewer blocks than workers and
+/// the lanes are wide enough; otherwise one serial task.
+fn foldAxisStreaming(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime fold: AxisFold,
+    input: []const dtype_mod.Scalar(dtype),
+    output: []AxisFoldTask(dtype, fold).Out,
+    outer: usize,
+    axis_dim: usize,
+    inner: usize,
+) void {
+    const Task = AxisFoldTask(dtype, fold);
+    const base_task: Task = .{
+        .input = input,
+        .output = output,
+        .axis_dim = axis_dim,
+        .inner = inner,
+        .outer_start = 0,
+        .outer_end = outer,
+        .inner_start = 0,
+        .inner_end = inner,
+    };
+    if (input.len >= parallel.row_kernel_len_threshold) {
+        const workers = parallel.cpuThreadCount(parallel.vector_max_threads);
+        if (outer >= workers or inner < 2 * axis_fold_min_inner_lanes) {
+            if (outer > 1 and ctx.dispatchRange(Task, "outer_start", "outer_end", base_task, outer, Task.run)) return;
+        } else if (ctx.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / axis_fold_min_inner_lanes, Task.run)) {
+            return;
+        }
+    }
+    Task.run(&base_task);
+}
+
 fn sumF32(ctx: *ExecContext, x: *const Tensor) !Tensor {
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
@@ -88,7 +186,6 @@ pub fn sumAxis(
     if (comptime dtype == .f32) return sumAxisF32(ctx, rank, x, axis);
     if (comptime isIntSum(dtype)) return intSumAxis(ctx, dtype, rank, x, axis);
     comptime ensureForwardFloatMath(dtype);
-    const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
 
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
@@ -122,24 +219,7 @@ pub fn sumAxis(
         return out;
     }
 
-    const out_strides = contiguousStridesArray(out_rank, out_shape);
-    for (input, 0..) |value, linear| {
-        var remainder = linear;
-        var out_linear: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            const coord = remainder % source.shape[dim];
-            remainder /= source.shape[dim];
-            if (dim != axis) {
-                const out_dim = if (dim < axis) dim else dim - 1;
-                out_linear += coord * out_strides[out_dim];
-            }
-        }
-        const next = dtype_mod.castFloat(output_dtype, compute_dtype, output[out_linear]) + dtype_mod.castFloat(dtype, compute_dtype, value);
-        output[out_linear] = dtype_mod.castFloat(compute_dtype, output_dtype, next);
-    }
-
+    foldAxisStreaming(ctx, dtype, .sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
     return out;
 }
 
@@ -178,23 +258,7 @@ fn intSumAxis(
         return out;
     }
 
-    const out_strides = contiguousStridesArray(out_rank, out_shape);
-    for (input, 0..) |value, linear| {
-        var remainder = linear;
-        var out_linear: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            const coord = remainder % source.shape[dim];
-            remainder /= source.shape[dim];
-            if (dim != axis) {
-                const out_dim = if (dim < axis) dim else dim - 1;
-                out_linear += coord * out_strides[out_dim];
-            }
-        }
-        output[out_linear] +%= intSumContribution(dtype, value);
-    }
-
+    foldAxisStreaming(ctx, dtype, .int_sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
     return out;
 }
 
@@ -230,23 +294,7 @@ fn sumAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
         return out;
     }
 
-    const out_strides = contiguousStridesArray(out_rank, out_shape);
-    for (input, 0..) |value, linear| {
-        var remainder = linear;
-        var out_linear: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            const coord = remainder % source.shape[dim];
-            remainder /= source.shape[dim];
-            if (dim != axis) {
-                const out_dim = if (dim < axis) dim else dim - 1;
-                out_linear += coord * out_strides[out_dim];
-            }
-        }
-        output[out_linear] += value;
-    }
-
+    foldAxisStreaming(ctx, .f32, .sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
     return out;
 }
 
@@ -765,23 +813,7 @@ fn prodF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime a
     }
 
     for (output) |*value| value.* = 1;
-    const out_strides = contiguousStridesArray(out_rank, out_shape);
-    for (input, 0..) |value, linear| {
-        var remainder = linear;
-        var out_linear: usize = 0;
-        comptime var dim = rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            const coord = remainder % source.shape[dim];
-            remainder /= source.shape[dim];
-            if (dim != axis) {
-                const out_dim = if (dim < axis) dim else dim - 1;
-                out_linear += coord * out_strides[out_dim];
-            }
-        }
-        output[out_linear] *= value;
-    }
-
+    foldAxisStreaming(ctx, .f32, .prod, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
     return out;
 }
 
