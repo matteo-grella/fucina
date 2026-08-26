@@ -131,11 +131,22 @@ pub const GradcheckResult = ag.GradcheckResult;
 /// Element dtype enum (f32/f16/bf16/int/bool + every quantized block
 /// format); the block-format registry lives in `quant`/`dtype`.
 pub const DType = dtype.DType;
-/// bf16 <-> f32 scalar converters (bf16 tensors store raw u16 bits): the
-/// bridge for consumers of bf16 state dicts and 16-bit params.
+/// bf16 <-> f32 scalar converters over RAW u16 bits (what the raw tensor
+/// layer and state dicts store): the bridge for consumers of bf16 bytes.
 pub const bf16ToF32 = dtype.bf16ToF32;
-/// f32 -> bf16 scalar converter (round-to-nearest-even; bf16 tensors store raw u16 bits).
+/// f32 -> bf16 raw-bits converter (round-to-nearest-even).
 pub const f32ToBf16 = dtype.f32ToBf16;
+/// bf16 as a VALUE type: the element the public `.bf16` tensor branch
+/// speaks (`item`/`data`/`dataConst`/`fromSlice`/`variableFromSlice`).
+/// Layout-identical to the raw u16 bits: `.bits`, `toF32`/`fromF32`,
+/// `@bitCast` at the raw seam.
+pub const Bf16 = dtype.Bf16;
+/// OCP FP8 E4M3FN value type: the element of the `.f8_e4m3` storage-float
+/// branch; layout-identical to its u8 bits.
+pub const F8E4M3 = dtype.F8E4M3;
+/// OCP FP8 E5M2 value type: the element of the `.f8_e5m2` storage-float
+/// branch; layout-identical to its u8 bits.
+pub const F8E5M2 = dtype.F8E5M2;
 /// Quantized-format vocabulary: the GGML block structs, the packed
 /// quantized-matmul RHS container types, block sizes, and the quant
 /// capability flags. The comptime completeness registry behind the block

@@ -470,8 +470,8 @@ test "public dense packed RHS supports f32 f16 and bf16 weights" {
         try std.testing.expectApproxEqAbs(want, got, 2e-5);
     }
 
-    var wb_values: [n * k]u16 = undefined;
-    for (&wb_values, w_values) |*dst, src| dst.* = dtype_mod.f32ToBf16(src);
+    var wb_values: [n * k]dtype_mod.Bf16 = undefined;
+    for (&wb_values, w_values) |*dst, src| dst.* = dtype_mod.Bf16.fromF32(src);
     const WB = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
     var wb = try WB.fromSlice(&ctx, .{ n, k }, &wb_values);
     defer wb.deinit();
@@ -483,7 +483,7 @@ test "public dense packed RHS supports f32 f16 and bf16 weights" {
         const i = index / n;
         const j = index % n;
         var want: f32 = 0;
-        for (0..k) |p| want += x_values[i * k + p] * dtype_mod.bf16ToF32(wb_values[j * k + p]);
+        for (0..k) |p| want += x_values[i * k + p] * wb_values[j * k + p].toF32();
         try std.testing.expectApproxEqAbs(want, got, 2e-5);
     }
 }

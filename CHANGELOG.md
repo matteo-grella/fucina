@@ -159,6 +159,8 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- `dtype.isFloat` (module-internal spelling of the same predicate).
+  Rewrite: `dtype.supportsForwardFloatMath(dt)`.
 - `ExecContext.reserveScopeSlot`, `adoptScopeValueAssumeCapacity`,
   `adoptScopeNodeAssumeCapacity`, and `ScopeNodeDestroy`. Rewrite:
   `try ctx.adopt(&.{ ctx.bufferEntry(dtype, buffer), ... })` with
@@ -214,6 +216,19 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The public bf16/f8 tensor branches speak VALUE types instead of raw bit
+  patterns: `item`/`data`/`dataConst`/`copyTo`/`fromSlice`/
+  `fromBorrowedConstSlice`/`variableFromSlice` on a `.bf16` tensor now take
+  and return the new `fucina.Bf16` (`packed struct(u16)` with `.bits`,
+  `toF32`, `fromF32`; `.f8_e4m3`/`.f8_e5m2` likewise via `fucina.F8E4M3` /
+  `fucina.F8E5M2`, and `dtype.Element(dtype)` is the mapping). The RAW
+  tensor layer is unchanged (`Scalar(.bf16)` stays `u16` bits;
+  `asRawTensor()` still exposes bits, as do state-dict bytes). The value
+  structs are layout-identical to their bits, so the rewrite is one cast at
+  the seam: `f32ToBf16(x)` in a facade element list becomes
+  `Bf16.fromF32(x)` (or `.{ .bits = raw }`), a `[]const u16` read of
+  `dataConst()` becomes `@ptrCast(try t.dataConst())` (or read `.bits` /
+  `v.toF32()` per element).
 - Exec scopes are one uniform arena of borrows. An adopted result is one
   `ExecContext.ScopeEntry{ ptr, release }` per reference (the value buffer
   of any dtype, and the graph node when there is one), taken by one

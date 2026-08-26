@@ -2138,7 +2138,7 @@ test "bf16 forward ops compute through f32 and narrow once" {
     defer reference_f32.deinit();
     var reference = try reference_f32.to(&ctx, .bf16);
     defer reference.deinit();
-    try std.testing.expectEqualSlices(u16, try reference.dataConst(), try activated.dataConst());
+    try std.testing.expectEqualSlices(fucina.Bf16, try reference.dataConst(), try activated.dataConst());
 
     // Widened reductions keep the f32 accumulator dtype, like sum/mean.
     var spread = try half.variance(&ctx, .d, 0);

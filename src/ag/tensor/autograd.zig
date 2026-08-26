@@ -11,6 +11,7 @@ const tensor_mod = @import("../../tensor.zig");
 const exec_mod = @import("../../exec.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const core = @import("../core.zig");
+const dtype_mod = @import("../../dtype.zig");
 
 const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
@@ -23,7 +24,10 @@ pub fn Ops(comptime Self: type) type {
         const tags = Self.axis_tags;
         const tensor_rank = Self.tensor_rank;
         const RawT = tensor_mod.TensorOf(dtype);
-        const Elem = RawT.Element;
+        /// The facade element (`dtype_mod.Element`): `Bf16` values on the
+        /// bf16 branch, the raw element elsewhere (see `common.zig`).
+        const Elem = dtype_mod.Element(dtype);
+        const RawElem = RawT.Element;
         const Tensor = Self.ag_root.Tensor;
         /// The gradient's type: f32, same tags (the f32 branch's own type).
         const Grad = Tensor(.{ .dtype = .f32, .tags = tags });
@@ -48,7 +52,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
             comptime requireGradDtype("variableFromSlice");
-            var value = try ctx.fromSlice(dtype, raw_shape, values);
+            var value = try ctx.fromSlice(dtype, raw_shape, @as([]const RawElem, @ptrCast(values)));
             errdefer value.deinit();
             return Self.variable(ctx, value);
         }

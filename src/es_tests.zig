@@ -39,8 +39,8 @@ fn widenF16(dst: []f32, src: []const f16) void {
     for (dst, src) |*d, s| d.* = @floatCast(s);
 }
 
-fn widenBf16(dst: []f32, src: []const u16) void {
-    for (dst, src) |*d, s| d.* = dtype_mod.bf16ToF32(s);
+fn widenBf16(dst: []f32, src: []const dtype_mod.Bf16) void {
+    for (dst, src) |*d, s| d.* = s.toF32();
 }
 
 // The golden scenario's parameters (tools/gen_es_goldens.py).
@@ -59,8 +59,8 @@ const GoldenParams = struct {
     d: Tensor(.{.n}),
 
     fn init(ctx: *ExecContext) !GoldenParams {
-        var theta_c_bits: [theta_c_f32.len]u16 = undefined;
-        for (&theta_c_bits, theta_c_f32) |*bits, v| bits.* = dtype_mod.f32ToBf16(v);
+        var theta_c_bits: [theta_c_f32.len]dtype_mod.Bf16 = undefined;
+        for (&theta_c_bits, theta_c_f32) |*bits, v| bits.* = dtype_mod.Bf16.fromF32(v);
 
         var a = try Tensor(.{.n}).fromSlice(ctx, .{theta_a.len}, &theta_a);
         errdefer a.deinit();
@@ -678,7 +678,7 @@ test "es materializeMember matches in-place perturbation bitwise" {
     try trainer.perturb(&ctx, 1);
     try std.testing.expectEqualSlices(f32, try params.a.dataConst(), rep_a);
     try std.testing.expectEqualSlices(f16, try params.b.dataConst(), rep_b);
-    try std.testing.expectEqualSlices(u16, try params.c.dataConst(), rep_c);
+    try std.testing.expectEqualSlices(u16, @ptrCast(try params.c.dataConst()), rep_c);
     try std.testing.expectEqualSlices(f32, try params.d.dataConst(), rep_d);
     try trainer.restore(&ctx, 1);
 }
@@ -785,7 +785,7 @@ test "es step equals manual update on a twin (snapshot restore), advances iterat
 
     try std.testing.expectEqualSlices(f32, try twin_params.a.dataConst(), try params.a.dataConst());
     try std.testing.expectEqualSlices(f16, try twin_params.b.dataConst(), try params.b.dataConst());
-    try std.testing.expectEqualSlices(u16, try twin_params.c.dataConst(), try params.c.dataConst());
+    try std.testing.expectEqualSlices(dtype_mod.Bf16, try twin_params.c.dataConst(), try params.c.dataConst());
     try std.testing.expectEqualSlices(f32, try twin_params.d.dataConst(), try params.d.dataConst());
 }
 

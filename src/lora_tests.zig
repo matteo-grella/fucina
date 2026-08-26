@@ -468,10 +468,10 @@ test "lora scoped train loop over a frozen bf16 base is leak-free and the loss d
     // Frozen bf16 base: the dot routes through the mixed f32 x bf16 TransB
     // kernel forward and ConstRhsDotBackward(.bf16) backward — the only
     // differentiable bf16 weight path.
-    var wbf_vals: [40]u16 = undefined;
+    var wbf_vals: [40]dtype_mod.Bf16 = undefined;
     var w_seed_vals: [40]f32 = undefined;
     rng.uniformFill(32, &w_seed_vals, -1, 1);
-    for (w_seed_vals, &wbf_vals) |v, *bits| bits.* = dtype_mod.f32ToBf16(v);
+    for (w_seed_vals, &wbf_vals) |v, *bits| bits.* = dtype_mod.Bf16.fromF32(v);
     var wbf = try Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } }).fromSlice(&ctx, .{ 5, 8 }, &wbf_vals);
     defer wbf.deinit();
     try std.testing.expect(!wbf.requiresGrad());

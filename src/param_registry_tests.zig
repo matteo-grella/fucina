@@ -10,6 +10,7 @@ const ag = @import("ag.zig");
 const optim = @import("optim.zig");
 const state_dict = @import("state_dict.zig");
 const param_registry = @import("param_registry.zig");
+const dtype_mod = @import("dtype.zig");
 
 const ExecContext = exec_mod.ExecContext;
 const DType = tensor_mod.DType;
@@ -509,7 +510,7 @@ test "addParamsTo registers 16-bit variables and the optimizer steps them" {
     defer opt.deinit();
     try registry.addParamsTo(&opt);
 
-    const before = try allocator.dupe(u16, try w.dataConst());
+    const before = try allocator.dupe(dtype_mod.Bf16, try w.dataConst());
     defer allocator.free(before);
     var c = try ag.Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 2 }, &.{ 0.5, -1.0, 2.0, 0.25 });
     defer c.deinit();
@@ -526,5 +527,5 @@ test "addParamsTo registers 16-bit variables and the optimizer steps them" {
     registry.zeroGrad();
 
     // lr 0.05 moves every element by ~0.05 — visible even at bf16 resolution.
-    try std.testing.expect(!std.mem.eql(u16, before, try w.dataConst()));
+    try std.testing.expect(!std.mem.eql(u16, @ptrCast(before), @ptrCast(try w.dataConst())));
 }

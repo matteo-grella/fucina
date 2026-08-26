@@ -400,13 +400,6 @@ pub fn isBlockQuantized(comptime dtype: DType) bool {
     return kind(dtype) == .block_quantized;
 }
 
-pub fn isFloat(comptime dtype: DType) bool {
-    return switch (dtype) {
-        .f16, .bf16, .f32, .f64 => true,
-        else => false,
-    };
-}
-
 /// 8-bit storage floats (OCP FP8: f8_e4m3 is the E4M3FN variant with NaN
 /// but no infinities; f8_e5m2 is IEEE-like with infinities). Storage-only:
 /// they convert to/from f32 but are excluded from forward math and grads.
@@ -439,7 +432,7 @@ pub fn isUnsignedInteger(comptime dtype: DType) bool {
 }
 
 pub fn supportsGrad(comptime dtype: DType) bool {
-    return isFloat(dtype);
+    return supportsForwardFloatMath(dtype);
 }
 
 /// Ordinary integer pointwise math (wrapping add/sub/mul, max/min,
@@ -482,40 +475,13 @@ pub fn supportsQuantizedGetRows(comptime dtype: DType) bool {
     return isBlockQuantized(dtype);
 }
 
+/// The dtype a tensor SPEAKS f32 as: every block-quantized format (one
+/// `block_formats` row each) and the f8 storage floats decode to f32;
+/// every other scalar dtype is its own logical type. Derived, not listed:
+/// a new registry row can never silently keep its storage type here.
 pub fn logicalDType(comptime dtype: DType) DType {
-    return switch (dtype) {
-        .q1_0,
-        .q2_0,
-        .q4_0,
-        .q4_1,
-        .q5_0,
-        .q5_1,
-        .q8_0,
-        .q8_1,
-        .q2_k,
-        .q3_k,
-        .q4_k,
-        .q5_k,
-        .q6_k,
-        .q8_k,
-        .iq1_s,
-        .iq1_m,
-        .iq2_xxs,
-        .iq2_xs,
-        .iq2_s,
-        .iq3_xxs,
-        .iq3_s,
-        .iq4_nl,
-        .iq4_xs,
-        .tq1_0,
-        .tq2_0,
-        .mxfp4,
-        .nvfp4,
-        .f8_e4m3,
-        .f8_e5m2,
-        => .f32,
-        else => dtype,
-    };
+    if (comptime isBlockQuantized(dtype) or isF8(dtype)) return .f32;
+    return dtype;
 }
 
 pub fn blockSize(comptime dtype: DType) usize {
@@ -850,6 +816,66 @@ pub fn f32ToBf16(value: f32) u16 {
     const lsb = (bits >> 16) & 1;
     const rounded = bits + 0x7fff + lsb;
     return @truncate(rounded >> 16);
+}
+
+/// bf16 as a VALUE type: one bf16 number, not a bare bit pattern. The raw
+/// tensor layer keeps storing `Scalar(.bf16)` = `u16` bits; this struct is
+/// the public-boundary element (`Element(.bf16)`), layout-identical to the
+/// bits (`packed struct(u16)`), so the two convert with `@bitCast` or
+/// `.bits` at the seam.
+pub const Bf16 = packed struct(u16) {
+    bits: u16,
+
+    pub fn toF32(self: Bf16) f32 {
+        return bf16ToF32(self.bits);
+    }
+
+    pub fn fromF32(value: f32) Bf16 {
+        return .{ .bits = f32ToBf16(value) };
+    }
+};
+
+/// OCP FP8 E4M3FN as a value type (`Element(.f8_e4m3)`); layout-identical
+/// to the `u8` storage bits. See `Bf16`.
+pub const F8E4M3 = packed struct(u8) {
+    bits: u8,
+
+    pub fn toF32(self: F8E4M3) f32 {
+        return f8e4m3ToF32(self.bits);
+    }
+
+    pub fn fromF32(value: f32) F8E4M3 {
+        return .{ .bits = f32ToF8e4m3(value) };
+    }
+};
+
+/// OCP FP8 E5M2 as a value type (`Element(.f8_e5m2)`); layout-identical
+/// to the `u8` storage bits. See `Bf16`.
+pub const F8E5M2 = packed struct(u8) {
+    bits: u8,
+
+    pub fn toF32(self: F8E5M2) f32 {
+        return f8e5m2ToF32(self.bits);
+    }
+
+    pub fn fromF32(value: f32) F8E5M2 {
+        return .{ .bits = f32ToF8e5m2(value) };
+    }
+};
+
+/// The element type the PUBLIC facade speaks: the value structs for the
+/// bit-storage floats (bf16 and the two f8 formats), the storage element
+/// (`Storage` — scalar or block struct) for everything else. The raw
+/// tensor layer stays on `Scalar`/`Storage` (bits); only the facade
+/// boundary converts, and the value structs are layout-identical to
+/// their bits so the conversion is a reinterpretation.
+pub fn Element(comptime dtype: DType) type {
+    return switch (dtype) {
+        .bf16 => Bf16,
+        .f8_e4m3 => F8E4M3,
+        .f8_e5m2 => F8E5M2,
+        else => Storage(dtype),
+    };
 }
 
 test {

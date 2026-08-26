@@ -391,7 +391,7 @@ test "optim saveStateDict/loadStateDict roundtrips f32, f16, and bf16 byte-exact
     const h_values = [_]f16{ 0.5, -1.25, 2, -3.5 };
     var h = try Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } }).fromSlice(&ctx, .{ 2, 2 }, &h_values);
     defer h.deinit();
-    const g_values = [_]u16{ dtype_mod.f32ToBf16(0.5), dtype_mod.f32ToBf16(-1), dtype_mod.f32ToBf16(2) };
+    const g_values = [_]dtype_mod.Bf16{ dtype_mod.Bf16.fromF32(0.5), dtype_mod.Bf16.fromF32(-1), dtype_mod.Bf16.fromF32(2) };
     var g = try Tensor(.{ .dtype = .bf16, .tags = .{.out} }).fromSlice(&ctx, .{3}, &g_values);
     defer g.deinit();
 
@@ -409,7 +409,7 @@ test "optim saveStateDict/loadStateDict roundtrips f32, f16, and bf16 byte-exact
     defer w2.deinit();
     var h2 = try Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } }).fromSlice(&ctx, .{ 2, 2 }, &.{ 9, 9, 9, 9 });
     defer h2.deinit();
-    var g2 = try Tensor(.{ .dtype = .bf16, .tags = .{.out} }).fromSlice(&ctx, .{3}, &.{ 0, 0, 0 });
+    var g2 = try Tensor(.{ .dtype = .bf16, .tags = .{.out} }).fromSlice(&ctx, .{3}, &.{ dtype_mod.Bf16.fromF32(0), dtype_mod.Bf16.fromF32(0), dtype_mod.Bf16.fromF32(0) });
     defer g2.deinit();
     var reader = std.Io.Reader.fixed(written);
     const load_entries = [_]optim.NamedTensorMut{
@@ -420,7 +420,7 @@ test "optim saveStateDict/loadStateDict roundtrips f32, f16, and bf16 byte-exact
     try optim.loadStateDict(allocator, &reader, &load_entries, .{});
     try std.testing.expectEqualSlices(f32, &w_values, try w2.dataConst());
     try std.testing.expectEqualSlices(f16, &h_values, try h2.dataConst());
-    try std.testing.expectEqualSlices(u16, &g_values, try g2.dataConst());
+    try std.testing.expectEqualSlices(dtype_mod.Bf16, &g_values, try g2.dataConst());
 }
 
 test "optim loadStateDict matches entries by name regardless of order" {
@@ -2501,7 +2501,7 @@ test "optim 16-bit params step through f32 masters, tracking the f32 twin exactl
             var expected = try w32.to(&ctx, float_dtype);
             defer expected.deinit();
             try std.testing.expectEqualSlices(
-                dtype_mod.Scalar(float_dtype),
+                dtype_mod.Element(float_dtype),
                 try expected.dataConst(),
                 try w16.dataConst(),
             );
@@ -2563,12 +2563,12 @@ test "optim v5 frames persist masters for bit-exact 16-bit resume" {
     var frame: std.Io.Writer.Allocating = .init(allocator);
     defer frame.deinit();
     try opt.saveState(&frame.writer);
-    const saved_values = try allocator.dupe(u16, try w.dataConst());
+    const saved_values = try allocator.dupe(dtype_mod.Bf16, try w.dataConst());
     defer allocator.free(saved_values);
 
     try stepOnce(&ctx, &w, &c, &opt);
     try stepOnce(&ctx, &w, &c, &opt);
-    const final_expected = try allocator.dupe(u16, try w.dataConst());
+    const final_expected = try allocator.dupe(dtype_mod.Bf16, try w.dataConst());
     defer allocator.free(final_expected);
 
     // Resume: fresh param from the SAVED 16-bit values, fresh optimizer,
@@ -2585,7 +2585,7 @@ test "optim v5 frames persist masters for bit-exact 16-bit resume" {
 
     try stepOnce(&ctx, &w_resumed, &c, &opt_resumed);
     try stepOnce(&ctx, &w_resumed, &c, &opt_resumed);
-    try std.testing.expectEqualSlices(u16, final_expected, try w_resumed.dataConst());
+    try std.testing.expectEqualSlices(dtype_mod.Bf16, final_expected, try w_resumed.dataConst());
 }
 
 test "optim Muon and SGD step 16-bit params through masters" {
@@ -2677,10 +2677,10 @@ test "optim Muon and SGD step 16-bit params through masters" {
 
         var expected_w = try w32.to(&ctx, .bf16);
         defer expected_w.deinit();
-        try std.testing.expectEqualSlices(u16, try expected_w.dataConst(), try w16.dataConst());
+        try std.testing.expectEqualSlices(dtype_mod.Bf16, try expected_w.dataConst(), try w16.dataConst());
         var expected_b = try bias32.to(&ctx, .bf16);
         defer expected_b.deinit();
-        try std.testing.expectEqualSlices(u16, try expected_b.dataConst(), try bias16.dataConst());
+        try std.testing.expectEqualSlices(dtype_mod.Bf16, try expected_b.dataConst(), try bias16.dataConst());
     }
 
     // SGD with momentum (bf16 state) over a bf16 param.
@@ -2723,6 +2723,6 @@ test "optim Muon and SGD step 16-bit params through masters" {
 
         var expected = try w32.to(&ctx, .bf16);
         defer expected.deinit();
-        try std.testing.expectEqualSlices(u16, try expected.dataConst(), try w16.dataConst());
+        try std.testing.expectEqualSlices(dtype_mod.Bf16, try expected.dataConst(), try w16.dataConst());
     }
 }

@@ -7,6 +7,7 @@
 //! over the tensor struct; aliased back onto it in ../tensor.zig.
 
 const tensor_mod = @import("../../tensor.zig");
+const dtype_mod = @import("../../dtype.zig");
 const tags_mod = @import("../../tags.zig");
 
 const TensorError = tensor_mod.TensorError;
@@ -20,8 +21,18 @@ pub fn Ops(comptime Self: type) type {
         const tags = Self.axis_tags;
         const tensor_rank = Self.tensor_rank;
         const RawT = tensor_mod.TensorOf(dtype);
-        const Elem = RawT.Element;
+        /// What the accessors speak: the VALUE type for the bit-storage
+        /// floats (`Bf16`, `F8E4M3`, `F8E5M2` — layout-identical to their
+        /// bits), the raw element for every other dtype. The raw tensor
+        /// layer underneath stays on bits; this boundary converts by
+        /// reinterpretation only.
+        const Elem = dtype_mod.Element(dtype);
         const has_grad = @hasField(Self, "grad_state");
+
+        fn toElem(raw: RawT.Element) Elem {
+            if (comptime Elem == RawT.Element) return raw;
+            return @bitCast(raw);
+        }
 
         /// Release the handle: the value buffer's reference and, on the
         /// gradient-carrying branches, the graph node's. A scope-owned
@@ -42,7 +53,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn item(self: *const Self) !Elem {
             if (!self.value.isScalar()) return TensorError.InvalidShape;
-            return (try self.value.dataConstChecked())[0];
+            return toElem((try self.value.dataConstChecked())[0]);
         }
 
         /// Mutable element view of a contiguous tensor. Refused on a tensor
@@ -52,15 +63,15 @@ pub fn Ops(comptime Self: type) type {
             if (comptime has_grad) {
                 if (self.requiresGrad()) return error.MutableDataRequiresNoGrad;
             }
-            return self.value.dataChecked();
+            return @ptrCast(try self.value.dataChecked());
         }
 
         pub fn dataConst(self: *const Self) ![]const Elem {
-            return self.value.dataConstChecked();
+            return @ptrCast(try self.value.dataConstChecked());
         }
 
         pub fn copyTo(self: *const Self, dst: []Elem) !void {
-            return self.value.copyTo(dst);
+            return self.value.copyTo(@ptrCast(dst));
         }
 
         pub fn requiresGrad(self: *const Self) bool {

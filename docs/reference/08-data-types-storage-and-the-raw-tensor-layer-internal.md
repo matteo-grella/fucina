@@ -130,17 +130,16 @@ Classification predicates (all comptime, all `pub`):
 |---|---|
 | `kind(dtype)` | returns `.scalar` or `.block_quantized` |
 | `isScalar` / `isBlockQuantized` | kind shorthands |
-| `isFloat` | `.f16`, `.bf16`, `.f32`, `.f64` |
 | `isF8` | `.f8_e4m3`, `.f8_e5m2` (OCP FP8 storage-only floats: convertible to/from f32, excluded from forward math and grads) |
 | `isInteger` | `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` |
 | `isSignedInteger` / `isUnsignedInteger` | the obvious subsets |
-| `supportsGrad` | `== isFloat` (only float tensors can carry gradients; in practice only `.f32` does, [§5](05-automatic-differentiation.md)) |
+| `supportsForwardFloatMath` | `.f16`, `.bf16`, `.f32`, `.f64` — THE float predicate (forward math on the typed facade, [§3](03-tensors-types-construction-and-data-access.md)) |
+| `supportsGrad` | `== supportsForwardFloatMath` (only float tensors can carry gradients; in practice only `.f32` does, [§5](05-automatic-differentiation.md)) |
 | `supportsIntMath` | `== isInteger` (wrapping integer pointwise math and i64-accumulated reductions; `.bool` reduces but has no pointwise math) |
-| `supportsForwardFloatMath` | `== isFloat` (forward-only math on the typed facade, [§3](03-tensors-types-construction-and-data-access.md)) |
 | `supportsToFloat` | floats, the f8 storage floats, plus every block-quantized dtype (dequantizable) |
 | `supportsQuantizedMatmulRhs` | every block dtype **except** `.q8_1` and `.q8_k` (those two are activation-side dot-product formats, [§10](10-quantization.md)) |
 | `supportsQuantizedGetRows` | `== isBlockQuantized` (embedding-row gather) |
-| `logicalDType` | blocks and the f8 storage floats map to `.f32`, other scalars map to themselves |
+| `logicalDType` | derived from the registry: block-quantized dtypes and the f8 storage floats map to `.f32`, other scalars map to themselves |
 
 Scalar constant/conversion helpers: `zero(dtype)`, `one(dtype)`,
 `name(dtype)` (the tag name), `toF32`/`toF64`/`fromF32`/`fromF64` (float
@@ -158,9 +157,18 @@ NaN → 0, anything→bool is `!= 0`, bool→number is 0/1).
 formats read through the value bridge so `-0.0` stays falsy and NaN is
 truthy. `toAccumulator`/`fromAccumulator` convert between `Scalar(dtype)`
 and `Accumulator(dtype)` (bool maps to 0/1). `bf16ToF32(bits: u16) f32` and
-`f32ToBf16(value: f32) u16` implement the bf16 bridge: round-to-nearest-even
-on narrowing, with ggml-compatible NaN quieting (a NaN payload never
-truncates to infinity; `src/dtype_tests.zig` pins this).
+`f32ToBf16(value: f32) u16` implement the bf16 bridge over raw bits:
+round-to-nearest-even on narrowing, with ggml-compatible NaN quieting (a
+NaN payload never truncates to infinity; `src/dtype_tests.zig` pins this).
+
+The bit-storage floats also come as VALUE types: `Bf16`, `F8E4M3`, `F8E5M2`
+(each a packed struct over its bits with `toF32`/`fromF32` wrapping the
+bridges above; re-exported at the `fucina` root). `Element(dtype)` maps a
+dtype to what the PUBLIC facade speaks — the value structs for bf16/f8, the
+`Storage` element (scalar or block struct) for everything else — while the
+raw tensor layer stays on `Scalar`/`Storage` bits; the two sides are
+layout-identical, so the facade boundary converts by reinterpretation
+(`@bitCast`/`@ptrCast`, or `.bits`).
 
 `f8e4m3ToF32`/`f32ToF8e4m3` and `f8e5m2ToF32`/`f32ToF8e5m2` implement the
 OCP FP8 bridges. Decode is an exact comptime 256-entry table per format

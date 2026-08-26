@@ -140,7 +140,10 @@ test "bf16 params train through f32 masters" {
     defer ctx.deinit();
 
     const W = fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
-    var w = try W.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 0x3f80, 0xc000, 0x3f00, 0x4040 }); // 1, -2, 0.5, 3
+    const Bf16 = fucina.Bf16;
+    var w = try W.variableFromSlice(&ctx, .{ 2, 2 }, &.{
+        Bf16.fromF32(1), Bf16.fromF32(-2), Bf16.fromF32(0.5), Bf16.fromF32(3),
+    });
     defer w.deinit();
     var x = try fucina.Tensor(.{ .t, .in }).fromSlice(&ctx, .{ 1, 2 }, &.{ 1, 2 });
     defer x.deinit();

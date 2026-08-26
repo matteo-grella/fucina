@@ -108,10 +108,14 @@ unsupported operation is a compile error, never a runtime failure
 
 Notes that follow from the dtype layer (`src/dtype.zig`, detailed in [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)):
 
-- `Scalar(.bf16)` is `u16` — bf16 tensors store and expose **raw bits**, not
-  a native float type; `f16` uses Zig's `f16`. The f8 storage floats follow
-  the same convention with `u8` bits (`dtype_mod.f32ToF8e4m3` /
-  `f8e4m3ToF32` and the e5m2 pair are the value bridges, [§8.2](08-data-types-storage-and-the-raw-tensor-layer-internal.md#82-storage-mapping-and-dtype-predicates-srcdtypezig)).
+- `Scalar(.bf16)` is `u16` — the RAW tensor layer stores bf16 as bits; the
+  public facade speaks the VALUE type `fucina.Bf16` (a `packed struct(u16)`
+  with `.bits` and `toF32`/`fromF32`, layout-identical to the bits), so
+  `item`/`data`/`dataConst`/`fromSlice` on a bf16 tensor take and return
+  bf16 numbers, not bare `u16`. `f16` uses Zig's `f16`. The f8 storage
+  floats follow the same convention over `u8` bits with `fucina.F8E4M3` /
+  `fucina.F8E5M2` (the `Element(dtype)` mapping and the raw bit bridges are
+  [§8.2](08-data-types-storage-and-the-raw-tensor-layer-internal.md#82-storage-mapping-and-dtype-predicates-srcdtypezig)).
 - Block-quantized tensors have no per-element scalar; their element type is
   the block struct (`Storage(dtype)`, e.g. `fucina.quant.BlockQ8_0`), and shapes
   count *logical* elements while storage counts blocks.
@@ -362,7 +366,9 @@ test "borrowed-storage constructors" {
 **Typed-constant branches** (int/bool and non-f32 float) share one
 constructor set: `constant`, `fromTensor`, `fromSlice`,
 `fromBorrowedConstSlice`, `empty`, `zeros`, `ones` — same semantics as the
-f32 forms, elements typed `Scalar(dtype)`. There is no `full`, `scalar`, or
+f32 forms, elements typed `dtype.Element(dtype)` (the value structs
+`Bf16`/`F8E4M3`/`F8E5M2` on the bit-storage float branches, `Scalar(dtype)`
+everywhere else). There is no `full`, `scalar`, or
 mutable `fromBorrowedSlice` on these branches. No `variable` except the
 f16/bf16 leaf constructors `variable`/`variableFromSlice` ([§3.2](03-tensors-types-construction-and-data-access.md#32-the-four-facade-branches-srcagtensorzig)): gradients
 are always f32.
@@ -474,15 +480,17 @@ broadcasts, inner narrows).
 ## 3.5 Data access (`src/ag/tensor.zig`, `src/tensor.zig`)
 
 ```zig
-pub fn item(self: *const Self) !f32                 // f32; typed: !Scalar(dtype); absent on quantized
+pub fn item(self: *const Self) !f32                 // f32; typed: !dtype.Element(dtype); absent on quantized
 pub fn data(self: *Self) ![]f32                     // mutable element view
 pub fn dataConst(self: *const Self) ![]const f32    // read-only element view
 pub fn copyTo(self: *const Self, dst: []f32) !void  // stride-aware copy out
 pub fn asRawTensor(self: *const Self) *const RawTensor
 ```
 
-(Element types are `Scalar(dtype)` on typed branches and the block struct
-`Storage(dtype)` on the quantized branch.)
+(Element types follow `dtype.Element(dtype)`: `Scalar(dtype)` on most typed
+branches, the value structs `Bf16`/`F8E4M3`/`F8E5M2` on the bit-storage
+float branches, and the block struct `Storage(dtype)` on the quantized
+branch.)
 
 - `item` requires a single-element tensor (`len() == 1`, any shape of
   all-ones); otherwise `error.InvalidShape`. It is how scalar losses are

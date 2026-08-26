@@ -4,6 +4,7 @@
 //! struct; aliased back onto it in ../../tensor.zig.
 
 const tensor_mod = @import("../../../tensor.zig");
+const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const rng = @import("../../../rng.zig");
@@ -18,7 +19,15 @@ pub fn Ops(comptime Self: type) type {
         const tags = Self.axis_tags;
         const tensor_rank = Self.tensor_rank;
         const RawT = tensor_mod.TensorOf(dtype);
-        const Elem = tensor_mod.Scalar(dtype);
+        /// The facade element (`dtype_mod.Element`): the value type for
+        /// bf16/f8, the storage scalar otherwise. `rawValues` reinterprets
+        /// back to the bits the raw layer stores.
+        const Elem = dtype_mod.Element(dtype);
+        const RawElem = tensor_mod.Scalar(dtype);
+
+        fn rawValues(values: []const Elem) []const RawElem {
+            return @ptrCast(values);
+        }
 
         /// Consumes `value` on success; on error, ownership stays with the caller.
         pub fn constant(ctx: *ExecContext, value: RawT) !Self {
@@ -33,7 +42,7 @@ pub fn Ops(comptime Self: type) type {
         }
 
         pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-            var value = try ctx.fromSlice(dtype, raw_shape, values);
+            var value = try ctx.fromSlice(dtype, raw_shape, rawValues(values));
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
@@ -43,7 +52,7 @@ pub fn Ops(comptime Self: type) type {
         /// borrow: `values` must outlive the tensor and must not be mutated
         /// (see the f32 `fromBorrowedConstSlice` contract).
         pub fn fromBorrowedConstSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-            var value = try ctx.fromBorrowedSlice(dtype, raw_shape, @constCast(values));
+            var value = try ctx.fromBorrowedSlice(dtype, raw_shape, @constCast(rawValues(values)));
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }

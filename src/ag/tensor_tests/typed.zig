@@ -107,17 +107,17 @@ test "public non-f32 float Tensor supports forward math" {
     defer ctx.deinit();
 
     var a = try Tensor(.{ .dtype = .bf16, .tags = .{ .batch, .d } }).fromSlice(&ctx, .{ 2, 2 }, &.{
-        dtype_mod.f32ToBf16(1),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(3),
-        dtype_mod.f32ToBf16(4),
+        dtype_mod.Bf16.fromF32(1),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(3),
+        dtype_mod.Bf16.fromF32(4),
     });
     defer a.deinit();
     var b = try Tensor(.{ .dtype = .bf16, .tags = .{ .batch, .d } }).fromSlice(&ctx, .{ 2, 2 }, &.{
-        dtype_mod.f32ToBf16(10),
-        dtype_mod.f32ToBf16(20),
-        dtype_mod.f32ToBf16(30),
-        dtype_mod.f32ToBf16(40),
+        dtype_mod.Bf16.fromF32(10),
+        dtype_mod.Bf16.fromF32(20),
+        dtype_mod.Bf16.fromF32(30),
+        dtype_mod.Bf16.fromF32(40),
     });
     defer b.deinit();
 
@@ -174,8 +174,8 @@ test "public f8 storage tensors round-trip through to casts" {
 
     // Raw-bits construction (the bf16 storage convention) and the e5m2 leg.
     var e5 = try Tensor(.{ .dtype = .f8_e5m2, .tags = .{.d} }).fromSlice(&ctx, .{2}, &.{
-        dtype_mod.f32ToF8e5m2(3.0),
-        dtype_mod.f32ToF8e5m2(-0.125),
+        dtype_mod.F8E5M2.fromF32(3.0),
+        dtype_mod.F8E5M2.fromF32(-0.125),
     });
     defer e5.deinit();
     var e5_f32 = try e5.to(&ctx, .f32);
@@ -882,10 +882,10 @@ test "typed forward ops reject grad-requiring operands" {
 
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .batch, .d } });
     var w = try W.variableFromSlice(&ctx, .{ 2, 2 }, &.{
-        dtype_mod.f32ToBf16(1),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(3),
-        dtype_mod.f32ToBf16(4),
+        dtype_mod.Bf16.fromF32(1),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(3),
+        dtype_mod.Bf16.fromF32(4),
     });
     defer w.deinit();
 

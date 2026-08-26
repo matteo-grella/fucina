@@ -387,13 +387,13 @@ test "tagged autograd dot with bf16 RHS propagates gradient to lhs" {
     var x = try X.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
     // All exactly representable in bf16, so widening introduces no error.
-    const w_values = [_]u16{
-        dtype_mod.f32ToBf16(0.5),
-        dtype_mod.f32ToBf16(-1),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(1.5),
-        dtype_mod.f32ToBf16(0.25),
-        dtype_mod.f32ToBf16(-0.5),
+    const w_values = [_]dtype_mod.Bf16{
+        dtype_mod.Bf16.fromF32(0.5),
+        dtype_mod.Bf16.fromF32(-1),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(1.5),
+        dtype_mod.Bf16.fromF32(0.25),
+        dtype_mod.Bf16.fromF32(-0.5),
     };
     var w = try W.fromSlice(&ctx, .{ 2, 3 }, &w_values);
     defer w.deinit();
@@ -430,14 +430,14 @@ test "tagged autograd bf16 RHS dot matches f32 reference across GEMV/GEMM shapes
     const k: usize = 1027;
     const n: usize = 3;
 
-    const w_data = try allocator.alloc(u16, n * k);
+    const w_data = try allocator.alloc(dtype_mod.Bf16, n * k);
     defer allocator.free(w_data);
     const w_f32 = try allocator.alloc(f32, n * k);
     defer allocator.free(w_f32);
     for (w_data, 0..) |*value, idx| {
         const centered: i32 = @intCast((idx * 3) % 13);
-        value.* = dtype_mod.f32ToBf16(@as(f32, @floatFromInt(centered - 6)) * 0.0625);
-        w_f32[idx] = dtype_mod.bf16ToF32(value.*);
+        value.* = dtype_mod.Bf16.fromF32(@as(f32, @floatFromInt(centered - 6)) * 0.0625);
+        w_f32[idx] = value.toF32();
     }
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
     var w = try W.fromSlice(&ctx, .{ n, k }, w_data);
@@ -502,12 +502,12 @@ test "tagged autograd bf16 RHS dot accepts a non-contiguous lhs view" {
 
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
     var w = try W.fromSlice(&ctx, .{ 2, 3 }, &.{
-        dtype_mod.f32ToBf16(0.5),
-        dtype_mod.f32ToBf16(-1),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(1.5),
-        dtype_mod.f32ToBf16(0.25),
-        dtype_mod.f32ToBf16(-0.5),
+        dtype_mod.Bf16.fromF32(0.5),
+        dtype_mod.Bf16.fromF32(-1),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(1.5),
+        dtype_mod.Bf16.fromF32(0.25),
+        dtype_mod.Bf16.fromF32(-0.5),
     });
     defer w.deinit();
 
@@ -538,12 +538,12 @@ test "tagged autograd bf16 RHS dot works under exec scope" {
     defer x.deinit();
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
     var w = try W.fromSlice(&ctx, .{ 2, 3 }, &.{
-        dtype_mod.f32ToBf16(0.5),
-        dtype_mod.f32ToBf16(-1),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(1.5),
-        dtype_mod.f32ToBf16(0.25),
-        dtype_mod.f32ToBf16(-0.5),
+        dtype_mod.Bf16.fromF32(0.5),
+        dtype_mod.Bf16.fromF32(-1),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(1.5),
+        dtype_mod.Bf16.fromF32(0.25),
+        dtype_mod.Bf16.fromF32(-0.5),
     });
     defer w.deinit();
 
@@ -578,12 +578,12 @@ test "tagged autograd bf16 RHS dot fallback path stays correct and differentiabl
     // test, transposed.
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .in, .out } });
     var w = try W.fromSlice(&ctx, .{ 3, 2 }, &.{
-        dtype_mod.f32ToBf16(0.5),
-        dtype_mod.f32ToBf16(1.5),
-        dtype_mod.f32ToBf16(-1),
-        dtype_mod.f32ToBf16(0.25),
-        dtype_mod.f32ToBf16(2),
-        dtype_mod.f32ToBf16(-0.5),
+        dtype_mod.Bf16.fromF32(0.5),
+        dtype_mod.Bf16.fromF32(1.5),
+        dtype_mod.Bf16.fromF32(-1),
+        dtype_mod.Bf16.fromF32(0.25),
+        dtype_mod.Bf16.fromF32(2),
+        dtype_mod.Bf16.fromF32(-0.5),
     });
     defer w.deinit();
 
@@ -1007,12 +1007,12 @@ test "public f32 Tensor einsum with a bf16 constant RHS matches the f32 path" {
     defer x.deinit();
     const w_data = [_]f32{ 1, -2, 0.5, 3, -1, 2 };
     var wb = try Tensor(.{ .dtype = .bf16, .tags = .{ .j, .k } }).fromSlice(&ctx, .{ 2, 3 }, &.{
-        dtype_mod.f32ToBf16(1),
-        dtype_mod.f32ToBf16(-2),
-        dtype_mod.f32ToBf16(0.5),
-        dtype_mod.f32ToBf16(3),
-        dtype_mod.f32ToBf16(-1),
-        dtype_mod.f32ToBf16(2),
+        dtype_mod.Bf16.fromF32(1),
+        dtype_mod.Bf16.fromF32(-2),
+        dtype_mod.Bf16.fromF32(0.5),
+        dtype_mod.Bf16.fromF32(3),
+        dtype_mod.Bf16.fromF32(-1),
+        dtype_mod.Bf16.fromF32(2),
     });
     defer wb.deinit();
     var w32 = try Tensor(.{ .j, .k }).variableFromSlice(&ctx, .{ 2, 3 }, &w_data);
