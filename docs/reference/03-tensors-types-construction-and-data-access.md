@@ -97,7 +97,13 @@ test "Tensor spec forms and comptime introspection" {
 `Tensor(spec)` comptime-dispatches on the dtype into four struct families.
 The method set of each branch is decided at compile time, so calling an
 unsupported operation is a compile error, never a runtime failure
-(pinned by the `@hasDecl` guard tests in `src/ag/tensor_tests/facade.zig`):
+(pinned by the `@hasDecl` guard tests in `src/ag/tensor_tests/facade.zig`).
+Which branch has what is one positive capability table in
+`src/ag/tensor.zig` (`Caps`/`caps`): the alias lines are grouped by
+capability, each group is guarded against the table (`requireCap`), and a
+comptime audit (`auditMixin`) requires every mixin decl to be either
+aliased on the branch or covered by a decl-group the dtype's row does not
+grant — each such group carries the documented reason for the absence:
 
 | Branch | dtypes | Capabilities |
 |---|---|---|
@@ -123,12 +129,13 @@ Notes that follow from the dtype layer (`src/dtype.zig`, detailed in [§8](08-da
   pointwise and `dot` keep the input dtype; reductions (`sum`, `mean`,
   `sumAll`) widen `f16`/`bf16` to `f32` (`f64` stays `f64`).
 
-Only the f32 and typed-float branches have gradient machinery: they carry
-`grad_state: ?*GradState` (on the typed-float branch only f16/bf16 tensors
-— autograd leaves and differentiable cast results, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig) — ever
-populate it); the typed scalar and block-quantized branches hold just the
-raw value and hard-code
-`requiresGrad() == false`.
+Only the dtypes whose capability row grants `grad_slot` — f32, f16, bf16 —
+carry a live `grad_state: ?*GradState` (on the typed-float branch these are
+autograd leaves and differentiable cast results, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig)). On
+f64 the leaf decls (`variable`, `grad`, ...) exist as curated comptime
+refusals and the field is `void` — no dead gradient pointer; the typed
+scalar and block-quantized branches hold just the raw value. All of them
+hard-code `requiresGrad() == false`.
 
 ## 3.3 Construction and ownership (`src/ag/tensor.zig`, `src/exec.zig`)
 

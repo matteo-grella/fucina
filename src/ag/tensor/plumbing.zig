@@ -100,7 +100,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             var entries: [2]ExecContext.ScopeEntry = undefined;
             var count: usize = 1;
             entries[0] = ExecContext.bufferEntry(T.dtype, t.value.buffer);
-            if (comptime @hasField(T, "grad_state")) {
+            if (comptime hasGradSlot(T)) {
                 if (t.grad_state) |state| {
                     entries[1] = core.scopeEntry(state);
                     count = 2;
@@ -124,9 +124,15 @@ pub fn Mod(comptime ag_tensor: type) type {
             return out;
         }
 
+        /// True when `T` carries a live gradient slot: a non-void
+        /// `grad_state` field (f32/f16/bf16; on f64 the field is `void`).
+        pub fn hasGradSlot(comptime T: type) bool {
+            return @hasField(T, "grad_state") and @FieldType(T, "grad_state") != void;
+        }
+
         /// The operand's gradient state, null on the branches without one.
         fn gradStateOf(t: anytype) ?*GradState {
-            if (comptime @hasField(@TypeOf(t.*), "grad_state")) return t.grad_state;
+            if (comptime hasGradSlot(@TypeOf(t.*))) return t.grad_state;
             return null;
         }
 

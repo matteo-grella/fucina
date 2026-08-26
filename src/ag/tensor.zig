@@ -12,6 +12,13 @@
 //! - block-quantized (`QuantizedTensor`): inference constants (dequantize,
 //!   row gather, packed matmul RHS).
 //!
+//! Which branch has what is ONE positive statement: the capability table
+//! (`Caps`/`caps`). The alias lines in the branches are grouped by
+//! capability, each group is guarded by `requireCap` against the table,
+//! and `auditMixin` closes the loop at comptime — every mixin decl is
+//! either aliased on the branch or belongs to a decl-group the dtype's
+//! row does not grant, whose `why` documents the absence.
+//!
 //! Spellings that normalize to the same (dtype, tags) are the same type:
 //! the dispatcher normalizes before instantiating a branch.
 
@@ -96,34 +103,381 @@ fn validateSpecTags(comptime tags: anytype) void {
     if (tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
 }
 
-/// Every `pub` decl of `Mixin` is aliased on `Self`, except the named
-/// ones: an entry added to a mixin without its alias line is a compile
-/// error here, not a silently thinner branch. The `except` lists below
-/// are the complete statement of where the branches differ.
-fn assertAliased(comptime Self: type, comptime Mixin: type, comptime except: []const []const u8) void {
+// ---------------------------------------------------------------------------
+// The capability table
+// ---------------------------------------------------------------------------
+
+/// The positive capability table: one boolean per decl-group of the shared
+/// mixins (plus the branch-local groups at the end), one row per dtype
+/// (`caps`). A granted capability means "the decls exist on the branch";
+/// individual ops may still refuse narrower dtype subsets with curated
+/// comptime errors in their bodies (bool arithmetic, the f64 leaf
+/// constructors, the f64 dense `packRhs`). The `Group` tables below map
+/// every mixin decl to its capability and carry the reason each absence
+/// exists.
+pub const Caps = struct {
+    // tensor/common.zig
+    /// deinit/asRawTensor/data/dataConst/copyTo/requiresGrad and the
+    /// tag/shape queries.
+    lifetime: bool = false,
+    /// item: scalar read-out (block dtypes have no per-element scalar).
+    scalar_item: bool = false,
+    // tensor/autograd.zig
+    /// variable/variableFromSlice/zeroGrad/grad/gradView: the trainable-
+    /// leaf surface. On f64 the decls exist as curated comptime refusals
+    /// (gradients are always f32).
+    leaf_decls: bool = false,
+    /// backward/backwardWithGrad: only an f32 tensor can be a loss root.
+    backward: bool = false,
+    /// Not an alias group: the branch carries a live `?*GradState` field
+    /// (f32/f16/bf16). Every other dtype stores no gradient pointer.
+    grad_slot: bool = false,
+    // tensor/views.zig
+    /// The zero-copy views and data movement, every scalar dtype.
+    views: bool = false,
+    // tensor/float/creation.zig and tensor/typed/creation.zig
+    /// The f32 constructors and random fills.
+    float_creation: bool = false,
+    /// The typed constant constructors (constant..onesLike).
+    typed_constants: bool = false,
+    /// randint/randperm (i64 seed streams) and the .bool bandMask.
+    int_fills: bool = false,
+    // tensor/float/matmul.zig and tensor/typed/math.zig
+    /// matmul and einsum (f32 kernels; the widened policy on 16-bit).
+    contraction: bool = false,
+    /// dot and the packed/ternary dot family (f32-led contractions).
+    float_dots: bool = false,
+    /// to and the counting sum/sumAll at the stored dtype.
+    typed_math_core: bool = false,
+    /// The typed mean and the typed same-dtype dot.
+    typed_float_math: bool = false,
+    /// The exact integer compare (float compare is elementwise's).
+    exact_compare: bool = false,
+    // tensor/elementwise.zig and tensor/typed/int.zig
+    /// add/sub/mul/maximum/minimum (wrapping on integers).
+    arith_core: bool = false,
+    /// The float pointwise family (unary/gated/scalar/mask/compare ops).
+    float_pointwise: bool = false,
+    /// f32-only graph-side elementwise: in-place updates, biasAdd, the
+    /// cast, the consuming no-grad helpers, dropout, channel ops, the
+    /// elemental escape hatch and its pow.
+    float_graph_ops: bool = false,
+    /// divTrunc/divFloor/rem/mod and the bitwise combinators.
+    int_arith: bool = false,
+    /// The .bool mask combinators logicalAnd/Or/Xor/Not.
+    mask_logic: bool = false,
+    // tensor/float/<domain>.zig
+    /// Convolutions and unfold/fold.
+    conv: bool = false,
+    /// Pooling and upsampling.
+    pool: bool = false,
+    /// The index-tensor gathers/scatters beyond the views.
+    gather_scatter: bool = false,
+    /// cumsum/cumprod/prod.
+    scans: bool = false,
+    /// The masked/segmented/recurrence reductions and sumMany.
+    reduce_full: bool = false,
+    /// variance/argmax/max/min.
+    stats_core: bool = false,
+    /// standardizeAxis and multinomial.
+    stats_full: bool = false,
+    /// topK/sort/argsort/routerTopK.
+    topk: bool = false,
+    /// pad.
+    pad: bool = false,
+    /// The fills, diagonal/band family and the 2-d pads.
+    shape_bands: bool = false,
+    /// softmax/logSoftmax/logsumexp.
+    softmax_family: bool = false,
+    /// rmsNorm/rmsNormMul/rmsNormMulAdd/layerNorm.
+    norms_core: bool = false,
+    /// groupNorm, the fused rms-norm+rope kernel and the vector norms.
+    norms_full: bool = false,
+    /// The loss heads.
+    loss: bool = false,
+    /// Rotary position embedding.
+    rope: bool = false,
+    /// Fused grouped causal attention.
+    attention: bool = false,
+    // branch-local (inline methods, not mixin-backed)
+    /// The dense f32-panel packRhs over f16/bf16 weights (refuses f64).
+    dense_pack_rhs: bool = false,
+    /// The block-quantized constant surface (dequantize, row gather,
+    /// packed matmul RHS, block-safe views).
+    quant_ops: bool = false,
+};
+
+/// The rows of the capability table: what each dtype's branch has.
+pub fn caps(comptime tensor_dtype: DType) Caps {
+    // f32: the differentiable branch, every capability of the float world.
+    if (tensor_dtype == .f32) return .{
+        .lifetime = true,
+        .scalar_item = true,
+        .leaf_decls = true,
+        .backward = true,
+        .grad_slot = true,
+        .views = true,
+        .float_creation = true,
+        .contraction = true,
+        .float_dots = true,
+        .arith_core = true,
+        .float_pointwise = true,
+        .float_graph_ops = true,
+        .conv = true,
+        .pool = true,
+        .gather_scatter = true,
+        .scans = true,
+        .reduce_full = true,
+        .stats_core = true,
+        .stats_full = true,
+        .topk = true,
+        .pad = true,
+        .shape_bands = true,
+        .softmax_family = true,
+        .norms_core = true,
+        .norms_full = true,
+        .loss = true,
+        .rope = true,
+        .attention = true,
+    };
+    // Block-quantized: inference constants.
+    if (dtype_mod.isBlockQuantized(tensor_dtype)) return .{
+        .lifetime = true,
+        .quant_ops = true,
+    };
+    // Typed float (f16/bf16/f64): forward float math; a live gradient
+    // slot on the 16-bit leaves only (f64 training is unsupported).
+    if (dtype_mod.supportsForwardFloatMath(tensor_dtype)) return .{
+        .lifetime = true,
+        .scalar_item = true,
+        .leaf_decls = true,
+        .grad_slot = tensor_dtype != .f64,
+        .views = true,
+        .typed_constants = true,
+        .typed_math_core = true,
+        .typed_float_math = true,
+        .contraction = true,
+        .dense_pack_rhs = true,
+        .arith_core = true,
+        .float_pointwise = true,
+        .scans = true,
+        .stats_core = true,
+        .pad = true,
+        .softmax_family = true,
+        .norms_core = true,
+    };
+    // Typed scalar (integers, bool, the f8 storage floats): constants
+    // with views, casts, and the integer/mask math.
+    return .{
+        .lifetime = true,
+        .scalar_item = true,
+        .views = true,
+        .typed_constants = true,
+        .int_fills = true,
+        .typed_math_core = true,
+        .exact_compare = true,
+        .arith_core = true,
+        .int_arith = true,
+        .mask_logic = true,
+    };
+}
+
+const Cap = std.meta.FieldEnum(Caps);
+
+/// One decl-group of a shared mixin: the capability granting it, the decl
+/// names it covers (`null` = every mixin decl not named by another group
+/// of the same mixin), and why the rows without the capability lack them.
+const Group = struct {
+    cap: Cap,
+    decls: ?[]const []const u8,
+    why: []const u8,
+};
+
+const common_caps: []const Group = &.{
+    .{ .cap = .scalar_item, .decls = &.{"item"}, .why = "item: block dtypes have no per-element scalar; dequantize with to(.f32) first" },
+    .{ .cap = .lifetime, .decls = null, .why = "lifetime, raw access and the tag/shape queries exist on every branch" },
+};
+
+const autograd_caps: []const Group = &.{
+    .{ .cap = .backward, .decls = &.{ "backward", "backwardWithGrad" }, .why = "backward: f32 only — losses are f32; 16-bit tensors are leaves, never losses" },
+    .{ .cap = .leaf_decls, .decls = null, .why = "trainable leaves are f32/f16/bf16 with f32 gradients; integer, bool, f8 and block-quantized tensors are constants" },
+};
+
+const views_caps: []const Group = &.{
+    .{ .cap = .views, .decls = null, .why = "block layouts pack the last axis: the quantized branch keeps only the block-safe inline set (withTags, materialize, row concat)" },
+};
+
+const float_creation_caps: []const Group = &.{
+    .{ .cap = .float_creation, .decls = null, .why = "the f32 constructors and random fills; typed branches build constants from the typed constructor set" },
+};
+
+const typed_creation_caps: []const Group = &.{
+    .{ .cap = .int_fills, .decls = &.{ "randint", "randperm", "bandMask" }, .why = "randint/randperm are i64 seed streams and bandMask is a .bool mask: scalar-branch constructors" },
+    .{ .cap = .typed_constants, .decls = null, .why = "the typed constant constructors (the f32 branch spells them in its float creation set)" },
+};
+
+const matmul_caps: []const Group = &.{
+    .{ .cap = .contraction, .decls = &.{ "matmul", "einsum" }, .why = "matmul/einsum: float branches only (f32 kernels, or the widened policy on 16-bit); cast integer tensors with to() first" },
+    .{ .cap = .float_dots, .decls = null, .why = "dot and the packed/ternary dot family are f32-led contractions (typed branches keep the typed dot and the inline dense packRhs)" },
+};
+
+const typed_math_caps: []const Group = &.{
+    .{ .cap = .typed_float_math, .decls = &.{ "mean", "dot" }, .why = "mean divides and dot contracts in float: typed float branches only; cast integer tensors with to() first" },
+    .{ .cap = .exact_compare, .decls = &.{"compare"}, .why = "the exact integer compare (float branches take the shared elementwise compare)" },
+    .{ .cap = .typed_math_core, .decls = null, .why = "to and the counting sum/sumAll exist on every typed branch" },
+};
+
+const int_caps: []const Group = &.{
+    .{ .cap = .mask_logic, .decls = &.{ "logicalAnd", "logicalOr", "logicalXor", "logicalNot" }, .why = "the .bool mask combinators (float branches take the shared elementwise ones)" },
+    .{ .cap = .int_arith, .decls = null, .why = "explicit integer division/remainder and the bitwise ops: integer branches only (float division is div)" },
+};
+
+const elementwise_caps: []const Group = &.{
+    .{ .cap = .arith_core, .decls = &.{ "add", "sub", "mul", "maximum", "minimum" }, .why = "the shared arithmetic core: float branches and the wrapping integer set (.bool refuses in the op)" },
+    .{ .cap = .float_graph_ops, .decls = &.{ "addAxisVectorInPlace", "addAxisVectorUnaryInPlace", "addScaledInPlace", "biasAdd", "prelu", "channelAffine", "to", "takeAddNoGrad", "takeScaleNoGrad", "dropout", "snake", "elementalUnary", "elementalBinary", "pow" }, .why = "f32 only: in-place updates on f32 storage, the graph-side cast and the consuming no-grad helpers, dropout, the channel ops, the elemental escape hatch and its pow" },
+    .{ .cap = .float_pointwise, .decls = null, .why = "float pointwise math: float branches only; cast with to() first" },
+};
+
+const conv_caps: []const Group = &.{
+    .{ .cap = .conv, .decls = null, .why = "convolutions and unfold/fold are f32 only; cast with to() first" },
+};
+
+const pool_caps: []const Group = &.{
+    .{ .cap = .pool, .decls = null, .why = "pooling and upsampling are f32 only; cast with to() first" },
+};
+
+const gather_scatter_caps: []const Group = &.{
+    .{ .cap = .gather_scatter, .decls = null, .why = "the index-tensor gathers/scatters are f32 only; cast with to() first" },
+};
+
+const reduce_caps: []const Group = &.{
+    .{ .cap = .scans, .decls = &.{ "cumsum", "cumprod", "prod" }, .why = "scans and prod: float branches only; cast with to() first" },
+    .{ .cap = .reduce_full, .decls = null, .why = "the masked, segmented and recurrence reductions and sumMany are f32 only (typed branches take sum/mean/sumAll at the stored dtype from the typed math set)" },
+};
+
+const stats_caps: []const Group = &.{
+    .{ .cap = .stats_core, .decls = &.{ "variance", "argmax", "max", "min" }, .why = "variance/argmax/extrema: float branches only; cast with to() first" },
+    .{ .cap = .stats_full, .decls = null, .why = "standardizeAxis and multinomial are f32 only" },
+};
+
+const topk_caps: []const Group = &.{
+    .{ .cap = .topk, .decls = null, .why = "top-k and sort are f32 only; cast with to() first" },
+};
+
+const shape_caps: []const Group = &.{
+    .{ .cap = .pad, .decls = &.{"pad"}, .why = "pad: float branches only; cast with to() first" },
+    .{ .cap = .shape_bands, .decls = null, .why = "the fills, diagonal/band family and the 2-d pads are f32 only" },
+};
+
+const softmax_caps: []const Group = &.{
+    .{ .cap = .softmax_family, .decls = null, .why = "softmax family: float tensors only (f32/f16/bf16/f64); cast with to() first" },
+};
+
+const norm_caps: []const Group = &.{
+    .{ .cap = .norms_core, .decls = &.{ "rmsNorm", "rmsNormMul", "rmsNormMulAdd", "layerNorm" }, .why = "the core norms: float branches only; cast with to() first" },
+    .{ .cap = .norms_full, .decls = null, .why = "groupNorm, the fused rms-norm+rope kernel and the vector norms are f32 only" },
+};
+
+const loss_caps: []const Group = &.{
+    .{ .cap = .loss, .decls = null, .why = "the loss heads are f32 only (losses are f32)" },
+};
+
+const rope_caps: []const Group = &.{
+    .{ .cap = .rope, .decls = null, .why = "rope is f32 only" },
+};
+
+const attention_caps: []const Group = &.{
+    .{ .cap = .attention, .decls = null, .why = "groupedAttention is f32 only (the KV representations are argument types)" },
+};
+
+/// Branch-local groups (inline methods, not mixin-backed): named here so
+/// `requireCap` guards and `capWhy` cover them; never passed to
+/// `auditMixin`.
+const local_caps: []const Group = &.{
+    .{ .cap = .grad_slot, .decls = &.{"grad_state"}, .why = "a live f32 gradient slot exists on f32/f16/bf16 only (f64 training is unsupported — gradients are always f32)" },
+    .{ .cap = .dense_pack_rhs, .decls = &.{"packRhs"}, .why = "the dense f32-panel packRhs over f16/bf16 weights (the op refuses f64)" },
+    .{ .cap = .quant_ops, .decls = &.{ "constant", "fromTensor", "fromBlocks", "fromStorageSlice", "fromBorrowedBlocks", "withTags", "to", "materialize", "concat", "packRhs", "packRhsAs", "getRows" }, .why = "the block-quantized constant surface (dequantize, row gather, packed matmul RHS)" },
+};
+
+const all_groups = common_caps ++ autograd_caps ++ views_caps ++ float_creation_caps ++
+    typed_creation_caps ++ matmul_caps ++ typed_math_caps ++ int_caps ++ elementwise_caps ++
+    conv_caps ++ pool_caps ++ gather_scatter_caps ++ reduce_caps ++ stats_caps ++ topk_caps ++
+    shape_caps ++ softmax_caps ++ norm_caps ++ loss_caps ++ rope_caps ++ attention_caps ++
+    local_caps;
+
+fn capWhy(comptime cap: Cap) []const u8 {
     comptime {
-        @setEvalBranchQuota(20_000);
+        for (all_groups) |group| {
+            if (group.cap == cap) return group.why;
+        }
+        return "see the capability table";
+    }
+}
+
+/// The guard in front of an alias group: the branch spells the group out,
+/// so the dtype's row must grant it.
+fn requireCap(comptime tensor_dtype: DType, comptime cap: Cap) void {
+    comptime {
+        if (!@field(caps(tensor_dtype), @tagName(cap))) {
+            @compileError("the ." ++ @tagName(tensor_dtype) ++ " branch aliases ." ++ @tagName(cap) ++
+                " but caps(." ++ @tagName(tensor_dtype) ++ ") does not grant it — " ++ capWhy(cap));
+        }
+    }
+}
+
+/// The completeness check, driven by the table (it replaces the old
+/// hand-written except lists): every pub decl of `Mixin` must be aliased
+/// on `Self` when the dtype's row grants its group; a decl whose group is
+/// not granted is documented negative space (the group's `why`). A decl
+/// added to a mixin without its alias line is a compile error naming op,
+/// dtype and capability, not a silently thinner branch.
+fn auditMixin(comptime Self: type, comptime Mixin: type, comptime groups: []const Group) void {
+    comptime {
+        @setEvalBranchQuota(200_000);
+        for (groups) |group| {
+            if (group.decls) |names| for (names) |name| {
+                if (!@hasDecl(Mixin, name))
+                    @compileError("capability ." ++ @tagName(group.cap) ++ " names " ++ name ++ ", which " ++ @typeName(Mixin) ++ " does not declare");
+            };
+        }
+        const row = caps(Self.dtype);
         for (@typeInfo(Mixin).@"struct".decls) |decl| {
-            var skip = false;
-            for (except) |name| {
-                if (std.mem.eql(u8, name, decl.name)) skip = true;
-            }
-            if (!skip and !@hasDecl(Self, decl.name)) {
-                @compileError(@typeName(Self) ++ " does not alias " ++ @typeName(Mixin) ++ "." ++ decl.name);
+            const group = declGroup(groups, decl.name);
+            if (!@field(row, @tagName(group.cap))) continue;
+            if (!@hasDecl(Self, decl.name)) {
+                @compileError(@typeName(Self) ++ " grants ." ++ @tagName(group.cap) ++ " but does not alias " ++ @typeName(Mixin) ++ "." ++ decl.name);
             }
         }
     }
 }
 
-/// The named `pub` decls of `Mixin` are aliased on `Self`: the positive
-/// form for a branch that takes a small subset of a mixin.
-fn assertAliasedSubset(comptime Self: type, comptime Mixin: type, comptime names: []const []const u8) void {
+fn declGroup(comptime groups: []const Group, comptime name: []const u8) Group {
     comptime {
-        for (names) |name| {
-            if (!@hasDecl(Mixin, name)) @compileError(@typeName(Mixin) ++ " has no decl " ++ name);
-            if (!@hasDecl(Self, name)) @compileError(@typeName(Self) ++ " does not alias " ++ @typeName(Mixin) ++ "." ++ name);
+        var rest: ?Group = null;
+        for (groups) |group| {
+            if (group.decls) |names| {
+                for (names) |n| {
+                    if (std.mem.eql(u8, n, name)) return group;
+                }
+            } else rest = group;
         }
+        if (rest) |group| return group;
+        @compileError("the capability table names no group for decl " ++ name);
     }
+}
+
+/// The gradient slot: a live `?*GradState` where the row grants
+/// `.grad_slot` (f32/f16/bf16), `void` — no field storage, nothing to
+/// release — elsewhere. f64 keeps the leaf DECLS (curated comptime
+/// refusals in tensor/autograd.zig) but carries no slot: an f64 tensor
+/// can never require gradients.
+fn GradSlot(comptime tensor_dtype: DType) type {
+    return if (caps(tensor_dtype).grad_slot) ?*GradState else void;
+}
+
+fn gradSlotDefault(comptime tensor_dtype: DType) GradSlot(tensor_dtype) {
+    if (comptime caps(tensor_dtype).grad_slot) return null;
+    return {};
 }
 
 /// The differentiable f32 branch.
@@ -152,8 +506,12 @@ fn FloatTensor(comptime tags: anytype) type {
 
         const Self = @This();
 
-        // ---- common: lifetime, raw access, tag/shape queries ----
+        // ---- common: lifetime, raw access, tag/shape queries (.lifetime, .scalar_item) ----
         const common = @import("tensor/common.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .lifetime);
+            requireCap(dtype, .scalar_item);
+        }
         pub const deinit = common.deinit;
         pub const asRawTensor = common.asRawTensor;
         pub const item = common.item;
@@ -167,18 +525,29 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const shape = common.shape;
         pub const isContiguous = common.isContiguous;
 
-        // ---- autograd: leaves, gradients, backward ----
+        // ---- autograd: trainable leaves and gradient read-out (.leaf_decls) ----
         const autograd_ops = @import("tensor/autograd.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .leaf_decls);
+        }
         pub const variable = autograd_ops.variable;
         pub const variableFromSlice = autograd_ops.variableFromSlice;
         pub const zeroGrad = autograd_ops.zeroGrad;
         pub const grad = autograd_ops.grad;
         pub const gradView = autograd_ops.gradView;
+
+        // ---- autograd: backward entry points (.backward) ----
+        comptime {
+            requireCap(dtype, .backward);
+        }
         pub const backward = autograd_ops.backward;
         pub const backwardWithGrad = autograd_ops.backwardWithGrad;
 
-        // ---- views: zero-copy views and data movement ----
+        // ---- views: zero-copy views and data movement (.views) ----
         const views = @import("tensor/views.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .views);
+        }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
         pub const detach = views.detach;
@@ -209,8 +578,11 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const unbindInto = views.unbindInto;
         pub const repeatAxis = views.repeatAxis;
 
-        // ---- creation: constructors and fills ----
+        // ---- creation: constructors and fills (.float_creation) ----
         const creation_ops = @import("tensor/float/creation.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .float_creation);
+        }
         pub const constant = creation_ops.constant;
         pub const fromTensor = creation_ops.fromTensor;
         pub const fromSlice = creation_ops.fromSlice;
@@ -236,12 +608,20 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const onesLike = creation_ops.onesLike;
         pub const fullLike = creation_ops.fullLike;
 
-        // ---- matmul: contractions (dot/einsum, packed and ternary-STE RHS) ----
+        // ---- matmul: the caller-named contractions (.contraction) ----
         const matmul_ops = @import("tensor/float/matmul.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .contraction);
+        }
         pub const matmul = matmul_ops.matmul;
+        pub const einsum = matmul_ops.einsum;
+
+        // ---- matmul: dot and the packed/ternary RHS family (.float_dots) ----
+        comptime {
+            requireCap(dtype, .float_dots);
+        }
         pub const dot = matmul_ops.dot;
         pub const addDot = matmul_ops.addDot;
-        pub const einsum = matmul_ops.einsum;
         pub const dotTernarySte = matmul_ops.dotTernarySte;
         pub const dotPacked = matmul_ops.dotPacked;
         pub const packRhs = matmul_ops.packRhs;
@@ -249,12 +629,21 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const splitSwiGluDotPacked = matmul_ops.splitSwiGluDotPacked;
         pub const gegluQuantDotPacked = matmul_ops.gegluQuantDotPacked;
 
-        // ---- elementwise: pointwise arithmetic, activations, masks, casts ----
+        // ---- elementwise: the shared arithmetic core (.arith_core) ----
         const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
-        pub const addAxisVectorInPlace = elementwise_ops.addAxisVectorInPlace;
-        pub const addAxisVectorUnaryInPlace = elementwise_ops.addAxisVectorUnaryInPlace;
-        pub const addScaledInPlace = elementwise_ops.addScaledInPlace;
-        pub const biasAdd = elementwise_ops.biasAdd;
+        comptime {
+            requireCap(dtype, .arith_core);
+        }
+        pub const add = elementwise_ops.add;
+        pub const sub = elementwise_ops.sub;
+        pub const mul = elementwise_ops.mul;
+        pub const maximum = elementwise_ops.maximum;
+        pub const minimum = elementwise_ops.minimum;
+
+        // ---- elementwise: the float pointwise family (.float_pointwise) ----
+        comptime {
+            requireCap(dtype, .float_pointwise);
+        }
         pub const where = elementwise_ops.where;
         pub const maskedFill = elementwise_ops.maskedFill;
         pub const compare = elementwise_ops.compare;
@@ -265,23 +654,13 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const isnan = elementwise_ops.isnan;
         pub const isinf = elementwise_ops.isinf;
         pub const isfinite = elementwise_ops.isfinite;
-        pub const prelu = elementwise_ops.prelu;
-        pub const channelAffine = elementwise_ops.channelAffine;
-        pub const to = elementwise_ops.to;
-        pub const add = elementwise_ops.add;
-        pub const sub = elementwise_ops.sub;
-        pub const mul = elementwise_ops.mul;
         pub const div = elementwise_ops.div;
         pub const scale = elementwise_ops.scale;
-        pub const takeAddNoGrad = elementwise_ops.takeAddNoGrad;
-        pub const takeScaleNoGrad = elementwise_ops.takeScaleNoGrad;
         pub const addScalar = elementwise_ops.addScalar;
         pub const subScalar = elementwise_ops.subScalar;
         pub const divScalar = elementwise_ops.divScalar;
         pub const powScalar = elementwise_ops.powScalar;
         pub const log1p = elementwise_ops.log1p;
-        pub const dropout = elementwise_ops.dropout;
-        pub const snake = elementwise_ops.snake;
         pub const gated = elementwise_ops.gated;
         pub const glu = elementwise_ops.glu;
         pub const swiglu = elementwise_ops.swiglu;
@@ -289,11 +668,6 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const situ = elementwise_ops.situ;
         pub const splitGated = elementwise_ops.splitGated;
         pub const unary = elementwise_ops.unary;
-        pub const elementalUnary = elementwise_ops.elementalUnary;
-        pub const elementalBinary = elementwise_ops.elementalBinary;
-        pub const maximum = elementwise_ops.maximum;
-        pub const minimum = elementwise_ops.minimum;
-        pub const pow = elementwise_ops.pow;
         pub const relu = elementwise_ops.relu;
         pub const leakyRelu = elementwise_ops.leakyRelu;
         pub const exp = elementwise_ops.exp;
@@ -323,8 +697,30 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const clampMin = elementwise_ops.clampMin;
         pub const clampMax = elementwise_ops.clampMax;
 
-        // ---- conv: convolutions and unfold/fold ----
+        // ---- elementwise: the f32 graph-side ops (.float_graph_ops) ----
+        comptime {
+            requireCap(dtype, .float_graph_ops);
+        }
+        pub const addAxisVectorInPlace = elementwise_ops.addAxisVectorInPlace;
+        pub const addAxisVectorUnaryInPlace = elementwise_ops.addAxisVectorUnaryInPlace;
+        pub const addScaledInPlace = elementwise_ops.addScaledInPlace;
+        pub const biasAdd = elementwise_ops.biasAdd;
+        pub const prelu = elementwise_ops.prelu;
+        pub const channelAffine = elementwise_ops.channelAffine;
+        pub const to = elementwise_ops.to;
+        pub const takeAddNoGrad = elementwise_ops.takeAddNoGrad;
+        pub const takeScaleNoGrad = elementwise_ops.takeScaleNoGrad;
+        pub const dropout = elementwise_ops.dropout;
+        pub const snake = elementwise_ops.snake;
+        pub const elementalUnary = elementwise_ops.elementalUnary;
+        pub const elementalBinary = elementwise_ops.elementalBinary;
+        pub const pow = elementwise_ops.pow;
+
+        // ---- conv: convolutions and unfold/fold (.conv) ----
         const conv_ops = @import("tensor/float/conv.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .conv);
+        }
         pub const conv2d = conv_ops.conv2d;
         pub const conv2dRelu = conv_ops.conv2dRelu;
         pub const prepareConv2dWeights = conv_ops.prepareConv2dWeights;
@@ -338,14 +734,20 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const conv1d = conv_ops.conv1d;
         pub const convTranspose1d = conv_ops.convTranspose1d;
 
-        // ---- pool: pooling and upsampling ----
+        // ---- pool: pooling and upsampling (.pool) ----
         const pool_ops = @import("tensor/float/pool.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .pool);
+        }
         pub const maxPool2d = pool_ops.maxPool2d;
         pub const avgPool2d = pool_ops.avgPool2d;
         pub const upsample2xNearest = pool_ops.upsample2xNearest;
 
-        // ---- gather_scatter: indexed reads and writes beyond the views ----
+        // ---- gather_scatter: indexed reads and writes beyond the views (.gather_scatter) ----
         const gather_scatter_ops = @import("tensor/float/gather_scatter.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .gather_scatter);
+        }
         pub const zeroSlice = gather_scatter_ops.zeroSlice;
         pub const zeroRows = gather_scatter_ops.zeroRows;
         pub const relposShift = gather_scatter_ops.relposShift;
@@ -358,40 +760,68 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const scatterAdd = gather_scatter_ops.scatterAdd;
         pub const scatter = gather_scatter_ops.scatter;
 
-        // ---- reduce: reductions, scans, linear recurrence ----
+        // ---- reduce: scans (.scans) ----
         const reduce_ops = @import("tensor/float/reduce.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .scans);
+        }
+        pub const cumsum = reduce_ops.cumsum;
+        pub const cumprod = reduce_ops.cumprod;
+        pub const prod = reduce_ops.prod;
+
+        // ---- reduce: the full reduction set (.reduce_full) ----
+        comptime {
+            requireCap(dtype, .reduce_full);
+        }
         pub const any = reduce_ops.any;
         pub const all = reduce_ops.all;
         pub const anyAll = reduce_ops.anyAll;
         pub const allAll = reduce_ops.allAll;
         pub const sum = reduce_ops.sum;
         pub const mean = reduce_ops.mean;
-        pub const cumsum = reduce_ops.cumsum;
         pub const segmentSum = reduce_ops.segmentSum;
         pub const linearRecurrence = reduce_ops.linearRecurrence;
-        pub const prod = reduce_ops.prod;
-        pub const cumprod = reduce_ops.cumprod;
         pub const sumAll = reduce_ops.sumAll;
         pub const sumMany = reduce_ops.sumMany;
 
-        // ---- stats: variance/standardize, extrema, argmax, multinomial ----
+        // ---- stats: variance, argmax, extrema (.stats_core) ----
         const stats_ops = @import("tensor/float/stats.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .stats_core);
+        }
         pub const variance = stats_ops.variance;
-        pub const standardizeAxis = stats_ops.standardizeAxis;
         pub const argmax = stats_ops.argmax;
-        pub const multinomial = stats_ops.multinomial;
         pub const max = stats_ops.max;
         pub const min = stats_ops.min;
 
-        // ---- topk: top-k, sort, router top-k ----
+        // ---- stats: standardize and multinomial (.stats_full) ----
+        comptime {
+            requireCap(dtype, .stats_full);
+        }
+        pub const standardizeAxis = stats_ops.standardizeAxis;
+        pub const multinomial = stats_ops.multinomial;
+
+        // ---- topk: top-k, sort, router top-k (.topk) ----
         const topk_ops = @import("tensor/float/topk.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .topk);
+        }
         pub const topK = topk_ops.topK;
         pub const sort = topk_ops.sort;
         pub const argsort = topk_ops.argsort;
         pub const routerTopK = topk_ops.routerTopK;
 
-        // ---- shape: the f32-only structural ops (fills, diagonals, bands) ----
+        // ---- shape: pad (.pad) ----
         const shape_ops = @import("tensor/float/shape.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .pad);
+        }
+        pub const pad = shape_ops.pad;
+
+        // ---- shape: fills, diagonals, bands (.shape_bands) ----
+        comptime {
+            requireCap(dtype, .shape_bands);
+        }
         pub const shiftBy = shape_ops.shiftBy;
         pub const diagonal = shape_ops.diagonal;
         pub const trace = shape_ops.trace;
@@ -400,31 +830,44 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const tril = shape_ops.tril;
         pub const triu = shape_ops.triu;
         pub const diagEmbed = shape_ops.diagEmbed;
-        pub const pad = shape_ops.pad;
         pub const zeroPad2d = shape_ops.zeroPad2d;
         pub const constantPad2d = shape_ops.constantPad2d;
 
-        // ---- softmax: softmax family ----
+        // ---- softmax: softmax family (.softmax_family) ----
         const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .softmax_family);
+        }
         pub const logsumexp = softmax_ops.logsumexp;
         pub const logSoftmax = softmax_ops.logSoftmax;
         pub const softmax = softmax_ops.softmax;
 
-        // ---- norm: normalization ops and norms ----
+        // ---- norm: the core norms (.norms_core) ----
         const norm_ops = @import("tensor/float/norm.zig").Ops(Self);
-        pub const groupNorm = norm_ops.groupNorm;
+        comptime {
+            requireCap(dtype, .norms_core);
+        }
         pub const rmsNorm = norm_ops.rmsNorm;
         pub const rmsNormMul = norm_ops.rmsNormMul;
         pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
-        pub const rmsNormMulRopeHalfPrepared = norm_ops.rmsNormMulRopeHalfPrepared;
         pub const layerNorm = norm_ops.layerNorm;
+
+        // ---- norm: groupNorm, fused norm+rope, vector norms (.norms_full) ----
+        comptime {
+            requireCap(dtype, .norms_full);
+        }
+        pub const groupNorm = norm_ops.groupNorm;
+        pub const rmsNormMulRopeHalfPrepared = norm_ops.rmsNormMulRopeHalfPrepared;
         pub const l2Normalize = norm_ops.l2Normalize;
         pub const norm = norm_ops.norm;
         pub const normAll = norm_ops.normAll;
         pub const cosineSimilarity = norm_ops.cosineSimilarity;
 
-        // ---- loss: loss heads ----
+        // ---- loss: loss heads (.loss) ----
         const loss_ops = @import("tensor/float/loss.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .loss);
+        }
         pub const crossEntropy = loss_ops.crossEntropy;
         pub const linearCrossEntropy = loss_ops.linearCrossEntropy;
         pub const linearDistill = loss_ops.linearDistill;
@@ -434,40 +877,48 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const klDivLoss = loss_ops.klDivLoss;
         pub const nllLoss = loss_ops.nllLoss;
 
-        // ---- rope: rotary position embedding ----
+        // ---- rope: rotary position embedding (.rope) ----
         const rope_ops = @import("tensor/float/rope.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .rope);
+        }
         pub const rope = rope_ops.rope;
 
-        // ---- attention: fused grouped causal attention ----
+        // ---- attention: fused grouped causal attention (.attention) ----
         const attention_ops = @import("tensor/float/attention.zig").Ops(Self);
+        comptime {
+            requireCap(dtype, .attention);
+        }
         pub const groupedAttention = attention_ops.groupedAttention;
 
         comptime {
-            assertAliased(Self, common, &.{});
-            assertAliased(Self, autograd_ops, &.{});
-            assertAliased(Self, views, &.{});
-            assertAliased(Self, creation_ops, &.{});
-            assertAliased(Self, matmul_ops, &.{});
-            assertAliased(Self, elementwise_ops, &.{});
-            assertAliased(Self, conv_ops, &.{});
-            assertAliased(Self, pool_ops, &.{});
-            assertAliased(Self, gather_scatter_ops, &.{});
-            assertAliased(Self, reduce_ops, &.{});
-            assertAliased(Self, stats_ops, &.{});
-            assertAliased(Self, topk_ops, &.{});
-            assertAliased(Self, shape_ops, &.{});
-            assertAliased(Self, softmax_ops, &.{});
-            assertAliased(Self, norm_ops, &.{});
-            assertAliased(Self, loss_ops, &.{});
-            assertAliased(Self, rope_ops, &.{});
-            assertAliased(Self, attention_ops, &.{});
+            auditMixin(Self, common, common_caps);
+            auditMixin(Self, autograd_ops, autograd_caps);
+            auditMixin(Self, views, views_caps);
+            auditMixin(Self, creation_ops, float_creation_caps);
+            auditMixin(Self, matmul_ops, matmul_caps);
+            auditMixin(Self, elementwise_ops, elementwise_caps);
+            auditMixin(Self, conv_ops, conv_caps);
+            auditMixin(Self, pool_ops, pool_caps);
+            auditMixin(Self, gather_scatter_ops, gather_scatter_caps);
+            auditMixin(Self, reduce_ops, reduce_caps);
+            auditMixin(Self, stats_ops, stats_caps);
+            auditMixin(Self, topk_ops, topk_caps);
+            auditMixin(Self, shape_ops, shape_caps);
+            auditMixin(Self, softmax_ops, softmax_caps);
+            auditMixin(Self, norm_ops, norm_caps);
+            auditMixin(Self, loss_ops, loss_caps);
+            auditMixin(Self, rope_ops, rope_caps);
+            auditMixin(Self, attention_ops, attention_caps);
         }
     };
 }
 
 /// The typed float branch (f16/bf16/f64): forward math over the stored
 /// dtype (f16/bf16 widen through f32 where no native kernel exists), every
-/// view, and, on f16/bf16, trainable leaves with f32 gradients.
+/// view, and, on f16/bf16, trainable leaves with f32 gradients (f64 keeps
+/// the leaf decls as curated comptime refusals and carries no gradient
+/// slot).
 fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
     comptime validateSpecTags(tags);
 
@@ -479,13 +930,19 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const ag_root = ag_file;
 
         value: tensor_mod.TensorOf(tensor_dtype),
-        grad_state: ?*GradState = null,
+        /// The gradient slot where `caps(dtype).grad_slot` grants it
+        /// (f16/bf16); `void` on f64 — no dead pointer field.
+        grad_state: GradSlot(tensor_dtype) = gradSlotDefault(tensor_dtype),
         scope_owned: bool = false,
 
         const Self = @This();
 
-        // ---- common ----
+        // ---- common (.lifetime, .scalar_item) ----
         const common = @import("tensor/common.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .lifetime);
+            requireCap(tensor_dtype, .scalar_item);
+        }
         pub const deinit = common.deinit;
         pub const asRawTensor = common.asRawTensor;
         pub const item = common.item;
@@ -499,16 +956,25 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const shape = common.shape;
         pub const isContiguous = common.isContiguous;
 
-        // ---- autograd leaves (f16/bf16): no backward, a 16-bit tensor is never a loss ----
+        // ---- autograd leaves (.leaf_decls): f16/bf16 train with f32
+        // gradients; on f64 the constructors are comptime refusals and no
+        // backward entry points exist anywhere on this branch (a 16-bit
+        // tensor is never a loss) ----
         const autograd_ops = @import("tensor/autograd.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .leaf_decls);
+        }
         pub const variable = autograd_ops.variable;
         pub const variableFromSlice = autograd_ops.variableFromSlice;
         pub const zeroGrad = autograd_ops.zeroGrad;
         pub const grad = autograd_ops.grad;
         pub const gradView = autograd_ops.gradView;
 
-        // ---- views ----
+        // ---- views (.views) ----
         const views = @import("tensor/views.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .views);
+        }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
         pub const detach = views.detach;
@@ -539,8 +1005,11 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const unbindInto = views.unbindInto;
         pub const repeatAxis = views.repeatAxis;
 
-        // ---- creation ----
+        // ---- creation (.typed_constants) ----
         const creation_ops = @import("tensor/typed/creation.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .typed_constants);
+        }
         pub const constant = creation_ops.constant;
         pub const fromTensor = creation_ops.fromTensor;
         pub const fromSlice = creation_ops.fromSlice;
@@ -551,6 +1020,11 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const emptyLike = creation_ops.emptyLike;
         pub const zerosLike = creation_ops.zerosLike;
         pub const onesLike = creation_ops.onesLike;
+
+        // ---- the dense f32-panel weight snapshot (.dense_pack_rhs) ----
+        comptime {
+            requireCap(tensor_dtype, .dense_pack_rhs);
+        }
 
         /// Snapshot this rank-2 f16/bf16 `[out, contract]` weight as f32
         /// output-row panels for a FloatTensor `dotPacked`. Widening happens
@@ -565,27 +1039,40 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             return ctx.packDenseMatmulRhs(tensor_dtype, self.asRawTensor());
         }
 
-        // ---- math over the stored dtype (every typed float dtype) ----
+        // ---- math over the stored dtype (.typed_math_core, .typed_float_math) ----
         const math_ops = @import("tensor/typed/math.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .typed_math_core);
+            requireCap(tensor_dtype, .typed_float_math);
+        }
         pub const to = math_ops.to;
         pub const sum = math_ops.sum;
-        pub const mean = math_ops.mean;
         pub const sumAll = math_ops.sumAll;
+        pub const mean = math_ops.mean;
         pub const dot = math_ops.dot;
 
-        // ---- elementwise: the shared float mixin (f32 kernels or typed kernels per the dtype policy; constants here) ----
+        // ---- elementwise: the shared arithmetic core (.arith_core) ----
         const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .arith_core);
+        }
         pub const add = elementwise_ops.add;
         pub const sub = elementwise_ops.sub;
         pub const mul = elementwise_ops.mul;
+        pub const maximum = elementwise_ops.maximum;
+        pub const minimum = elementwise_ops.minimum;
+
+        // ---- elementwise: the float pointwise family (.float_pointwise)
+        // (f32 kernels or typed kernels per the dtype policy; constants here) ----
+        comptime {
+            requireCap(tensor_dtype, .float_pointwise);
+        }
         pub const div = elementwise_ops.div;
         pub const scale = elementwise_ops.scale;
         pub const divScalar = elementwise_ops.divScalar;
         pub const addScalar = elementwise_ops.addScalar;
         pub const subScalar = elementwise_ops.subScalar;
         pub const powScalar = elementwise_ops.powScalar;
-        pub const maximum = elementwise_ops.maximum;
-        pub const minimum = elementwise_ops.minimum;
         pub const where = elementwise_ops.where;
         pub const maskedFill = elementwise_ops.maskedFill;
         pub const gated = elementwise_ops.gated;
@@ -633,58 +1120,71 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const isinf = elementwise_ops.isinf;
         pub const isfinite = elementwise_ops.isfinite;
 
-        // ---- softmax, scans, reductions, pad: the shared float mixins (f32 kernels through the widened policy; constants here) ----
+        // ---- softmax family (.softmax_family), scans (.scans), stats
+        // (.stats_core), pad (.pad), norms (.norms_core): the shared float
+        // mixins (f32 kernels through the widened policy; constants here) ----
         const softmax_ops = @import("tensor/float/softmax.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .softmax_family);
+        }
         pub const softmax = softmax_ops.softmax;
         pub const logSoftmax = softmax_ops.logSoftmax;
         pub const logsumexp = softmax_ops.logsumexp;
+
         const reduce_ops = @import("tensor/float/reduce.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .scans);
+        }
         pub const cumsum = reduce_ops.cumsum;
         pub const cumprod = reduce_ops.cumprod;
         pub const prod = reduce_ops.prod;
+
         const stats_ops = @import("tensor/float/stats.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .stats_core);
+        }
         pub const variance = stats_ops.variance;
         pub const argmax = stats_ops.argmax;
         pub const max = stats_ops.max;
         pub const min = stats_ops.min;
+
         const shape_ops = @import("tensor/float/shape.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .pad);
+        }
         pub const pad = shape_ops.pad;
 
         const norm_ops = @import("tensor/float/norm.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .norms_core);
+        }
         pub const rmsNorm = norm_ops.rmsNorm;
         pub const rmsNormMul = norm_ops.rmsNormMul;
         pub const rmsNormMulAdd = norm_ops.rmsNormMulAdd;
         pub const layerNorm = norm_ops.layerNorm;
 
-        // ---- matmul: the shared float mixin (typed GEMM for the plain kind, the widened policy otherwise; constants here) ----
+        // ---- matmul: the caller-named contractions (.contraction)
+        // (typed GEMM for the plain kind, the widened policy otherwise) ----
         const matmul_ops = @import("tensor/float/matmul.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .contraction);
+        }
         pub const matmul = matmul_ops.matmul;
         pub const einsum = matmul_ops.einsum;
 
         comptime {
-            assertAliased(Self, common, &.{});
-            // A 16-bit tensor is never a loss: no backward entry points.
-            assertAliased(Self, autograd_ops, &.{ "backward", "backwardWithGrad" });
-            assertAliased(Self, views, &.{});
-            // The i64 seed streams and the .bool band mask are scalar-branch constructors.
-            assertAliased(Self, creation_ops, &.{ "randint", "randperm", "bandMask" });
-            // Float comparison comes from the shared elementwise mixin (math_ops.compare is the exact integer one).
-            assertAliased(Self, math_ops, &.{"compare"});
-            // `dot` and the packed/ternary dots keep their typed and f32 forms (math_ops.dot, the inline packRhs).
-            assertAliased(Self, matmul_ops, &.{ "dot", "addDot", "dotTernarySte", "dotPacked", "packRhs", "rmsNormMulDotPacked", "splitSwiGluDotPacked", "gegluQuantDotPacked" });
-            assertAliased(Self, softmax_ops, &.{});
-            // groupNorm, the fused rms-norm+rope kernel and the vector norms stay f32-only.
-            assertAliased(Self, norm_ops, &.{ "groupNorm", "rmsNormMulRopeHalfPrepared", "l2Normalize", "norm", "normAll", "cosineSimilarity" });
-            // The typed reductions (`sum`, `mean`, `sumAll`) come from math_ops; the
-            // masked, segmented and recurrence arms are f32-only.
-            assertAliased(Self, reduce_ops, &.{ "any", "all", "anyAll", "allAll", "sum", "mean", "segmentSum", "linearRecurrence", "sumAll", "sumMany" });
-            assertAliased(Self, stats_ops, &.{ "standardizeAxis", "multinomial" });
-            // The diagonal/band family and the 2-d pads stay f32-only.
-            assertAliased(Self, shape_ops, &.{ "shiftBy", "diagonal", "trace", "diag", "bandPart", "tril", "triu", "diagEmbed", "zeroPad2d", "constantPad2d" });
-            // The rest of the elementwise mixin is f32-only: in-place updates on
-            // f32 storage, the graph-side cast and consuming ops, dropout, the
-            // channel ops, the elemental escape hatch and its `pow`.
-            assertAliased(Self, elementwise_ops, &.{ "addAxisVectorInPlace", "addAxisVectorUnaryInPlace", "addScaledInPlace", "biasAdd", "prelu", "channelAffine", "to", "takeAddNoGrad", "takeScaleNoGrad", "dropout", "snake", "elementalUnary", "elementalBinary", "pow" });
+            auditMixin(Self, common, common_caps);
+            auditMixin(Self, autograd_ops, autograd_caps);
+            auditMixin(Self, views, views_caps);
+            auditMixin(Self, creation_ops, typed_creation_caps);
+            auditMixin(Self, math_ops, typed_math_caps);
+            auditMixin(Self, elementwise_ops, elementwise_caps);
+            auditMixin(Self, softmax_ops, softmax_caps);
+            auditMixin(Self, reduce_ops, reduce_caps);
+            auditMixin(Self, stats_ops, stats_caps);
+            auditMixin(Self, shape_ops, shape_caps);
+            auditMixin(Self, norm_ops, norm_caps);
+            auditMixin(Self, matmul_ops, matmul_caps);
         }
     };
 }
@@ -706,8 +1206,12 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
 
         const Self = @This();
 
-        // ---- common ----
+        // ---- common (.lifetime, .scalar_item) ----
         const common = @import("tensor/common.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .lifetime);
+            requireCap(tensor_dtype, .scalar_item);
+        }
         pub const deinit = common.deinit;
         pub const asRawTensor = common.asRawTensor;
         pub const item = common.item;
@@ -721,8 +1225,11 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const shape = common.shape;
         pub const isContiguous = common.isContiguous;
 
-        // ---- views ----
+        // ---- views (.views) ----
         const views = @import("tensor/views.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .views);
+        }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
         pub const detach = views.detach;
@@ -753,8 +1260,11 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const unbindInto = views.unbindInto;
         pub const repeatAxis = views.repeatAxis;
 
-        // ---- creation ----
+        // ---- creation (.typed_constants) ----
         const creation_ops = @import("tensor/typed/creation.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .typed_constants);
+        }
         pub const constant = creation_ops.constant;
         pub const fromTensor = creation_ops.fromTensor;
         pub const fromSlice = creation_ops.fromSlice;
@@ -765,6 +1275,11 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const emptyLike = creation_ops.emptyLike;
         pub const zerosLike = creation_ops.zerosLike;
         pub const onesLike = creation_ops.onesLike;
+
+        // ---- creation: seed streams and the band mask (.int_fills) ----
+        comptime {
+            requireCap(tensor_dtype, .int_fills);
+        }
         pub const randint = creation_ops.randint;
         pub const randperm = creation_ops.randperm;
         pub const bandMask = creation_ops.bandMask;
@@ -774,20 +1289,36 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         // combinators, i64-returning reductions, and scalar casts. On
         // `.bool` the arithmetic entries are compile errors; only `to` and
         // the counting `sum`/`sumAll` apply. ----
+
+        // ---- casts and the counting reductions (.typed_math_core), the
+        // exact integer compare (.exact_compare) ----
         const math_ops = @import("tensor/typed/math.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .typed_math_core);
+            requireCap(tensor_dtype, .exact_compare);
+        }
         pub const to = math_ops.to;
         pub const sum = math_ops.sum;
         pub const sumAll = math_ops.sumAll;
         pub const compare = math_ops.compare;
-        // The integer arithmetic subset of the shared elementwise mixin
-        // (wrapping two's complement; `div` is explicit, see intDiv).
+
+        // ---- the wrapping arithmetic subset of the shared elementwise
+        // mixin (.arith_core; `div` is explicit, see intDiv) ----
         const elementwise_ops = @import("tensor/elementwise.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .arith_core);
+        }
         pub const add = elementwise_ops.add;
         pub const sub = elementwise_ops.sub;
         pub const mul = elementwise_ops.mul;
         pub const maximum = elementwise_ops.maximum;
         pub const minimum = elementwise_ops.minimum;
+
+        // ---- explicit division and the bitwise combinators (.int_arith) ----
         const int_ops = @import("tensor/typed/int.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .int_arith);
+        }
         pub const divTrunc = int_ops.divTrunc;
         pub const divFloor = int_ops.divFloor;
         pub const rem = int_ops.rem;
@@ -796,21 +1327,22 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const bitOr = int_ops.bitOr;
         pub const bitXor = int_ops.bitXor;
 
-        // ---- masks: the logical combinators live on the `.bool` branch ----
+        // ---- masks: the logical combinators live on the `.bool` branch (.mask_logic) ----
+        comptime {
+            requireCap(tensor_dtype, .mask_logic);
+        }
         pub const logicalAnd = int_ops.logicalAnd;
         pub const logicalOr = int_ops.logicalOr;
         pub const logicalXor = int_ops.logicalXor;
         pub const logicalNot = int_ops.logicalNot;
 
         comptime {
-            assertAliased(Self, common, &.{});
-            assertAliased(Self, views, &.{});
-            assertAliased(Self, creation_ops, &.{});
-            // Integer division is explicit (divTrunc/divFloor); mean, dot, and
-            // scaling are float ops.
-            assertAliased(Self, math_ops, &.{ "mean", "dot" });
-            assertAliasedSubset(Self, elementwise_ops, &.{ "add", "sub", "mul", "maximum", "minimum" });
-            assertAliased(Self, int_ops, &.{});
+            auditMixin(Self, common, common_caps);
+            auditMixin(Self, views, views_caps);
+            auditMixin(Self, creation_ops, typed_creation_caps);
+            auditMixin(Self, math_ops, typed_math_caps);
+            auditMixin(Self, elementwise_ops, elementwise_caps);
+            auditMixin(Self, int_ops, int_caps);
         }
     };
 }
@@ -836,8 +1368,11 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
 
         const Self = @This();
 
-        // ---- common ----
+        // ---- common (.lifetime; no .scalar_item: blocks have no scalar) ----
         const common = @import("tensor/common.zig").Ops(Self);
+        comptime {
+            requireCap(tensor_dtype, .lifetime);
+        }
         pub const deinit = common.deinit;
         pub const asRawTensor = common.asRawTensor;
         pub const data = common.data;
@@ -849,6 +1384,11 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const dim = common.dim;
         pub const shape = common.shape;
         pub const isContiguous = common.isContiguous;
+
+        // ---- the block-quantized constant surface (.quant_ops) ----
+        comptime {
+            requireCap(tensor_dtype, .quant_ops);
+        }
 
         /// Consumes `value` on success; on error, ownership stays with the caller.
         pub fn constant(ctx: *ExecContext, value: RawTypedTensor) !Self {
@@ -962,8 +1502,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         }
 
         comptime {
-            // Block dtypes have no scalar element to read out.
-            assertAliased(Self, common, &.{"item"});
+            auditMixin(Self, common, common_caps);
         }
     };
 }

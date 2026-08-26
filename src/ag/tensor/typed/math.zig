@@ -50,7 +50,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.cast(dtype, target_dtype, self.asRawTensor());
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
-                if (comptime @hasField(Self, "grad_state")) {
+                if (comptime plumbing.hasGradSlot(Self)) {
                     if (!plumbing.recordsGrad(self.requiresGrad())) return plumbing.finishNoGrad(tags, ctx, value);
                     const Record = CastBackward(tags);
                     return plumbing.finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });

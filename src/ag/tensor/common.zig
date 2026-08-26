@@ -2,9 +2,10 @@
 //! scalar read-out, and the tag/shape queries. Written once over
 //! `Self.dtype`; every branch carries the exec-scope borrow flag, and the
 //! gradient-carrying branches (f32, f16, bf16) are recognized by their
-//! `grad_state` field, so `deinit` releases the graph reference and `data`
-//! refuses mutable access to a tensor that requires gradients. A mixin
-//! over the tensor struct; aliased back onto it in ../tensor.zig.
+//! non-void `grad_state` field (on f64 the field is `void` — no slot), so
+//! `deinit` releases the graph reference and `data` refuses mutable access
+//! to a tensor that requires gradients. A mixin over the tensor struct;
+//! aliased back onto it in ../tensor.zig.
 
 const tensor_mod = @import("../../tensor.zig");
 const dtype_mod = @import("../../dtype.zig");
@@ -27,7 +28,7 @@ pub fn Ops(comptime Self: type) type {
         /// layer underneath stays on bits; this boundary converts by
         /// reinterpretation only.
         const Elem = dtype_mod.Element(dtype);
-        const has_grad = @hasField(Self, "grad_state");
+        const has_grad = @hasField(Self, "grad_state") and @FieldType(Self, "grad_state") != void;
 
         fn toElem(raw: RawT.Element) Elem {
             if (comptime Elem == RawT.Element) return raw;

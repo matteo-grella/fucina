@@ -239,7 +239,14 @@ Autograd:
 - `src/ag/tensor.zig`: public tagged/autograd tensor facade — the `Tensor`
   dispatcher (normalizes the spec, then instantiates one of four branches:
   f32, typed float, typed scalar, block-quantized) and, per branch, one
-  alias line per method onto the shared mixins in `src/ag/tensor/`:
+  alias line per method onto the shared mixins in `src/ag/tensor/`. Which
+  branch aliases what is one positive capability table (`Caps`/`caps`):
+  the alias lines are grouped by capability, each group is guarded against
+  the table (`requireCap`), and a comptime audit (`auditMixin`) requires
+  every mixin decl to be aliased or covered by a decl-group the dtype's
+  row does not grant (the group's `why` documents the absence); only the
+  `grad_slot` dtypes (f32/f16/bf16) carry the live `?*GradState` field —
+  on f64 it is `void`. The mixins:
   `common.zig` (lifetime, raw access, tag/shape queries, every branch),
   `views.zig` (the dtype-generic views and data movement, every scalar
   dtype; differentiable on f32), `elementwise.zig` (the dtype-generic

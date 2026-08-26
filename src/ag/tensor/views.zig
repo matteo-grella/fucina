@@ -80,9 +80,10 @@ pub fn Ops(comptime Self: type) type {
             return Tensor(.{ .dtype = dtype, .tags = result_tags });
         }
 
-        /// The operand's gradient state, null on the branches without one.
+        /// The operand's gradient state, null on the branches without one
+        /// (no field, or the void f64 slot).
         fn gradStateOf(t: anytype) ?*GradState {
-            if (comptime @hasField(@TypeOf(t.*), "grad_state")) return t.grad_state;
+            if (comptime plumbing.hasGradSlot(@TypeOf(t.*))) return t.grad_state;
             return null;
         }
 

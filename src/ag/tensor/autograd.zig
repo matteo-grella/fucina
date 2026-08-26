@@ -57,10 +57,13 @@ pub fn Ops(comptime Self: type) type {
             return Self.variable(ctx, value);
         }
 
-        /// Drop the accumulated gradient (no-op for constants). Training loops
+        /// Drop the accumulated gradient (no-op for constants — and for
+        /// f64, which carries no gradient slot at all). Training loops
         /// call this between steps so gradients don't accumulate across them.
         pub fn zeroGrad(self: *const Self) void {
-            if (self.grad_state) |state| state.zeroGrad();
+            if (comptime @FieldType(Self, "grad_state") != void) {
+                if (self.grad_state) |state| state.zeroGrad();
+            }
         }
 
         /// The accumulated gradient as an owned f32 constant (null before
