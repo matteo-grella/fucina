@@ -53,13 +53,6 @@ pub const TrainerState = struct {
     /// re-captured BEFORE loading the checkpointed parameters on resume.
     es_anchor_decay: ?u64 = null,
     es_anchor_lambda: ?f64 = null,
-    /// Ternary genome knobs (es.Config.ternary_*): flip rate and update
-    /// fraction/decay are part of the flip-stream and top-K contracts like
-    /// `es_antithetic` — (seed, iteration, population, these rates) fully
-    /// regenerate every member's flips and the update schedule.
-    es_ternary_flip_rate: ?f64 = null,
-    es_ternary_update_fraction: ?f64 = null,
-    es_ternary_update_decay: ?f64 = null,
     es_iteration: ?u64 = null,
 };
 
@@ -110,9 +103,6 @@ test "trainer state roundtrips through directory sentinel" {
         .es_antithetic = 1,
         .es_anchor_decay = 2,
         .es_anchor_lambda = 10.0,
-        .es_ternary_flip_rate = 0.001,
-        .es_ternary_update_fraction = 0.005,
-        .es_ternary_update_decay = 0.015,
         .es_iteration = 17,
     });
     const loaded = try training_checkpoint.loadTrainerState(TrainerState, allocator, io, dir_path);
@@ -134,9 +124,6 @@ test "trainer state roundtrips through directory sentinel" {
     try std.testing.expectEqual(@as(?u64, 1), loaded.es_antithetic);
     try std.testing.expectEqual(@as(?u64, 2), loaded.es_anchor_decay);
     try std.testing.expectEqual(@as(?f64, 10.0), loaded.es_anchor_lambda);
-    try std.testing.expectEqual(@as(?f64, 0.001), loaded.es_ternary_flip_rate);
-    try std.testing.expectEqual(@as(?f64, 0.005), loaded.es_ternary_update_fraction);
-    try std.testing.expectEqual(@as(?f64, 0.015), loaded.es_ternary_update_decay);
     try std.testing.expectEqual(@as(?u64, 17), loaded.es_iteration);
 
     // Absent optionals stay null (older checkpoints without accum_steps or
@@ -150,6 +137,5 @@ test "trainer state roundtrips through directory sentinel" {
     try std.testing.expectEqual(@as(?u64, null), bare.data_epoch);
     try std.testing.expectEqual(@as(?u64, null), bare.data_index);
     try std.testing.expectEqual(@as(?f64, null), bare.es_sigma);
-    try std.testing.expectEqual(@as(?f64, null), bare.es_ternary_flip_rate);
     try std.testing.expectEqual(@as(?u64, null), bare.es_iteration);
 }

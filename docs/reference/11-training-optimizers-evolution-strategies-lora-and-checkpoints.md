@@ -836,7 +836,6 @@ pub const TrainerState = struct {   // fucina_models.train.trainer_state
     es_noise: ?u64,                          // STABLE mapping: 0 = iid, 1 = correlated
     es_antithetic: ?u64,                     // 1 = mirrored pairs
     es_anchor_decay: ?u64, es_anchor_lambda: ?f64,          // 0/absent none, 1 l1, 2 l2
-    es_ternary_flip_rate: ?f64, es_ternary_update_fraction: ?f64, es_ternary_update_decay: ?f64,
     es_iteration: ?u64,
 };
 ```
@@ -1053,6 +1052,7 @@ pub const Trainer = struct {
     iteration: u64 = 0,                        // advances once per update; persist to resume
     pub fn init(allocator: Allocator, config: Config) !Trainer
     pub fn deinit(self: *Self) void
+    pub fn applyResumedConfig(self: *Self, config: Config) !void
     pub fn alphaValue(self: *const Self) f32
     pub fn addParam(self: *Self, t: anytype) !void
     pub fn addParamNamed(self: *Self, t: anytype, name: ?[]const u8) !void
@@ -1090,7 +1090,14 @@ deduplication), and the added-slot count is returned. Duplicate storage via
 in place is `MemberActive`. `init` validates the config
 (`InvalidConfig`): sigma/alpha positive-finite, population ≥ 2, even under
 `antithetic`, ternary knobs in range, and for AWD a positive-finite lambda
-with `alpha*lambda < 1` for l2.
+with `alpha*lambda < 1` for l2. `config` is readable after `init`, but a
+resume replaces it through `applyResumedConfig(config)`, never by field
+assignment: the same validation runs on the whole new config (an odd
+population under `antithetic` is rejected on resume exactly as at `init`,
+leaving the live config untouched), every ternary slot's undo log is
+re-sized to the new per-member flip count, and the per-iteration noise
+cache is dropped so no stream filled under the old seed or scheme
+survives. Rejected with `MemberActive` while a member is applied in place.
 
 **Seed-regenerated noise (the scale trick).** Noise is never stored: a
 member's perturbation is a pure function of
@@ -1107,8 +1114,9 @@ acknowledged reseeding artifact (kept for reference-faithful runs). Both
 are checkpoint contracts: `(config.seed, iteration)` plus population and
 the scheme knobs fully regenerate the population, so resume needs only the
 iteration counter (`TrainerState.es_*` fields — there is no
-`optimizer.fucina` in an ES checkpoint; on resume, validate
-sigma/alpha/population and restore `es_iteration`).
+`optimizer.fucina` in an ES checkpoint; on resume, hand the saved
+sigma/alpha/population/scheme/seed to `applyResumedConfig` and restore
+`es_iteration`).
 
 **Two evaluation shapes.**
 
@@ -1253,6 +1261,9 @@ regenerate-subtract cannot work); the update is EGGROLL-style
 vote-and-threshold top-K one-bin moves; `materializeTernaryMember` is the
 replica twin. Block scales (`d`) are never touched; ternary slots skip
 snapshots, stream caches, and AWD. The three `ternary_*` config knobs are
-checkpoint contracts (`es_ternary_*` in `TrainerState`). Quantization
+checkpoint contracts like `antithetic`: (seed, iteration, population, these
+rates) regenerate every member's flips and the update schedule, so a
+resumed run must re-pass them identically (the trainers' `TrainerState`
+does not persist them). Quantization
 background and the TQ2_0 layout: [§10](10-quantization.md); design record:
 [TERNARY.md](../TERNARY.md); acceptance demo: `zig build es-ternary-spirals`.

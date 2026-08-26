@@ -184,9 +184,10 @@ finding that sparse single-bin updates *improve* stability transfers whole):
   top-K by |vote| (ties by index — deterministic) move **one bin** toward
   sign(vote), clamped; `K = round(update_fraction·len / (1 + decay·t))`.
 - Config: `ternary_flip_rate` (0.001), `ternary_update_fraction` (0.005),
-  `ternary_update_decay` (0.0) — checkpoint contracts, persisted as
-  `es_ternary_*` in the trainers' checkpoint state
-  (`fucina_models.train.trainer_state.TrainerState`). Float and ternary slots coexist in one
+  `ternary_update_decay` (0.0) — checkpoint contracts like `antithetic`:
+  a resumed run must re-pass them identically (the trainers' checkpoint
+  state, `fucina_models.train.trainer_state.TrainerState`, does not
+  persist them). Float and ternary slots coexist in one
   trainer (biases/scales stay Gaussian-ES floats); the float noise streams
   are untouched (pinned bitwise by a mixed-trainer test).
 

@@ -765,28 +765,37 @@ fn loadEsCheckpoint(
     const saved_alpha = state.es_alpha orelse return error.CheckpointConfigMismatch;
     const saved_population = state.es_population orelse return error.CheckpointConfigMismatch;
     const saved_noise = state.es_noise orelse return error.CheckpointConfigMismatch;
-    es_trainer.config.sigma = @floatCast(saved_sigma);
-    es_trainer.config.alpha = @floatCast(saved_alpha);
-    es_trainer.config.population = @intCast(saved_population);
-    es_trainer.config.noise = switch (saved_noise) {
+    // Build the resumed config beside the live one and hand it to the
+    // trainer whole: `applyResumedConfig` re-runs the init validation
+    // (population parity under antithetic, ranges) and re-sizes what the
+    // old config sized, which field assignment would skip.
+    var resumed = es_trainer.config;
+    resumed.sigma = @floatCast(saved_sigma);
+    resumed.alpha = @floatCast(saved_alpha);
+    resumed.population = @intCast(saved_population);
+    resumed.noise = switch (saved_noise) {
         0 => .iid,
         1 => .correlated,
         else => return error.CheckpointConfigMismatch,
     };
     // Absent = written before antithetic existed = independent members.
-    es_trainer.config.antithetic = switch (state.es_antithetic orelse 0) {
+    resumed.antithetic = switch (state.es_antithetic orelse 0) {
         0 => false,
         1 => true,
         else => return error.CheckpointConfigMismatch,
     };
-    es_trainer.config.anchor_decay = switch (state.es_anchor_decay orelse 0) {
+    resumed.anchor_decay = switch (state.es_anchor_decay orelse 0) {
         0 => .none,
         1 => .l1,
         2 => .l2,
         else => return error.CheckpointConfigMismatch,
     };
-    es_trainer.config.anchor_lambda = @floatCast(state.es_anchor_lambda orelse 0);
-    es_trainer.config.seed = state.seed;
+    resumed.anchor_lambda = @floatCast(state.es_anchor_lambda orelse 0);
+    resumed.seed = state.seed;
+    es_trainer.applyResumedConfig(resumed) catch |err| switch (err) {
+        error.InvalidConfig => return error.CheckpointConfigMismatch,
+        else => return err,
+    };
     es_trainer.iteration = state.es_iteration orelse return error.CheckpointConfigMismatch;
 
     switch (mode) {

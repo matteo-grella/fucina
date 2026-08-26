@@ -95,9 +95,9 @@
 //! destroys information, so `restore` replays a per-slot (index, old code)
 //! undo log in reverse instead of regenerate-subtracting. Block scales
 //! (`d`) are never touched. All three ternary knobs and the flip-stream
-//! mapping are checkpoint contracts like `antithetic` (persisted as the
-//! `es_ternary_*` fields of the trainers' checkpoint state,
-//! `fucina_models.train.trainer_state.TrainerState`).
+//! mapping are checkpoint contracts like `antithetic`: a resumed run must
+//! re-pass them identically (the trainers' checkpoint state,
+//! `fucina_models.train.trainer_state.TrainerState`, does not persist them).
 //!
 //! Stability: experimental (CHANGELOG.md tiers).
 //!

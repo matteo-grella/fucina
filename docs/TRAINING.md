@@ -1046,6 +1046,7 @@ vote-and-threshold: fitness-weighted votes on touched indices, top-K by
 `K = round(ternary_update_fraction·len / (1 + ternary_update_decay·t))`.
 Weights never leave {-1, 0, +1}·d, so members evaluate through the real
 TQ2_0 int8 kernels and the trained state is byte-for-byte the served model.
-The three `ternary_*` knobs are checkpoint contracts (persisted as
-`es_ternary_*`). `zig build es-ternary-spirals` is the from-scratch
-acceptance demo. Full design record: `docs/TERNARY.md`.
+The three `ternary_*` knobs are checkpoint contracts: re-pass them
+identically on resume (the trainers' checkpoint state does not persist
+them). `zig build es-ternary-spirals` is the from-scratch acceptance demo.
+Full design record: `docs/TERNARY.md`.

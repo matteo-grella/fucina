@@ -33,6 +33,12 @@ this point; earlier history is `git log`.
   mapping a full-model checkpoint resumes at one model of resident memory
   (the stream form stages the whole frame first); `es-finetune --mode full`
   resumes through it.
+- `es.Trainer.applyResumedConfig(config)`: the one way to replace a
+  trainer's configuration after registration (a checkpoint resume). It
+  re-runs the `init` validation on the whole config, re-sizes every ternary
+  slot's undo log to the new flip count, and drops the per-iteration noise
+  cache; field assignment into `trainer.config` bypassed all three.
+  `es-finetune --load` resumes through it.
 - `fucina-run --spec`: draft-model-free speculative decode for every
   rewind-capable registered family (the cascade SAM + token-recycling
   draft source over the shared `SpeculativeDecoder`; greedy-only, same
@@ -134,6 +140,11 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- `models.train.trainer_state.TrainerState.{es_ternary_flip_rate,
+  es_ternary_update_fraction, es_ternary_update_decay}`: no trainer wrote
+  or read them. The ternary knobs stay checkpoint contracts that a resumed
+  run re-passes identically (`docs/TERNARY.md`); an older checkpoint
+  carrying the keys still loads (unknown keys are ignored).
 - Every deprecated alias, ahead of the one-MINOR schedule: the policy is now
   "no alias step before 1.0" (`docs/DEVELOPMENT.md` §6). Rewrites:
   `fucina.BlockQ*` / `fucina.BlockIQ*` / `fucina.BlockTQ*` /

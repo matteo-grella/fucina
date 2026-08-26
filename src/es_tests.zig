@@ -398,6 +398,41 @@ test "es antithetic: mirrored pairs, folded update matches a signed serial refer
     try std.testing.expectError(es.EsError.InvalidConfig, es.Trainer.init(allocator, .{ .population = 3, .antithetic = true }));
 }
 
+test "es applyResumedConfig re-runs the init validation and re-sizes what the config sized" {
+    const allocator = std.testing.allocator;
+    var trainer = try es.Trainer.init(allocator, .{ .sigma = 0.1, .population = 4, .antithetic = true, .seed = 3 });
+    defer trainer.deinit();
+    // One ternary slot: 256 logical elements -> undo log of max(1, round(0.001 * 256)) = 1 entry.
+    const blocks = try ternaryConstBlocks(allocator, 1, 1);
+    defer allocator.free(blocks);
+    try trainer.addTernaryParam(blocks, 256);
+    try std.testing.expectEqual(@as(usize, 1), trainer.ternary_slots.items[0].undo.len);
+
+    // Odd population under antithetic is rejected on resume exactly as at
+    // init; the live config and the undo log are untouched.
+    var odd = trainer.config;
+    odd.population = 3;
+    try std.testing.expectError(es.EsError.InvalidConfig, trainer.applyResumedConfig(odd));
+    try std.testing.expectEqual(@as(usize, 4), trainer.config.population);
+    var bad_sigma = trainer.config;
+    bad_sigma.sigma = 0;
+    try std.testing.expectError(es.EsError.InvalidConfig, trainer.applyResumedConfig(bad_sigma));
+    try std.testing.expectEqual(@as(f32, 0.1), trainer.config.sigma);
+    try std.testing.expectEqual(@as(usize, 1), trainer.ternary_slots.items[0].undo.len);
+
+    // A valid resume lands, and the undo log follows the new flip rate
+    // (0.5 * 256 = 128 flips per member).
+    var resumed = trainer.config;
+    resumed.population = 6;
+    resumed.seed = 11;
+    resumed.ternary_flip_rate = 0.5;
+    try trainer.applyResumedConfig(resumed);
+    try std.testing.expectEqual(@as(usize, 6), trainer.config.population);
+    try std.testing.expectEqual(@as(u64, 11), trainer.config.seed);
+    try std.testing.expectEqual(@as(usize, 128), trainer.ternary_slots.items[0].undo.len);
+    try std.testing.expectEqual(@as(usize, 128), trainer.ternaryFlipCount(256));
+}
+
 test "es antithetic converges on the sphere objective" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");

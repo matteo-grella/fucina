@@ -125,16 +125,16 @@ pub const Config = struct {
     /// logical elements each member flips per perturbation — per-member
     /// flips = max(1, round(ternary_flip_rate * len)). Must be in (0, 1].
     /// Part of the flip-stream checkpoint contract like `antithetic`
-    /// (persist it alongside seed/population; `es_ternary_flip_rate`).
+    /// (re-pass it identically on resume alongside seed/population).
     ternary_flip_rate: f32 = 0.001,
     /// Ternary update budget: the top-K vote cap per update is
     /// K = max(1, round(effective_fraction * len)). Must be in (0, 1].
-    /// Checkpoint contract (`es_ternary_update_fraction`).
+    /// Checkpoint contract (re-pass it identically on resume).
     ternary_update_fraction: f32 = 0.005,
     /// Decay schedule on the ternary update budget: effective_fraction =
     /// ternary_update_fraction / (1 + ternary_update_decay * iteration) —
     /// EGGROLL's 1/(1+ct) cadence; 0 = constant budget. Must be finite and
-    /// >= 0. Checkpoint contract (`es_ternary_update_decay`).
+    /// >= 0. Checkpoint contract (re-pass it identically on resume).
     ternary_update_decay: f32 = 0.0,
     /// Base seed for the member-seed and noise-stream derivations.
     seed: u64 = 42,

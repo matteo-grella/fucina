@@ -52,6 +52,9 @@ const anchorSlot = kernels.anchorSlot;
 
 pub const Trainer = struct {
     allocator: Allocator,
+    /// Read freely; replace only through `applyResumedConfig` (a resume),
+    /// which re-validates it and re-sizes what depends on it. Field
+    /// assignment after `init` bypasses both.
     config: Config,
     slots: std.ArrayList(Slot) = .empty,
     /// Ternary genome slots (`addTernaryParam`) — kept apart from the float
@@ -87,6 +90,13 @@ pub const Trainer = struct {
     const Self = @This();
 
     pub fn init(allocator: Allocator, config: Config) !Self {
+        try validateConfig(config);
+        return .{ .allocator = allocator, .config = config };
+    }
+
+    /// The `init` config checks, shared with `applyResumedConfig` so a resumed
+    /// configuration can never be weaker-checked than a fresh one.
+    fn validateConfig(config: Config) !void {
         if (!(config.sigma > 0) or !std.math.isFinite(config.sigma)) return EsError.InvalidConfig;
         if (config.alpha) |alpha| {
             if (!(alpha > 0) or !std.math.isFinite(alpha)) return EsError.InvalidConfig;
@@ -103,7 +113,50 @@ pub const Trainer = struct {
             // The l2 shrink factor (1 - alpha*lambda) must stay positive.
             if (config.anchor_decay == .l2 and !(alpha * config.anchor_lambda < 1)) return EsError.InvalidConfig;
         }
-        return .{ .allocator = allocator, .config = config };
+    }
+
+    /// Replace the configuration after registration: a checkpoint resume,
+    /// where the saved sigma/alpha/population/scheme/anchor/seed win over
+    /// the CLI. The only sanctioned way to change `config` once `init` has
+    /// returned. Runs the whole `init` validation on the new config (an odd
+    /// population under `antithetic` is rejected here exactly as at init),
+    /// then re-sizes what the old config sized: every ternary slot's undo
+    /// log (one entry per flip, at the new `ternary_flip_rate`) and the
+    /// per-iteration noise cache, which is dropped outright so no stream
+    /// filled under the old seed, scheme, or stream count survives (it
+    /// re-fills lazily). Transactional: on any error the live config and the
+    /// slots are untouched. `iteration` is restored by the caller as before.
+    /// Rejected with `MemberActive` while a member is applied in place.
+    pub fn applyResumedConfig(self: *Self, config: Config) !void {
+        try validateConfig(config);
+        if (self.active_member != null) return EsError.MemberActive;
+
+        // Phase 1 (fallible): the replacement undo logs, allocated beside
+        // the live ones. Only slots whose flip count changes get one.
+        const n_ternary = self.ternary_slots.items.len;
+        const replacements = try self.allocator.alloc(?[]UndoEntry, n_ternary);
+        defer self.allocator.free(replacements);
+        @memset(replacements, null);
+        errdefer for (replacements) |maybe| {
+            if (maybe) |undo| self.allocator.free(undo);
+        };
+        for (self.ternary_slots.items, replacements) |*slot, *replacement| {
+            const flips = flipCountFor(config, slot.len);
+            if (flips != slot.undo.len) replacement.* = try self.allocator.alloc(UndoEntry, flips);
+        }
+
+        // Phase 2 (infallible): commit.
+        self.config = config;
+        for (self.ternary_slots.items, replacements) |*slot, maybe| {
+            const undo = maybe orelse continue;
+            self.allocator.free(slot.undo);
+            slot.undo = undo;
+            slot.undo_len = 0;
+        }
+        if (self.stream_cache) |*cache| {
+            cache.deinit(self.allocator);
+            self.stream_cache = null;
+        }
     }
 
     pub fn deinit(self: *Self) void {
@@ -363,7 +416,11 @@ pub const Trainer = struct {
     /// Flips per member on a ternary slot of `len` logical elements:
     /// max(1, round(ternary_flip_rate * len)).
     pub fn ternaryFlipCount(self: *const Self, len: usize) usize {
-        const raw = @round(@as(f64, self.config.ternary_flip_rate) * @as(f64, @floatFromInt(len)));
+        return flipCountFor(self.config, len);
+    }
+
+    fn flipCountFor(config: Config, len: usize) usize {
+        const raw = @round(@as(f64, config.ternary_flip_rate) * @as(f64, @floatFromInt(len)));
         return @max(1, @as(usize, @intFromFloat(raw)));
     }
 
