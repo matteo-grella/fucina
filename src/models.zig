@@ -193,6 +193,11 @@ pub const model_common = @import("models/model_common.zig");
 /// ports share (f64-accumulated RMS norm, max-subtracted softmax, silu, and
 /// the SwiGLU-through-`LinearWeight` FFN).
 pub const host_ops = @import("models/host_ops.zig");
+/// Model-band op library: single-family kernels and helpers that sit above
+/// the core runtime (the DeepSeek YaRN frequency blend); the heavier
+/// family kernels live in their family subtrees (`gemma.moe.moe_gu`,
+/// `research.kimi3.model.delta_attention`).
+pub const ops = @import("models/ops.zig");
 /// Cache-aware expert routing policy shared by the streamed-MoE decoders.
 pub const moe_router = @import("models/moe_router.zig");
 /// Shared `--moe-*` argv parser and exit-time report for the streamed-MoE

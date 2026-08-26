@@ -173,6 +173,20 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- Single-family ops leave the public `ExecContext` for the models band
+  (`fucina_models`), each next to its one consumer. Rewrites:
+  `ExecContext.moe_gu` / `ctx.moeGuDecodePacked` / `ctx.moeGuBatchPacked` /
+  `ctx.moeGuDecodeRaw` / `ctx.moeGuBatchRaw` →
+  `models.gemma.moe.moe_gu` / `models.gemma.moe.decodePacked` /
+  `.batchPacked` / `.decodeRaw` / `.batchRaw` (free functions taking
+  `*ExecContext` first; `RawExpertWeights` stays
+  `models.gemma.moe.RawExpertWeights`); `exec.delta_attention` /
+  `ctx.kdaRecurrent` →
+  `models.research.kimi3.model.delta_attention` and its `.kdaRecurrent`
+  (`src/models/research/kimi3/delta_attention.zig`);
+  `ctx.yarnBlendInvFreqsF64` → `models.ops.yarnBlendInvFreqsF64(ctx, ...)`
+  (`src/models/ops.zig`). The shared MoE DECODE/BATCH engines
+  (`exec/moe.zig`, `exec/moe_chain.zig`, `MoeRhs`) stay on `ExecContext`.
 - `dtype.isFloat` (module-internal spelling of the same predicate).
   Rewrite: `dtype.supportsForwardFloatMath(dt)`.
 - `ExecContext.reserveScopeSlot`, `adoptScopeValueAssumeCapacity`,

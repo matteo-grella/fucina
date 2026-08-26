@@ -6,7 +6,7 @@
 //!
 //! The heavy linears per layer (q, kv_a, kv_b, o, FFN projections) run on
 //! fucina's quantized kernels; YaRN RoPE runs through the core rope op over
-//! hand-filled f64-angle tables (`yarnBlendInvFreqsF64` +
+//! hand-filled f64-angle tables (the model-band `yarnBlendInvFreqsF64` +
 //! `prepareRopeTableInvFreqsF64`), and router top-k through the core topK.
 //! Host-side f32 remains where the core kernels would change validated
 //! bits: rms norms (f64 accumulation, ggml's), router sigmoid/softmax and
@@ -16,6 +16,7 @@
 //! `.latent`'s absorbed algebra).
 const std = @import("std");
 const fucina = @import("fucina");
+const models_ops = @import("../ops.zig");
 const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const decoder = @import("../decoder.zig");
@@ -151,7 +152,7 @@ pub const Config = struct {
 /// YaRN rotary frequencies for the rope slice: the blend between
 /// interpolation (freq/factor) and extrapolation (original freq) across the
 /// correction ramp [beta_fast=32, beta_slow=1] — the HF DeepseekV2Yarn
-/// reference, computed by the core `yarnBlendInvFreqsF64`. V2-Lite's mscale
+/// reference, computed by the model-band `yarnBlendInvFreqsF64`. V2-Lite's mscale
 /// == mscale_all_dim, so the cos/sin magnitude correction cancels to 1 and
 /// only the attention-scale mscale² survives (`attn_scale`). Rotation runs
 /// through the core rope op over per-step hand-filled tables (f64 angles,
@@ -161,7 +162,7 @@ const YarnRope = struct {
     inv_freq: []f64,
 
     fn init(ctx: *ExecContext, config: Config) !YarnRope {
-        return .{ .inv_freq = try ctx.yarnBlendInvFreqsF64(config.qk_rope_dim, config.rope_theta, config.yarn_factor, config.yarn_orig_ctx) };
+        return .{ .inv_freq = try models_ops.yarnBlendInvFreqsF64(ctx, config.qk_rope_dim, config.rope_theta, config.yarn_factor, config.yarn_orig_ctx) };
     }
 
     fn deinit(self: *YarnRope, allocator: Allocator) void {

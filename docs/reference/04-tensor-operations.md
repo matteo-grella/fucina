@@ -655,10 +655,11 @@ test "a masked lane that selects nothing takes the identity, not an error" {
 }
 ```
 
-Related (exec-level): `ctx.kdaRecurrent` (`src/exec/delta_attention.zig`)
-is the fused, stateful counterpart of this scan family — the delta-rule
-linear-attention recurrence the kimi3 model family mixes sequences with;
-it lives with the attention entries, [§4.13](04-tensor-operations.md#413-attention-srcagtensorzig).
+Related (models band): `kdaRecurrent`
+(`src/models/research/kimi3/delta_attention.zig`) is the fused, stateful
+counterpart of this scan family — the delta-rule linear-attention
+recurrence the kimi3 model family mixes sequences with; it lives with its
+family, described under [§4.13](04-tensor-operations.md#413-attention-srcagtensorzig).
 
 Dtype policy: on the f32 facade everything is f32 in and out. On the typed
 constant tensors ([§4.19](04-tensor-operations.md#419-math-on-non-f32-tensors-srcagtensorzig)) reductions widen per `outputDType(.reduction, ·)` —
@@ -1288,9 +1289,10 @@ at comptime (a closed set; anything else is a compile error):
   `freq_factors` (Llama-3 long-context, Gemma global layers); `null` is
   plain RoPE. `.inv_freq_f64` takes per-pair inverse frequencies the core
   cannot rebuild and accumulates each angle in f64 before the f32 cast;
-  `ctx.yarnBlendInvFreqsF64(dim, base, factor, orig_ctx)` builds the
-  DeepSeek-family YaRN blend for it (beta 32/1 correction ramp;
-  `factor <= 1` returns the plain pow schedule). The table's `feature_dim`
+  the model-band `models.ops.yarnBlendInvFreqsF64(ctx, dim, base, factor,
+  orig_ctx)` (`src/models/ops.zig`) builds the DeepSeek-family YaRN blend
+  for it (beta 32/1 correction ramp; `factor <= 1` returns the plain pow
+  schedule). The table's `feature_dim`
   is the **authoritative rotary span**: equal to `dim(feature_tag)` rotates
   fully; smaller rotates the leading `feature_dim` features (`.half`,
   `.interleaved`) or the trailing ones (`.interleaved_tail`) and passes the
@@ -1414,10 +1416,11 @@ Related: `relposShift(ctx, t_k, out_tags)` — Transformer-XL relative-shift
 `out[h,q,j] = self[h, q, j+(Tq−1)−q]` (`P >= Tk+Tq−1`); differentiable
 (scatter VJP).
 
-Below the tag facade, `ExecContext.kdaRecurrent`
-(`src/exec/delta_attention.zig`) is the fused delta-rule linear-attention
-sequence recurrence (Kimi Delta Attention, the kimi3 family's sequence
-mixer). Inputs are the post-convolution projections — `q`/`k`
+In the models band, `kdaRecurrent`
+(`src/models/research/kimi3/delta_attention.zig`, next to its one
+consumer) is the fused delta-rule linear-attention sequence recurrence
+(Kimi Delta Attention, the kimi3 family's sequence mixer). It takes the
+`*ExecContext` first, like an exec entry. Inputs are the post-convolution projections — `q`/`k`
 `[seq, heads, k_dim]`, `v` `[seq, heads, v_dim]`, `g_raw`
 `[seq, heads, k_dim]` (pre-gate low-rank decay), `beta_raw` `[seq, heads]`
 (pre-sigmoid) — plus `a_log` (length `heads` for per-head or `k_dim` for
@@ -1427,7 +1430,7 @@ default `k_dim^(−1/2)`). Per token, q/k are l2-normalized, each head's
 `[k_dim, v_dim]` state decays along K by
 `exp(−exp(A_log)·softplus(g + dt_bias))`, the `sigmoid(beta)`-weighted
 delta-rule update lands, and the output row is read out. Returns
-`exec.delta_attention.KdaResult` — `o` `[seq, heads, v_dim]` plus the
+`delta_attention.KdaResult` — `o` `[seq, heads, v_dim]` plus the
 final state (the decode-resume seed), one `deinit()` releasing both. Work
 splits by whole heads (single writer per output row — bitwise identical
 for any task count); inference-only, no backward record.

@@ -29,6 +29,7 @@ const weights = @import("fucina").weights;
 const gguf_meta = @import("fucina").gguf_meta;
 const ptqtp_gguf = @import("fucina").ptqtp_gguf;
 const decoder = @import("../decoder.zig");
+const models_ops = @import("../ops.zig");
 const chat = @import("../text/chat.zig");
 const model_common = @import("../model_common.zig");
 const tokenizer_mod = @import("../text/tokenizer.zig");
@@ -195,9 +196,9 @@ const Rope = struct {
     pairs: usize,
 
     fn init(ctx: *ExecContext, config: Config) !Rope {
-        const raw_freq = try ctx.yarnBlendInvFreqsF64(config.rope_dims, config.rope_theta, 1.0, 0);
+        const raw_freq = try models_ops.yarnBlendInvFreqsF64(ctx, config.rope_dims, config.rope_theta, 1.0, 0);
         errdefer ctx.allocator.free(raw_freq);
-        const comp_freq = try ctx.yarnBlendInvFreqsF64(config.rope_dims, config.compress_rope_theta, config.yarn_factor, config.yarn_orig_ctx);
+        const comp_freq = try models_ops.yarnBlendInvFreqsF64(ctx, config.rope_dims, config.compress_rope_theta, config.yarn_factor, config.yarn_orig_ctx);
         return .{ .raw_freq = raw_freq, .comp_freq = comp_freq, .pairs = config.rope_dims / 2 };
     }
 

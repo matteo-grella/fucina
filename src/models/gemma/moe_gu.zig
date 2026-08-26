@@ -1,26 +1,28 @@
 //! Fused gate|up MoE expert kernels over the raw GGUF stack layout
 //! (per expert: gate rows then up rows of Q6_K/Q4_K blocks, Q8_0 down
-//! rows), plus the packed x4 arms and the GPU batch path. Decode carves
-//! the shared MoE decode scratch; batch rides the phase-chain scheduling
-//! in `moe_chain.zig`. Entries take the `*ExecContext` (decode carves
-//! its `moe_scratch`); the tagged facade wrappers live with the gemma
-//! family (`models/gemma/moe.zig`), the methods on `ExecContext`
-//! (`moeGu*`).
+//! rows), plus the packed x4 arms and the GPU batch path. Gemma is the
+//! one family with this weight shape, so the kernels live with it; the
+//! tagged facade wrappers are in `moe.zig` next door. Decode carves the
+//! shared MoE decode scratch through the public `ExecContext` scratch
+//! seam; batch rides the phase-chain scheduling that `ExecContext`
+//! exposes as `moe_chain` (the shared batched-MoE scaffolding stays in
+//! the exec band).
 const std = @import("std");
 
-const backend_mod = @import("../backend.zig");
+const fucina = @import("fucina");
+
+const backend_mod = fucina.internal.backend_mod;
 const offload = backend_mod.offload;
 const backend_ops = backend_mod.ops;
 const dtype_mod = backend_mod.dtype_info;
-const tensor = @import("../tensor.zig");
-const thread = @import("../thread.zig");
-const exec_moe = @import("moe.zig");
-const ExecContext = @import("../exec.zig").ExecContext;
+const tensor = fucina.internal.tensor_mod;
+const thread = fucina.internal.thread_mod;
+const ExecContext = fucina.ExecContext;
 
-const MoeBatchProfile = exec_moe.MoeBatchProfile;
+const MoeBatchProfile = fucina.MoeBatchProfile;
 const Tensor = tensor.Tensor;
 
-const moe_chain = @import("moe_chain.zig");
+const moe_chain = ExecContext.moe_chain;
 const moeBatchProfileStart = moe_chain.moeBatchProfileStart;
 const moeBatchProfileElapsed = moe_chain.moeBatchProfileElapsed;
 const moeDecodeColumnSplit = moe_chain.moeDecodeColumnSplit;
@@ -199,9 +201,9 @@ pub fn decodePacked(
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    exec_moe.lockMoeDecodeScratch(ctx);
-    defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuDecodeChainState, GuDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    ExecContext.lockMoeDecodeScratch(ctx);
+    defer ExecContext.unlockMoeDecodeScratch(ctx);
+    const sv = try ExecContext.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuDecodeChainState, GuDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -1199,9 +1201,9 @@ pub fn decodeRaw(
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    exec_moe.lockMoeDecodeScratch(ctx);
-    defer exec_moe.unlockMoeDecodeScratch(ctx);
-    const sv = try exec_moe.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuRawDecodeChainState, GuRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    ExecContext.lockMoeDecodeScratch(ctx);
+    defer ExecContext.unlockMoeDecodeScratch(ctx);
+    const sv = try ExecContext.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, GuRawDecodeChainState, GuRawDecodeChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);

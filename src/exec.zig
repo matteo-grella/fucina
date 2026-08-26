@@ -19,7 +19,6 @@ const tuning = @import("tuning.zig");
 const exec_attention = @import("exec/attention.zig");
 const exec_moe = @import("exec/moe.zig");
 const exec_moe_chain = @import("exec/moe_chain.zig");
-const exec_moe_gu = @import("exec/moe_gu.zig");
 const exec_matmul = @import("exec/matmul.zig");
 const exec_elementwise = @import("exec/elementwise.zig");
 const exec_quant_matmul = @import("exec/quant_matmul.zig");
@@ -41,7 +40,6 @@ const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
 pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
-pub const delta_attention = @import("exec/delta_attention.zig");
 
 pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
@@ -479,7 +477,6 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const rope = exec_rope.rope;
     pub const prepareRopeTable = exec_rope.prepareRopeTable;
-    pub const yarnBlendInvFreqsF64 = exec_rope.yarnBlendInvFreqsF64;
     pub const ropeWithTable = exec_rope.ropeWithTable;
 
     // ----------------------------------------------------------------------
@@ -487,11 +484,6 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     pub const groupedAttention = exec_attention.groupedAttention;
     pub const groupedAttentionBackward = exec_attention.groupedAttentionBackward;
-
-    // ----------------------------------------------------------------------
-    // delta attention: the gated-DeltaNet recurrence (exec/delta_attention.zig)
-    // ----------------------------------------------------------------------
-    pub const kdaRecurrent = delta_attention.kdaRecurrent;
 
     // ----------------------------------------------------------------------
     // matmul: dense contractions, batched and packed (exec/matmul.zig)
@@ -524,7 +516,7 @@ pub const ExecContext = struct {
     pub const tryMatmulQuantRhsSharedInput = exec_quant_matmul.tryMatmulQuantRhsSharedInput;
 
     // ----------------------------------------------------------------------
-    // MoE: routing scratch, expert chains, fused gate|up kernels (exec/moe.zig, exec/moe_chain.zig, exec/moe_gu.zig)
+    // MoE: routing scratch and the expert chains (exec/moe.zig, exec/moe_chain.zig)
     // ----------------------------------------------------------------------
     /// A Mixture-of-Experts projection: all experts of one layer's gate/up/down
     /// stacked into a single RHS buffer. The implementation lives in exec/moe.zig;
@@ -532,18 +524,10 @@ pub const ExecContext = struct {
     pub const MoeRhs = exec_moe.MoeRhs;
     /// Shared batched-MoE scheduling scaffolding (route plan, phase-chain
     /// machinery, chunk helpers, profile timers). Lives in exec/moe_chain.zig;
-    /// exposed as an ExecContext decl so the gemma MoE engines at the models
-    /// layer reach the exact same types through the `fucina` root.
+    /// exposed as an ExecContext decl so the gemma fused gate|up engines
+    /// (`models/gemma/moe_gu.zig`) reach the exact same types through the
+    /// `fucina` root.
     pub const moe_chain = exec_moe_chain;
-    /// Fused gate|up MoE expert kernels over raw GGUF stack layouts
-    /// (`exec/moe_gu.zig`): the packed Q6_Kx4/Q8_0x4 arms, the raw
-    /// Q6_K/Q4_K block arm, and the GPU batch path. The gemma family's
-    /// tagged wrappers live in `models/gemma/moe.zig`.
-    pub const moe_gu = exec_moe_gu;
-    pub const moeGuDecodePacked = exec_moe_gu.decodePacked;
-    pub const moeGuBatchPacked = exec_moe_gu.batchPacked;
-    pub const moeGuDecodeRaw = exec_moe_gu.decodeRaw;
-    pub const moeGuBatchRaw = exec_moe_gu.batchRaw;
     pub const lockMoeDecodeScratch = exec_moe.lockMoeDecodeScratch;
     pub const unlockMoeDecodeScratch = exec_moe.unlockMoeDecodeScratch;
     pub const MoeDecodeScratchView = exec_moe.MoeDecodeScratchView;
@@ -568,5 +552,4 @@ test {
     _ = @import("exec/row_ops_tests.zig");
     _ = @import("exec/softmax_tests.zig");
     _ = @import("exec/stats_tests.zig");
-    _ = @import("exec/delta_attention.zig");
 }

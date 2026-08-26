@@ -7,10 +7,10 @@
 
 const std = @import("std");
 
-const exec_mod = @import("../exec.zig");
-const tensor = @import("../tensor.zig");
+const fucina = @import("fucina");
+const delta_attention = @import("delta_attention.zig");
 
-const ExecContext = exec_mod.ExecContext;
+const ExecContext = fucina.ExecContext;
 
 const goldens_dir = "models/kimi-k3-0.40b/goldens";
 
@@ -73,7 +73,7 @@ test "kdaRecurrent matches the reference fused_recurrent_kda goldens" {
     var beta_t = try ctx.fromSlice(.f32, &.{ T, H }, beta);
     defer beta_t.deinit();
 
-    var result = try ctx.kdaRecurrent(&q_t, &k_t, &v_t, &g_t, &beta_t, a_log, dt_bias, null, 0);
+    var result = try delta_attention.kdaRecurrent(&ctx, &q_t, &k_t, &v_t, &g_t, &beta_t, a_log, dt_bias, null, 0);
     defer result.deinit();
 
     for (o_ref, result.o.dataConst()) |expected, actual| {

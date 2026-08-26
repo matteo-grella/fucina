@@ -572,7 +572,7 @@ defer step.deinit();
 // requires model assets to run
 ```
 
-**MoE expert kernels** (`moe.zig` over `exec/moe_gu.zig`, survey depth). The expert FFN has two weight representations: per-expert
+**MoE expert kernels** (`moe.zig` over the family-local `moe_gu.zig`, survey depth). The expert FFN has two weight representations: per-expert
 **packed** RHS (`MoeFfn.gate/up/down`, the tested Q6_K/Q8_0 packed kernels —
 peak CPU throughput) and **raw** GGUF-layout blocks
 (`RawExpertWeights{ gu: .q6_k|.q4_k, dn_blocks, device_owned, borrowed }`,
@@ -583,9 +583,10 @@ seconds and ~24 GB saved at load), on Q4_K-transcoded experts, under
 (decode | batch) x (packed | raw) matrix: `decodePackedTensor` /
 `batchPackedTensor` / `decodeRawTensor` / `batchRawTensor` (tagged-tensor
 wrappers) over `decodePacked` / `batchPacked` / `decodeRaw` / `batchRaw`.
-The kernel bodies live in the exec band (`exec/moe_gu.zig`, reached
-through the `ExecContext.moeGu*` facade); batch entries consume the shared
-counting-sort route plan (`exec/moe_chain.zig`) with an expert-major
+The kernel bodies live with the family
+(`src/models/gemma/moe_gu.zig`, re-exported as `gemma.moe.moe_gu`); batch
+entries consume the shared counting-sort route plan (`exec/moe_chain.zig`,
+reached through the `ExecContext.moe_chain` seam) with an expert-major
 scatter that stays deliberately serial to keep each token's summation
 order fixed against the parity oracles.
 
@@ -879,9 +880,10 @@ schedule, `Config.deinit(allocator)` frees the list) and
 `<dir>/model.safetensors` (`safetensors.File.loadMmap`).
 
 Heavy lifting goes through the shared exec ops — `matmulTransB`,
-`causalDepthwiseConv1d`, `kdaRecurrent` ([§4.13](04-tensor-operations.md#413-attention-srcagtensorzig)),
-`gated(.situ)`, `rmsNormMul` — while the depth mixture and the
-small MLA core are model-local routines. Model surface: `load`, `deinit`,
+`causalDepthwiseConv1d`, `gated(.situ)`, `rmsNormMul` — and the
+family-local KDA recurrence (`delta_attention.zig` next door,
+[§4.13](04-tensor-operations.md#413-attention-srcagtensorzig)), while the
+depth mixture and the small MLA core are model-local routines. Model surface: `load`, `deinit`,
 `forward(ctx, tokens)` (full-sequence forward: token ids, `[]const u32`,
 to `[seq, vocab]` logits) and `forwardProbed(ctx, tokens, probe)` with
 `Probe` (`{ context, callback }`) — a stage observer that receives the

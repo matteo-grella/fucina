@@ -164,16 +164,12 @@ Execution runtime:
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
   the runtime boundary.
-- `src/exec/moe_gu.zig`: fused gate|up MoE expert kernels over raw GGUF
-  stack layouts (packed Q6_Kx4/Q8_0x4 arms, raw Q6_K/Q4_K blocks, GPU
-  batch path), reached through the `moeGu*` facade methods; the gemma
-  family's tagged wrappers live in `models/gemma/moe.zig`.
 - `src/exec/moe_chain.zig`: shared batched-MoE scheduling scaffolding
   (expert-grouped route plan, gather → gate/up → act → down phase-chain
   machinery, chunking helpers, profile timers). Consumed by `exec/moe.zig`
-  and by the fused gate|up kernels in `moe_gu.zig`, so scheduler fixes
-  land once for every
-  family.
+  and, through the `ExecContext.moe_chain` seam, by the gemma fused
+  gate|up kernels (`models/gemma/moe_gu.zig`), so scheduler fixes land
+  once for every family.
 
 Backends:
 
@@ -729,6 +725,16 @@ those arms take the container types back, so the container and its multiply
 are one mutually-dependent unit. A helper that fits none of these rows wants
 a new home with a stated subject, not a fifth un-ruled one.
 
+Code owned by ONE family is not shared and does not get an exec home: a
+kernel with a single family consumer lives next to that family and reaches
+the runtime through the public `ExecContext` surface (or the
+`fucina.internal` seams). The gemma fused gate|up engines
+(`models/gemma/moe_gu.zig`), the Kimi KDA recurrence
+(`models/research/kimi3/delta_attention.zig`), and the DeepSeek YaRN
+frequency blend (`models/ops.zig`) live under this rule; the shared MoE
+DECODE/BATCH engines (`exec/moe.zig`, `exec/moe_chain.zig`, `MoeRhs`)
+stay in exec because every MoE family schedules through them.
+
 ### The decoder contract and the architecture registry
 
 Every autoregressive text family speaks one comptime-checked surface,
@@ -762,9 +768,9 @@ Model families live in subdirectories and are exposed as namespaces:
   pass over N per-stream KV caches).
 - `models.qwen35.{model,chat,serving}` — Qwen3.5/Qwen3.6 Gated-DeltaNet hybrid
   plus its ChatML chat/generation engine and serving adapter.
-- `models.gemma.{model,train,moe}` — Gemma 4 text + MoE; the MoE kernels
-  live in the exec band (`exec/moe_gu.zig`), `gemma.moe` is the tagged
-  family surface over them.
+- `models.gemma.{model,train,moe}` — Gemma 4 text + MoE; the fused
+  gate|up MoE kernels live with the family (`models/gemma/moe_gu.zig`),
+  `gemma.moe` is the tagged family surface over them.
 - `models.diffusion_gemma.model` — block text-diffusion on the gemma4 backbone.
 - `models.deepseek2.model` — DeepSeek-V2 family (MLA + MoE).
 - `models.deepseek4.{model,serving}` — DeepSeek V4 Flash (CSA/HCA attention +

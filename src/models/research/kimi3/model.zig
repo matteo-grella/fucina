@@ -6,9 +6,9 @@
 //! checkpoint (safetensors + config.json): every component reproduces the
 //! reference equations and is pinned against reference activations by the
 //! golden tests. Heavy lifting goes through the exec ops (`matmulTransB`,
-//! `causalDepthwiseConv1d`, `kdaRecurrent`, `gated(.situ)`,
-//! `rmsNormMul`); the depth-mixture and the tiny MLA core are
-//! model-local routines. A serving-scale variant (GGUF weights, packed/
+//! `causalDepthwiseConv1d`, `gated(.situ)`, `rmsNormMul`) and the
+//! family-local KDA recurrence (`delta_attention.zig` next door); the
+//! depth-mixture and the tiny MLA core are model-local routines. A serving-scale variant (GGUF weights, packed/
 //! quant routes, fused attention, KV/state caches) builds on the same
 //! layout when real K3-family checkpoints become a target.
 //!
@@ -22,6 +22,8 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const safetensors = fucina.safetensors;
+/// Delta-rule linear attention: the KDA recurrence kernel (family-local).
+pub const delta_attention = @import("delta_attention.zig");
 
 const Allocator = std.mem.Allocator;
 pub const ExecContext = fucina.ExecContext;
@@ -561,7 +563,7 @@ pub const Model = struct {
         var g3 = try g_raw.reshape(&.{ seq, heads, head_dim });
         defer g3.deinit();
 
-        var result = try ctx.kdaRecurrent(&q3, &k3, &v3, &g3, &beta_raw, w.a_log, w.dt_bias, null, 0);
+        var result = try delta_attention.kdaRecurrent(ctx, &q3, &k3, &v3, &g3, &beta_raw, w.a_log, w.dt_bias, null, 0);
         defer result.deinit();
 
         // o_norm: per-head RMSNorm(o)·weight × sigmoid(full-rank gate).

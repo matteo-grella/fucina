@@ -12,6 +12,9 @@
 //!     S ← S + (β·k̂) ⊗ Δ
 //!     o_t = q̂ᵀ·S
 //!
+//! Lives with its one consumer, the Kimi-K3 research port (`model.zig`
+//! next door), reaching the runtime through the public `ExecContext`.
+//!
 //! Heads are independent: work splits by whole heads (single writer per
 //! output row and per state plane, bitwise identical for any task count);
 //! within a head the fold is sequential over t with @Vector arithmetic
@@ -20,10 +23,11 @@
 //! training support belongs to a chunked VJP or input-capture replay.
 
 const std = @import("std");
-const parallel = @import("../parallel.zig");
-const tensor = @import("../tensor.zig");
-const thread = @import("../thread.zig");
-const ExecContext = @import("../exec.zig").ExecContext;
+const fucina = @import("fucina");
+
+const parallel = fucina.parallel;
+const tensor = fucina.internal.tensor_mod;
+const ExecContext = fucina.ExecContext;
 
 const Tensor = tensor.Tensor;
 

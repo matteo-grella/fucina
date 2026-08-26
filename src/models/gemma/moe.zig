@@ -1,7 +1,7 @@
-//! Gemma-family surface over the fused gate|up MoE kernels, which live in
-//! the exec band (`exec/moe_gu.zig`, reached through the `ExecContext`
-//! facade): the raw entries re-exported under the family's names, plus the
-//! tagged `Tensor(.{ .seq, .embed })` wrappers the gemma forward calls.
+//! Gemma-family surface over the fused gate|up MoE kernels, which live
+//! next door in `moe_gu.zig`: the raw entries re-exported under the
+//! family's names, plus the tagged `Tensor(.{ .seq, .embed })` wrappers
+//! the gemma forward calls.
 const std = @import("std");
 const fucina = @import("fucina");
 
@@ -11,11 +11,15 @@ const SeqEmbedTensor = fucina.Tensor(.{ .seq, .embed });
 const RawTensor = fucina.internal.RawTensor;
 const backend_mod = fucina.internal.backend_mod;
 
-pub const RawExpertWeights = ExecContext.moe_gu.RawExpertWeights;
-pub const decodePacked = ExecContext.moeGuDecodePacked;
-pub const batchPacked = ExecContext.moeGuBatchPacked;
-pub const decodeRaw = ExecContext.moeGuDecodeRaw;
-pub const batchRaw = ExecContext.moeGuBatchRaw;
+/// The fused gate|up kernel bodies (packed x4 arms, raw block arm, GPU
+/// batch path).
+pub const moe_gu = @import("moe_gu.zig");
+
+pub const RawExpertWeights = moe_gu.RawExpertWeights;
+pub const decodePacked = moe_gu.decodePacked;
+pub const batchPacked = moe_gu.batchPacked;
+pub const decodeRaw = moe_gu.decodeRaw;
+pub const batchRaw = moe_gu.batchRaw;
 
 fn wrapSeqEmbedTensor(ctx: *ExecContext, raw: RawTensor) !SeqEmbedTensor {
     var owned = raw;
