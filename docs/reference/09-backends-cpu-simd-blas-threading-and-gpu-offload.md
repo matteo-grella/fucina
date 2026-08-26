@@ -428,8 +428,15 @@ Within the pure-Zig tier there are two paths:
 
 - **Register-tiled row kernels** (`gemmNNRange`/`gemmTNRange`/`gemmNTRange`):
   loop orders chosen so the inner loop is contiguous streams (NN/TN
-  broadcast-FMA into C rows; NT is a per-element two-stream dot). Parallel
-  over row ranges, or over column ranges for decode-shaped `m < 32`.
+  broadcast-FMA into C rows; NT is a per-element two-stream dot). Every
+  multiply-accumulate is one `@mulAdd` (fmla / vfmadd), the scalar column
+  tails included, so a column served by the vector lanes in one column
+  split and by the scalar tail in another carries the same fused rounding,
+  and the row kernels share the blocked and packed kernels' rounding
+  class. Parallel over row ranges, or over column ranges for decode-shaped
+  `m < 32`. The NT dot leaves (`dot4`, `primitives.vecDot`) fuse the same
+  way; `vecDot`/`vecSum` accumulate over `reduce_chains` (8) independent
+  chains summed in index order.
 - **The BLIS-style blocked packed GEMM** (`gemm_blocked.zig`) — the
   `-Dblas=none` answer to training-shaped sizes. Gate:
   `shouldUseBlocked(m, n, k)` = `m ≥ 32 and n ≥ 32 and k ≥ 16` and

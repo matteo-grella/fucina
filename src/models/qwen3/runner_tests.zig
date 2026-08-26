@@ -242,14 +242,14 @@ fn syntheticQwenGolden(moe: bool, golden: Golden) !void {
 
 test "runner matches the recorded forward on a synthetic dense GGUF" {
     try syntheticQwenGolden(false, .{
-        .prefill_hash = 0x84b988c871d84241,
+        .prefill_hash = 0x4979542fa3ce0e5d,
         .chain = .{ 23, 13, 52, 37, 44 },
     });
 }
 
 test "runner matches the recorded forward on a synthetic MoE GGUF (the small-MoE fixture)" {
     try syntheticQwenGolden(true, .{
-        .prefill_hash = 0x29724bb80fda2f71,
+        .prefill_hash = 0x7e38a24d734bf8b0,
         .chain = .{ 34, 51, 61, 17, 34 },
     });
 }
@@ -312,7 +312,7 @@ test "runner and the glm4moe family module agree bitwise on a synthetic GGUF (ho
     try test_support.requireNative();
     // Recorded trace for the same fixture: chain[0] = prefill argmax.
     const golden = Golden{
-        .prefill_hash = 0xb4ec8486578aa204,
+        .prefill_hash = 0xc6521f8e0f67bad4,
         .chain = .{ 57, 28, 57, 28, 59 },
     };
     const allocator = std.testing.allocator;

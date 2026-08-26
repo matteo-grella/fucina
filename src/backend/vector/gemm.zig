@@ -802,13 +802,13 @@ fn gemmNNColsMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []co
         while (j + vector_len <= col_end) : (j += vector_len) {
             var acc: Vf32 = @splat(0);
             for (0..k) |p| {
-                acc += @as(Vf32, @splat(ad[i * k + p])) * @as(Vf32, bd[p * n + j ..][0..vector_len].*);
+                acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[i * k + p])), @as(Vf32, bd[p * n + j ..][0..vector_len].*), acc);
             }
             storeVec(mode, cd[i * n + j ..][0..vector_len], acc);
         }
         while (j < col_end) : (j += 1) {
             var s: f32 = 0;
-            for (0..k) |p| s += ad[i * k + p] * bd[p * n + j];
+            for (0..k) |p| s = @mulAdd(f32, ad[i * k + p], bd[p * n + j], s);
             storeScalar(mode, &cd[i * n + j], s);
         }
     }
@@ -827,13 +827,13 @@ fn gemmTNCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k
         while (j + vector_len <= col_end) : (j += vector_len) {
             var acc: Vf32 = @splat(0);
             for (0..k) |p| {
-                acc += @as(Vf32, @splat(ad[p * m + i])) * @as(Vf32, bd[p * n + j ..][0..vector_len].*);
+                acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + i])), @as(Vf32, bd[p * n + j ..][0..vector_len].*), acc);
             }
             cd[i * n + j ..][0..vector_len].* = acc;
         }
         while (j < col_end) : (j += 1) {
             var s: f32 = 0;
-            for (0..k) |p| s += ad[p * m + i] * bd[p * n + j];
+            for (0..k) |p| s = @mulAdd(f32, ad[p * m + i], bd[p * n + j], s);
             cd[i * n + j] = s;
         }
     }
@@ -1359,14 +1359,14 @@ inline fn gemmNNRows4(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
             const a1: Vf32 = @splat(ad[(row + 1) * k + p]);
             const a2: Vf32 = @splat(ad[(row + 2) * k + p]);
             const a3: Vf32 = @splat(ad[(row + 3) * k + p]);
-            acc00 += a0 * b0;
-            acc01 += a0 * b1;
-            acc10 += a1 * b0;
-            acc11 += a1 * b1;
-            acc20 += a2 * b0;
-            acc21 += a2 * b1;
-            acc30 += a3 * b0;
-            acc31 += a3 * b1;
+            acc00 = @mulAdd(Vf32, a0, b0, acc00);
+            acc01 = @mulAdd(Vf32, a0, b1, acc01);
+            acc10 = @mulAdd(Vf32, a1, b0, acc10);
+            acc11 = @mulAdd(Vf32, a1, b1, acc11);
+            acc20 = @mulAdd(Vf32, a2, b0, acc20);
+            acc21 = @mulAdd(Vf32, a2, b1, acc21);
+            acc30 = @mulAdd(Vf32, a3, b0, acc30);
+            acc31 = @mulAdd(Vf32, a3, b1, acc31);
         }
 
         storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc00);
@@ -1385,10 +1385,10 @@ inline fn gemmNNRows4(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
         var acc3: Vf32 = @splat(0);
         for (0..k) |p| {
             const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc0 += @as(Vf32, @splat(ad[(row + 0) * k + p])) * b0;
-            acc1 += @as(Vf32, @splat(ad[(row + 1) * k + p])) * b0;
-            acc2 += @as(Vf32, @splat(ad[(row + 2) * k + p])) * b0;
-            acc3 += @as(Vf32, @splat(ad[(row + 3) * k + p])) * b0;
+            acc0 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 0) * k + p])), b0, acc0);
+            acc1 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 1) * k + p])), b0, acc1);
+            acc2 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 2) * k + p])), b0, acc2);
+            acc3 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 3) * k + p])), b0, acc3);
         }
         storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc0);
         storeVec(mode, cd[(row + 1) * n + j ..][0..vector_len], acc1);
@@ -1402,10 +1402,10 @@ inline fn gemmNNRows4(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
         var s3: f32 = 0;
         for (0..k) |p| {
             const b = bd[p * n + j];
-            s0 += ad[(row + 0) * k + p] * b;
-            s1 += ad[(row + 1) * k + p] * b;
-            s2 += ad[(row + 2) * k + p] * b;
-            s3 += ad[(row + 3) * k + p] * b;
+            s0 = @mulAdd(f32, ad[(row + 0) * k + p], b, s0);
+            s1 = @mulAdd(f32, ad[(row + 1) * k + p], b, s1);
+            s2 = @mulAdd(f32, ad[(row + 2) * k + p], b, s2);
+            s3 = @mulAdd(f32, ad[(row + 3) * k + p], b, s3);
         }
         storeScalar(mode, &cd[(row + 0) * n + j], s0);
         storeScalar(mode, &cd[(row + 1) * n + j], s1);
@@ -1428,8 +1428,8 @@ inline fn gemmNNRows8(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
             const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
             inline for (0..8) |r| {
                 const a: Vf32 = @splat(ad[(row + r) * k + p]);
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
+                acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
+                acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
             }
         }
 
@@ -1446,7 +1446,7 @@ inline fn gemmNNRows8(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
         for (0..k) |p| {
             const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
             inline for (0..8) |r| {
-                acc[r] += @as(Vf32, @splat(ad[(row + r) * k + p])) * b;
+                acc[r] = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + r) * k + p])), b, acc[r]);
             }
         }
         inline for (0..8) |r| {
@@ -1458,7 +1458,7 @@ inline fn gemmNNRows8(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: 
         for (0..k) |p| {
             const b = bd[p * n + j];
             inline for (0..8) |r| {
-                sums[r] += ad[(row + r) * k + p] * b;
+                sums[r] = @mulAdd(f32, ad[(row + r) * k + p], b, sums[r]);
             }
         }
         inline for (0..8) |r| {
@@ -1473,13 +1473,13 @@ inline fn gemmNNRow(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []
         var acc: Vf32 = @splat(0);
         for (0..k) |p| {
             const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc += @as(Vf32, @splat(ad[row * k + p])) * b;
+            acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[row * k + p])), b, acc);
         }
         storeVec(mode, cd[row * n + j ..][0..vector_len], acc);
     }
     while (j < n) : (j += 1) {
         var s: f32 = 0;
-        for (0..k) |p| s += ad[row * k + p] * bd[p * n + j];
+        for (0..k) |p| s = @mulAdd(f32, ad[row * k + p], bd[p * n + j], s);
         storeScalar(mode, &cd[row * n + j], s);
     }
 }
@@ -1498,8 +1498,8 @@ inline fn gemmTNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
             const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
             inline for (0..8) |r| {
                 const a: Vf32 = @splat(ad[p * m + row + r]);
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
+                acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
+                acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
             }
         }
 
@@ -1516,7 +1516,7 @@ inline fn gemmTNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
         for (0..k) |p| {
             const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
             inline for (0..8) |r| {
-                acc[r] += @as(Vf32, @splat(ad[p * m + row + r])) * b;
+                acc[r] = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + r])), b, acc[r]);
             }
         }
         inline for (0..8) |r| {
@@ -1528,7 +1528,7 @@ inline fn gemmTNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
         for (0..k) |p| {
             const b = bd[p * n + j];
             inline for (0..8) |r| {
-                sums[r] += ad[p * m + row + r] * b;
+                sums[r] = @mulAdd(f32, ad[p * m + row + r], b, sums[r]);
             }
         }
         inline for (0..8) |r| {
@@ -1556,14 +1556,14 @@ inline fn gemmTNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
             const a1: Vf32 = @splat(ad[p * m + row + 1]);
             const a2: Vf32 = @splat(ad[p * m + row + 2]);
             const a3: Vf32 = @splat(ad[p * m + row + 3]);
-            acc00 += a0 * b0;
-            acc01 += a0 * b1;
-            acc10 += a1 * b0;
-            acc11 += a1 * b1;
-            acc20 += a2 * b0;
-            acc21 += a2 * b1;
-            acc30 += a3 * b0;
-            acc31 += a3 * b1;
+            acc00 = @mulAdd(Vf32, a0, b0, acc00);
+            acc01 = @mulAdd(Vf32, a0, b1, acc01);
+            acc10 = @mulAdd(Vf32, a1, b0, acc10);
+            acc11 = @mulAdd(Vf32, a1, b1, acc11);
+            acc20 = @mulAdd(Vf32, a2, b0, acc20);
+            acc21 = @mulAdd(Vf32, a2, b1, acc21);
+            acc30 = @mulAdd(Vf32, a3, b0, acc30);
+            acc31 = @mulAdd(Vf32, a3, b1, acc31);
         }
 
         cd[(row + 0) * n + j ..][0..vector_len].* = acc00;
@@ -1582,10 +1582,10 @@ inline fn gemmTNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
         var acc3: Vf32 = @splat(0);
         for (0..k) |p| {
             const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc0 += @as(Vf32, @splat(ad[p * m + row + 0])) * b0;
-            acc1 += @as(Vf32, @splat(ad[p * m + row + 1])) * b0;
-            acc2 += @as(Vf32, @splat(ad[p * m + row + 2])) * b0;
-            acc3 += @as(Vf32, @splat(ad[p * m + row + 3])) * b0;
+            acc0 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 0])), b0, acc0);
+            acc1 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 1])), b0, acc1);
+            acc2 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 2])), b0, acc2);
+            acc3 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 3])), b0, acc3);
         }
         cd[(row + 0) * n + j ..][0..vector_len].* = acc0;
         cd[(row + 1) * n + j ..][0..vector_len].* = acc1;
@@ -1599,10 +1599,10 @@ inline fn gemmTNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m
         var s3: f32 = 0;
         for (0..k) |p| {
             const b = bd[p * n + j];
-            s0 += ad[p * m + row + 0] * b;
-            s1 += ad[p * m + row + 1] * b;
-            s2 += ad[p * m + row + 2] * b;
-            s3 += ad[p * m + row + 3] * b;
+            s0 = @mulAdd(f32, ad[p * m + row + 0], b, s0);
+            s1 = @mulAdd(f32, ad[p * m + row + 1], b, s1);
+            s2 = @mulAdd(f32, ad[p * m + row + 2], b, s2);
+            s3 = @mulAdd(f32, ad[p * m + row + 3], b, s3);
         }
         cd[(row + 0) * n + j] = s0;
         cd[(row + 1) * n + j] = s1;
@@ -1617,42 +1617,57 @@ inline fn gemmTNRow(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m: 
         var acc: Vf32 = @splat(0);
         for (0..k) |p| {
             const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc += @as(Vf32, @splat(ad[p * m + row])) * b;
+            acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row])), b, acc);
         }
         cd[row * n + j ..][0..vector_len].* = acc;
     }
     while (j < n) : (j += 1) {
         var s: f32 = 0;
-        for (0..k) |p| s += ad[p * m + row] * bd[p * n + j];
+        for (0..k) |p| s = @mulAdd(f32, ad[p * m + row], bd[p * n + j], s);
         cd[row * n + j] = s;
     }
 }
 
+/// Four B rows against one A row, fused: two accumulator chains per
+/// column (even/odd vector steps) keep eight independent FMA chains in
+/// flight, since a single chain per column is latency-bound (the fused
+/// 4-chain form measured slower than the unfused one on the 253-row NT
+/// prefill shapes). The two chains are summed, the lanes reduced, then the
+/// scalar tail fused in; the order is fixed per element regardless of the
+/// caller's column split.
 inline fn dot4(out: []f32, a: []const f32, b: []const f32, b_row: usize, k: usize) void {
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
-
-    var p: usize = 0;
-    while (p + vector_len <= k) : (p += vector_len) {
-        const av: Vf32 = a[p..][0..vector_len].*;
-        acc0 += av * @as(Vf32, b[(b_row + 0) * k + p ..][0..vector_len].*);
-        acc1 += av * @as(Vf32, b[(b_row + 1) * k + p ..][0..vector_len].*);
-        acc2 += av * @as(Vf32, b[(b_row + 2) * k + p ..][0..vector_len].*);
-        acc3 += av * @as(Vf32, b[(b_row + 3) * k + p ..][0..vector_len].*);
+    var acc: [4][2]Vf32 = undefined;
+    inline for (0..4) |c| {
+        acc[c][0] = @splat(0);
+        acc[c][1] = @splat(0);
     }
 
-    var s0 = @reduce(.Add, acc0);
-    var s1 = @reduce(.Add, acc1);
-    var s2 = @reduce(.Add, acc2);
-    var s3 = @reduce(.Add, acc3);
+    var p: usize = 0;
+    while (p + 2 * vector_len <= k) : (p += 2 * vector_len) {
+        const av0: Vf32 = a[p..][0..vector_len].*;
+        const av1: Vf32 = a[p + vector_len ..][0..vector_len].*;
+        inline for (0..4) |c| {
+            acc[c][0] = @mulAdd(Vf32, av0, @as(Vf32, b[(b_row + c) * k + p ..][0..vector_len].*), acc[c][0]);
+            acc[c][1] = @mulAdd(Vf32, av1, @as(Vf32, b[(b_row + c) * k + p + vector_len ..][0..vector_len].*), acc[c][1]);
+        }
+    }
+    while (p + vector_len <= k) : (p += vector_len) {
+        const av: Vf32 = a[p..][0..vector_len].*;
+        inline for (0..4) |c| {
+            acc[c][0] = @mulAdd(Vf32, av, @as(Vf32, b[(b_row + c) * k + p ..][0..vector_len].*), acc[c][0]);
+        }
+    }
+
+    var s0 = @reduce(.Add, acc[0][0] + acc[0][1]);
+    var s1 = @reduce(.Add, acc[1][0] + acc[1][1]);
+    var s2 = @reduce(.Add, acc[2][0] + acc[2][1]);
+    var s3 = @reduce(.Add, acc[3][0] + acc[3][1]);
     while (p < k) : (p += 1) {
         const av = a[p];
-        s0 += av * b[(b_row + 0) * k + p];
-        s1 += av * b[(b_row + 1) * k + p];
-        s2 += av * b[(b_row + 2) * k + p];
-        s3 += av * b[(b_row + 3) * k + p];
+        s0 = @mulAdd(f32, av, b[(b_row + 0) * k + p], s0);
+        s1 = @mulAdd(f32, av, b[(b_row + 1) * k + p], s1);
+        s2 = @mulAdd(f32, av, b[(b_row + 2) * k + p], s2);
+        s3 = @mulAdd(f32, av, b[(b_row + 3) * k + p], s3);
     }
     out[0] = s0;
     out[1] = s1;

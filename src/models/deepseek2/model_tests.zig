@@ -33,7 +33,7 @@ test "deepseek2 matches the recorded DeepSeek-V2-Lite forward (Q8_0; skips witho
     // BOS + a short prompt; recorded 2026-08-23 (aarch64 native, Accelerate).
     const prompt = [_]usize{ 100000, 5726, 207, 12 };
     const golden_chain = [_]usize{ 59948, 220, 11598, 11 };
-    const golden_hash: u64 = 0xb446357d85ea25f0;
+    const golden_hash: u64 = 0x97923a985faafd72;
 
     var logits = try model.stepBatch(&ctx, &cache, &prompt);
     if (strict_bits) try std.testing.expectEqual(golden_hash, fnvHash(try logits.dataConst()));

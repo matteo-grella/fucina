@@ -500,24 +500,28 @@ pub inline fn vexpf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
     return @select(f32, x != x, x, result);
 }
 
+/// Number of independent accumulator chains in `vecSum` / `vecDot`: the
+/// loops are add-latency bound, and eight chains keep the FMA/FADD
+/// pipelines full where four left them half idle (measured, see the
+/// commit that widened them). The chain count is part of the summation
+/// order and therefore of the result bits.
+pub const reduce_chains = 8;
+
 pub inline fn vecSum(x: []const f32) f32 {
     if (x.len == 0) return 0;
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
+    var acc: [reduce_chains]Vf32 = undefined;
+    inline for (0..reduce_chains) |c| acc[c] = @splat(0);
     var i: usize = 0;
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        acc0 += x[i..][0..vector_len].*;
-        acc1 += x[i + vector_len ..][0..vector_len].*;
-        acc2 += x[i + 2 * vector_len ..][0..vector_len].*;
-        acc3 += x[i + 3 * vector_len ..][0..vector_len].*;
+    while (i + reduce_chains * vector_len <= x.len) : (i += reduce_chains * vector_len) {
+        inline for (0..reduce_chains) |c| acc[c] += @as(Vf32, x[i + c * vector_len ..][0..vector_len].*);
     }
     while (i + vector_len <= x.len) : (i += vector_len) {
         const xv: Vf32 = x[i..][0..vector_len].*;
-        acc0 += xv;
+        acc[0] += xv;
     }
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+    var total = acc[0];
+    inline for (1..reduce_chains) |c| total += acc[c];
+    var s = @reduce(.Add, total);
     while (i < x.len) : (i += 1) s += x[i];
     return s;
 }
@@ -594,43 +598,46 @@ pub inline fn vecProd(x: []const f32) f32 {
     return p;
 }
 
+/// Fused dot product over `reduce_chains` independent chains: every
+/// product is folded into its chain with one `@mulAdd` (a single rounding
+/// per term, the scalar tail included), the chains are summed in index
+/// order and the lanes reduced last.
 pub inline fn vecDot(x: []const f32, y: []const f32) f32 {
     if (x.len == 0) return 0;
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
+    var acc: [reduce_chains]Vf32 = undefined;
+    inline for (0..reduce_chains) |c| acc[c] = @splat(0);
     var i: usize = 0;
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        acc0 += @as(Vf32, x[i..][0..vector_len].*) * @as(Vf32, y[i..][0..vector_len].*);
-        acc1 += @as(Vf32, x[i + vector_len ..][0..vector_len].*) * @as(Vf32, y[i + vector_len ..][0..vector_len].*);
-        acc2 += @as(Vf32, x[i + 2 * vector_len ..][0..vector_len].*) * @as(Vf32, y[i + 2 * vector_len ..][0..vector_len].*);
-        acc3 += @as(Vf32, x[i + 3 * vector_len ..][0..vector_len].*) * @as(Vf32, y[i + 3 * vector_len ..][0..vector_len].*);
+    while (i + reduce_chains * vector_len <= x.len) : (i += reduce_chains * vector_len) {
+        inline for (0..reduce_chains) |c| {
+            const xv: Vf32 = x[i + c * vector_len ..][0..vector_len].*;
+            const yv: Vf32 = y[i + c * vector_len ..][0..vector_len].*;
+            acc[c] = @mulAdd(Vf32, xv, yv, acc[c]);
+        }
     }
     while (i + vector_len <= x.len) : (i += vector_len) {
         const xv: Vf32 = x[i..][0..vector_len].*;
         const yv: Vf32 = y[i..][0..vector_len].*;
-        acc0 += xv * yv;
+        acc[0] = @mulAdd(Vf32, xv, yv, acc[0]);
     }
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += x[i] * y[i];
+    var total = acc[0];
+    inline for (1..reduce_chains) |c| total += acc[c];
+    var s = @reduce(.Add, total);
+    while (i < x.len) : (i += 1) s = @mulAdd(f32, x[i], y[i], s);
     return s;
 }
 
-// Multiply-add of a contiguous slice with a broadcast scalar: out += in * s.
-// This is the hot path of matmul / matmulTransA — every output row receives
-// one vecFmaScalar per k-step. Spelled as a separate multiply and add
-// (`ov + iv * sv`, no `@mulAdd`): the rounding class is unfused, whatever
-// the target's FMA support.
+// Fused multiply-add of a contiguous slice with a broadcast scalar:
+// out += in * s, one `@mulAdd` per lane (fmla on AArch64, vfmadd on
+// x86_64 with FMA), the scalar tail fused the same way.
 pub inline fn vecFmaScalar(out: []f32, in: []const f32, s: f32) void {
     const sv: Vf32 = @splat(s);
     var i: usize = 0;
     while (i + vector_len <= out.len) : (i += vector_len) {
         const ov: Vf32 = out[i..][0..vector_len].*;
         const iv: Vf32 = in[i..][0..vector_len].*;
-        out[i..][0..vector_len].* = ov + iv * sv;
+        out[i..][0..vector_len].* = @mulAdd(Vf32, iv, sv, ov);
     }
-    while (i < out.len) : (i += 1) out[i] += in[i] * s;
+    while (i < out.len) : (i += 1) out[i] = @mulAdd(f32, in[i], s, out[i]);
 }
 
 pub inline fn vecElementwiseF64(comptime op: ops.ElementwiseOp, z: []f64, x: []const f64, y: []const f64) void {
