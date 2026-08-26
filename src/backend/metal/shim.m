@@ -107,7 +107,19 @@ typedef struct {
 #define FUCINA_GEMM_VARIANTS 3
 #define FUCINA_GEMM_DTYPES 4
 #define FUCINA_GEMM_PIPELINES (FUCINA_GEMM_DTYPES * FUCINA_GEMM_VARIANTS * 8)
-#define FUCINA_WRAP_CACHE 512
+// Initial capacity of the wrap cache; the table doubles (rehash under
+// wrap_lock) whenever it reaches half load, so the number of resident
+// weights a model can register is bounded by memory, not by a constant.
+#define FUCINA_WRAP_CACHE_INITIAL 512
+
+// One wrap-cache entry: page base, page-rounded end, and the buffer held as
+// a +1 CoreFoundation reference (the table is malloc'd and rehashed, which
+// ARC cannot manage in place). NULL buf = empty slot.
+typedef struct {
+    uintptr_t base;
+    uintptr_t end;
+    void *buf;
+} FucinaWrapSlot;
 
 typedef struct {
     id<MTLDevice> device;
@@ -131,11 +143,14 @@ typedef struct {
     // cached: resident-f16 RHS storage lives for the whole process, so the cache
     // can never go stale unless an owner explicitly frees a resident buffer
     // during teardown (pool-churned activations are NOT cached).
-    struct { uintptr_t base; uintptr_t end; } wrap_keys[FUCINA_WRAP_CACHE];
-    id<MTLBuffer> wrap_bufs[FUCINA_WRAP_CACHE];
-    // Guards wrap_keys/wrap_bufs: lookups run from eager async dispatch,
-    // f16_lock/qmoe_lock legacy paths, and concurrent resident allocation
-    // during model loading. calloc zero-init == OS_UNFAIR_LOCK_INIT.
+    // Open-addressed (linear probe) by page base, one entry per base;
+    // capacity a power of two, grown at half load. calloc zero-init = empty.
+    FucinaWrapSlot *wrap_slots;
+    size_t wrap_cap;
+    size_t wrap_count;
+    // Guards wrap_slots/wrap_cap/wrap_count: lookups run from eager async
+    // dispatch, f16_lock/qmoe_lock legacy paths, and concurrent resident
+    // allocation during model loading. calloc zero-init == OS_UNFAIR_LOCK_INIT.
     os_unfair_lock wrap_lock;
     size_t page_size;
     // Quantized grouped GEMM (ggml_mul_mm.metal): one pipeline per format,
@@ -247,9 +262,15 @@ void fucina_metal_deinit(void *ctx_opaque) {
         for (int i = 0; i < FUCINA_GEMM_PIPELINES; i++) {
             ctx->pipelines[i] = nil;
         }
-        for (int i = 0; i < FUCINA_WRAP_CACHE; i++) {
-            ctx->wrap_bufs[i] = nil;
+        for (size_t i = 0; i < ctx->wrap_cap; i++) {
+            if (ctx->wrap_slots[i].buf != NULL) {
+                CFRelease(ctx->wrap_slots[i].buf);
+            }
         }
+        free(ctx->wrap_slots);
+        ctx->wrap_slots = NULL;
+        ctx->wrap_cap = 0;
+        ctx->wrap_count = 0;
         for (int i = 0; i < FUCINA_QMM_FORMATS; i++) {
             ctx->qmm_pipelines[i] = nil;
         }
@@ -333,49 +354,134 @@ static id<MTLBuffer> fucina_wrap(FucinaMetalCtx *ctx, const void *ptr, size_t le
                                      deallocator:nil];
 }
 
-// As fucina_wrap, but cached by (page base, length-covers) — ONLY for memory
-// the caller guarantees stays mapped for the process lifetime (resident f16
-// weights, device-owned expert buffers). Linear probe; a full table degrades
-// to uncached wraps. The cache has its own lock: its mutators run under
-// DIFFERENT caller locks (f16_lock, qmoe_lock) and fucina_metal_alloc_resident_bytes
-// is called from concurrent model-loading workers with no caller lock at all.
+// ---- Wrap cache table (all helpers run under wrap_lock) ----
+
+static size_t fucina_wrap_hash(uintptr_t base, size_t cap) {
+    return (size_t)((base >> 14) & (cap - 1));
+}
+
+// The slot holding `base`, or NULL.
+static FucinaWrapSlot *fucina_wrap_cache_find(FucinaMetalCtx *ctx, uintptr_t base) {
+    if (ctx->wrap_cap == 0) {
+        return NULL;
+    }
+    size_t mask = ctx->wrap_cap - 1;
+    size_t slot = fucina_wrap_hash(base, ctx->wrap_cap);
+    for (size_t probe = 0; probe < ctx->wrap_cap; probe++) {
+        FucinaWrapSlot *e = &ctx->wrap_slots[slot];
+        if (e->buf == NULL) {
+            return NULL;
+        }
+        if (e->base == base) {
+            return e;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+// Place an entry into a table with at least one empty slot.
+static void fucina_wrap_cache_place(FucinaWrapSlot *slots, size_t cap, FucinaWrapSlot e) {
+    size_t mask = cap - 1;
+    size_t slot = fucina_wrap_hash(e.base, cap);
+    while (slots[slot].buf != NULL) {
+        slot = (slot + 1) & mask;
+    }
+    slots[slot] = e;
+}
+
+// Make room for one more entry: doubles (and rehashes) the table at half
+// load. false on allocation failure; the table is unchanged and the caller
+// treats the insert as refused.
+static bool fucina_wrap_cache_reserve(FucinaMetalCtx *ctx) {
+    if (ctx->wrap_slots != NULL && (ctx->wrap_count + 1) * 2 <= ctx->wrap_cap) {
+        return true;
+    }
+    size_t new_cap = ctx->wrap_cap == 0 ? FUCINA_WRAP_CACHE_INITIAL : ctx->wrap_cap * 2;
+    FucinaWrapSlot *slots = calloc(new_cap, sizeof(FucinaWrapSlot));
+    if (slots == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < ctx->wrap_cap; i++) {
+        if (ctx->wrap_slots[i].buf != NULL) {
+            fucina_wrap_cache_place(slots, new_cap, ctx->wrap_slots[i]);
+        }
+    }
+    free(ctx->wrap_slots);
+    ctx->wrap_slots = slots;
+    ctx->wrap_cap = new_cap;
+    return true;
+}
+
+// Insert after a successful reserve; `base` must be absent. Takes a +1
+// reference on `buf`.
+static void fucina_wrap_cache_insert(FucinaMetalCtx *ctx, uintptr_t base, uintptr_t end, id<MTLBuffer> buf) {
+    FucinaWrapSlot e = { .base = base, .end = end, .buf = (void *)CFBridgingRetain(buf) };
+    fucina_wrap_cache_place(ctx->wrap_slots, ctx->wrap_cap, e);
+    ctx->wrap_count++;
+}
+
+// Erase the entry at `e` (releasing its buffer) and close the probe
+// cluster behind it, so later lookups never stop early at the hole.
+static void fucina_wrap_cache_erase(FucinaMetalCtx *ctx, FucinaWrapSlot *e) {
+    size_t mask = ctx->wrap_cap - 1;
+    CFRelease(e->buf);
+    e->buf = NULL;
+    e->base = 0;
+    e->end = 0;
+    ctx->wrap_count--;
+    size_t next = (size_t)(e - ctx->wrap_slots);
+    next = (next + 1) & mask;
+    while (ctx->wrap_slots[next].buf != NULL) {
+        FucinaWrapSlot moved = ctx->wrap_slots[next];
+        ctx->wrap_slots[next].buf = NULL;
+        ctx->wrap_slots[next].base = 0;
+        ctx->wrap_slots[next].end = 0;
+        fucina_wrap_cache_place(ctx->wrap_slots, ctx->wrap_cap, moved);
+        next = (next + 1) & mask;
+    }
+}
+
+// As fucina_wrap, but cached by page base — ONLY for memory the caller
+// guarantees stays mapped for the process lifetime (resident f16 weights,
+// device-owned expert buffers). One entry per base: a request past a cached
+// entry's end replaces it with a longer wrap (in-flight tickets hold their
+// own references, so the shorter one dies when they do). The table grows
+// with the model; only an allocation failure degrades to an uncached wrap.
+// The cache has its own lock: its mutators run under DIFFERENT caller locks
+// (f16_lock, qmoe_lock) and fucina_metal_alloc_resident_bytes is called from
+// concurrent model-loading workers with no caller lock at all.
 static id<MTLBuffer> fucina_wrap_cached(FucinaMetalCtx *ctx, const void *ptr, size_t len, size_t *offset_out) {
     uintptr_t mask = (uintptr_t)ctx->page_size - 1;
     uintptr_t base = (uintptr_t)ptr & ~mask;
     uintptr_t end = ((uintptr_t)ptr + len + mask) & ~mask;
     *offset_out = (uintptr_t)ptr - base;
-    size_t h = (size_t)((base >> 14) % FUCINA_WRAP_CACHE);
-    size_t first_empty = FUCINA_WRAP_CACHE;
     os_unfair_lock_lock(&ctx->wrap_lock);
-    for (size_t probe = 0; probe < FUCINA_WRAP_CACHE; probe++) {
-        size_t slot = (h + probe) % FUCINA_WRAP_CACHE;
-        if (ctx->wrap_bufs[slot] == nil) {
-            if (first_empty == FUCINA_WRAP_CACHE) {
-                first_empty = slot;
-            }
-            continue;
-        }
-        if (ctx->wrap_keys[slot].base == base && ctx->wrap_keys[slot].end >= end) {
-            id<MTLBuffer> buf = ctx->wrap_bufs[slot];
-            os_unfair_lock_unlock(&ctx->wrap_lock);
-            return buf;
-        }
-    }
-    if (first_empty != FUCINA_WRAP_CACHE) {
-        id<MTLBuffer> buf = [ctx->device newBufferWithBytesNoCopy:(void *)base
-                                                           length:(NSUInteger)(end - base)
-                                                          options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
-                                                      deallocator:nil];
-        if (buf != nil) {
-            ctx->wrap_keys[first_empty].base = base;
-            ctx->wrap_keys[first_empty].end = end;
-            ctx->wrap_bufs[first_empty] = buf;
-        }
+    FucinaWrapSlot *hit = fucina_wrap_cache_find(ctx, base);
+    if (hit != NULL && hit->end >= end) {
+        id<MTLBuffer> buf = (__bridge id<MTLBuffer>)hit->buf;
         os_unfair_lock_unlock(&ctx->wrap_lock);
         return buf;
     }
+    if (hit == NULL && !fucina_wrap_cache_reserve(ctx)) {
+        os_unfair_lock_unlock(&ctx->wrap_lock);
+        return fucina_wrap(ctx, ptr, len, offset_out);
+    }
+    id<MTLBuffer> buf = [ctx->device newBufferWithBytesNoCopy:(void *)base
+                                                       length:(NSUInteger)(end - base)
+                                                      options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
+                                                   deallocator:nil];
+    if (buf != nil) {
+        if (hit != NULL) {
+            CFRelease(hit->buf);
+            hit->end = end;
+            hit->buf = (void *)CFBridgingRetain(buf);
+        } else {
+            fucina_wrap_cache_insert(ctx, base, end, buf);
+        }
+    }
     os_unfair_lock_unlock(&ctx->wrap_lock);
-    return fucina_wrap(ctx, ptr, len, offset_out);
+    return buf;
 }
 
 // Lookup-only variant of fucina_wrap_cached: returns the cached wrap when
@@ -388,19 +494,13 @@ static id<MTLBuffer> fucina_wrap_resident_or_transient(FucinaMetalCtx *ctx, cons
     uintptr_t mask = (uintptr_t)ctx->page_size - 1;
     uintptr_t base = (uintptr_t)ptr & ~mask;
     uintptr_t end = ((uintptr_t)ptr + len + mask) & ~mask;
-    size_t h = (size_t)((base >> 14) % FUCINA_WRAP_CACHE);
     os_unfair_lock_lock(&ctx->wrap_lock);
-    for (size_t probe = 0; probe < FUCINA_WRAP_CACHE; probe++) {
-        size_t slot = (h + probe) % FUCINA_WRAP_CACHE;
-        if (ctx->wrap_bufs[slot] == nil) {
-            continue;
-        }
-        if (ctx->wrap_keys[slot].base == base && ctx->wrap_keys[slot].end >= end) {
-            id<MTLBuffer> buf = ctx->wrap_bufs[slot];
-            os_unfair_lock_unlock(&ctx->wrap_lock);
-            *offset_out = (uintptr_t)ptr - base;
-            return buf;
-        }
+    FucinaWrapSlot *hit = fucina_wrap_cache_find(ctx, base);
+    if (hit != NULL && hit->end >= end) {
+        id<MTLBuffer> buf = (__bridge id<MTLBuffer>)hit->buf;
+        os_unfair_lock_unlock(&ctx->wrap_lock);
+        *offset_out = (uintptr_t)ptr - base;
+        return buf;
     }
     os_unfair_lock_unlock(&ctx->wrap_lock);
     return fucina_wrap(ctx, ptr, len, offset_out);
@@ -863,8 +963,8 @@ int fucina_metal_qmoe_stage(
 // the CPU reads the same bytes through the returned contents pointer
 // (unified memory). Owners may release these buffers with
 // fucina_metal_free_resident_bytes; callers that cannot prove ownership must
-// still treat them as process-lifetime and fall back when the bounded wrap cache
-// is full.
+// still treat them as process-lifetime. NULL only when the device or the
+// wrap-cache table cannot allocate; the caller then keeps plain host memory.
 void *fucina_metal_alloc_resident_bytes(void *ctx_opaque, int64_t len) {
     FucinaMetalCtx *ctx = (FucinaMetalCtx *)ctx_opaque;
     if (ctx == NULL || len <= 0) {
@@ -879,24 +979,17 @@ void *fucina_metal_alloc_resident_bytes(void *ctx_opaque, int64_t len) {
         uintptr_t mask = (uintptr_t)ctx->page_size - 1;
         uintptr_t base = (uintptr_t)buf.contents;
         uintptr_t end = (base + (uintptr_t)len + mask) & ~mask;
-        size_t h = (size_t)((base >> 14) % FUCINA_WRAP_CACHE);
         // Model loading registers weights from concurrent pool workers — the
-        // probe/insert must be atomic or two workers can claim one slot and
-        // ARC releases the overwritten buffer while its contents pointer is
-        // already handed out.
+        // reserve/insert must be atomic under the lock, and a fresh device
+        // allocation can never share a page base with a live entry.
         os_unfair_lock_lock(&ctx->wrap_lock);
-        for (size_t probe = 0; probe < FUCINA_WRAP_CACHE; probe++) {
-            size_t slot = (h + probe) % FUCINA_WRAP_CACHE;
-            if (ctx->wrap_bufs[slot] == nil) {
-                ctx->wrap_keys[slot].base = base;
-                ctx->wrap_keys[slot].end = end;
-                ctx->wrap_bufs[slot] = buf;
-                os_unfair_lock_unlock(&ctx->wrap_lock);
-                return buf.contents;
-            }
+        if (fucina_wrap_cache_find(ctx, base) != NULL || !fucina_wrap_cache_reserve(ctx)) {
+            os_unfair_lock_unlock(&ctx->wrap_lock);
+            return NULL;
         }
+        fucina_wrap_cache_insert(ctx, base, end, buf);
         os_unfair_lock_unlock(&ctx->wrap_lock);
-        return NULL; // cache full — caller falls back to plain host memory
+        return buf.contents;
     }
 }
 
@@ -907,14 +1000,11 @@ int fucina_metal_free_resident_bytes(void *ctx_opaque, const void *ptr) {
     }
     uintptr_t base = (uintptr_t)ptr;
     os_unfair_lock_lock(&ctx->wrap_lock);
-    for (size_t slot = 0; slot < FUCINA_WRAP_CACHE; slot++) {
-        if (ctx->wrap_bufs[slot] != nil && ctx->wrap_keys[slot].base == base) {
-            ctx->wrap_bufs[slot] = nil;
-            ctx->wrap_keys[slot].base = 0;
-            ctx->wrap_keys[slot].end = 0;
-            os_unfair_lock_unlock(&ctx->wrap_lock);
-            return 0;
-        }
+    FucinaWrapSlot *hit = fucina_wrap_cache_find(ctx, base);
+    if (hit != NULL) {
+        fucina_wrap_cache_erase(ctx, hit);
+        os_unfair_lock_unlock(&ctx->wrap_lock);
+        return 0;
     }
     os_unfair_lock_unlock(&ctx->wrap_lock);
     return 1;

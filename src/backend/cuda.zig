@@ -192,6 +192,9 @@ const Trace = struct {
     rhs_streamed: std.atomic.Value(u64) = .{ .raw = 0 },
     dev_alloc_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     dev_alloc_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
+    /// Resident allocations and adoptions refused (VRAM budget, or the
+    /// registry could not grow); the caller kept its host bytes.
+    resident_refusals: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_pass: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_below: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_shape: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -255,7 +258,7 @@ pub fn traceDump() void {
     std.debug.print(
         \\[gpu-trace] cuda dispatch: f32={d} ({d:.1}ms) f16={d} ({d:.1}ms) quant={d} ({d:.1}ms) gemv={d} attn={d} ({d:.1}ms) | h2d={d:.1}MB d2h={d:.1}MB
         \\[gpu-trace] async: f32 calls={d} submit={d:.1}ms host-wait={d:.1}ms | f16 calls={d} submit={d:.1}ms host-wait={d:.1}ms | quant calls={d} submit={d:.1}ms host-wait={d:.1}ms
-        \\[gpu-trace] rhs: resident={d} streamed={d} | resident allocs={d} ({d:.1}MB)
+        \\[gpu-trace] rhs: resident={d} streamed={d} | resident allocs={d} ({d:.1}MB) refused={d}
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} transient-floor={d} cuda-error={d}
         \\
     , .{
@@ -283,6 +286,7 @@ pub fn traceDump() void {
         trace.rhs_streamed.load(.monotonic),
         trace.dev_alloc_calls.load(.monotonic),
         mb(trace.dev_alloc_bytes.load(.monotonic)),
+        trace.resident_refusals.load(.monotonic),
         trace.gate_pass.load(.monotonic),
         trace.gate_below.load(.monotonic),
         trace.gate_shape.load(.monotonic),
@@ -1460,17 +1464,30 @@ const ResidentEntry = struct {
     owned: bool,
     prefetched: bool,
 };
-const resident_slots = 512;
+// The registry grows with the model (one entry per resident allocation or
+// adoption, under the lock): the VRAM budget is the only cap. A refused
+// allocation or adoption (budget, or the registry could not grow) leaves
+// the caller on its host bytes and counts in `Trace.resident_refusals`.
 var resident_lock: thread.Mutex = .{};
-var resident_entries: [resident_slots]ResidentEntry = undefined;
-var resident_count: usize = 0;
+var resident_entries: std.ArrayList(ResidentEntry) = .empty;
 var resident_outstanding: usize = 0;
 
 fn residentLookupLocked(ptr: usize, len: usize) ?usize {
-    for (resident_entries[0..resident_count], 0..) |e, i| {
+    for (resident_entries.items, 0..) |e, i| {
         if (ptr >= e.src_base and ptr + len <= e.src_base + e.len) return i;
     }
     return null;
+}
+
+/// Append under `resident_lock`; false when the registry cannot grow.
+fn residentAppendLocked(entry: ResidentEntry) bool {
+    resident_entries.append(std.heap.c_allocator, entry) catch return false;
+    resident_outstanding += entry.len;
+    return true;
+}
+
+fn residentRefused() void {
+    if (trace_on) tinc(&trace.resident_refusals, 1);
 }
 
 /// Resolve `bytes` to a zero-transfer device pointer:
@@ -1485,7 +1502,7 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
     const ptr = @intFromPtr(bytes.ptr);
     resident_lock.lock();
     if (residentLookupLocked(ptr, bytes.len)) |i| {
-        const e = &resident_entries[i];
+        const e = &resident_entries.items[i];
         const need = !e.prefetched;
         if (need) e.prefetched = true;
         const dev = e.dev_base + (ptr - e.src_base);
@@ -1495,10 +1512,13 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
         if (need) _ = ctx.driver.cuMemPrefetchAsync(@intCast(pf_base), pf_len, ctx.device, ctx.stream);
         return @intCast(dev);
     }
-    const over_budget = resident_count >= resident_slots or
-        (ctx.vram_budget > 0 and resident_outstanding + bytes.len > ctx.vram_budget);
+    const over_budget = ctx.vram_budget > 0 and resident_outstanding + bytes.len > ctx.vram_budget;
     resident_lock.unlock();
-    if (!adopt_if_stable or !ctx.managed_ok or over_budget) return null;
+    if (!adopt_if_stable or !ctx.managed_ok) return null;
+    if (over_budget) {
+        residentRefused();
+        return null;
+    }
 
     // Adopt: managed copy of the stable source bytes, READ_MOSTLY-advised.
     if (ctx.driver.cuCtxSetCurrent(ctx.context) != 0) return null;
@@ -1511,31 +1531,28 @@ fn residentDevPtr(ctx: *Ctx, bytes: []const u8, adopt_if_stable: bool) ?api.CUde
     resident_lock.lock();
     if (residentLookupLocked(ptr, bytes.len)) |i| {
         // Raced with another adopter; keep theirs.
-        const dev = resident_entries[i].dev_base + (ptr - resident_entries[i].src_base);
+        const dev = resident_entries.items[i].dev_base + (ptr - resident_entries.items[i].src_base);
         resident_lock.unlock();
         _ = ctx.driver.cuMemFree(dptr);
         return @intCast(dev);
     }
-    // Recheck BOTH bounds under the lock: the earlier probe was check-then-act
+    // Recheck the budget under the lock: the earlier probe was check-then-act
     // across a release, and concurrent adopters must not jointly exceed the
     // budget (oversubscribed managed memory silently page-thrashes).
-    if (resident_count >= resident_slots or
-        (ctx.vram_budget > 0 and resident_outstanding + bytes.len > ctx.vram_budget))
-    {
-        resident_lock.unlock();
-        _ = ctx.driver.cuMemFree(dptr);
-        return null;
-    }
-    resident_entries[resident_count] = .{
+    const budget_ok = !(ctx.vram_budget > 0 and resident_outstanding + bytes.len > ctx.vram_budget);
+    const registered = budget_ok and residentAppendLocked(.{
         .src_base = ptr,
         .len = bytes.len,
         .dev_base = @intCast(dptr),
         .owned = false,
         .prefetched = true,
-    };
-    resident_count += 1;
-    resident_outstanding += bytes.len;
+    });
     resident_lock.unlock();
+    if (!registered) {
+        _ = ctx.driver.cuMemFree(dptr);
+        residentRefused();
+        return null;
+    }
     _ = ctx.driver.cuMemPrefetchAsync(dptr, bytes.len, ctx.device, ctx.stream);
     if (trace_on) {
         tinc(&trace.dev_alloc_calls, 1);
@@ -1669,10 +1686,12 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
     const ctx = context() orelse return null;
     if (!ctx.managed_ok) return null;
     resident_lock.lock();
-    const over_budget = resident_count >= resident_slots or
-        (ctx.vram_budget > 0 and resident_outstanding + len > ctx.vram_budget);
+    const over_budget = ctx.vram_budget > 0 and resident_outstanding + len > ctx.vram_budget;
     resident_lock.unlock();
-    if (over_budget) return null;
+    if (over_budget) {
+        residentRefused();
+        return null;
+    }
 
     if (ctx.driver.cuCtxSetCurrent(ctx.context) != 0) return null;
     var dptr: api.CUdeviceptr = 0;
@@ -1681,23 +1700,20 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
     _ = ctx.driver.cuMemAdvise(dptr, len, api.CU_MEM_ADVISE_SET_READ_MOSTLY, ctx.device);
 
     resident_lock.lock();
-    if (resident_count >= resident_slots or
-        (ctx.vram_budget > 0 and resident_outstanding + len > ctx.vram_budget))
-    {
-        resident_lock.unlock();
-        _ = ctx.driver.cuMemFree(dptr);
-        return null;
-    }
-    resident_entries[resident_count] = .{
+    const budget_ok = !(ctx.vram_budget > 0 and resident_outstanding + len > ctx.vram_budget);
+    const registered = budget_ok and residentAppendLocked(.{
         .src_base = @intCast(dptr),
         .len = len,
         .dev_base = @intCast(dptr),
         .owned = true,
         .prefetched = false,
-    };
-    resident_count += 1;
-    resident_outstanding += len;
+    });
     resident_lock.unlock();
+    if (!registered) {
+        _ = ctx.driver.cuMemFree(dptr);
+        residentRefused();
+        return null;
+    }
 
     if (trace_on) {
         tinc(&trace.dev_alloc_calls, 1);
@@ -1718,7 +1734,7 @@ pub fn freeResidentBytes(bytes: []const u8) void {
 
     resident_lock.lock();
     var dev_base: ?usize = null;
-    for (resident_entries[0..resident_count], 0..) |e, i| {
+    for (resident_entries.items, 0..) |e, i| {
         // Owned entries match their managed base; adopted entries match the
         // SOURCE base — an owner freeing adopted source bytes must evict the
         // stale mapping (and its managed copy) or a later allocation at the
@@ -1726,8 +1742,7 @@ pub fn freeResidentBytes(bytes: []const u8) void {
         if (e.src_base == base) {
             dev_base = e.dev_base;
             resident_outstanding -= e.len;
-            resident_entries[i] = resident_entries[resident_count - 1];
-            resident_count -= 1;
+            _ = resident_entries.swapRemove(i);
             break;
         }
     }

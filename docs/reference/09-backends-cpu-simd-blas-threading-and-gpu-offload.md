@@ -709,12 +709,17 @@ Weight residency: `allocResidentBytes(len)` returns device-owned,
 page-aligned unified-memory bytes the CPU reads through the same slice; this
 is a performance cache, not a correctness precondition — pageable client
 wraps are re-wired into the GPU address space on every commit (~45 µs/MB), so
-stable weights should live resident. The provider keeps a bounded
-address-keyed registry (512 ranges) so dispatch paths recognize resident
-operands without caller flags. Dense f32/f16 inputs and f32 outputs own one
+stable weights should live resident. The provider keeps an address-keyed
+registry of resident ranges so dispatch paths recognize resident operands
+without caller flags; it grows with the model (one entry per allocation,
+under a lock, no fixed cap), and on both providers an allocation the
+registry cannot record is refused rather than handed out unrecognized, so
+the loader keeps its host bytes (`Trace.resident_refusals`, printed by
+`traceDump` as `refused=`). Dense f32/f16 inputs and f32 outputs own one
 page wrapper on each storage allocation; pooled reuse changes values, not the
 mapping, and the wrapper is evicted before the allocation is freed. Quantized
-stable weight pages retain the bounded address-keyed shim cache. The stale-pages rule
+stable weight pages retain the address-keyed shim cache, an open-addressed
+table that doubles at half load. The stale-pages rule
 is absolute: only bytes whose address is process-lifetime-stable may be
 flagged cacheable
 (`RhsLifetime.stable_process`) — a cached wrap of a freed-and-reused page

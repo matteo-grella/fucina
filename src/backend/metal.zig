@@ -262,6 +262,9 @@ const Trace = struct {
     rhs_transient: std.atomic.Value(u64) = .{ .raw = 0 },
     dev_alloc_calls: std.atomic.Value(u64) = .{ .raw = 0 },
     dev_alloc_bytes: std.atomic.Value(u64) = .{ .raw = 0 },
+    /// Resident allocations refused because the range registry could not
+    /// grow (the caller fell back to host bytes).
+    resident_refusals: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_pass: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_below: std.atomic.Value(u64) = .{ .raw = 0 },
     gate_shape: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -407,7 +410,7 @@ pub fn traceDump() void {
         \\[gpu-trace] gpu-time: f32={d:.1}ms overhead={d:.1}ms | f16={d:.1}ms overhead={d:.1}ms | quant={d:.1}ms overhead={d:.1}ms | attn={d:.1}ms overhead={d:.1}ms
         \\[gpu-trace] kernel-sched: f32={d:.1}ms f16={d:.1}ms quant={d:.1}ms attn={d:.1}ms
         \\[gpu-trace] quant overhead: lock-wait={d:.1}ms stage-copy={d:.1}ms
-        \\[gpu-trace] rhs-cache: stable={d} transient={d} | resident-bytes allocs={d} ({d:.1} MB)
+        \\[gpu-trace] rhs-cache: stable={d} transient={d} | resident-bytes allocs={d} ({d:.1} MB) refused={d}
         \\[gpu-trace] gate decisions: pass={d} below-gate={d} shape-reject={d} shim-error={d} shape-overflow={d}
         \\
     , .{
@@ -424,9 +427,9 @@ pub fn traceDump() void {
         ms(trace.quant_lock_ns.load(.monotonic)),  ms(trace.quant_stage_ns.load(.monotonic)),
         trace.rhs_cacheable.load(.monotonic),      trace.rhs_transient.load(.monotonic),
         trace.dev_alloc_calls.load(.monotonic),    @as(f64, @floatFromInt(trace.dev_alloc_bytes.load(.monotonic))) / 1e6,
-        trace.gate_pass.load(.monotonic),          trace.gate_below.load(.monotonic),
-        trace.gate_shape.load(.monotonic),         trace.shim_err.load(.monotonic),
-        trace.shape_overflow.load(.monotonic),
+        trace.resident_refusals.load(.monotonic),  trace.gate_pass.load(.monotonic),
+        trace.gate_below.load(.monotonic),         trace.gate_shape.load(.monotonic),
+        trace.shim_err.load(.monotonic),           trace.shape_overflow.load(.monotonic),
     });
     trace_shape_lock.lock();
     var shapes = trace_shapes;
@@ -1371,7 +1374,14 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
     if (len == 0 or len > std.math.maxInt(i64)) return null;
     const ctx = context() orelse return null;
     const p = fucina_metal_alloc_resident_bytes(ctx, @intCast(len)) orelse return null;
-    registerResidentRange(@intFromPtr(p), len);
+    if (!registerResidentRange(@intFromPtr(p), len)) {
+        // Refuse (the CUDA behaviour) rather than hand out bytes the
+        // dispatch paths would not recognize and would re-stage as
+        // transient on every call: the caller keeps its host copy.
+        _ = fucina_metal_free_resident_bytes(ctx, p);
+        if (trace_on) tinc(&trace.resident_refusals, 1);
+        return null;
+    }
     if (trace_on) {
         tinc(&trace.dev_alloc_calls, 1);
         tinc(&trace.dev_alloc_bytes, len);
@@ -1386,26 +1396,29 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
 /// that proof themselves: the ADDRESS is stable for the process even when
 /// the contents mutate, e.g. weights trained in place by fucina.es, and the
 /// shim's cached wrap reads the live unified-memory pages).
-const resident_range_slots = 512;
+///
+/// The registry grows with the model (one entry per resident allocation,
+/// under the lock): there is no fixed entry cap past which later weights
+/// would silently stop being recognized. Only an allocator failure while
+/// growing refuses the registration, and then `allocResidentBytes`
+/// refuses the allocation itself (`Trace.resident_refusals`).
+const ResidentRange = struct { base: usize, len: usize };
 var resident_ranges_lock: thread.Mutex = .{};
-var resident_ranges: [resident_range_slots]struct { base: usize, len: usize } = undefined;
-var resident_range_count: usize = 0;
+var resident_ranges: std.ArrayList(ResidentRange) = .empty;
 
-fn registerResidentRange(base: usize, len: usize) void {
+fn registerResidentRange(base: usize, len: usize) bool {
     resident_ranges_lock.lock();
     defer resident_ranges_lock.unlock();
-    if (resident_range_count >= resident_range_slots) return; // lookup misses stay correct
-    resident_ranges[resident_range_count] = .{ .base = base, .len = len };
-    resident_range_count += 1;
+    resident_ranges.append(std.heap.c_allocator, .{ .base = base, .len = len }) catch return false;
+    return true;
 }
 
 fn unregisterResidentRange(base: usize) void {
     resident_ranges_lock.lock();
     defer resident_ranges_lock.unlock();
-    for (resident_ranges[0..resident_range_count], 0..) |range, i| {
+    for (resident_ranges.items, 0..) |range, i| {
         if (range.base == base) {
-            resident_ranges[i] = resident_ranges[resident_range_count - 1];
-            resident_range_count -= 1;
+            _ = resident_ranges.swapRemove(i);
             return;
         }
     }
@@ -1416,10 +1429,41 @@ fn isResidentRange(bytes: []const u8) bool {
     const base = @intFromPtr(bytes.ptr);
     resident_ranges_lock.lock();
     defer resident_ranges_lock.unlock();
-    for (resident_ranges[0..resident_range_count]) |range| {
+    for (resident_ranges.items) |range| {
         if (base >= range.base and base + bytes.len <= range.base + range.len) return true;
     }
     return false;
+}
+
+fn residentRangeCount() usize {
+    resident_ranges_lock.lock();
+    defer resident_ranges_lock.unlock();
+    return resident_ranges.items.len;
+}
+
+test "metal resident-range registry grows past the retired 512-entry cap" {
+    if (comptime !enabled) return error.SkipZigTest;
+    if (context() == null) return error.SkipZigTest;
+
+    const count = 600;
+    const before = residentRangeCount();
+    var ranges: [count][]u8 = undefined;
+    var allocated: usize = 0;
+    defer for (ranges[0..allocated]) |bytes| freeResidentBytes(bytes);
+    while (allocated < count) : (allocated += 1) {
+        ranges[allocated] = allocResidentBytes(4096) orelse return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(before + count, residentRangeCount());
+    // Every allocation, first and last alike, is recognized whole and by
+    // an interior sub-range; the old table stopped recording at 512.
+    for (ranges) |bytes| {
+        try std.testing.expect(isResidentRange(bytes));
+        try std.testing.expect(isResidentRange(bytes[1024..2048]));
+    }
+    for (ranges[0..allocated]) |bytes| freeResidentBytes(bytes);
+    allocated = 0;
+    try std.testing.expectEqual(before, residentRangeCount());
+    try std.testing.expect(!isResidentRange(ranges[count - 1]));
 }
 
 /// Release bytes returned by `allocResidentBytes`. Safe no-op when the Metal
