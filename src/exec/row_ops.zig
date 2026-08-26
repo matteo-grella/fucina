@@ -244,31 +244,36 @@ pub const RmsNormMulBackwardWeightRowsTask = struct {
     row_end: usize,
 };
 
-pub const RmsNormRowStatsTask = struct {
+/// Row-block grid of the large-input rmsNorm weight gradient: a fixed
+/// 64 rows per block, independent of the thread count, so which rows a
+/// block's partial covers and the order the partials are reduced in are
+/// properties of the shape alone.
+pub const rms_weight_grad_block_rows: usize = 64;
+
+pub const RmsNormWeightGradBlocksTask = struct {
     input: []const f32,
-    /// Per-row 1/rms (`[rows]`): disjoint writes by row, each a pure
-    /// function of its row through the same sum-of-squares tree as
-    /// `rmsNormMulBackwardWeightRows`, so the scratch is bitwise identical
-    /// for any thread count and to the serial row kernel.
-    stats: []f32,
+    grad: []const f32,
+    /// `[block_count][axis_dim]` partials. Block b owns rows
+    /// `[b * block_rows, min((b + 1) * block_rows, rows))` and accumulates
+    /// them in row order from zero, so its partial is a pure function of
+    /// its rows whichever task computes it.
+    partials: []f32,
+    rows: usize,
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
+    block_start: usize,
+    block_end: usize,
 };
 
-pub const RmsNormWeightGradColumnsTask = struct {
-    input: []const f32,
-    grad: []const f32,
-    stats: []const f32,
-    // Each task owns the contiguous DESTINATION column range
-    // [col_start, col_end) and accumulates over ALL rows in row order (the
-    // LayerNormParamGradColumnsTask pattern): per-column accumulation
-    // order equals the serial row kernel's, so dweight is bitwise
-    // identical for any thread count.
-    dweight: []f32,
-    rows: usize,
+pub const RmsNormWeightGradReduceTask = struct {
+    partials: []const f32,
+    /// Pre-zeroed `[axis_dim]`. Each task owns the column range
+    /// `[col_start, col_end)` and adds the block partials in block order;
+    /// the vector body and the scalar tail evaluate the same
+    /// `acc + partial` per column, so the column split never moves a bit.
+    output: []f32,
+    block_count: usize,
     axis_dim: usize,
     col_start: usize,
     col_end: usize,
@@ -700,12 +705,12 @@ pub fn runRmsNormMulBackwardWeightRowsTask(task: *const RmsNormMulBackwardWeight
     rmsNormMulBackwardWeightRows(task.*);
 }
 
-pub fn runRmsNormRowStatsTask(task: *const RmsNormRowStatsTask) void {
-    rmsNormRowStats(task.*);
+pub fn runRmsNormWeightGradBlocksTask(task: *const RmsNormWeightGradBlocksTask) void {
+    rmsNormWeightGradBlocks(task.*);
 }
 
-pub fn runRmsNormWeightGradColumnsTask(task: *const RmsNormWeightGradColumnsTask) void {
-    rmsNormWeightGradColumns(task.*);
+pub fn runRmsNormWeightGradReduceTask(task: *const RmsNormWeightGradReduceTask) void {
+    rmsNormWeightGradReduce(task.*);
 }
 
 pub fn runLayerNormRowsTask(task: *const LayerNormRowsTask) void {
@@ -856,8 +861,9 @@ pub fn splitGluBackwardRows(task: SplitGluBackwardTask) void {
 /// rmsNorm row kernel shares: four 8-lane accumulators over the bulk,
 /// combined as `(acc0 + acc1) + (acc2 + acc3)`, one 8-lane loop over the
 /// remainder, a horizontal reduce, then the scalar tail. The order is the
-/// bit contract of the rmsNorm family (goldens pin it); keep it.
-inline fn rowSumSq(row: []const f32) f32 {
+/// bit contract of the rmsNorm family (goldens pin it); keep it. Public
+/// for the tests' bit oracles.
+pub inline fn rowSumSq(row: []const f32) f32 {
     const Vec = @Vector(8, f32);
     const vector_width = 8;
     var i: usize = 0;
@@ -1058,68 +1064,47 @@ pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void
     }
 }
 
-pub fn rmsNormRowStats(task: RmsNormRowStatsTask) void {
-    for (task.row_start..task.row_end) |row_i| {
-        const sumsq = rowSumSq(task.input[row_i * task.axis_dim ..][0..task.axis_dim]);
-        task.stats[row_i] = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
+/// One row block per iteration: its partial starts at zero and takes the
+/// block's rows in row order through the row kernel (the same
+/// `dweight + gy * x * (1/rms)` chain as the small-input path), so a
+/// partial depends only on the block's rows, never on the task that ran
+/// it.
+pub fn rmsNormWeightGradBlocks(task: RmsNormWeightGradBlocksTask) void {
+    for (task.block_start..task.block_end) |block_i| {
+        const partial = task.partials[block_i * task.axis_dim ..][0..task.axis_dim];
+        @memset(partial, 0);
+        const row_start = block_i * rms_weight_grad_block_rows;
+        rmsNormMulBackwardWeightRows(.{
+            .input = task.input,
+            .grad = task.grad,
+            .output = partial,
+            .axis_dim = task.axis_dim,
+            .inv_axis_dim = task.inv_axis_dim,
+            .eps = task.eps,
+            .row_start = row_start,
+            .row_end = @min(row_start + rms_weight_grad_block_rows, task.rows),
+        });
     }
 }
 
-/// Column-partitioned dweight accumulation (the large-input pooled path):
-/// the task accumulates its own column range over ALL rows in row order,
-/// reading per-row 1/rms from the precomputed stats. The vector body and
-/// the scalar tail evaluate the exact per-element expression of
-/// `rmsNormMulBackwardWeightRows`, `dweight + gy * x * (1/rms)`, so a
-/// column produces the same bits whether it lands in a vector lane or the
-/// tail: the column split can move with the task count without changing
-/// any result bit.
-pub fn rmsNormWeightGradColumns(task: RmsNormWeightGradColumnsTask) void {
+/// Block-ordered reduction of the partials into the task's column range.
+pub fn rmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;
-    // A task's column slice is one short run per row, `axis_dim` floats
-    // apart, which the hardware prefetcher does not follow. Rows are
-    // walked in blocks: the column loop sweeps the block so each cache
-    // line of the block is fetched once and consumed vector by vector,
-    // and the next block's lines are requested explicitly while this one
-    // computes. Per column the rows are still added in row order (rows
-    // within a block, blocks in sequence), so the bytes do not depend on
-    // the block size.
-    const row_block = 16;
-    const prefetch_line_floats = 16;
-
-    var row0: usize = 0;
-    while (row0 < task.rows) : (row0 += row_block) {
-        const row_end = @min(row0 + row_block, task.rows);
-        const next_end = @min(row_end + row_block, task.rows);
-        for (row_end..next_end) |row_i| {
-            const ahead = row_i * task.axis_dim;
-            var line = task.col_start;
-            while (line < task.col_end) : (line += prefetch_line_floats) {
-                @prefetch(&task.input[ahead + line], .{ .rw = .read, .locality = 3, .cache = .data });
-                @prefetch(&task.grad[ahead + line], .{ .rw = .read, .locality = 3, .cache = .data });
-            }
+    var col = task.col_start;
+    while (col + vector_width <= task.col_end) : (col += vector_width) {
+        var acc: Vec = task.output[col..][0..vector_width].*;
+        for (0..task.block_count) |block_i| {
+            acc = acc + @as(Vec, task.partials[block_i * task.axis_dim + col ..][0..vector_width].*);
         }
-
-        var col = task.col_start;
-        while (col + vector_width <= task.col_end) : (col += vector_width) {
-            var acc: Vec = task.dweight[col..][0..vector_width].*;
-            for (row0..row_end) |row_i| {
-                const base = row_i * task.axis_dim;
-                const values: Vec = task.input[base + col ..][0..vector_width].*;
-                const grad: Vec = task.grad[base + col ..][0..vector_width].*;
-                const rms_vec: Vec = @splat(task.stats[row_i]);
-                acc = acc + grad * values * rms_vec;
-            }
-            task.dweight[col..][0..vector_width].* = acc;
+        task.output[col..][0..vector_width].* = acc;
+    }
+    while (col < task.col_end) : (col += 1) {
+        var acc = task.output[col];
+        for (0..task.block_count) |block_i| {
+            acc = acc + task.partials[block_i * task.axis_dim + col];
         }
-        while (col < task.col_end) : (col += 1) {
-            var acc = task.dweight[col];
-            for (row0..row_end) |row_i| {
-                const base = row_i * task.axis_dim;
-                acc += task.grad[base + col] * task.input[base + col] * task.stats[row_i];
-            }
-            task.dweight[col] = acc;
-        }
+        task.output[col] = acc;
     }
 }
 

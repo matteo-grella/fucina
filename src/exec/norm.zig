@@ -33,8 +33,8 @@ const RmsNormMulRowsTask = exec_row_ops.RmsNormMulRowsTask;
 const RmsNormMulAddRowsTask = exec_row_ops.RmsNormMulAddRowsTask;
 const RmsNormMulBackwardInputRowsTask = exec_row_ops.RmsNormMulBackwardInputRowsTask;
 const RmsNormMulBackwardWeightRowsTask = exec_row_ops.RmsNormMulBackwardWeightRowsTask;
-const RmsNormRowStatsTask = exec_row_ops.RmsNormRowStatsTask;
-const RmsNormWeightGradColumnsTask = exec_row_ops.RmsNormWeightGradColumnsTask;
+const RmsNormWeightGradBlocksTask = exec_row_ops.RmsNormWeightGradBlocksTask;
+const RmsNormWeightGradReduceTask = exec_row_ops.RmsNormWeightGradReduceTask;
 const LayerNormRowsTask = exec_row_ops.LayerNormRowsTask;
 const LayerNormBackwardInputRowsTask = exec_row_ops.LayerNormBackwardInputRowsTask;
 const LayerNormRowStatsTask = exec_row_ops.LayerNormRowStatsTask;
@@ -47,8 +47,8 @@ const runRmsNormMulRowsTask = exec_row_ops.runRmsNormMulRowsTask;
 const runRmsNormMulAddRowsTask = exec_row_ops.runRmsNormMulAddRowsTask;
 const runRmsNormMulBackwardInputRowsTask = exec_row_ops.runRmsNormMulBackwardInputRowsTask;
 const runRmsNormMulBackwardWeightRowsTask = exec_row_ops.runRmsNormMulBackwardWeightRowsTask;
-const runRmsNormRowStatsTask = exec_row_ops.runRmsNormRowStatsTask;
-const runRmsNormWeightGradColumnsTask = exec_row_ops.runRmsNormWeightGradColumnsTask;
+const runRmsNormWeightGradBlocksTask = exec_row_ops.runRmsNormWeightGradBlocksTask;
+const runRmsNormWeightGradReduceTask = exec_row_ops.runRmsNormWeightGradReduceTask;
 const runLayerNormRowsTask = exec_row_ops.runLayerNormRowsTask;
 const runLayerNormBackwardInputRowsTask = exec_row_ops.runLayerNormBackwardInputRowsTask;
 const runLayerNormRowStatsTask = exec_row_ops.runLayerNormRowStatsTask;
@@ -187,11 +187,12 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 
 /// VJP of rmsNorm; computes only the requested gradients. dx recomputes the
 /// row rms from `x` (weighted or plain per `options.weight`); dweight is
-/// `sum_rows gy * x_hat`, accumulated per column in row order: serially
-/// for small inputs (the row kernel), and for large ones through a
-/// per-row 1/rms pass followed by column-partitioned accumulation across
-/// the pool (`rmsNormWeightGradColumns`), so dweight is bitwise identical
-/// for any thread count and to the serial form.
+/// `sum_rows gy * x_hat`. Small inputs accumulate it per column in row
+/// order (the row kernel). Large inputs accumulate fixed 64-row blocks in
+/// row order (`rms_weight_grad_block_rows`) and reduce the block partials
+/// in block order, whichever threads computed them, so dweight is bitwise
+/// identical for any thread count: block-ordered, a property of the shape
+/// alone, not the single-chain row order of the small-input path.
 pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormBackwardOptions) !RmsNormBackwardResult {
     var result = RmsNormBackwardResult{};
     errdefer result.deinit();
@@ -579,44 +580,46 @@ fn rmsNormBackwardWeight(
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and axis_dim > 1 and parallel.cpuThreadCount(parallel.vector_max_threads) > 1 and ctx.workPool() != null) {
-            // Per-row 1/rms scratch, then the column-partitioned
-            // accumulation: both stages are bitwise identical for any
-            // thread count and to the serial row kernel (see the task
-            // structs / kernels), unlike per-task row partials combined in
-            // task order. A one-thread team keeps the single-pass row
-            // kernel (the same bytes, one read of `x` instead of two).
-            const stats = try ctx.allocator.alloc(f32, outer);
-            defer ctx.allocator.free(stats);
-            const stats_task: RmsNormRowStatsTask = .{
-                .input = input,
-                .stats = stats,
-                .axis_dim = axis_dim,
-                .inv_axis_dim = inv_axis_dim,
-                .eps = eps,
-                .row_start = 0,
-                .row_end = outer,
-            };
-            if (!ctx.dispatchRange(RmsNormRowStatsTask, "row_start", "row_end", stats_task, outer, runRmsNormRowStatsTask)) {
-                exec_row_ops.rmsNormRowStats(stats_task);
-            }
-            const col_task: RmsNormWeightGradColumnsTask = .{
-                .input = input,
-                .grad = grad,
-                .stats = stats,
-                .dweight = output,
-                .rows = outer,
-                .axis_dim = axis_dim,
-                .col_start = 0,
-                .col_end = axis_dim,
-            };
-            if (!ctx.dispatchRange(RmsNormWeightGradColumnsTask, "col_start", "col_end", col_task, axis_dim, runRmsNormWeightGradColumnsTask)) {
-                exec_row_ops.rmsNormWeightGradColumns(col_task);
-            }
+        // Fixed row-block grid: each 64-row block accumulates its own
+        // partial in row order, the partials are reduced in block order.
+        // Blocks are distributed over the tasks and the grid depends on
+        // `outer` alone, so one thread and N produce the same bytes (the
+        // serial fallbacks below walk the same grid). A single block is
+        // the row kernel itself (0 + partial is the partial).
+        const block_rows = exec_row_ops.rms_weight_grad_block_rows;
+        const block_count = (outer + block_rows - 1) / block_rows;
+        if (block_count == 1) {
+            rmsNormMulBackwardWeightRows(base_task);
             return out;
         }
-
-        rmsNormMulBackwardWeightRows(base_task);
+        const partials_buffer = try ctx.buffers.acquire(block_count * axis_dim);
+        defer partials_buffer.release();
+        const partials = partials_buffer.data[0 .. block_count * axis_dim];
+        const blocks_task: RmsNormWeightGradBlocksTask = .{
+            .input = input,
+            .grad = grad,
+            .partials = partials,
+            .rows = outer,
+            .axis_dim = axis_dim,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .block_start = 0,
+            .block_end = block_count,
+        };
+        if (!ctx.dispatchRange(RmsNormWeightGradBlocksTask, "block_start", "block_end", blocks_task, block_count, runRmsNormWeightGradBlocksTask)) {
+            exec_row_ops.rmsNormWeightGradBlocks(blocks_task);
+        }
+        const reduce_task: RmsNormWeightGradReduceTask = .{
+            .partials = partials,
+            .output = output,
+            .block_count = block_count,
+            .axis_dim = axis_dim,
+            .col_start = 0,
+            .col_end = axis_dim,
+        };
+        const reduce_pooled = partials.len >= parallel.row_kernel_len_threshold and
+            ctx.dispatchRange(RmsNormWeightGradReduceTask, "col_start", "col_end", reduce_task, axis_dim, runRmsNormWeightGradReduceTask);
+        if (!reduce_pooled) exec_row_ops.rmsNormWeightGradReduce(reduce_task);
         return out;
     }
 
