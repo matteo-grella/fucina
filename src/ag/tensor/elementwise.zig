@@ -109,8 +109,11 @@ pub fn Ops(comptime Self: type) type {
             try ctx.addScaledInPlace(&self.value, other_ptr.asRawTensor(), alpha);
         }
 
-        /// Out-of-place `self + bias` (broadcast along the last axis `axis_tag`) as
-        /// a NEW no-grad tensor; `self` is unchanged.
+        /// Out-of-place `self + bias` (a constant `[axis_dim]` slice broadcast
+        /// along the last axis `axis_tag`) as a NEW tensor; `self` is
+        /// unchanged. Differentiable in `self` (identity VJP: the slice bias
+        /// is a constant and receives no gradient; for a trainable bias use
+        /// `add` with a broadcast operand).
         pub fn biasAdd(self: *const Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !Self {
             var value = try self.value.clone(ctx.allocator);
             errdefer value.deinit();

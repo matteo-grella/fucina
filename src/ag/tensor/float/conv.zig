@@ -34,10 +34,11 @@ pub fn Ops(comptime Self: type) type {
         const finishNoGrad = plumbing.finishNoGrad;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
-        /// No-grad 2-D convolution. `self` is the rank-3 input `[H, W, Cin]`
+        /// 2-D convolution. `self` is the rank-3 input `[H, W, Cin]`
         /// (channels-last), `weight` is rank-4 `[Cout, kH, kW, Cin/groups]`,
         /// `bias` is `null` or a rank-1 `[Cout]` tensor. Result `[oH, oW, Cout]`
-        /// is tagged `out_tags`.
+        /// is tagged `out_tags`. Differentiable in the input, the weight,
+        /// and the bias (`Conv2dBackward`).
         pub fn conv2d(
             self: *const Self,
             ctx: *ExecContext,

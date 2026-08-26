@@ -35,7 +35,9 @@ pub fn Ops(comptime Self: type) type {
         const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const TensorObject = plumbing.TensorObject;
 
-        /// No-grad: copy of `self` with `[start, start+length)` along `axis_tag` zeroed.
+        /// Copy of `self` with `[start, start+length)` along `axis_tag`
+        /// zeroed. Differentiable: the upstream gradient passes through
+        /// unchanged outside the zeroed range and is dropped inside it.
         pub fn zeroSlice(self: *const Self, ctx: *ExecContext, comptime axis_tag: Tag, start: usize, length: usize) !Self {
             const zero_axis = comptime Self.axis(axis_tag);
             var value = try ctx.zeroSlice(tensor_rank, self.asRawTensor(), zero_axis, start, length);
@@ -43,7 +45,9 @@ pub fn Ops(comptime Self: type) type {
             return finishOp(tags, ctx, value, self.requiresGrad(), ZeroSliceBackward(tags, zero_axis), .{ ctx.allocator, self.grad_state, start, length });
         }
 
-        /// No-grad: copy of `self` with the given `indices` along `axis_tag` zeroed.
+        /// Copy of `self` with the given `indices` along `axis_tag` zeroed.
+        /// Differentiable: the upstream gradient passes through unchanged
+        /// on the kept rows and is dropped on the zeroed ones.
         pub fn zeroRows(self: *const Self, ctx: *ExecContext, comptime axis_tag: Tag, indices: []const usize) !Self {
             const zero_axis = comptime Self.axis(axis_tag);
             var value = try ctx.zeroRows(tensor_rank, self.asRawTensor(), zero_axis, indices);

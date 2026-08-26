@@ -8,7 +8,6 @@ const exec_mod = @import("../../exec.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
 const ag_tensor = @import("../tensor.zig");
-const gradcheck_mod = @import("../gradcheck.zig");
 
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
