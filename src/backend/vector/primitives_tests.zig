@@ -126,3 +126,49 @@ test "vecUnary elu and gelu_erf match the scalar path bit-for-bit" {
     primitives.vecUnary(.erf, &got, &x);
     for (x, got) |v, g| try std.testing.expectEqual(ops.unaryScalar(.erf, v), g);
 }
+
+test "vecUnary gelu_quant matches ops.geluQuantScalar bit-for-bit over every f16 in [-10, 10]" {
+    // ggml's GGML_GELU_FP16 is a 65536-entry table indexed by the f16-rounded
+    // input, and `gelu_quant` promises that table's bytes (reference ch. 9,
+    // the Gemma GeGLU parity contract). Every finite f16 inside the clamps is
+    // an input the table has an entry for, so this sweep IS the contract: the
+    // vector lanes must agree with the scalar form (`std.math.tanh`) on all
+    // of them, whatever tanh the lanes use.
+    var inputs: [1 << 16]f32 = undefined;
+    var count: usize = 0;
+    var bits: u16 = 0;
+    while (true) : (bits += 1) {
+        const h: f16 = @bitCast(bits);
+        if (std.math.isFinite(h)) {
+            const v: f32 = @floatCast(h);
+            if (v >= -10 and v <= 10) {
+                inputs[count] = v;
+                count += 1;
+            }
+        }
+        if (bits == 0xffff) break;
+    }
+    // Off-grid values on both sides of the clamps (rounded to f16 inside).
+    for ([_]f32{ -10.5, -9.999, -9.99, 9.99, 9.999, 10.5, 0.1, -0.1, 1e-3, -1e-3 }) |v| {
+        inputs[count] = v;
+        count += 1;
+    }
+    try std.testing.expect(count > 30_000);
+
+    var got: [1 << 16]f32 = undefined;
+    primitives.vecUnary(.gelu_quant, got[0..count], inputs[0..count]);
+    var mismatches: usize = 0;
+    var first: ?usize = null;
+    for (inputs[0..count], got[0..count], 0..) |v, g, i| {
+        const want = ops.geluQuantScalar(v);
+        if (@as(u32, @bitCast(want)) != @as(u32, @bitCast(g))) {
+            mismatches += 1;
+            if (first == null) first = i;
+        }
+    }
+    if (mismatches != 0) {
+        const i = first.?;
+        std.debug.print("gelu_quant lane/scalar mismatch: {d} of {d} inputs; first x={e} want={e} got={e}\n", .{ mismatches, count, inputs[i], ops.geluQuantScalar(inputs[i]), got[i] });
+        return error.TestUnexpectedResult;
+    }
+}

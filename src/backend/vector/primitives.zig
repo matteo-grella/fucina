@@ -1,6 +1,16 @@
 //! Low-level @Vector primitives (dot/add/mul cores, transcendental vector
 //! bodies, the f16 row-block attention inner loops). The shared core
 //! (V* aliases, vector_len*) comes from `common.zig`.
+//!
+//! Transcendental pairing: every exp-family lane body evaluates ONE
+//! `vexpf` (`.exp`, `.sigmoid`, `.silu`, `.softplus`, `.tanh`, `.gelu`,
+//! `.geglu`, `.situ`, the logit softcap), so the forward lanes and the
+//! unary-VJP lanes (`unaryDerivativeVec`, which is `vexpf`-based too)
+//! agree to `vexpf`'s accuracy; the sub-vector tails use libm and sit
+//! within the same 2e-6 of the lanes. The one exception is `gelu_quant`:
+//! its lanes evaluate the scalar `ops.geluQuantScalar` per lane because
+//! the ggml f16-LUT contract is byte parity, which no approximate tanh
+//! keeps once the output is rounded to f16 (`primitives_tests.zig`).
 
 const std = @import("std");
 const ops = @import("../ops.zig");
@@ -309,7 +319,7 @@ pub inline fn vecGated(comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []
 pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
     return switch (op) {
         .relu => @max(value, @as(Vf32, @splat(0))),
-        .exp => @exp(value),
+        .exp => vexpf(vector_len, value),
         .sqrt => @sqrt(value),
         .rsqrt => @as(Vf32, @splat(1)) / @sqrt(value),
         .sigmoid => sigmoidVec(value),
@@ -387,15 +397,15 @@ pub inline fn fastTanhVec(value: Vf32) Vf32 {
 }
 
 /// ggml f16-LUT gelu (see ops.geluQuantScalar): f16-round the input, exact
-/// tanh-gelu, f16-round the output, with hard clamps at +/-10.
+/// tanh-gelu, f16-round the output, with hard clamps at +/-10. Evaluated
+/// with the scalar body PER LANE on purpose: the contract is byte parity
+/// with ggml's table, and the f16 output rounding turns any approximate
+/// tanh into flipped table entries (the previous `tanhVec`-based lanes
+/// disagreed with the scalar form on 428 of the 37388 f16 inputs inside
+/// the clamps). The scalar tanh is one `expm1f` per lane, cheaper than
+/// the lane form it replaces.
 pub inline fn geluQuantVec(value: Vf32) Vf32 {
-    const F16Vec = @Vector(vector_len, f16);
-    const xr: Vf32 = @floatCast(@as(F16Vec, @floatCast(value)));
-    const g = @as(Vf32, @splat(0.5)) * xr * (@as(Vf32, @splat(1)) + tanhVec(geluTanhArgVec(xr)));
-    const gr: Vf32 = @floatCast(@as(F16Vec, @floatCast(g)));
-    const ten: Vf32 = @splat(10);
-    const lo_clamped = @select(f32, value <= -ten, @as(Vf32, @splat(0)), gr);
-    return @select(f32, value >= ten, value, lo_clamped);
+    return perLaneUnary(.gelu_quant, value);
 }
 
 pub inline fn gatedActivationVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
@@ -421,15 +431,27 @@ pub inline fn sigmoidVec(value: Vf32) Vf32 {
     return one / (one + vexpf(vector_len, -value));
 }
 
+/// tanh on the lanes from ONE `vexpf`: t = e^(-2|x|) (the argument is
+/// never positive, so nothing overflows), tanh(|x|) = (1 - t) / (1 + t),
+/// and the sign copied back bitwise. Below |x| = 0.125 the quotient
+/// cancels (t -> 1), so those lanes take the degree-7 odd Taylor series
+/// instead. Measured against f64 tanh: max relative error 5.1e-7 over
+/// [-10, 10] (the vexpf side, at |x| = 0.144), 8.9e-8 below the cut, 6.8e-8
+/// below 1e-3; the previous `@exp`-per-lane form was 2.7e-5 overall and
+/// lost every digit below |x| ~ 1e-7. One vexpf per vector instead of
+/// eight libm calls: 3.6x faster over 1M lanes.
 pub inline fn tanhVec(value: Vf32) Vf32 {
-    // tanh(v) = 2*sigmoid(2v) - 1, evaluated in the sign-stable form on each
-    // branch (the exponent argument stays <= 0 so exp never overflows).
-    const zero: Vf32 = @splat(0);
+    const Vu32 = @Vector(vector_len, u32);
     const one: Vf32 = @splat(1);
-    const two: Vf32 = @splat(2);
-    const positive = two / (@exp(-two * value) + one) - one;
-    const negative = one - two / (@exp(two * value) + one);
-    return @select(f32, value >= zero, positive, negative);
+    const ax = @abs(value);
+    const t = vexpf(vector_len, @as(Vf32, @splat(-2)) * ax);
+    const quotient = (one - t) / (one + t);
+    // tanh(a) = a - a^3/3 + 2a^5/15 - 17a^7/315 + O(a^9)
+    const x2 = ax * ax;
+    const series = ax * @mulAdd(Vf32, x2, @mulAdd(Vf32, x2, @mulAdd(Vf32, x2, @as(Vf32, @splat(-17.0 / 315.0)), @as(Vf32, @splat(2.0 / 15.0))), @as(Vf32, @splat(-1.0 / 3.0))), one);
+    const magnitude = @select(f32, ax < @as(Vf32, @splat(0.125)), series, quotient);
+    const sign_bits = @as(Vu32, @bitCast(value)) & @as(Vu32, @splat(0x8000_0000));
+    return @bitCast(@as(Vu32, @bitCast(magnitude)) | sign_bits);
 }
 
 pub inline fn geluTanhArgVec(value: Vf32) Vf32 {

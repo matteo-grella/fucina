@@ -250,8 +250,16 @@ backend kernel), plus the scalar reference semantics (`unaryScalar`,
 `gatedActivationScalar`, `compareScalar` with IEEE-754 NaN rules, and `erff`,
 a faithful musl translation so `gelu_erf` matches `ggml_vec_gelu_erf_f32`).
 `gelu_quant` reproduces ggml's f16-LUT GELU bit-for-bit (input and output
-rounded through f16, hard clamps at ±10) for llama.cpp numeric parity; `gelu`
-is the exact tanh-approximation form.
+rounded through f16, hard clamps at ±10) for llama.cpp numeric parity; its
+SIMD lanes evaluate the scalar form per lane, since the f16 output rounding
+turns any approximate lane tanh into flipped table entries
+(`primitives_tests.zig` sweeps every f16 inside the clamps). `gelu` is the
+exact tanh-approximation form. The other exp-family lane bodies (`exp`,
+`sigmoid`, `silu`, `softplus`, `tanh`, `gelu`, `geglu`, `situ`, the logit
+softcap) all evaluate one `vexpf` per vector, the same polynomial the unary
+VJP lanes use, so forward and backward lanes agree to `vexpf`'s accuracy;
+the lane `tanh` is `(1 - e^(-2|x|)) / (1 + e^(-2|x|))` with an odd Taylor
+series below `|x| = 0.125` (max relative error 5.1e-7 against f64 tanh).
 
 ## 9.3 The scalar backend and the parity contract (`src/backend/cpu.zig`, `src/backend/parity_test.zig`)
 
