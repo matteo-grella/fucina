@@ -688,6 +688,38 @@ fn contiguousLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
     return weightedSum(ctx, &y);
 }
 
+fn selectLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
+    var y = try x.select(ctx, .row, 1);
+    defer y.deinit();
+    return weightedSum(ctx, &y);
+}
+
+fn selectNegativeLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
+    var y = try x.select(ctx, .col, -1);
+    defer y.deinit();
+    return weightedSum(ctx, &y);
+}
+
+fn selectScalarLoss(ctx: *ExecContext, x: *const V) !Tensor(.{}) {
+    var y = try x.select(ctx, .col, 2);
+    defer y.deinit();
+    return weightedSum(ctx, &y);
+}
+
+fn reshapeLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
+    var y = try x.reshape(ctx, .{ .a, .b }, .{ 4, 3 });
+    defer y.deinit();
+    return weightedSum(ctx, &y);
+}
+
+fn reshapeNonContiguousLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
+    var permuted = try x.permuteTo(ctx, .{ .col, .row });
+    defer permuted.deinit();
+    var y = try permuted.reshape(ctx, .{ .a, .b }, .{ 2, 6 });
+    defer y.deinit();
+    return weightedSum(ctx, &y);
+}
+
 fn biasAddLoss(ctx: *ExecContext, x: *const M) !Tensor(.{}) {
     var y = try x.biasAdd(ctx, &.{ 0.5, -1.0, 0.25, 2.0 }, .col);
     defer y.deinit();
@@ -707,9 +739,14 @@ fn runStridedView(ctx: *ExecContext) anyerror!void {
     try check(ctx, mergeLoss, .{&x}, 12, .{});
     try check(ctx, materializeLoss, .{&x}, 12, .{});
     try check(ctx, viewWithStridesLoss, .{&x}, 12, .{});
+    try check(ctx, selectLoss, .{&x}, 12, .{});
+    try check(ctx, selectNegativeLoss, .{&x}, 12, .{});
+    try check(ctx, reshapeLoss, .{&x}, 12, .{});
+    try check(ctx, reshapeNonContiguousLoss, .{&x}, 12, .{});
     var v = try variable(ctx, V, .{6}, 3.1);
     defer v.deinit();
     try check(ctx, splitLoss, .{&v}, 6, .{});
+    try check(ctx, selectScalarLoss, .{&v}, 6, .{});
 }
 
 fn runAxisView(ctx: *ExecContext) anyerror!void {
@@ -889,7 +926,7 @@ const cases = [_]Case{
     .{ .name = "ZeroRowsBackward", .run = runZeroRows },
     .{ .name = "ZeroSliceBackward", .run = runZeroSlice },
     .{ .name = "BroadcastBackward", .run = runBroadcast },
-    .{ .name = "StridedViewBackward (diagonal, merge, split, materialize, viewWithStrides)", .run = runStridedView },
+    .{ .name = "StridedViewBackward (diagonal, merge, split, materialize, viewWithStrides, select, reshape)", .run = runStridedView },
     .{ .name = "AxisViewBackward (permuteTo, insertAxis)", .run = runAxisView },
     .{ .name = "IdentityBackward (contiguous, biasAdd)", .run = runIdentity },
     .{ .name = "CastBackward (f32, f16 round trip)", .run = runCast },

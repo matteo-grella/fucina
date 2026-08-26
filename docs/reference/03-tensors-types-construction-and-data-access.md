@@ -755,9 +755,10 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
 - `reshape` is torch.reshape over named axes: an arbitrary row-major
   reinterpretation to `new_tags_spec`/`new_shape` (element counts must
   match, `InvalidShape` otherwise) with the torch view-or-materialize
-  rule — a contiguous source stays a zero-copy view, a strided one
-  materializes first (composed flatten → split; a rank-1 target
-  degenerates to plain `flatten`).
+  rule — a contiguous source stays a zero-copy view with a single
+  `StridedViewBackward` record, a strided one materializes first
+  (composed flatten → split; a rank-1 target degenerates to plain
+  `flatten`).
 - `sliceStep` is `narrow` with a step (torch `x[start::step]` on one
   axis): a zero-copy strided view on no-grad tensors; under gradients it
   lowers to `gather` over the stepped indices (a copy with the exact

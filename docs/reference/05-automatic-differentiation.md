@@ -384,12 +384,15 @@ is created and dropped when it is destroyed; `src/ag/core.zig`). Releasing a
 handle before `backward` is therefore always safe: the graph keeps the node
 alive until its last consumer record goes. The *composed* facade ops
 (`nllLoss`, `l2Normalize`, `cosineSimilarity`, `norm`, `normAll`,
-`maskedSelect`, `maskedScatter`, `select`, `slice` (more than one sliced
-axis), `reshape` (multi-tag targets), `rollBy`, `shiftBy`, `trace`,
-`diag`, `diagEmbed`, `constantPad2d`/`zeroPad2d`, `stack`, `unbindInto`, `einsumMany`,
-`conv2dRelu` (its grad path is `conv2d` then `relu`))
-release their function-local intermediates on return and differentiate
-scoped or unscoped alike (pinned by `src/ag/tensor_tests/ownership.zig`).
+`maskedSelect`, `maskedScatter`, `slice` (more than one sliced
+axis), `reshape` (multi-tag targets over a non-contiguous source; a
+contiguous source is one strided-view record), `rollBy`, `shiftBy`,
+`trace`, `diag`, `diagEmbed`, `constantPad2d`/`zeroPad2d`, `stack`,
+`unbindInto`, `einsumMany`, `conv2dRelu` (its grad path is `conv2d` then
+`relu`)) release their function-local intermediates on return and
+differentiate scoped or unscoped alike (pinned by
+`src/ag/tensor_tests/ownership.zig`); `select` is a single strided-view
+record, not a composition.
 
 ## 5.4 noGrad scopes (`src/ag/control.zig`)
 

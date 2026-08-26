@@ -1832,10 +1832,11 @@ bullets).
   **view**: it retains the source buffer and aliases its memory, so a
   mutation of the source through `data()` is visible through the result.
 - `select(ctx, tag, index: isize)` — torch.select / `x[i]`: one position
-  of `tag` with the axis removed (composed narrow → squeeze — a zero-copy
-  view; scope-required under gradients, [§4.1](04-tensor-operations.md#41-the-common-operation-contract-srcagtensorzig)). Negative `index` counts
-  from the end; out of range errors with `IndexOutOfBounds`. The gradient
-  is the exact scatter — unselected positions receive zero.
+  of `tag` with the axis removed (one strided view over the source with a
+  single `StridedViewBackward` record — a zero-copy view). Negative
+  `index` counts from the end; out of range errors with
+  `IndexOutOfBounds`. The gradient is the exact scatter — unselected
+  positions receive zero.
 - `slice(ctx, spec)` — multi-axis basic slicing (torch/numpy
   `x[1:-1, ::2]`, positive steps): `spec` names the tags to slice, each
   field a `fucina.SliceRange`-shaped range — [§3.7](03-tensors-types-construction-and-data-access.md#37-views-and-structural-ops-srcagtensorzig-srctag_opszig-srcexecgather_scatterzig) has the full bounds

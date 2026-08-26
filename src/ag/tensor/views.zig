@@ -220,10 +220,11 @@ pub fn Ops(comptime Self: type) type {
         /// Arbitrary row-major reinterpretation to `new_tags_spec` /
         /// `new_shape` (torch.reshape): the element count must match
         /// (`InvalidShape` otherwise). View-or-materialize like torch: a
-        /// contiguous source stays a zero-copy view; a non-contiguous one
-        /// materializes first (the `flatten` rule). Composed flatten ->
-        /// split, so gradients come from the existing exact view records;
-        /// a rank-1 target degenerates to plain `flatten`.
+        /// contiguous source stays a zero-copy view carrying ONE
+        /// `StridedViewBackward` record (its order-preserving arm reshapes
+        /// the upstream gradient back, no scatter); a non-contiguous one
+        /// materializes first and takes the composed flatten -> split
+        /// path; a rank-1 target degenerates to plain `flatten`.
         pub fn reshape(
             self: *const Self,
             ctx: *ExecContext,
@@ -234,6 +235,15 @@ pub fn Ops(comptime Self: type) type {
             if (comptime new_tags.len == 1) {
                 if (self.asRawTensor().len() != new_shape[0]) return TensorError.InvalidShape;
                 return self.flatten(ctx, new_tags[0]);
+            }
+            if (self.isContiguous()) {
+                comptime validateUniqueTags(new_tags);
+                var value = try self.value.reshape(new_shape[0..]);
+                errdefer value.deinit();
+                if (comptime !differentiable) return finishTypedNoGrad(Out(new_tags), ctx, value, self.requiresGrad());
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(new_tags, ctx, value);
+                const Record = StridedViewBackward(tags, new_tags);
+                return finishOp(new_tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
             }
             var flat = try self.flatten(ctx, new_tags[0]);
             defer flat.deinit();
@@ -354,17 +364,43 @@ pub fn Ops(comptime Self: type) type {
         /// Select one position of `tag` and remove the axis (torch.select /
         /// `x[i]`): the single-slice sibling of `unbindInto`. `index`
         /// counts from the end when negative (torch convention); out of
-        /// range errors with `IndexOutOfBounds`. Composed narrow -> squeeze,
-        /// so the value is a zero-copy view aliasing the selected row and
-        /// the gradient is the exact scatter (every unselected position
-        /// receives zero).
+        /// range errors with `IndexOutOfBounds`. One strided view (the
+        /// selected axis becomes an offset, the other axes keep their
+        /// layout), so the value is a zero-copy view aliasing the selected
+        /// row and the single `StridedViewBackward` record scatters the
+        /// gradient exactly (every unselected position receives zero).
         pub fn select(self: *const Self, ctx: *ExecContext, comptime tag: Tag, index: isize) !Out(removeTag(tags, tag)) {
-            const n: isize = @intCast(self.asRawTensor().shape.at(comptime axis(tag)));
+            const result_tags = comptime removeTag(tags, tag);
+            const select_axis = comptime axis(tag);
+            const raw = self.asRawTensor();
+            const n: isize = @intCast(raw.shape.at(select_axis));
             const shifted = if (index < 0) index +| n else index;
             if (shifted < 0 or shifted >= n) return TensorError.IndexOutOfBounds;
-            var row = try self.narrow(ctx, tag, @intCast(shifted), 1);
-            defer row.deinit();
-            return row.squeeze(ctx, tag);
+            const offset_delta = @as(usize, @intCast(shifted)) * raw.strides.at(select_axis);
+
+            const result_rank = comptime rawRank(result_tags.len);
+            var new_shape: [result_rank]usize = undefined;
+            var new_strides: [result_rank]usize = undefined;
+            if (comptime result_tags.len == 0) {
+                // Scalar result: the raw layer stores it as shape {1}.
+                new_shape[0] = 1;
+                new_strides[0] = 1;
+            } else {
+                var write: usize = 0;
+                inline for (0..tag_rank) |i| {
+                    if (i != select_axis) {
+                        new_shape[write] = raw.shape.at(i);
+                        new_strides[write] = raw.strides.at(i);
+                        write += 1;
+                    }
+                }
+            }
+            var value = try self.value.viewWithStridesOffset(&new_shape, &new_strides, offset_delta);
+            errdefer value.deinit();
+            if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = StridedViewBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
         }
 
         /// `narrow` with a step (torch basic slicing `x[start::step]` along
