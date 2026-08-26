@@ -593,14 +593,23 @@ validation, materialization, allocation, and dispatch. Backends own numeric
 kernels. `backend/quant.zig` owns block helpers, dequantization, loaded-block
 row access, the interleaved pack layouts and RHS containers, and the
 portable kernels shared by both backends; backend dispatch consumes
-`AnyQuantizedMatmulRhs` internally. Exec and kernel entries are spelled
-once per operation with the format as a comptime parameter or inferred
-from the container type: `ExecContext.packMatmulRhs(dt, &w)`,
-`matmulPacked(&a, &rhs)`, `rmsNormMulMatmulPacked`,
-`splitSwiGluMatmulPacked`, and `gegluQuantMatmulPacked` on the exec side;
-`kernels.matmulQuantizedRhs` (plain K-quant containers),
-`kernels.matmulPacked` (packed containers), and `kernels.matmulPackedSlice`
-(pre-quantized LHS slices) on the backend side. K-quants and the `IQ*`/`TQ*` formats dot
+`AnyQuantizedMatmulRhs` internally. Each tier is addressed by one
+request type. The backend seam is `ops.QuantGemm`, the request
+`{ weight, rhs: RhsPack, lhs: LhsForm, order: LoopOrder }` with
+`supported()` as the one matrix of existing kernels: every packed container states its interleave
+as `pub const pack`, each format file exports one
+`gemm(comptime g, out, lhs, rhs, tile)` over its tile bodies,
+`quant.gemm` dispatches on `g.weight`, and the dispatch tier (the vector
+parallel split `gemm2D`, the `AnyQuantizedMatmulRhs` union entry,
+`kernels.matmulPacked` over container `(dtype, pack)`,
+`kernels.matmulPackedSlice` for pre-quantized LHS slices) selects
+requests instead of names. The exec seam is `QuantMatmul`, the request
+`{ prologue: ?FusedActKind, placement, rhs_lifetime, numerics }` with the
+`Lhs` operand union: `ExecContext.matmulQuant`/`matmulQuantInto` are the
+entries, and the named spellings (`matmulPacked`,
+`rmsNormMulMatmulPacked`, `splitSwiGluMatmulPacked`,
+`gegluQuantMatmulPacked`, the tensor/blocks entries and the `try*` GPU
+attempts) are thin wrappers over them. K-quants and the `IQ*`/`TQ*` formats dot
 against `Q8_K` activation blocks; `IQ4_NL`, `MXFP4`, and `NVFP4` (like the
 legacy formats) use `Q8_0`/`Q8_1` activation blocks. Decode follows GGML
 lookup tables, nonlinear codebooks, and E8M0/UE4M3 FP4 scale rules; every

@@ -190,7 +190,7 @@ generic over a comptime dtype, op, request, or container type):
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
-| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulQuantizedRhs`† (comptime dtype, the plain K-quant containers), `matmulPacked`† (comptime container dispatch over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs` |
+| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. Both providers additionally export `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
 
 The counts above are asserted against the lists themselves (the name
 lists are reachable as `fucina.internal.backend_mod.interface`):
@@ -199,8 +199,8 @@ lists are reachable as `fucina.internal.backend_mod.interface`):
 test "kernel interface inventory" {
     const backend = fucina.internal.backend_mod;
     const interface = backend.interface;
-    try std.testing.expectEqual(@as(usize, 76), interface.names.len);
-    try std.testing.expectEqual(@as(usize, 14), interface.generic_names.len);
+    try std.testing.expectEqual(@as(usize, 75), interface.names.len);
+    try std.testing.expectEqual(@as(usize, 13), interface.generic_names.len);
     try std.testing.expectEqual(@as(usize, 13), interface.pool_free_names.len);
     // Every named kernel is a declaration of the active provider's set
     // (`conform` pins that set to exactly `names`, so the same check on the

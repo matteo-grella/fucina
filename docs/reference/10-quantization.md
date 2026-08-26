@@ -373,6 +373,46 @@ Packing and consuming happen on the facade:
 - `gate.gegluQuantDotPacked(ctx, &up, &packed, in_tag, out_tag)` — fused
   GeGLU + down projection, `q8_0x4` only.
 
+On `ExecContext`, every quantized matmul entry is a spelling of one
+request pair (`src/exec/quant_matmul.zig`):
+
+```zig
+pub const QuantMatmul = struct {
+    prologue: ?FusedActKind = null,    // .split_swiglu / .rms_norm_mul / .geglu_quant
+    placement: enum { auto, cpu } = .auto,
+    rhs_lifetime: RhsLifetime = .transient,
+    numerics: enum { batched, rowwise } = .batched,
+};
+pub const Lhs = union(enum) { plain, rms_norm, gate_up };  // the prologue's operands
+```
+
+`matmulQuant(ctx, lhs, rhs, opts)` returns the f32 `[m, rhs.n]` product of
+the (optionally fused-activated) LHS rows against a packed or compact RHS
+container; `matmulQuantInto(ctx, out, lhs, rhs, opts)` is the
+caller-storage form. `.plain` carries plain rows (the fused gate|up rows,
+width 2k, for `.split_swiglu`); `.rms_norm` is `{ x, weight, eps }`;
+`.gate_up` is `{ gate, up }` (`.geglu_quant`, `q8_0x4` only).
+`placement = .auto` consults the GPU offload seam exactly as the named
+entries did, falling back to the CPU kernels on decline;
+`numerics = .rowwise` pins every row to the m == 1 kernels (the
+`pin_rowwise_kernels` semantics, per call; the K-quant fused engine pins
+by forcing its per-row tail kernel instead of looping). The named
+`ExecContext` entries (`matmulPacked`, `matmulPackedInto`,
+`rmsNormMulMatmulPacked`, `splitSwiGluMatmulPacked`,
+`gegluQuantMatmulPacked`, `matmul2DWithQuantizedTensorRhs`,
+`matmul2DWithQuantizedBlocksRhs`) remain as thin wrappers, each naming
+its replacement.
+
+One seam sits below it: the backend addresses its quantized kernels by an
+`ops.QuantGemm` request, `{ weight: DType, rhs: RhsPack{rows, x4, x8,
+x2mmla}, lhs: LhsForm{f32, q8_k, q8_kx4, q8_kx2mmla, q8_0, q8_0x4, q8_1},
+order: LoopOrder{row_outer, col_outer} }`, whose `supported()` is the
+one matrix of existing kernels (an unsupported combination is a compile
+error naming it). Every packed container states its interleave as
+`pub const pack`, each format file exports one
+`gemm(comptime g, out, lhs, rhs, tile)` over its tile bodies, and
+`quant.gemm` dispatches on `g.weight`.
+
 At the LLM layer ([§13](13-the-model-stack-fucina_models.md)), `fucina_models`'s `weights.zig` wraps each quantized
 projection as a struct holding the original blocks plus a
 `fucina.PackedRhs(dtype)` built once at load. Inkling uses the same pattern

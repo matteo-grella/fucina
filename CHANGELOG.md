@@ -25,6 +25,20 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `ExecContext.matmulQuant` / `matmulQuantInto` (`exec.QuantMatmul`,
+  `exec.QuantMatmulLhs`): the one quantized matmul request. `prologue`
+  names the fused activation (`.split_swiglu`/`.rms_norm_mul`/
+  `.geglu_quant`), `placement` the accelerator policy, `rhs_lifetime` the
+  RHS storage guarantee, and `numerics = .rowwise` the per-call
+  kernel-pinned batch mode (`pin_rowwise_kernels` semantics without the
+  context flag). The body is one row-pinned fallback, one fused prologue,
+  one accelerator attempt and one backend call.
+- `backend/ops.zig` `QuantGemm` (`{ weight, rhs: RhsPack, lhs: LhsForm,
+  order: LoopOrder }` with `supported()` as the one kernel matrix, plus
+  `Tile` and the `LhsOf`/`RhsOf` operand types): the quantized GEMM
+  request at the kernel seam. Each `quant/<fmt>.zig` exports one
+  `gemm(comptime g, out, lhs, rhs, tile)`; `quant.gemm` dispatches on
+  `g.weight`; every packed RHS container carries `pub const pack`.
 - `optim`: `addFallbackParam`/`addFallbackParamNamed` exist on every
   optimizer type, not only `Muon`/`Apollo`. Without an embedded fallback
   (SGD/Adam/AdamW) they are `addParam`/`addParamNamed` — the one path is
@@ -858,6 +872,13 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
 
 ### Deprecated
 
+- The named `ExecContext` quantized matmul entries
+  (`matmul2DWithQuantizedTensorRhs`, `matmul2DWithQuantizedBlocksRhs`,
+  `matmulPacked`, `matmulPackedInto`, `rmsNormMulMatmulPacked`,
+  `splitSwiGluMatmulPacked`, `gegluQuantMatmulPacked`, `tryMatmulQuantRhs`,
+  `tryMatmulTernaryFolded`, `tryMatmulQuantRhsSharedInput`) are thin
+  wrappers over `matmulQuant`/`matmulQuantInto`, each doc comment naming
+  its request form. Wrappers kept; removal follows the deprecation ledger.
 - `fucina.simd.{vecScale,vecMaxReduce,dotF32F16,scoreRows4F16,vecExpAffineSumInPlace,weightedAccumRows4F16}`
   — backend internals that were published under the elemental-op
   namespace; in-tree consumers use `fucina.internal.backend_mod.vector_impl`.
