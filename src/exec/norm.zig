@@ -564,7 +564,7 @@ pub fn rmsNormMulRopeWithTable(
 
     var ww = try ctx.prepareContiguous(.f32, weight);
     defer ww.deinit();
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     const input = x.buffer.data;
     const weights = ww.tensor().dataConst();
 

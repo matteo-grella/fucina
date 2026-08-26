@@ -1789,8 +1789,8 @@ pub fn gemmBatched(
     stride_c: usize,
 ) void {
     _ = pc;
-    @constCast(a.buffer).waitReady();
-    @constCast(b.buffer).waitReady();
+    a.buffer.waitReady();
+    b.buffer.waitReady();
     out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
@@ -1821,7 +1821,7 @@ pub fn gemmBatched(
 }
 
 fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 
@@ -1831,7 +1831,7 @@ fn contiguousData(x: *Tensor, len: usize) []f32 {
 }
 
 fn contiguousDataConstOf(comptime dtype: DType, x: *const tensor.TensorOf(dtype), len: usize) []const dtype_mod.Scalar(dtype) {
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 

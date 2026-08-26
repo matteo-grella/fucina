@@ -472,7 +472,7 @@ pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.T
                     // spinning on one pending accelerator Work is
                     // wasted parallelism (waitReady itself is
                     // claimant-safe either way).
-                    @constCast(x.buffer).waitReady();
+                    x.buffer.waitReady();
                     materializeChunked(dtype, x, dst, pool);
                     return out;
                 }

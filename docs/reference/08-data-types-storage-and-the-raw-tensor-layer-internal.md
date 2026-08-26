@@ -319,6 +319,8 @@ Refcount operations:
   N readers on one buffer): a single claimant dereferences and releases the
   Work; everyone else spins until the slot clears, which happens only after
   the host copy is visible (8-thread regression in `src/storage_tests.zig`).
+  The wait entries take `*const Self` (they move only the atomic fields),
+  so a read-only accessor fences without a cast.
 - `setPendingUse()` / `waitUnused()` / `waitMutable()` — track the latest
   submitted GPU reader of this allocation. Const host reads may overlap a
   device read; mutable access waits so post-call input mutation cannot race

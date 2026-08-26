@@ -163,23 +163,28 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// copy is visible. The pre-claim naive form (load → ensureHost →
         /// clear → release) let a loser dereference a Work the winner had
         /// already freed.
-        pub fn waitReady(self: *Self) void {
+        ///
+        /// Takes `*const`: the wait entries move only the atomic fields
+        /// (`pending_work`, `pending_claim`, `pending_use`), so a read-only
+        /// accessor fences without a cast; the one cast lives here.
+        pub fn waitReady(self: *const Self) void {
+            const atomics: *Self = @constCast(self);
             while (true) {
                 if (self.pending_work.load(.acquire) == null) return;
-                if (self.pending_claim.cmpxchgWeak(false, true, .acq_rel, .acquire) != null) {
+                if (atomics.pending_claim.cmpxchgWeak(false, true, .acq_rel, .acquire) != null) {
                     std.atomic.spinLoopHint();
                     continue;
                 }
                 // Re-read under the claim: a previous claimant may have
                 // completed and freed the work after our gate load.
                 const work = self.pending_work.load(.acquire) orelse {
-                    self.pending_claim.store(false, .release);
+                    atomics.pending_claim.store(false, .release);
                     return;
                 };
                 work.ensureHost();
-                const displaced = self.pending_work.cmpxchgStrong(work, null, .acq_rel, .acquire);
+                const displaced = atomics.pending_work.cmpxchgStrong(work, null, .acq_rel, .acquire);
                 std.debug.assert(displaced == null); // sole clearer while claimed
-                self.pending_claim.store(false, .release);
+                atomics.pending_claim.store(false, .release);
                 work.release();
                 return;
             }
@@ -210,16 +215,17 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// overwrite it. `ensureHost` may also materialize that command's
         /// output on discrete GPUs; mutation is rare enough that correctness
         /// is preferable to a second provider-specific fence protocol.
-        pub fn waitUnused(self: *Self) void {
+        pub fn waitUnused(self: *const Self) void {
+            const atomics: *Self = @constCast(self);
             while (self.pending_use.load(.acquire)) |work| {
                 work.ensureHost();
                 // Provider finish normally cleared it. Keep this fallback so
                 // a future Work implementation cannot leave a stale token.
-                self.clearPendingUse(work);
+                atomics.clearPendingUse(work);
             }
         }
 
-        pub fn waitMutable(self: *Self) void {
+        pub fn waitMutable(self: *const Self) void {
             self.waitReady();
             self.waitUnused();
         }

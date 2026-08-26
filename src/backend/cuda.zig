@@ -1165,7 +1165,7 @@ fn stageInput(
     dev: *DeviceBuf,
     copy_queued: *bool,
 ) ?api.CUdeviceptr {
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     const bytes = std.math.mul(usize, elems, @sizeOf(f32)) catch return null;
     const values = x.buffer.data[x.offset..][0..elems];
     if (residentDevPtr(ctx, std.mem.sliceAsBytes(values), false)) |resident| return resident;
@@ -1186,7 +1186,7 @@ fn stageInputF16(
     dev: *DeviceBuf,
     copy_queued: *bool,
 ) ?api.CUdeviceptr {
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     const bytes = std.math.mul(usize, elems, @sizeOf(f16)) catch return null;
     const values = x.buffer.data[x.offset..][0..elems];
     if (residentDevPtr(ctx, std.mem.sliceAsBytes(values), false)) |resident| return resident;

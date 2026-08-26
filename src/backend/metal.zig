@@ -1142,7 +1142,7 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
     // The conversion reads A on the HOST at submit time, so any pending
     // device producer must be complete first (unlike the wraps, which the
     // in-order queue serializes device-side).
-    @constCast(a.buffer).waitReady();
+    a.buffer.waitReady();
     const scratch = storage.BufferOf(.bf16).create(std.heap.c_allocator, a_elems) catch return false;
     var scratch_owned = true;
     defer if (scratch_owned) scratch.release();

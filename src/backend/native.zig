@@ -1317,8 +1317,8 @@ fn blasBatched(
     lda: usize,
     ldb: usize,
 ) void {
-    @constCast(a.buffer).waitReady();
-    @constCast(b.buffer).waitReady();
+    a.buffer.waitReady();
+    b.buffer.waitReady();
     out.buffer.waitMutable();
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
@@ -1494,7 +1494,7 @@ fn cDim(value: usize) c_int {
 }
 
 fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
-    @constCast(x.buffer).waitReady();
+    x.buffer.waitReady();
     return x.buffer.data[x.offset .. x.offset + len];
 }
 

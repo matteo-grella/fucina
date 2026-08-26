@@ -386,7 +386,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn dataConstChecked(self: *const Self) ![]const Elem {
             if (!self.isContiguous()) return TensorError.UnsupportedView;
-            @constCast(self.buffer).waitReady();
+            self.buffer.waitReady();
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }
 
@@ -398,7 +398,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn dataConst(self: *const Self) []const Elem {
             self.requireContiguousData();
-            @constCast(self.buffer).waitReady();
+            self.buffer.waitReady();
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }
 
@@ -428,7 +428,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             std.debug.assert(dst.len >= count);
             std.debug.assert(linear_start + count <= self.storageLen());
             if (count == 0) return;
-            @constCast(self.buffer).waitReady();
+            self.buffer.waitReady();
 
             // Maximal suffix of axes laid out row-major-contiguously in the
             // view (dim-1 axes are absorbed regardless of their stride).
