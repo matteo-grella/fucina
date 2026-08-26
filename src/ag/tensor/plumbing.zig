@@ -417,7 +417,6 @@ pub fn Mod(comptime ag_tensor: type) type {
             right: *const tensor_mod.TensorOf(tensor_dtype),
             comptime contract_tag: Tag,
         ) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
-            const output_dtype = comptime dtype_mod.outputDType(.matmul, tensor_dtype);
             const result_shape = try dotResultShape(tensor_dtype, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
             const batch_rank = comptime dotBatchLen(left_tags, right_tags, contract_tag);
             const left_free_rank = comptime dotLeftFreeLen(left_tags, right_tags, contract_tag);
@@ -454,23 +453,12 @@ pub fn Mod(comptime ag_tensor: type) type {
                 defer left_batched.deinit();
                 var right_batched = try right_ready.reshape(&.{ num_batches, k, n });
                 defer right_batched.deinit();
-
-                var out = try ctx.empty(output_dtype, result_shape);
-                errdefer out.deinit();
-
-                const left_batch_len = m * k;
-                const right_batch_len = k * n;
-                const out_batch_len = m * n;
-                for (0..num_batches) |batch| {
-                    var left_matrix = try left_batched.viewWithStridesOffset(&.{ m, k }, &.{ k, 1 }, batch * left_batch_len);
-                    defer left_matrix.deinit();
-                    var right_matrix = try right_batched.viewWithStridesOffset(&.{ k, n }, &.{ n, 1 }, batch * right_batch_len);
-                    defer right_matrix.deinit();
-                    var product = try ctx.matmul(tensor_dtype, .plain, &left_matrix, &right_matrix);
-                    defer product.deinit();
-                    @memcpy(out.data()[batch * out_batch_len ..][0..out_batch_len], product.dataConst());
-                }
-                return out;
+                var product = try ctx.bmm(tensor_dtype, .plain, &left_batched, &right_batched);
+                errdefer product.deinit();
+                if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) return product;
+                const reshaped = try product.reshape(result_shape[0..]);
+                product.deinit();
+                return reshaped;
             }
 
             var left_matrix = try left_ready.reshape(&.{ m, k });

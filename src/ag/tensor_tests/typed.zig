@@ -242,6 +242,70 @@ test "public non-f32 float Tensor dot supports multi-free and batch tags" {
     }, batched_product.asRawTensor().dataConst());
 }
 
+/// The batched typed dot (`plumbing.typedDotRaw`, batch tags shared by
+/// both operands) against a per-batch loop of the 2-D typed GEMM
+/// (`ctx.matmul(dtype, .plain, ...)`), compared BITWISE: the batched arm
+/// must be a layout change, not a numerics change.
+fn expectTypedBatchedDotMatchesPerBatchGemm(
+    comptime float_dtype: DType,
+    ctx: *ExecContext,
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+) !void {
+    const allocator = ctx.allocator;
+    const left_values = try allocator.alloc(f32, batch * m * k);
+    defer allocator.free(left_values);
+    for (left_values, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.7 + 0.3) * 0.5;
+    const right_values = try allocator.alloc(f32, batch * k * n);
+    defer allocator.free(right_values);
+    for (right_values, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.4 + 0.9) * 0.5;
+
+    var left32 = try Tensor(.{ .b, .m, .k }).fromSlice(ctx, .{ batch, m, k }, left_values);
+    defer left32.deinit();
+    var left = try left32.to(ctx, float_dtype);
+    defer left.deinit();
+    var right32 = try Tensor(.{ .b, .k, .n }).fromSlice(ctx, .{ batch, k, n }, right_values);
+    defer right32.deinit();
+    var right = try right32.to(ctx, float_dtype);
+    defer right.deinit();
+
+    var product = try left.dot(ctx, &right, .k);
+    defer product.deinit();
+    try std.testing.expectEqualSlices(usize, &.{ batch, m, n }, product.asRawTensor().shape.slice());
+
+    const Elem = dtype_mod.Scalar(dtype_mod.outputDType(.matmul, float_dtype));
+    const reference = try allocator.alloc(Elem, batch * m * n);
+    defer allocator.free(reference);
+    for (0..batch) |bi| {
+        var left_matrix = try left.asRawTensor().viewWithStridesOffset(&.{ m, k }, &.{ k, 1 }, bi * m * k);
+        defer left_matrix.deinit();
+        var right_matrix = try right.asRawTensor().viewWithStridesOffset(&.{ k, n }, &.{ n, 1 }, bi * k * n);
+        defer right_matrix.deinit();
+        var per_batch = try ctx.matmul(float_dtype, .plain, &left_matrix, &right_matrix);
+        defer per_batch.deinit();
+        @memcpy(reference[bi * m * n ..][0 .. m * n], per_batch.dataConst());
+    }
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(reference), std.mem.sliceAsBytes(product.asRawTensor().dataConst()));
+}
+
+test "typed dot batched arm is bitwise the per-batch typed GEMM (f16, bf16)" {
+    inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
+        var gpa = std.heap.DebugAllocator(.{}){};
+        defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+        var ctx: ExecContext = undefined;
+        ctx.init(gpa.allocator());
+        defer ctx.deinit();
+
+        // Below and at the BLAS/blocked GEMM thresholds (m, n, k >= 16).
+        try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 2, 3, 4, 5);
+        try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 3, 5, 8, 2);
+        try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 2, 16, 16, 16);
+        try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 2, 24, 40, 32);
+    }
+}
+
 test "typed float widened unary family matches the narrowed f32 reference" {
     @setEvalBranchQuota(1_000_000);
     var gpa = std.heap.DebugAllocator(.{}){};
