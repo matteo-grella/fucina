@@ -44,12 +44,30 @@ fn quantizeRowsQ8_0x4IntoImpl(blocks: []BlockQ8_0x4, src: *const Tensor, comptim
     if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
-    if (!pad_rows) {
-        quantizeRowsQ8_0x4GroupsInto(blocks, data, cols, blocks_per_row, 0, row_groups);
-        return;
+    if (pad_rows) {
+        quantizeRowsQ8_0x4PaddedGroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
+    } else {
+        quantizeRowsQ8_0x4GroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
     }
-    var row_group: usize = 0;
-    while (row_group < row_groups) : (row_group += 1) {
+}
+
+/// 4-row groups `[row_group_start, row_group_end)` of the `[rows, cols]`
+/// activation `data` into their lane-packed Q8_0x4 blocks, the final
+/// partial group's missing lanes zeroed (d = 0, qs = 0). Groups own
+/// disjoint blocks, so a pool split over group ranges produces the serial
+/// call's bytes; allocation-free, lengths are the caller's proof.
+pub fn quantizeRowsQ8_0x4PaddedGroupsInto(
+    blocks: []BlockQ8_0x4,
+    data: []const f32,
+    rows: usize,
+    cols: usize,
+    blocks_per_row: usize,
+    row_group_start: usize,
+    row_group_end: usize,
+) void {
+    std.debug.assert(row_group_end <= (rows + 3) / 4 and data.len == rows * cols and blocks.len == ((rows + 3) / 4) * blocks_per_row);
+    var row_group = row_group_start;
+    while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;
         while (block_index < blocks_per_row) : (block_index += 1) {
             var dst = &blocks[row_group * blocks_per_row + block_index];
@@ -91,14 +109,18 @@ fn quantizeRowsQ8_0x4IntoImpl(blocks: []BlockQ8_0x4, src: *const Tensor, comptim
     }
 }
 
+/// The whole-group twin of `quantizeRowsQ8_0x4PaddedGroupsInto` (`rows` a
+/// multiple of 4, every lane a real row).
 pub fn quantizeRowsQ8_0x4GroupsInto(
     blocks: []BlockQ8_0x4,
     data: []const f32,
+    rows: usize,
     cols: usize,
     blocks_per_row: usize,
     row_group_start: usize,
     row_group_end: usize,
 ) void {
+    std.debug.assert(rows % 4 == 0 and row_group_end <= rows / 4 and data.len == rows * cols and blocks.len == (rows / 4) * blocks_per_row);
     var row_group = row_group_start;
     while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;

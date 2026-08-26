@@ -477,7 +477,20 @@ allocator). The native backend's fused K-quant split-SwiGLU and GeGLU paths
 (`buffers.acquireScratch`) — the q8_0x4 fused split-SwiGLU arm puts a
 512-block stack array in front of the same pool lease — and parallelize row-group
 quantization across the work pool once `m·k` reaches **one eighth** of
-`parallel.vector_elementwise_len_threshold`. Failure mode: allocation
+`parallel.vector_elementwise_len_threshold`. The unfused native dispatch tier
+(`matmul2DQuantizedRhs*` / `matmulPacked` in `src/backend/native.zig`) splits
+its own LHS quantization the same way: the allocation-free range forms
+(`quantizeRowsQ8_0RangeInto`, `quantizeRowsQ8_KRangeInto`,
+`quantizeRowsQ8_0x4GroupsInto`/`quantizeRowsQ8_0x4PaddedGroupsInto`,
+`quantizeRowsQ8_Kx4GroupsInto`, `quantizeRowsQ8_Kx2MmlaGroupsInto`) quantize a
+row or row-group range, and the tier fans those ranges over the caller's
+`ParallelConfig` pool at the same one-eighth gate, so a decode row never
+touches the pool and every split is bitwise the serial walk (rows own
+disjoint blocks). The per-row Q8_0 and Q8_K bodies are one `@Vector` form on
+every ISA (aarch64 keeps its `fcvtas`/`fcvtns` rounding legs; elsewhere the
+portable vector round and the 2^23 magic-number round-half-even), byte-equal
+to the scalar `quantizeToI8`/`roundNearestEven` forms that
+`src/x86dot_check.zig` pins them against. Failure mode: allocation
 failure is the only runtime error; quantization itself is total for finite
 input.
 

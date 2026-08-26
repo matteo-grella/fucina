@@ -134,6 +134,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                         backend_mod.quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto(
                             task.q8_0x4_blocks[row_group * task.blocks_per_row ..][0..task.blocks_per_row],
                             task.scratch[0 .. 4 * cols],
+                            4,
                             cols,
                             task.blocks_per_row,
                             0,

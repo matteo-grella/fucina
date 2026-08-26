@@ -42,6 +42,8 @@
 //!   tq2_0 folded x86 AVX2 arm        | validated x86-64 emulator          | EXECUTED 2026-07-24, leg (c), x86_64_v3 static musl; checksum bit-equal to the Rosetta run (3ad62348d3bdb3f6)
 //!   tq2_0 folded x86 VNNI ymm arm    | NEVER                              | compile-verified 2026-07-24 (alderlake leg); execution needs AVX-VNNI hardware
 //!   portable widening tier (256-bit) | every host (no gate)               | ongoing: zig build test everywhere + this checker
+//!   q8_0/q8_k LHS quantizer body, aarch64 (fcvtas/fcvtns legs) | natively, Apple M1 Max | EXECUTED 2026-08-26 (this checker's q8 quantizer section vs the scalar bodies)
+//!   q8_0/q8_k LHS quantizer body, x86 portable round legs | NEVER | compile-verified 2026-08-26 (legs (b)/(c) + the alderlake/znver4 compile legs); execution pending the x86 rig
 //!
 //! The 2026-07-03 hardware attestations ran `zig build test -Doptimize=ReleaseFast`
 //! + `zig build x86dot-check` natively on the box; the K-quant/q8_0 packed-arm
@@ -291,6 +293,55 @@ fn refDotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
     return total;
 }
 
+// ---- scalar LHS quantizer references ----------------------------------------
+// The element-at-a-time Q8_0 / Q8_K bodies the vector quantizers replaced
+// (q8k.zig): same amax, same scale, `common.quantizeToI8` (round half away
+// from zero) and `common.roundNearestEven` per element.
+
+fn refQuantizeRowQ8_0(dst: []BlockQ8_0, src: []const f32) void {
+    for (dst, 0..) |*block, block_index| {
+        const row = src[block_index * 32 ..][0..32];
+        var amax: f32 = 0;
+        for (row) |v| amax = @max(amax, @abs(v));
+        const d = amax / 127.0;
+        const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
+        block.d = common.f32ToF16Bits(d);
+        for (&block.qs, row) |*q, v| q.* = common.quantizeToI8(v * inv_d);
+    }
+}
+
+fn refQuantizeRowQ8_K(dst: []BlockQ8_K, src: []const f32) void {
+    for (dst, 0..) |*block, block_index| {
+        const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
+        var amax: f32 = 0;
+        for (row) |v| amax = @max(amax, @abs(v));
+        var max_value: f32 = 0;
+        for (row) |v| {
+            if (@abs(v) == amax) {
+                max_value = v;
+                break;
+            }
+        }
+        if (amax == 0) {
+            block.d = 0;
+            @memset(&block.qs, 0);
+            @memset(&block.bsums, 0);
+            continue;
+        }
+        const inv_scale = -127.0 / max_value;
+        for (&block.qs, row) |*q, v| {
+            const quantized = common.roundNearestEven(inv_scale * v);
+            q.* = @intFromFloat(@min(127.0, quantized));
+        }
+        for (&block.bsums, 0..) |*sum, group| {
+            var acc: i32 = 0;
+            for (block.qs[group * 16 ..][0..16]) |q| acc += q;
+            sum.* = @intCast(acc);
+        }
+        block.d = 1.0 / inv_scale;
+    }
+}
+
 // ---- deterministic fills ----------------------------------------------------
 
 fn fillRandomBlockQ4_K(block: *BlockQ4_K, random: std.Random) void {
@@ -331,6 +382,66 @@ fn fillRandomBlockQ8_0(block: *BlockQ8_0, random: std.Random, allow_m128: bool) 
 }
 
 // ---- check phases -----------------------------------------------------------
+
+const q8_quant_rows = 4;
+const q8_quant_len = q8_quant_rows * qk_k_block_size;
+
+fn checkQ8QuantizerRows(label: []const u8, src: *const [q8_quant_len]f32) void {
+    var want_q8_0: [q8_quant_len / 32]BlockQ8_0 = undefined;
+    var got_q8_0: [q8_quant_len / 32]BlockQ8_0 = undefined;
+    refQuantizeRowQ8_0(&want_q8_0, src);
+    quant.q8k.quantizeRowQ8_0IntoUnchecked(&got_q8_0, src);
+    for (&want_q8_0, &got_q8_0) |*want, *got| {
+        const want_bytes = std.mem.asBytes(want);
+        const got_bytes = std.mem.asBytes(got);
+        for (want_bytes, got_bytes, 0..) |w, g, byte_i| {
+            fnvAdd(g);
+            if (w != g) {
+                failures += 1;
+                std.debug.print("FAIL {s} q8_0 byte {d}: expected {d}, got {d}\n", .{ label, byte_i, w, g });
+            }
+        }
+    }
+
+    var want_q8_k: [q8_quant_rows]BlockQ8_K = undefined;
+    var got_q8_k: [q8_quant_rows]BlockQ8_K = undefined;
+    refQuantizeRowQ8_K(&want_q8_k, src);
+    quant.q8k.quantizeRowQ8_KIntoUnchecked(&got_q8_k, src);
+    for (&want_q8_k, &got_q8_k) |*want, *got| {
+        const want_bytes = std.mem.asBytes(want);
+        const got_bytes = std.mem.asBytes(got);
+        for (want_bytes, got_bytes, 0..) |w, g, byte_i| {
+            fnvAdd(g);
+            if (w != g) {
+                failures += 1;
+                std.debug.print("FAIL {s} q8_k byte {d}: expected {d}, got {d}\n", .{ label, byte_i, w, g });
+            }
+        }
+    }
+}
+
+/// The vector Q8_0 / Q8_K LHS quantizer bodies against their scalar
+/// references, byte for byte: random rows, rows of exact halves with the
+/// block maximum pinned to -127 (scale 1, so every element sits on a
+/// rounding tie: half-away for q8_0, half-even for q8_k), and zeros.
+fn checkQ8Quantizers() void {
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const random = prng.random();
+    var src: [q8_quant_len]f32 = undefined;
+
+    fillUniformF32(random, &src, 3.0);
+    checkQ8QuantizerRows("q8 quantizers random", &src);
+
+    for (&src, 0..) |*v, i| v.* = 0.5 * @as(f32, @floatFromInt(@as(i32, @intCast(i % 64)) - 32));
+    var i: usize = 0;
+    while (i < src.len) : (i += 32) src[i] = -127;
+    checkQ8QuantizerRows("q8 quantizers ties", &src);
+
+    @memset(&src, 0);
+    checkQ8QuantizerRows("q8 quantizers zeros", &src);
+
+    std.debug.print("q8 quantizers: done (checksum so far {x:0>16})\n", .{fnv});
+}
 
 fn checkPrimitives() void {
     var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
@@ -724,6 +835,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     checkPrimitives();
+    checkQ8Quantizers();
     try checkQ4K(allocator);
     try checkQ8_0(allocator);
     try checkTQ2_0(allocator);

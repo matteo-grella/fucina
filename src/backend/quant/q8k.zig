@@ -28,29 +28,17 @@ pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
 /// count (asserted in safe builds). The validate-then-unchecked entry, so
 /// pre-validated call sites (thread-task bodies) never suppress the checked
 /// twin's error set with `catch unreachable`.
+///
+/// One `@Vector` body on every architecture: 4-lane amax, scale, clamp,
+/// then `common.roundHalfAwayFromZeroVec4ToI32` (fcvtas on aarch64, the
+/// portable vector round elsewhere). Clamping before the round is
+/// equivalent to rounding first because the bounds are integral, so every
+/// byte equals the scalar `common.quantizeToI8` form (`x86dot_check.zig`
+/// pins the two against each other on every ISA it runs on).
 pub fn quantizeRowQ8_0IntoUnchecked(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
     std.debug.assert(src.len % types.q8_0_block_size == 0);
     std.debug.assert(dst.len == src.len / types.q8_0_block_size);
-    const block_count = dst.len;
 
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return quantizeRowQ8_0IntoAarch64(dst, src);
-    }
-
-    var block_index: usize = 0;
-    while (block_index < block_count) : (block_index += 1) {
-        const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-        var amax: f32 = 0;
-        for (row) |v| amax = @max(amax, @abs(v));
-
-        const d = amax / 127.0;
-        const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
-
-        dst[block_index].d = common.f32ToF16Bits(d);
-        for (&dst[block_index].qs, row) |*q, v| q.* = common.quantizeToI8(v * inv_d);
-    }
-}
-fn quantizeRowQ8_0IntoAarch64(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
         const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
@@ -122,9 +110,16 @@ pub fn quantizeRowsQ8_0Into(blocks: []dtype_mod.BlockQ8_0, src: *const Tensor) !
     if (blocks.len != try types.checkedProduct(rows, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
-    var row: usize = 0;
-    while (row < rows) : (row += 1) {
-        try quantizeRowQ8_0Into(
+    quantizeRowsQ8_0RangeInto(blocks, data, rows, cols, blocks_per_row, 0, rows);
+}
+/// Rows `[row_start, row_end)` of the `[rows, cols]` activation `data` into
+/// their q8_0 blocks (`blocks` covers all `rows * blocks_per_row`; the
+/// lengths are the caller's proof). Rows own disjoint blocks, so a pool
+/// split over row ranges produces the serial call's bytes; allocation-free.
+pub fn quantizeRowsQ8_0RangeInto(blocks: []dtype_mod.BlockQ8_0, data: []const f32, rows: usize, cols: usize, blocks_per_row: usize, row_start: usize, row_end: usize) void {
+    std.debug.assert(row_end <= rows and data.len == rows * cols and blocks.len == rows * blocks_per_row);
+    for (row_start..row_end) |row| {
+        quantizeRowQ8_0IntoUnchecked(
             blocks[row * blocks_per_row ..][0..blocks_per_row],
             data[row * cols ..][0..cols],
         );
@@ -251,54 +246,16 @@ pub fn quantizeRowQ8_KInto(dst: []dtype_mod.BlockQ8_K, src: []const f32) !void {
 
 /// `quantizeRowQ8_KInto` for callers that have already proven the lengths
 /// (same contract as `quantizeRowQ8_0IntoUnchecked`).
+///
+/// One `@Vector` body on every architecture: 4-lane amax, then per lane
+/// `common.roundNearestEvenVec4ToI32` (fcvtns on aarch64, the 2^23
+/// magic-number round elsewhere; |scaled| <= 127 keeps it exact) and the
+/// bsums from the same lanes. Byte-equal to the scalar
+/// `common.roundNearestEven` form (`x86dot_check.zig` pins the two).
 pub fn quantizeRowQ8_KIntoUnchecked(dst: []dtype_mod.BlockQ8_K, src: []const f32) void {
     std.debug.assert(src.len % qk_k_block_size == 0);
     std.debug.assert(dst.len == src.len / qk_k_block_size);
-    const block_count = dst.len;
-    if (comptime builtin.cpu.arch == .aarch64) {
-        return quantizeRowQ8_KIntoAarch64(dst, src);
-    }
 
-    var block_index: usize = 0;
-    while (block_index < block_count) : (block_index += 1) {
-        const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
-        var amaxv: QKV4f32 = @splat(0);
-        var vec_index: usize = 0;
-        while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-            const v: QKV4f32 = row[vec_index * 4 ..][0..4].*;
-            amaxv = @max(amaxv, @abs(v));
-        }
-        const amax = @reduce(.Max, amaxv);
-        var max_value: f32 = 0;
-        for (row) |v| {
-            if (@abs(v) == amax) {
-                max_value = v;
-                break;
-            }
-        }
-
-        if (amax == 0) {
-            dst[block_index].d = 0;
-            @memset(&dst[block_index].qs, 0);
-            @memset(&dst[block_index].bsums, 0);
-            continue;
-        }
-
-        const inv_scale = -127.0 / max_value;
-        for (&dst[block_index].qs, row) |*q, v| {
-            const quantized = common.roundNearestEven(inv_scale * v);
-            q.* = @intFromFloat(@min(127.0, quantized));
-        }
-
-        for (&dst[block_index].bsums, 0..) |*sum, group| {
-            var acc: i32 = 0;
-            for (dst[block_index].qs[group * 16 ..][0..16]) |q| acc += q;
-            sum.* = @intCast(acc);
-        }
-        dst[block_index].d = 1.0 / inv_scale;
-    }
-}
-fn quantizeRowQ8_KIntoAarch64(dst: []dtype_mod.BlockQ8_K, src: []const f32) void {
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
         const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
@@ -350,14 +307,19 @@ pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]dtype_mod.B
     const blocks = try allocator.alloc(dtype_mod.BlockQ8_K, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
 
-    var row: usize = 0;
-    while (row < rows) : (row += 1) {
-        try quantizeRowQ8_KInto(
+    quantizeRowsQ8_KRangeInto(blocks, data, rows, cols, blocks_per_row, 0, rows);
+    return blocks;
+}
+/// Rows `[row_start, row_end)` of the `[rows, cols]` activation `data` into
+/// their Q8_K blocks; same contract as `quantizeRowsQ8_0RangeInto`.
+pub fn quantizeRowsQ8_KRangeInto(blocks: []dtype_mod.BlockQ8_K, data: []const f32, rows: usize, cols: usize, blocks_per_row: usize, row_start: usize, row_end: usize) void {
+    std.debug.assert(row_end <= rows and data.len == rows * cols and blocks.len == rows * blocks_per_row);
+    for (row_start..row_end) |row| {
+        quantizeRowQ8_KIntoUnchecked(
             blocks[row * blocks_per_row ..][0..blocks_per_row],
             data[row * cols ..][0..cols],
         );
     }
-    return blocks;
 }
 pub fn quantizeRowsQ8_Kx4Into(blocks: []types.BlockQ8_Kx4, src: *const Tensor) !void {
     return quantizeRowsQ8_Kx4IntoImpl(blocks, src, false);
@@ -376,7 +338,14 @@ pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []types.BlockQ8_Kx4, src: *const Tenso
     if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
-    for (0..row_groups) |row_group| {
+    quantizeRowsQ8_Kx4GroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
+}
+/// 4-row groups `[group_start, group_end)` of the `[rows, cols]` activation
+/// `data` into their lane-packed Q8_Kx4 blocks (a final partial group pads
+/// its missing lanes); same contract as `quantizeRowsQ8_0RangeInto`.
+pub fn quantizeRowsQ8_Kx4GroupsInto(blocks: []types.BlockQ8_Kx4, data: []const f32, rows: usize, cols: usize, blocks_per_row: usize, group_start: usize, group_end: usize) void {
+    std.debug.assert(group_end <= (rows + 3) / 4 and data.len == rows * cols and blocks.len == ((rows + 3) / 4) * blocks_per_row);
+    for (group_start..group_end) |row_group| {
         const rows_in_group = @min(rows - row_group * 4, 4);
         quantizeRowGroupQ8_Kx4Into(
             blocks[row_group * blocks_per_row ..][0..blocks_per_row],
@@ -461,7 +430,14 @@ pub fn quantizeRowsQ8_Kx2MmlaInto(blocks: []types.BlockQ8_Kx2Mmla, src: *const T
     if (blocks.len != try types.checkedProduct(rows / 2, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
-    for (0..rows / 2) |row_group| {
+    quantizeRowsQ8_Kx2MmlaGroupsInto(blocks, data, rows, cols, blocks_per_row, 0, rows / 2);
+}
+/// Row pairs `[group_start, group_end)` of the `[rows, cols]` activation
+/// `data` (`rows` even) into their smmla-interleaved Q8_Kx2Mmla blocks;
+/// same contract as `quantizeRowsQ8_0RangeInto`.
+pub fn quantizeRowsQ8_Kx2MmlaGroupsInto(blocks: []types.BlockQ8_Kx2Mmla, data: []const f32, rows: usize, cols: usize, blocks_per_row: usize, group_start: usize, group_end: usize) void {
+    std.debug.assert(rows % 2 == 0 and group_end <= rows / 2 and data.len == rows * cols and blocks.len == (rows / 2) * blocks_per_row);
+    for (group_start..group_end) |row_group| {
         for (0..blocks_per_row) |block_index| {
             var dst = &blocks[row_group * blocks_per_row + block_index];
             var row_qs: [2][qk_k_block_size]i8 = undefined;

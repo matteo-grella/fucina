@@ -32,6 +32,83 @@ const q8_0_lhs_stack_blocks: usize = 512;
 const q4_k_x4_min_rows: usize = 4;
 const q5_k_x4_prefix_min_rows: usize = 128;
 
+/// The `[rows, cols]` f32 activation behind an LHS tensor, validated once
+/// at the dispatch tier (rank 2, the declared dims, contiguous) so the
+/// allocation-free range quantizers run unchecked below it.
+fn lhsRows(a: *const Tensor, rows: usize, cols: usize) ![]const f32 {
+    const view = try a.rankView(2);
+    if (view.dim(0) != rows or view.dim(1) != cols) return tensor.TensorError.ShapeMismatch;
+    return try a.dataConstChecked();
+}
+
+/// Row-range LHS quantization over the pool. `quantizeRange(blocks, data,
+/// rows, cols, blocks_per_row, unit_start, unit_end)` quantizes units
+/// `[unit_start, unit_end)` (rows, or the lane-packed formats' row groups)
+/// of the `[rows, cols]` activation into `blocks`; units own disjoint
+/// blocks, so any split produces the serial call's bytes. Gate: the fused
+/// activation+quantization tasks' (`exec/quant_matmul.zig`) element
+/// threshold, `rows * cols >= vector_elementwise_len_threshold / 8`; a
+/// decode row never touches the pool, and a call without a team (or from
+/// inside one, where `parallelChunks` degrades to the caller) runs the
+/// serial walk.
+fn quantizeLhsUnits(
+    pc: ParallelConfig,
+    comptime Block: type,
+    comptime quantizeRange: fn ([]Block, []const f32, usize, usize, usize, usize, usize) void,
+    blocks: []Block,
+    data: []const f32,
+    rows: usize,
+    cols: usize,
+    blocks_per_row: usize,
+    unit_count: usize,
+) void {
+    const Task = struct {
+        blocks: []Block,
+        data: []const f32,
+        rows: usize,
+        cols: usize,
+        blocks_per_row: usize,
+        unit_start: usize,
+        unit_end: usize,
+
+        fn run(task: *const @This()) void {
+            quantizeRange(task.blocks, task.data, task.rows, task.cols, task.blocks_per_row, task.unit_start, task.unit_end);
+        }
+    };
+    if (pc.pool) |pool| {
+        if (unit_count > 1 and rows * cols >= parallel.vector_elementwise_len_threshold / 8) {
+            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), unit_count);
+            if (task_count > 1) {
+                var tasks: [parallel.vector_max_threads]Task = undefined;
+                for (0..task_count) |task_i| {
+                    tasks[task_i] = .{
+                        .blocks = blocks,
+                        .data = data,
+                        .rows = rows,
+                        .cols = cols,
+                        .blocks_per_row = blocks_per_row,
+                        .unit_start = task_i * unit_count / task_count,
+                        .unit_end = (task_i + 1) * unit_count / task_count,
+                    };
+                }
+                pool.parallelChunks(Task, tasks[0..task_count], Task.run);
+                return;
+            }
+        }
+    }
+    quantizeRange(blocks, data, rows, cols, blocks_per_row, 0, unit_count);
+}
+
+/// Q8_K row blocks of the `[rows, k]` activation `data`, allocated for the
+/// caller (who frees them) and quantized through `quantizeLhsUnits`.
+fn quantizedLhsQ8_K(pc: ParallelConfig, allocator: std.mem.Allocator, data: []const f32, rows: usize, k: usize) ![]dtype_mod.BlockQ8_K {
+    const blocks_per_row = try quantized_matmul.q8k.qkBlockCount(k);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_K, try checkedQuantizedProduct(rows, blocks_per_row));
+    errdefer allocator.free(blocks);
+    quantizeLhsUnits(pc, dtype_mod.BlockQ8_K, quantized_matmul.q8k.quantizeRowsQ8_KRangeInto, blocks, data, rows, k, blocks_per_row, rows);
+    return blocks;
+}
+
 fn checkedTensorProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
 }
@@ -414,7 +491,7 @@ fn matmul2DQuantizedRhsQ8_0Rows(
         try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
     defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
-    try quantized_matmul.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
+    quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
     kernel(pc, cd, qlhs_blocks, rhs, m, n, k);
 }
 
@@ -451,7 +528,7 @@ fn matmul2DQuantizedRhsQ8_KRows(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = contiguousData(out, m * n);
-    const qlhs = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, a);
+    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
     defer allocator.free(qlhs);
     kernel(pc, cd, qlhs, rhs, m, n, k);
 }
@@ -664,7 +741,7 @@ fn matmulPackedQ8_0x4(
                 try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
             defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
-            try quantized_matmul.q8_0.quantizeRowsQ8_0x4PaddedInto(qlhs_blocks, a);
+            quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4PaddedGroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, row_groups);
             vector.matmul_quant.matmul2DQ8_0x4PackedPaddedRhsInto(pc, cd, qlhs_blocks, rhs, m, n, k);
             return;
         }
@@ -684,7 +761,7 @@ fn matmulPackedQ8_0x4(
         try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
     defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
-    try quantized_matmul.q8_0.quantizeRowsQ8_0x4Into(qlhs_blocks, a);
+    quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m / 4);
     vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd, qlhs_blocks, rhs, m, n, k);
 }
 
@@ -705,6 +782,7 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
     k: usize,
 ) !void {
     const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const ad = try lhsRows(a, m, k);
     const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
     const bulk_rows = m - m % 4;
 
@@ -717,15 +795,11 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
             try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
         defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
 
-        var bulk = try a.viewWithStridesOffset(&.{ bulk_rows, k }, &.{ k, 1 }, 0);
-        defer bulk.deinit();
-        try quantized_matmul.q8_0.quantizeRowsQ8_0x4Into(qlhs_blocks, &bulk);
+        quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, ad[0 .. bulk_rows * k], bulk_rows, k, blocks_per_row, bulk_rows / 4);
         vector.matmul_quant.matmul2DQ8_0x4PackedRhsInto(pc, cd[0 .. bulk_rows * n], qlhs_blocks, rhs, bulk_rows, n, k);
     }
 
     const tail_rows = m - bulk_rows;
-    var tail = try a.viewWithStridesOffset(&.{ tail_rows, k }, &.{ k, 1 }, bulk_rows * k);
-    defer tail.deinit();
     const tail_count = try checkedQuantizedProduct(tail_rows, blocks_per_row);
     var tail_stack: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
     const tail_blocks = if (tail_count <= tail_stack.len)
@@ -734,7 +808,7 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
         try allocator.alloc(dtype_mod.BlockQ8_0, tail_count);
     defer if (tail_count > tail_stack.len) allocator.free(tail_blocks);
 
-    try quantized_matmul.q8k.quantizeRowsQ8_0Into(tail_blocks, &tail);
+    quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, tail_blocks, ad[bulk_rows * k .. m * k], tail_rows, k, blocks_per_row, tail_rows);
     // The <=3-row remainder runs after the bulk kernel completes; the caller's
     // `pc` passes through so it can column-split like a decode-shaped matmul
     // (a parallel split never changes per-element math).
@@ -910,6 +984,7 @@ fn matmulPackedQ4_Kx2Mmla(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const ad = try lhsRows(a, m, k);
     const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_k, k);
     const prefix_rows = m - m % 2;
 
@@ -917,23 +992,15 @@ fn matmulPackedQ4_Kx2Mmla(
         const qlhs_x2 = try allocator.alloc(quantized_matmul.BlockQ8_Kx2Mmla, try checkedQuantizedProduct(prefix_rows / 2, blocks_per_row));
         defer allocator.free(qlhs_x2);
 
-        if (prefix_rows == m) {
-            try quantized_matmul.q8k.quantizeRowsQ8_Kx2MmlaInto(qlhs_x2, a);
-        } else {
-            var prefix = try a.viewWithStridesOffset(&.{ prefix_rows, k }, &.{ k, 1 }, 0);
-            defer prefix.deinit();
-            try quantized_matmul.q8k.quantizeRowsQ8_Kx2MmlaInto(qlhs_x2, &prefix);
-        }
+        quantizeLhsUnits(pc, quantized_matmul.BlockQ8_Kx2Mmla, quantized_matmul.q8k.quantizeRowsQ8_Kx2MmlaGroupsInto, qlhs_x2, ad[0 .. prefix_rows * k], prefix_rows, k, blocks_per_row, prefix_rows / 2);
         vector.matmul_quant.matmul2DQ4_Kx2MmlaQ8_Kx2MmlaRhsInto(pc, cd[0 .. prefix_rows * n], qlhs_x2, rhs, prefix_rows, n, k);
     }
 
     if (prefix_rows == m) return;
 
-    var tail = try a.viewWithStridesOffset(&.{ m - prefix_rows, k }, &.{ k, 1 }, prefix_rows * k);
-    defer tail.deinit();
-    const tail_blocks = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, &tail);
-    defer allocator.free(tail_blocks);
     const tail_pc = if (prefix_rows == 0) pc else ParallelConfig{};
+    const tail_blocks = try quantizedLhsQ8_K(tail_pc, allocator, ad[prefix_rows * k .. m * k], m - prefix_rows, k);
+    defer allocator.free(tail_blocks);
     vector.matmul_quant.matmul2DQ4_Kx2MmlaRhsInto(tail_pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
 }
 
@@ -972,24 +1039,16 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     const qlhs_x4 = try allocator.alloc(quantized_matmul.BlockQ8_Kx4, try checkedQuantizedProduct(row_groups, blocks_per_row));
     defer allocator.free(qlhs_x4);
 
-    if (prefix_rows == m) {
-        if (pad_x4_rows) {
-            try quantized_matmul.q8k.quantizeRowsQ8_Kx4PaddedInto(qlhs_x4, a);
-        } else {
-            try quantized_matmul.q8k.quantizeRowsQ8_Kx4Into(qlhs_x4, a);
-        }
-    } else {
-        var prefix = try a.viewWithStridesOffset(&.{ prefix_rows, k }, &.{ k, 1 }, 0);
-        defer prefix.deinit();
-        try quantized_matmul.q8k.quantizeRowsQ8_Kx4Into(qlhs_x4, &prefix);
-    }
+    // prefix_rows is a multiple of 4 unless the padded x4 kernel takes every
+    // row, so the group walk's final-group lane padding is exactly the
+    // padded form there and a no-op otherwise.
+    const ad = try lhsRows(a, m, k);
+    quantizeLhsUnits(pc, quantized_matmul.BlockQ8_Kx4, quantized_matmul.q8k.quantizeRowsQ8_Kx4GroupsInto, qlhs_x4, ad[0 .. prefix_rows * k], prefix_rows, k, blocks_per_row, row_groups);
     x4(pc, cd[0 .. prefix_rows * n], qlhs_x4, rhs, prefix_rows, n, k);
 
     if (prefix_rows == m) return;
 
-    var tail = try a.viewWithStridesOffset(&.{ m - prefix_rows, k }, &.{ k, 1 }, prefix_rows * k);
-    defer tail.deinit();
-    const tail_blocks = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, &tail);
+    const tail_blocks = try quantizedLhsQ8_K(pc, allocator, ad[prefix_rows * k .. m * k], m - prefix_rows, k);
     defer allocator.free(tail_blocks);
     // The <=3-row remainder runs after the x4 kernel completes; the caller's
     // `pc` passes through so it can column-split like a decode-shaped matmul
@@ -1179,9 +1238,11 @@ fn matmul2DQuantizedRhsTableQ8_0(
     }
 
     const cd = contiguousData(out, m * n);
-    var qlhs = try quantized_matmul.q8k.quantizeRowsQ8_0(allocator, a);
-    defer qlhs.deinit();
-    vector.matmul_quant.matmul2DTableQ8_0RhsInto(pc, rhs_dtype, cd, qlhs.blocks, rhs, m, n, k);
+    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    const qlhs = try allocator.alloc(dtype_mod.BlockQ8_0, try checkedQuantizedProduct(m, blocks_per_row));
+    defer allocator.free(qlhs);
+    quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs, try lhsRows(a, m, k), m, k, blocks_per_row, m);
+    vector.matmul_quant.matmul2DTableQ8_0RhsInto(pc, rhs_dtype, cd, qlhs, rhs, m, n, k);
 }
 
 fn matmul2DQuantizedRhsTableQ8_K(
@@ -1204,7 +1265,7 @@ fn matmul2DQuantizedRhsTableQ8_K(
     }
 
     const cd = contiguousData(out, m * n);
-    const qlhs = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, a);
+    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
     defer allocator.free(qlhs);
     vector.matmul_quant.matmul2DTableQ8_KRhsInto(pc, rhs_dtype, cd, qlhs, rhs, m, n, k);
 }
@@ -1222,7 +1283,7 @@ fn matmul2DQuantizedRhsTQ2_0(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = contiguousData(out, m * n);
-    const qlhs = try quantized_matmul.q8k.quantizeRowsQ8_K(allocator, a);
+    const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
     defer allocator.free(qlhs);
     vector.matmul_quant.matmul2DTQ2_0RhsInto(pc, cd, qlhs, rhs, m, n, k);
 }

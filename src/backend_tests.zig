@@ -269,6 +269,76 @@ fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.
     return quant.q8_0.packMatmulRhsQ8_0x4(allocator, blocks, split_test_n, split_test_k, blocks_per_row);
 }
 
+fn buildRowsRhsQ8_0(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ8_0 {
+    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
+    const values = try allocator.alloc(f32, split_test_n * split_test_k);
+    defer allocator.free(values);
+    fillSplitTestValues(values, random);
+    var weights = try Tensor.fromSlice(allocator, &.{ split_test_n, split_test_k }, values);
+    defer weights.deinit();
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, split_test_n * blocks_per_row);
+    errdefer allocator.free(blocks);
+    try quant.q8k.quantizeRowsQ8_0Into(blocks, &weights);
+    return .{
+        .rows = .{ .allocator = allocator, .blocks = blocks, .rows = split_test_n, .cols = split_test_k, .blocks_per_row = blocks_per_row },
+        .k = split_test_k,
+        .n = split_test_n,
+    };
+}
+
+fn buildRowsRhsQ4_K(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ4_K {
+    const blocks_per_column = try quant.blockCountForDType(.q4_k, split_test_k);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, split_test_n * blocks_per_column);
+    defer allocator.free(blocks);
+    var values: [256]f32 = undefined;
+    for (blocks) |*block| {
+        fillSplitTestValues(&values, random);
+        quant.q4_k.quantizeBlockQ4_KInto(block, &values);
+    }
+    return quant.q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, split_test_k, split_test_n, blocks);
+}
+
+fn expectPooledQuantizedRhsDispatchEqual(allocator: std.mem.Allocator, pool: *thread.Pool, a: *const Tensor, rhs: quant.AnyQuantizedMatmulRhs, m: usize) !void {
+    var serial = try Tensor.zeros(allocator, &.{ m, split_test_n });
+    defer serial.deinit();
+    var pooled = try Tensor.zeros(allocator, &.{ m, split_test_n });
+    defer pooled.deinit();
+    try native.kernels.matmul2DQuantizedRhs(.{}, allocator, &serial, a, rhs, m, split_test_n, split_test_k);
+    try native.kernels.matmul2DQuantizedRhs(.{ .pool = pool }, allocator, &pooled, a, rhs, m, split_test_n, split_test_k);
+    try expectBitEqualF32(serial.dataConst(), pooled.dataConst());
+}
+
+test "native quantized-RHS dispatch quantizes the LHS over the pool bitwise identically" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x1a5d0ffbeef08001);
+    const random = prng.random();
+
+    // 64 rows x 512 features is exactly the LHS-quantization pooling gate
+    // (vector_elementwise_len_threshold / 8): the pooled call splits the
+    // activation rows across tasks before the row-kernel GEMM, the serial
+    // call quantizes them on one thread; rows own disjoint blocks, so the
+    // products must agree byte for byte. Per-row Q8_0 (q8_0 rows) and
+    // per-row Q8_K (plain q4_k rows) LHS formats.
+    const m = 64;
+    const lhs_values = try allocator.alloc(f32, m * split_test_k);
+    defer allocator.free(lhs_values);
+    fillSplitTestValues(lhs_values, random);
+    var a = try Tensor.fromSlice(allocator, &.{ m, split_test_k }, lhs_values);
+    defer a.deinit();
+
+    var pool: thread.Pool = undefined;
+    try pool.init(.{ .allocator = allocator, .max_workers = 4 });
+    defer pool.deinit();
+
+    var rhs_q8_0 = try buildRowsRhsQ8_0(allocator, random);
+    defer rhs_q8_0.deinit();
+    try expectPooledQuantizedRhsDispatchEqual(allocator, &pool, &a, .{ .q8_0 = &rhs_q8_0 }, m);
+
+    var rhs_q4_k = try buildRowsRhsQ4_K(allocator, random);
+    defer rhs_q4_k.deinit();
+    try expectPooledQuantizedRhsDispatchEqual(allocator, &pool, &a, .{ .q4_k = &rhs_q4_k }, m);
+}
+
 test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel tail" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x51c4d0ffbeef5501);

@@ -50,16 +50,17 @@ pub fn roundNearestEven(x: f32) f32 {
     return rounded;
 }
 
+/// Round-half-to-even on 4 lanes via the 2^23 magic number (the default
+/// rounding mode does the tie-break; `ops.rintScalar` is the scalar twin):
+/// exact for every |x| < 2^23, larger magnitudes are already integral and
+/// pass through. Branch-free and bit-identical to `roundNearestEven`.
 fn roundNearestEvenVec4(x: QKV4f32) QKV4f32 {
-    const zero: QKV4f32 = @splat(0);
-    var rounded = @round(x);
-    const rounded_int: QKV4i32 = @intFromFloat(rounded);
-    const odd = (rounded_int & @as(QKV4i32, @splat(1))) != @as(QKV4i32, @splat(0));
-    const half = @abs(rounded - x) == @as(QKV4f32, @splat(0.5));
-    const adjust = half & odd;
-    const direction = @select(f32, x < zero, @as(QKV4f32, @splat(-1.0)), @as(QKV4f32, @splat(1.0)));
-    rounded -= @select(f32, adjust, direction, zero);
-    return rounded;
+    const VecU = @Vector(4, u32);
+    const big: QKV4f32 = @splat(8388608.0);
+    const ax = @abs(x);
+    const shifted = @select(f32, ax < big, (ax + big) - big, ax);
+    const sign_bits = @as(VecU, @bitCast(x)) & @as(VecU, @splat(0x80000000));
+    return @bitCast(@as(VecU, @bitCast(shifted)) | sign_bits);
 }
 
 pub fn roundNearestEvenVec4ToI32(x: QKV4f32) QKV4i32 {
