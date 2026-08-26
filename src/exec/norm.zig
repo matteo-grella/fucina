@@ -33,6 +33,8 @@ const RmsNormMulRowsTask = exec_row_ops.RmsNormMulRowsTask;
 const RmsNormMulAddRowsTask = exec_row_ops.RmsNormMulAddRowsTask;
 const RmsNormMulBackwardInputRowsTask = exec_row_ops.RmsNormMulBackwardInputRowsTask;
 const RmsNormMulBackwardWeightRowsTask = exec_row_ops.RmsNormMulBackwardWeightRowsTask;
+const RmsNormRowStatsTask = exec_row_ops.RmsNormRowStatsTask;
+const RmsNormWeightGradColumnsTask = exec_row_ops.RmsNormWeightGradColumnsTask;
 const LayerNormRowsTask = exec_row_ops.LayerNormRowsTask;
 const LayerNormBackwardInputRowsTask = exec_row_ops.LayerNormBackwardInputRowsTask;
 const LayerNormRowStatsTask = exec_row_ops.LayerNormRowStatsTask;
@@ -45,6 +47,8 @@ const runRmsNormMulRowsTask = exec_row_ops.runRmsNormMulRowsTask;
 const runRmsNormMulAddRowsTask = exec_row_ops.runRmsNormMulAddRowsTask;
 const runRmsNormMulBackwardInputRowsTask = exec_row_ops.runRmsNormMulBackwardInputRowsTask;
 const runRmsNormMulBackwardWeightRowsTask = exec_row_ops.runRmsNormMulBackwardWeightRowsTask;
+const runRmsNormRowStatsTask = exec_row_ops.runRmsNormRowStatsTask;
+const runRmsNormWeightGradColumnsTask = exec_row_ops.runRmsNormWeightGradColumnsTask;
 const runLayerNormRowsTask = exec_row_ops.runLayerNormRowsTask;
 const runLayerNormBackwardInputRowsTask = exec_row_ops.runLayerNormBackwardInputRowsTask;
 const runLayerNormRowStatsTask = exec_row_ops.runLayerNormRowStatsTask;
@@ -183,7 +187,11 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 
 /// VJP of rmsNorm; computes only the requested gradients. dx recomputes the
 /// row rms from `x` (weighted or plain per `options.weight`); dweight is
-/// `sum_rows gy * x_hat`, accumulated per column in row order.
+/// `sum_rows gy * x_hat`, accumulated per column in row order: serially
+/// for small inputs (the row kernel), and for large ones through a
+/// per-row 1/rms pass followed by column-partitioned accumulation across
+/// the pool (`rmsNormWeightGradColumns`), so dweight is bitwise identical
+/// for any thread count and to the serial form.
 pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormBackwardOptions) !RmsNormBackwardResult {
     var result = RmsNormBackwardResult{};
     errdefer result.deinit();
@@ -571,37 +579,41 @@ fn rmsNormBackwardWeight(
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1) {
-            if (ctx.workPool()) |pool| {
-                const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                var tasks: [parallel.vector_max_threads]RmsNormMulBackwardWeightRowsTask = undefined;
-                var partials = try ctx.allocator.alloc(f32, task_count * axis_dim);
-                defer ctx.allocator.free(partials);
-                @memset(partials, 0);
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base_task;
-                    tasks[task_i].output = partials[task_i * axis_dim ..][0..axis_dim];
-                    tasks[task_i].row_start = task_i * outer / task_count;
-                    tasks[task_i].row_end = (task_i + 1) * outer / task_count;
-                }
-                pool.parallelChunks(RmsNormMulBackwardWeightRowsTask, tasks[0..task_count], runRmsNormMulBackwardWeightRowsTask);
-
-                const Vec = @Vector(8, f32);
-                const vector_width = 8;
-                for (0..task_count) |task_i| {
-                    const partial = partials[task_i * axis_dim ..][0..axis_dim];
-                    var axis_i: usize = 0;
-                    while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
-                        const current: Vec = output[axis_i..][0..vector_width].*;
-                        const addend: Vec = partial[axis_i..][0..vector_width].*;
-                        output[axis_i..][0..vector_width].* = current + addend;
-                    }
-                    while (axis_i < axis_dim) : (axis_i += 1) {
-                        output[axis_i] += partial[axis_i];
-                    }
-                }
-                return out;
+        if (outer > 1 and axis_dim > 1 and parallel.cpuThreadCount(parallel.vector_max_threads) > 1 and ctx.workPool() != null) {
+            // Per-row 1/rms scratch, then the column-partitioned
+            // accumulation: both stages are bitwise identical for any
+            // thread count and to the serial row kernel (see the task
+            // structs / kernels), unlike per-task row partials combined in
+            // task order. A one-thread team keeps the single-pass row
+            // kernel (the same bytes, one read of `x` instead of two).
+            const stats = try ctx.allocator.alloc(f32, outer);
+            defer ctx.allocator.free(stats);
+            const stats_task: RmsNormRowStatsTask = .{
+                .input = input,
+                .stats = stats,
+                .axis_dim = axis_dim,
+                .inv_axis_dim = inv_axis_dim,
+                .eps = eps,
+                .row_start = 0,
+                .row_end = outer,
+            };
+            if (!ctx.dispatchRange(RmsNormRowStatsTask, "row_start", "row_end", stats_task, outer, runRmsNormRowStatsTask)) {
+                exec_row_ops.rmsNormRowStats(stats_task);
             }
+            const col_task: RmsNormWeightGradColumnsTask = .{
+                .input = input,
+                .grad = grad,
+                .stats = stats,
+                .dweight = output,
+                .rows = outer,
+                .axis_dim = axis_dim,
+                .col_start = 0,
+                .col_end = axis_dim,
+            };
+            if (!ctx.dispatchRange(RmsNormWeightGradColumnsTask, "col_start", "col_end", col_task, axis_dim, runRmsNormWeightGradColumnsTask)) {
+                exec_row_ops.rmsNormWeightGradColumns(col_task);
+            }
+            return out;
         }
 
         rmsNormMulBackwardWeightRows(base_task);

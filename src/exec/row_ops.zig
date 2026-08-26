@@ -243,6 +243,36 @@ pub const RmsNormMulBackwardWeightRowsTask = struct {
     row_end: usize,
 };
 
+pub const RmsNormRowStatsTask = struct {
+    input: []const f32,
+    /// Per-row 1/rms (`[rows]`): disjoint writes by row, each a pure
+    /// function of its row through the same sum-of-squares tree as
+    /// `rmsNormMulBackwardWeightRows`, so the scratch is bitwise identical
+    /// for any thread count and to the serial row kernel.
+    stats: []f32,
+    axis_dim: usize,
+    inv_axis_dim: f32,
+    eps: f32,
+    row_start: usize,
+    row_end: usize,
+};
+
+pub const RmsNormWeightGradColumnsTask = struct {
+    input: []const f32,
+    grad: []const f32,
+    stats: []const f32,
+    // Each task owns the contiguous DESTINATION column range
+    // [col_start, col_end) and accumulates over ALL rows in row order (the
+    // LayerNormParamGradColumnsTask pattern): per-column accumulation
+    // order equals the serial row kernel's, so dweight is bitwise
+    // identical for any thread count.
+    dweight: []f32,
+    rows: usize,
+    axis_dim: usize,
+    col_start: usize,
+    col_end: usize,
+};
+
 pub const LayerNormRowsTask = struct {
     input: []const f32,
     // Affine parameters (rank-1 [axis_dim]); both null = plain normalize.
@@ -669,6 +699,14 @@ pub fn runRmsNormMulBackwardWeightRowsTask(task: *const RmsNormMulBackwardWeight
     rmsNormMulBackwardWeightRows(task.*);
 }
 
+pub fn runRmsNormRowStatsTask(task: *const RmsNormRowStatsTask) void {
+    rmsNormRowStats(task.*);
+}
+
+pub fn runRmsNormWeightGradColumnsTask(task: *const RmsNormWeightGradColumnsTask) void {
+    rmsNormWeightGradColumns(task.*);
+}
+
 pub fn runLayerNormRowsTask(task: *const LayerNormRowsTask) void {
     layerNormRows(task.*);
 }
@@ -997,6 +1035,7 @@ pub fn rmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void {
     }
 }
 
+
 pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;
@@ -1004,7 +1043,6 @@ pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
-
         const rms_scale = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
         const rms_vec: Vec = @splat(rms_scale);
         var axis_i: usize = 0;
@@ -1016,6 +1054,71 @@ pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void
         }
         while (axis_i < task.axis_dim) : (axis_i += 1) {
             task.output[axis_i] += task.grad[base + axis_i] * task.input[base + axis_i] * rms_scale;
+        }
+    }
+}
+
+pub fn rmsNormRowStats(task: RmsNormRowStatsTask) void {
+    for (task.row_start..task.row_end) |row_i| {
+        const sumsq = rowSumSq(task.input[row_i * task.axis_dim ..][0..task.axis_dim]);
+        task.stats[row_i] = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
+    }
+}
+
+/// Column-partitioned dweight accumulation (the large-input pooled path):
+/// the task accumulates its own column range over ALL rows in row order,
+/// reading per-row 1/rms from the precomputed stats. The vector body and
+/// the scalar tail evaluate the exact per-element expression of
+/// `rmsNormMulBackwardWeightRows`, `dweight + gy * x * (1/rms)`, so a
+/// column produces the same bits whether it lands in a vector lane or the
+/// tail: the column split can move with the task count without changing
+/// any result bit.
+pub fn rmsNormWeightGradColumns(task: RmsNormWeightGradColumnsTask) void {
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    // A task's column slice is one short run per row, `axis_dim` floats
+    // apart, which the hardware prefetcher does not follow. Rows are
+    // walked in blocks: the column loop sweeps the block so each cache
+    // line of the block is fetched once and consumed vector by vector,
+    // and the next block's lines are requested explicitly while this one
+    // computes. Per column the rows are still added in row order (rows
+    // within a block, blocks in sequence), so the bytes do not depend on
+    // the block size.
+    const row_block = 16;
+    const prefetch_line_floats = 16;
+
+    var row0: usize = 0;
+    while (row0 < task.rows) : (row0 += row_block) {
+        const row_end = @min(row0 + row_block, task.rows);
+        const next_end = @min(row_end + row_block, task.rows);
+        for (row_end..next_end) |row_i| {
+            const ahead = row_i * task.axis_dim;
+            var line = task.col_start;
+            while (line < task.col_end) : (line += prefetch_line_floats) {
+                @prefetch(&task.input[ahead + line], .{ .rw = .read, .locality = 3, .cache = .data });
+                @prefetch(&task.grad[ahead + line], .{ .rw = .read, .locality = 3, .cache = .data });
+            }
+        }
+
+        var col = task.col_start;
+        while (col + vector_width <= task.col_end) : (col += vector_width) {
+            var acc: Vec = task.dweight[col..][0..vector_width].*;
+            for (row0..row_end) |row_i| {
+                const base = row_i * task.axis_dim;
+                const values: Vec = task.input[base + col ..][0..vector_width].*;
+                const grad: Vec = task.grad[base + col ..][0..vector_width].*;
+                const rms_vec: Vec = @splat(task.stats[row_i]);
+                acc = acc + grad * values * rms_vec;
+            }
+            task.dweight[col..][0..vector_width].* = acc;
+        }
+        while (col < task.col_end) : (col += 1) {
+            var acc = task.dweight[col];
+            for (row0..row_end) |row_i| {
+                const base = row_i * task.axis_dim;
+                acc += task.grad[base + col] * task.input[base + col] * task.stats[row_i];
+            }
+            task.dweight[col] = acc;
         }
     }
 }

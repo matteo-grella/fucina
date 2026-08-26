@@ -644,3 +644,55 @@ test "norm non-last-axis lane kernels are bitwise the strided scalar arms" {
     try expectNormLaneKernelsMatchOracle(&ctx, 3, .{ 2, 64, 1027 }, 0x9e13);
     try expectNormLaneKernelsMatchOracle(&ctx, 4, .{ 2, 3, 32, 701 }, 0x9e14);
 }
+
+test "rmsNorm dweight is bitwise identical for any thread count" {
+    var ctx: ExecContext = undefined;
+    ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+
+    // Above the row-kernel threshold (pooled column partition) with a
+    // column count that leaves a vector tail in some task splits.
+    const rows = 260;
+    const cols = 1013;
+    const data = try std.testing.allocator.alloc(f32, rows * cols);
+    defer std.testing.allocator.free(data);
+    testFillRandom(data, 0x4d5e);
+    const grad = try std.testing.allocator.alloc(f32, rows * cols);
+    defer std.testing.allocator.free(grad);
+    testFillRandom(grad, 0x4d5f);
+    var x = try ctx.fromSlice(.f32, .{ rows, cols }, data);
+    defer x.deinit();
+    var gy = try ctx.fromSlice(.f32, .{ rows, cols }, grad);
+    defer gy.deinit();
+
+    const saved_threads = parallel.cpuThreadCount(parallel.vector_max_threads);
+    defer parallel.setMaxThreads(saved_threads);
+
+    // One task: the pooled dispatch degenerates and the serial row kernel
+    // runs; every larger team must reproduce its bytes.
+    parallel.setMaxThreads(1);
+    var serial = try ctx.rmsNormBackward(2, &x, &gy, 1, 1e-5, .{ .need_input = false, .need_weight = true });
+    defer serial.deinit();
+    for ([_]usize{ 2, 3, 5, saved_threads }) |threads| {
+        parallel.setMaxThreads(threads);
+        var pooled = try ctx.rmsNormBackward(2, &x, &gy, 1, 1e-5, .{ .need_input = false, .need_weight = true });
+        defer pooled.deinit();
+        try expectBitwiseF32(serial.weight.?.dataConst(), pooled.weight.?.dataConst());
+    }
+
+    // The serial form itself is the row-order column accumulation.
+    const expected = try std.testing.allocator.alloc(f64, cols);
+    defer std.testing.allocator.free(expected);
+    @memset(expected, 0);
+    for (0..rows) |row_i| {
+        const row = data[row_i * cols ..][0..cols];
+        const row_g = grad[row_i * cols ..][0..cols];
+        var sumsq: f64 = 0;
+        for (row) |value| sumsq += @as(f64, value) * value;
+        const inv_rms = 1 / @sqrt(sumsq / @as(f64, @floatFromInt(cols)) + 1e-5);
+        for (expected, row_g, row) |*acc, g, value| acc.* += @as(f64, g) * value * inv_rms;
+    }
+    for (expected, serial.weight.?.dataConst()) |want, got| {
+        try expectCloseToF64(want, got, 1e-4, 1e-4);
+    }
+}
