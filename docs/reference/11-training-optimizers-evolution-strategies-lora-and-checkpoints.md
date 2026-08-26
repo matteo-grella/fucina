@@ -16,14 +16,13 @@ semantics are [§5](05-automatic-differentiation.md); the exec-scope memory mode
 
 ## 11.1 The shape of a training step
 
-Training differs from inference in exactly one rule: every tensor on the
-path from the parameters to the loss must stay alive until `backward()`
-returns ([§5](05-automatic-differentiation.md) — `GradState` is single-owner, and consumers hold raw pointers
-into the graph). Exec scopes ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) make that rule implicit: open a scope
-around the step, write the forward in the ordinary deinit-ASAP style (deinit
-on scope-owned results is a safe no-op), and close the scope after the
-optimizer step. The canonical step order is `backward` → `clipGradNorm` →
-`step` → `zeroGrad`:
+Training adds no lifetime rule to inference's: the graph is
+reference-counted ([§5](05-automatic-differentiation.md): every consumer record retains its operands'
+`GradState`s), so an intermediate may be released as soon as its forward
+consumer has run. Exec scopes ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) remove even the handle bookkeeping:
+open a scope around the step, write the forward in the ordinary deinit-ASAP
+style, and close the scope after the optimizer step. The canonical step order
+is `backward` → `clipGradNorm` → `step` → `zeroGrad`:
 
 ```zig
 test "one training step: forward, backward, clip, step, zero" {

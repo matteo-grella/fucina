@@ -49,7 +49,7 @@ test "public Tensor conv2d facade matches ctx.conv2d (with and without bias)" {
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.asRawTensor().dataConst());
 }
 
-test "public Tensor conv2dRelu grad path is composed: scope required, gradients pass the relu mask" {
+test "public Tensor conv2dRelu grad path is composed: gradients pass the relu mask, scoped or not" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     var ctx: ExecContext = undefined;
@@ -63,16 +63,9 @@ test "public Tensor conv2dRelu grad path is composed: scope required, gradients 
     var w = try Tensor(.{ .cout, .kh, .kw, .cinpg }).variableFromSlice(&ctx, .{ 1, 2, 2, 1 }, &.{ 1, 0, 0, -1 });
     defer w.deinit();
 
-    // Grad tracking without an exec scope is a LOUD error (composed op:
-    // conv2d then relu; the conv node is function-local).
-    try std.testing.expectError(
-        error.ActiveExecScopeRequired,
-        x.conv2dRelu(&ctx, w, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout }),
-    );
-
+    // Unscoped: the composition's conv intermediate is released inside
+    // conv2dRelu; the relu record keeps its state alive until backward.
     {
-        const scope = ctx.openExecScope();
-        defer ctx.closeExecScope(scope);
         var y = try x.conv2dRelu(&ctx, w, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout });
         defer y.deinit();
         try std.testing.expectEqualSlices(f32, &.{ 2, 0, 0, 3 }, try y.dataConst());
@@ -80,9 +73,30 @@ test "public Tensor conv2dRelu grad path is composed: scope required, gradients 
         defer loss.deinit();
         try loss.backward(&ctx);
     }
+    {
+        var gw = (try w.grad(&ctx)).?;
+        defer gw.deinit();
+        // dL/dw[k] = sum of the input patch over the two surviving positions.
+        try std.testing.expectEqualSlices(f32, &.{ 8, 5, 7, 3 }, try gw.dataConst());
+        var gx = (try x.grad(&ctx)).?;
+        defer gx.deinit();
+        try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 0, 0, 0, 0, 0, -1 }, try gx.dataConst());
+    }
+    x.zeroGrad();
+    w.zeroGrad();
+
+    // Scoped: the same gradients.
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var y = try x.conv2dRelu(&ctx, w, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout });
+        defer y.deinit();
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
     var gw = (try w.grad(&ctx)).?;
     defer gw.deinit();
-    // dL/dw[k] = sum of the input patch over the two surviving positions.
     try std.testing.expectEqualSlices(f32, &.{ 8, 5, 7, 3 }, try gw.dataConst());
     var gx = (try x.grad(&ctx)).?;
     defer gx.deinit();

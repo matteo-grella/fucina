@@ -106,14 +106,6 @@ pub fn Ops(comptime Self: type) type {
             return Out(result_tags).fromTensor(ctx, value);
         }
 
-        /// Composed ops whose intermediates are function-local graph nodes
-        /// need an active exec scope when gradients are tracked (see
-        /// `plumbing.requireScopeForComposedGrad`); the typed branches never
-        /// track gradients through them.
-        fn requireScopeForComposed(ctx: *ExecContext, wants_grad: bool) !void {
-            if (comptime differentiable) try plumbing.requireScopeForComposedGrad(ctx, wants_grad);
-        }
-
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.materialize(dtype, self.asRawTensor());
             errdefer value.deinit();
@@ -122,9 +114,9 @@ pub fn Ops(comptime Self: type) type {
 
         /// Borrow-if-contiguous materialize: an already-contiguous tensor
         /// returns a zero-copy retained view of the same storage (linked to
-        /// the graph through an identity backward, `GradState` is
-        /// single-owner, so the handle carries its own state rather than
-        /// aliasing `self`'s); a strided view returns `materialize(ctx)`.
+        /// the graph through an identity backward, so the handle carries a
+        /// state of its own rather than sharing `self`'s); a strided view
+        /// returns `materialize(ctx)`.
         /// Either way the result is owned by the caller (always `deinit` it;
         /// refcounted storage keeps the view case safe past the source's
         /// deinit), contiguous, and safe for `data`/`dataConst` access
@@ -230,9 +222,7 @@ pub fn Ops(comptime Self: type) type {
         /// contiguous source stays a zero-copy view; a non-contiguous one
         /// materializes first (the `flatten` rule). Composed flatten ->
         /// split, so gradients come from the existing exact view records;
-        /// when the target rank is > 1 and gradients are tracked this
-        /// requires an active exec scope (see `nllLoss`); a rank-1 target
-        /// degenerates to plain `flatten` (no scope needed).
+        /// a rank-1 target degenerates to plain `flatten`.
         pub fn reshape(
             self: *const Self,
             ctx: *ExecContext,
@@ -244,7 +234,6 @@ pub fn Ops(comptime Self: type) type {
                 if (self.asRawTensor().len() != new_shape[0]) return TensorError.InvalidShape;
                 return self.flatten(ctx, new_tags[0]);
             }
-            try requireScopeForComposed(ctx, self.requiresGrad());
             var flat = try self.flatten(ctx, new_tags[0]);
             defer flat.deinit();
             return flat.split(ctx, new_tags[0], new_tags_spec, new_shape);
@@ -306,11 +295,8 @@ pub fn Ops(comptime Self: type) type {
         /// rank-1 tensor that is a single element and `rollBy` matches
         /// `roll`. A per-section permutation, composed flatten + gather +
         /// split, so the gradient is exact (the inverse per-section roll).
-        /// When gradients are tracked this requires an active exec scope
-        /// (see `maskedSelect`).
         pub fn rollBy(self: *const Self, ctx: *ExecContext, comptime tag: Tag, offsets: []const isize) !Self {
             const roll_axis = comptime axis(tag);
-            try requireScopeForComposed(ctx, self.requiresGrad());
             const raw = self.asRawTensor();
             const n = raw.shape.at(roll_axis);
             var inner: usize = 1;
@@ -356,11 +342,8 @@ pub fn Ops(comptime Self: type) type {
         /// range errors with `IndexOutOfBounds`. Composed narrow -> squeeze,
         /// so the value is a zero-copy view aliasing the selected row and
         /// the gradient is the exact scatter (every unselected position
-        /// receives zero). When gradients are tracked this requires an
-        /// active exec scope (see `nllLoss`); errors with
-        /// `ActiveExecScopeRequired` otherwise.
+        /// receives zero).
         pub fn select(self: *const Self, ctx: *ExecContext, comptime tag: Tag, index: isize) !Out(removeTag(tags, tag)) {
-            try requireScopeForComposed(ctx, self.requiresGrad());
             const n: isize = @intCast(self.asRawTensor().shape.at(comptime axis(tag)));
             const shifted = if (index < 0) index +| n else index;
             if (shifted < 0 or shifted >= n) return TensorError.IndexOutOfBounds;
@@ -421,9 +404,6 @@ pub fn Ops(comptime Self: type) type {
         /// step-1 ranges the no-grad value is a zero-copy view and the
         /// gradient is the exact per-axis scatter; stepped axes follow the
         /// `sliceStep` contract (view no-grad, gather copy under gradients).
-        /// Slicing more than one axis with gradients tracked requires an
-        /// active exec scope (see `nllLoss`); errors with
-        /// `ActiveExecScopeRequired` otherwise.
         pub fn slice(self: *const Self, ctx: *ExecContext, spec: anytype) !Self {
             const Spec = @TypeOf(spec);
             comptime {
@@ -439,8 +419,6 @@ pub fn Ops(comptime Self: type) type {
                     if (!known) @compileError("slice range names a tag not on this tensor: ." ++ field.name);
                 }
             }
-            if (comptime @typeInfo(Spec).@"struct".fields.len > 1)
-                try requireScopeForComposed(ctx, self.requiresGrad());
             var current: ?Self = null;
             errdefer if (current) |*c| c.deinit();
             inline for (tags) |tag| {
@@ -577,10 +555,7 @@ pub fn Ops(comptime Self: type) type {
         /// Stack `self` and `others` along a NEW axis tagged `new_tag`
         /// inserted at `axis_index` (torch.stack): composed as insertAxis on
         /// every input + concat, so the result is differentiable in ALL
-        /// inputs through the multi-parent ConcatBackward. When gradients
-        /// are tracked this requires an active exec scope (the inserted-axis
-        /// intermediates are function-local graph nodes; see `nllLoss`);
-        /// errors with `ActiveExecScopeRequired` otherwise.
+        /// inputs through the multi-parent ConcatBackward.
         pub fn stack(
             self: *const Self,
             ctx: *ExecContext,
@@ -590,15 +565,14 @@ pub fn Ops(comptime Self: type) type {
         ) !Out(insertTagAt(tags, new_tag, axis_index)) {
             var any_grad = self.requiresGrad();
             for (others) |other| any_grad = any_grad or other.requiresGrad();
-            try requireScopeForComposed(ctx, any_grad);
 
             const Expanded = Out(insertTagAt(tags, new_tag, axis_index));
             var expanded = try ctx.allocator.alloc(Expanded, others.len + 1);
             defer ctx.allocator.free(expanded);
             var created: usize = 0;
-            // The inserted-axis views are composition temporaries: deinit is
-            // a no-op under an exec scope (scope-owned) and a real release
-            // in the unscoped no-grad arm.
+            // The inserted-axis views are composition temporaries: releasing
+            // their handles is always safe (the concat record retains their
+            // graph states; a scope-owned handle's deinit is a no-op).
             defer for (expanded[0..created]) |*view| view.deinit();
 
             expanded[0] = try self.insertAxis(ctx, new_tag, axis_index);
@@ -624,11 +598,8 @@ pub fn Ops(comptime Self: type) type {
         /// must equal `dim(tag)`. The CALLER owns every filled tensor and
         /// deinits each (under an exec scope they are scope-owned borrows and
         /// deinit is a no-op); on error, entries filled so far have already
-        /// been released. When gradients are tracked this requires an active
-        /// exec scope (see `nllLoss`); errors with `ActiveExecScopeRequired`
-        /// otherwise.
+        /// been released.
         pub fn unbindInto(self: *const Self, ctx: *ExecContext, comptime tag: Tag, out: []Out(removeTag(tags, tag))) !void {
-            try requireScopeForComposed(ctx, self.requiresGrad());
             if (out.len != self.asRawTensor().shape.at(axis(tag))) return TensorError.InvalidShape;
             var filled: usize = 0;
             errdefer for (out[0..filled]) |*entry| entry.deinit();

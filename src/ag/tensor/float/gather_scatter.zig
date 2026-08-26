@@ -32,7 +32,6 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const finishOp = plumbing.finishOp;
-        const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const TensorObject = plumbing.TensorObject;
 
         /// Copy of `self` with `[start, start+length)` along `axis_tag`
@@ -110,16 +109,13 @@ pub fn Ops(comptime Self: type) type {
         /// (zero-size tensors are not representable) — a dedicated error,
         /// distinct from the shape errors, so the data-dependent no-match
         /// outcome stays catchable apart from caller bugs; pre-counting via
-        /// a mask sum avoids the error path entirely. When gradients are
-        /// tracked this requires an active exec scope (see `nllLoss`);
-        /// errors with `ActiveExecScopeRequired` otherwise.
+        /// a mask sum avoids the error path entirely.
         pub fn maskedSelect(self: *const Self, ctx: *ExecContext, mask: anytype, comptime out_tag: Tag) !Tensor(.{out_tag}) {
             const Mask = TensorObject(@TypeOf(mask));
             comptime {
                 if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
                     @compileError("maskedSelect takes a .bool or float mask; cast integer masks explicitly");
             }
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const mask_raw = mask.asRawTensor();
             if (!std.mem.eql(usize, self.asRawTensor().shape.slice(), mask_raw.shape.slice())) return TensorError.ShapeMismatch;
             const mask_values = try mask_raw.dataConstChecked();
@@ -179,9 +175,7 @@ pub fn Ops(comptime Self: type) type {
         /// the gradients come from the existing exact records. Errors with
         /// `EmptySelection` when the mask selects nothing (zero-size tensors
         /// are not representable; see `maskedSelect`) and with `InvalidShape`
-        /// when `values`' length differs from the selected count. When
-        /// gradients are tracked this requires an active exec scope (see
-        /// `maskedSelect`); errors with `ActiveExecScopeRequired` otherwise.
+        /// when `values`' length differs from the selected count.
         pub fn maskedScatter(
             self: *const Self,
             ctx: *ExecContext,
@@ -195,7 +189,6 @@ pub fn Ops(comptime Self: type) type {
                 if (Mask.dtype != .bool and !dtype_mod.supportsForwardFloatMath(Mask.dtype))
                     @compileError("maskedScatter takes a .bool or float mask; cast integer masks explicitly");
             }
-            try requireScopeForComposedGrad(ctx, self.requiresGrad() or values.requiresGrad());
             const mask_raw = mask.asRawTensor();
             if (!std.mem.eql(usize, self.asRawTensor().shape.slice(), mask_raw.shape.slice())) return TensorError.ShapeMismatch;
             const mask_values = try mask_raw.dataConstChecked();

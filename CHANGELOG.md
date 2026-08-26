@@ -152,6 +152,13 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- `error.ActiveExecScopeRequired` and the exec-scope requirement of the
+  composed facade ops (`nllLoss`, `l2Normalize`, `cosineSimilarity`, `norm`,
+  `normAll`, `maskedSelect`, `maskedScatter`, `select`, multi-axis `slice`,
+  multi-tag `reshape`, `rollBy`, `shiftBy`, `trace`, `diag`, `diagEmbed`,
+  `constantPad2d`/`zeroPad2d`, `stack`, `unbindInto`, `einsumMany`,
+  `conv2dRelu`): they differentiate with or without a scope. Rewrite: delete
+  the `openExecScope` you added only to satisfy it.
 - `models.train.trainer_state.TrainerState.{es_ternary_flip_rate,
   es_ternary_update_fraction, es_ternary_update_decay}`: no trainer wrote
   or read them. The ternary knobs stay checkpoint contracts that a resumed
@@ -196,6 +203,17 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `GradState` is reference-counted (`src/ag/core.zig`): a facade handle holds
+  one reference, every backward record holds one per non-null operand (taken
+  when the node is created, dropped when the record is destroyed), and an
+  exec scope holds one per adopted result. Releasing an intermediate before
+  `backward` is safe scoped or unscoped; previously an unscoped release
+  before backward left the consumer records with dangling parent pointers
+  (documented as undefined behavior). `GradState.deinit` is
+  `GradState.release`, with `retain` alongside; `core.createNode` retains
+  the record's operands and `core.releaseParents` is the matching head of
+  every record vtable deinit. The cost is one atomic per operand per node
+  in each direction.
 - Backend kernel seam, dense GEMM: the nineteen name variants
   (`matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`,
   `matmul2DIntoUncheckedTyped`, `matmulTransA2DIntoUnchecked`,

@@ -42,7 +42,7 @@ pub fn Ops(comptime Self: type) type {
             var v = value;
             try validateTensorRank(dtype, tags, &v);
             const state = try GradState.leaf(ctx.allocator);
-            errdefer state.deinit();
+            errdefer state.release();
             return .{ .value = v, .grad_state = state };
         }
 

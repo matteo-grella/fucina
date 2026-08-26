@@ -804,9 +804,9 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
 - `unbindInto`, `select`, `slice` (more than one sliced axis),
   `maskedSelect`, `maskedScatter`, `rollBy`, `shiftBy`, `stack`,
   `zeroPad2d`, `constantPad2d`, `reshape` (multi-tag targets), `trace`,
-  `diag`, and `diagEmbed` are *composed* ops: when gradients are tracked
-  they require an active exec scope and error with
-  `error.ActiveExecScopeRequired` otherwise ([§5](05-automatic-differentiation.md)).
+  `diag`, and `diagEmbed` are *composed* ops: their intermediates are
+  released on return and retained by the consumer records, so they
+  differentiate scoped or unscoped alike ([§5](05-automatic-differentiation.md)).
 - Quantized branch: `concat` (rank-2, row axis only) and
   `getRows(ctx, tag, indices, out_tag)` — a fused gather+dequantize
   returning an **f32** tensor (see the snippet in [§3.3](03-tensors-types-construction-and-data-access.md#33-construction-and-ownership-srcagtensorzig-srcexeczig)); both comptime-reject

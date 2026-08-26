@@ -40,7 +40,6 @@ pub fn Ops(comptime Self: type) type {
         const differentiable = dtype == .f32;
         const finishOrConstant = plumbing.finishOrConstant;
         const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
-        const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const padding2dValues = plumbing.padding2dValues;
 
         /// Non-circular `rollBy`: same per-section offsets and sign
@@ -51,11 +50,9 @@ pub fn Ops(comptime Self: type) type {
         /// source positions shifted out of the axis receive zero gradient
         /// (composed gather + maskedFill: the fill mask zeroes their
         /// upstream gradient before the gather scatters it back). Same
-        /// `offsets` layout, `InvalidShape`, and exec-scope rules as
-        /// `rollBy`.
+        /// `offsets` layout and `InvalidShape` rule as `rollBy`.
         pub fn shiftBy(self: *const Self, ctx: *ExecContext, comptime tag: Tag, offsets: []const isize, fill: f32) !Self {
             const shift_axis = comptime axis(tag);
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const raw = self.asRawTensor();
             const n = raw.shape.at(shift_axis);
             var inner: usize = 1;
@@ -132,11 +129,8 @@ pub fn Ops(comptime Self: type) type {
 
         /// Sum of the main diagonal over the (`tag_a`, `tag_b`) plane
         /// (torch.trace generalized to named axes): composed diagonal ->
-        /// sum, so the gradient is the exact identity-matrix scatter. When
-        /// gradients are tracked this requires an active exec scope (see
-        /// `nllLoss`); errors with `ActiveExecScopeRequired` otherwise.
+        /// sum, so the gradient is the exact identity-matrix scatter.
         pub fn trace(self: *const Self, ctx: *ExecContext, comptime tag_a: Tag, comptime tag_b: Tag) !Tensor(removeTag(removeTag(tags, tag_a), tag_b)) {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             var diag_view = try self.diagonal(ctx, tag_a, tag_b, tag_a);
             defer diag_view.deinit();
             return diag_view.sum(ctx, tag_a, .{});
@@ -146,13 +140,11 @@ pub fn Ops(comptime Self: type) type {
         /// (torch.diag on a vector): zeros elsewhere. `out_tags_spec` names
         /// the two result axes. Composed zeros -> setRows (flat diagonal
         /// positions) -> reshape, so the gradient is the exact
-        /// diagonal-extract; scope-required under gradients (see
-        /// `nllLoss`).
+        /// diagonal-extract.
         pub fn diag(self: *const Self, ctx: *ExecContext, comptime out_tags_spec: anytype) !Tensor(normalizeTags(out_tags_spec)) {
             comptime if (tag_count != 1) @compileError("diag embeds a rank-1 tensor as a matrix diagonal; for extraction use diagonal");
             const out_tags = comptime normalizeTags(out_tags_spec);
             comptime if (out_tags.len != 2) @compileError("diag builds a rank-2 [n, n] tensor: pass exactly two tags");
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const n = self.asRawTensor().shape.at(0);
             var base = try Self.zeros(ctx, .{n * n});
             defer base.deinit();
@@ -207,8 +199,7 @@ pub fn Ops(comptime Self: type) type {
         /// `out_tags[1]` (the column axis) appended LAST. Works at any rank
         /// carrying `vec_tag`; the remaining axes pass through. Composed
         /// rename -> broadcast-multiply against an `eye` constant, so the
-        /// gradient is the exact diagonal extraction; scope-required under
-        /// gradients (see `nllLoss`).
+        /// gradient is the exact diagonal extraction.
         pub fn diagEmbed(
             self: *const Self,
             ctx: *ExecContext,
@@ -223,7 +214,6 @@ pub fn Ops(comptime Self: type) type {
                 if (tagIndex(rest, out_tags[0]) != null or tagIndex(rest, out_tags[1]) != null)
                     @compileError("diagEmbed result tags must not collide with the remaining input tags");
             }
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             var renamed = try self.withTags(ctx, replaceTag(tags, vec_tag, out_tags[0]));
             defer renamed.deinit();
             var identity = try Tensor(.{ out_tags[0], out_tags[1] }).eye(ctx, self.dim(vec_tag));
@@ -261,12 +251,9 @@ pub fn Ops(comptime Self: type) type {
         /// Differentiable in `self`: pad positions are constants and drop
         /// their gradient, cropped source positions receive zero gradient
         /// (composed narrow + pad per axis, so the gradients come from the
-        /// existing exact records). When gradients are tracked this
-        /// requires an active exec scope (see `maskedSelect`), even for
-        /// paddings that degenerate to fewer ops.
+        /// existing exact records).
         pub fn constantPad2d(self: *const Self, ctx: *ExecContext, comptime h_tag: Tag, comptime w_tag: Tag, padding: anytype, fill: f32) !Self {
             comptime if (h_tag == w_tag) @compileError("constantPad2d: h_tag and w_tag must be distinct");
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const p = padding2dValues(padding);
 
             var cur: Self = undefined;

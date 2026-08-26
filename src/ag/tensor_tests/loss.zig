@@ -297,11 +297,8 @@ test "public Tensor nllLoss composes -logp[label] with reductions and gradient" 
     try std.testing.expectError(error.InvalidDataLength, c.nllLoss(&ctx, .class, &.{2}, .mean));
     try std.testing.expectError(error.IndexOutOfBounds, c.nllLoss(&ctx, .class, &.{ 3, 0 }, .mean));
 
-    // Grad tracking without an exec scope is a LOUD error (the composed
-    // intermediates would dangle) — the training pattern below is scoped.
     var x = try T.variableFromSlice(&ctx, .{ 2, 3 }, &logp);
     defer x.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, x.nllLoss(&ctx, .class, &labels, .mean));
 
     // mean gradient: -onehot/positions.
     {

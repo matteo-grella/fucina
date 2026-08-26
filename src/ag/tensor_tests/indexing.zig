@@ -148,9 +148,6 @@ test "public Tensor zeroPad2d routes gradients to the interior only" {
     var x = try M.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
 
-    // Grad tracking without an exec scope is a LOUD error (composed op).
-    try std.testing.expectError(error.ActiveExecScopeRequired, x.zeroPad2d(&ctx, .h, .w, 1));
-
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
@@ -276,7 +273,6 @@ test "public Tensor diagonal diag trace" {
     // trace = sum of the diagonal; gradient is the identity scatter.
     var sq = try M.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer sq.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, sq.trace(&ctx, .row, .col));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
@@ -347,7 +343,6 @@ test "public Tensor select removes the axis (torch.select)" {
     // Gradient: exact scatter — unselected positions receive zero.
     var xv = try M.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer xv.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xv.select(&ctx, .col, 1));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
@@ -409,15 +404,11 @@ test "public Tensor slice composes multi-axis ranges (torch basic indexing)" {
     try std.testing.expectError(error.InvalidShape, x.slice(&ctx, .{ .col = .{ .step = 0 } }));
     try std.testing.expectError(error.InvalidShape, x.slice(&ctx, .{ .row = .{ .start = 2, .end = 2 } }));
 
-    // Gradient: multi-axis slicing needs a scope; the scatter is exact.
+    // Gradient: the multi-axis scatter is exact.
     var xv = try M.variableFromSlice(&ctx, .{ 3, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
     defer xv.deinit();
-    try std.testing.expectError(
-        error.ActiveExecScopeRequired,
-        xv.slice(&ctx, .{ .row = .{ .start = 1 }, .col = .{ .end = 2 } }),
-    );
     {
-        // A single sliced axis is one narrow — no scope required.
+        // A single sliced axis is one narrow.
         var single = try xv.slice(&ctx, .{ .row = .{ .start = 2 } });
         defer single.deinit();
         try std.testing.expectEqualSlices(f32, &.{ 9, 10, 11, 12 }, try single.dataConst());
@@ -447,7 +438,6 @@ test "public Tensor diagEmbed embeds batched diagonals with exact extraction gra
     const V = Tensor(.{ .b, .d });
     var v = try V.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer v.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, v.diagEmbed(&ctx, .d, .{ .row, .col }));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);

@@ -1052,6 +1052,7 @@ test {
     _ = @import("tensor_tests/loss.zig");
     _ = @import("tensor_tests/matmul.zig");
     _ = @import("tensor_tests/norm.zig");
+    _ = @import("tensor_tests/ownership.zig");
     _ = @import("tensor_tests/quant.zig");
     _ = @import("tensor_tests/reduce.zig");
     _ = @import("tensor_tests/rope.zig");

@@ -194,39 +194,21 @@ pub fn Mod(comptime ag_tensor: type) type {
             return out;
         }
 
-        /// Guard for facade-level COMPOSED differentiable ops (nllLoss, l2Normalize,
-        /// cosineSimilarity): their intermediate graph nodes are function-local, so
-        /// when gradients are tracked only an active exec scope can own them until
-        /// backward (GradState is single-owner — unscoped deinit of a grad-carrying
-        /// intermediate would dangle the downstream operand pointers). Loud error
-        /// instead of undefined behavior; no-grad composition works unscoped.
-        pub fn requireScopeForComposedGrad(ctx: *ExecContext, wants_grad: bool) !void {
-            if (wants_grad and control.isGradEnabled() and !ctx.execScopeActive()) {
-                return error.ActiveExecScopeRequired;
-            }
-        }
-
         /// N-ary einsum: contracts two or more f32 tensors (values or pointers, in a
         /// tuple) down to `out_tags` by a comptime left-fold of the binary `einsum`.
         /// Each intermediate keeps exactly the tags still needed by the remaining
         /// operands or the output, in group-nested order, so classic chains (e.g. a
         /// LoRA delta `x[s,i]·A[r,i]·B[o,r] -> [s,o]`) stay on the direct GEMM paths.
         /// Contraction order is the operand order — order the tuple so early
-        /// intermediates stay small. Gradients flow through every operand; as with
-        /// other composed facade ops, tracking gradients requires an active exec
-        /// scope to own the intermediates (`error.ActiveExecScopeRequired`).
+        /// intermediates stay small. Gradients flow through every operand; the
+        /// intermediates are released on return and the graph keeps them alive
+        /// (each consumer record holds a reference to its operands' states).
         pub fn einsumMany(ctx: *ExecContext, comptime out_tags: anytype, operands: anytype) !Tensor(normalizeTags(out_tags)) {
             const OperandsT = @TypeOf(operands);
             const operand_count = comptime @typeInfo(OperandsT).@"struct".fields.len;
             comptime {
                 if (operand_count < 2) @compileError("einsumMany requires at least two operands");
             }
-            var wants_grad = false;
-            inline for (0..operand_count) |i| {
-                const ptr = tensorObjectPtrFrom(@TypeOf(operands[i]), &operands[i]);
-                if (ptr.requiresGrad()) wants_grad = true;
-            }
-            try requireScopeForComposedGrad(ctx, wants_grad);
             const first = tensorObjectPtrFrom(@TypeOf(operands[0]), &operands[0]);
             return einsumManyFold(ctx, out_tags, first, operands, 1);
         }
@@ -308,7 +290,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                 fn destroy(ptr: *anyopaque) void {
                     const payload: *@This() = @ptrCast(@alignCast(ptr));
                     payload.value.deinit();
-                    payload.state.deinit();
+                    payload.state.release();
                     payload.allocator.destroy(payload);
                 }
             };
@@ -365,15 +347,15 @@ pub fn Mod(comptime ag_tensor: type) type {
 
         pub fn destroyGradStateOpaque(ptr: *anyopaque) void {
             const state: *GradState = @ptrCast(@alignCast(ptr));
-            state.deinit();
+            state.release();
         }
 
         /// Consumes `value` and `state` on success. On error, ownership of `value`
         /// stays with the caller (every call site holds an `errdefer value.deinit()`),
-        /// while `state` — a co-allocated node the caller cannot reach — is destroyed
+        /// while `state`, a co-allocated node the caller cannot reach, is released
         /// here.
         pub fn finishWithBackward(comptime tags: anytype, value: RawTensor, state: *GradState) !Tensor(tags) {
-            errdefer state.deinit();
+            errdefer state.release();
             var owned_value = value;
             try validateTensorRank(.f32, normalizeTags(tags), &owned_value);
             return .{ .value = owned_value, .grad_state = state };

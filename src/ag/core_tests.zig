@@ -53,6 +53,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(self.parents);
             allocator.free(self.parents);
             core.destroyNode(Self, allocator, self);
         }
@@ -78,7 +79,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
     var initialized: usize = 0;
     errdefer {
         for (parents[0..initialized]) |parent| {
-            parent.deinit();
+            parent.release();
         }
     }
     for (0..operand_count) |i| {
@@ -89,7 +90,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
     }
     defer {
         for (&parents) |parent| {
-            parent.deinit();
+            parent.release();
         }
     }
 
@@ -97,7 +98,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
     defer output_value.deinit();
 
     const output = try core.createNode(WideBackward, .{ ctx.allocator, &parent_operands });
-    defer output.deinit();
+    defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
 
@@ -145,6 +146,7 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(operands(ptr));
             core.destroyNode(Self, allocator, self);
         }
 
@@ -164,15 +166,15 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
     defer ctx.deinit();
 
     const a = try GradState.leaf(ctx.allocator);
-    defer a.deinit();
+    defer a.release();
     const b = try GradState.leaf(ctx.allocator);
-    defer b.deinit();
+    defer b.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try core.createNode(DuplicateViewBackward, .{ ctx.allocator, a, b });
-    defer output.deinit();
+    defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
 
@@ -225,6 +227,7 @@ test "multi-output backward adds a seed when a prior output already touched that
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(operands(ptr));
             core.destroyNode(Self, allocator, self);
         }
 
@@ -244,13 +247,13 @@ test "multi-output backward adds a seed when a prior output already touched that
     defer ctx.deinit();
 
     const x = try GradState.leaf(ctx.allocator);
-    defer x.deinit();
+    defer x.release();
 
     const z = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 3 });
-    defer z.deinit();
+    defer z.release();
 
     const y = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, z, 2 });
-    defer y.deinit();
+    defer y.release();
 
     var y_value = try ctx.scalar(.f32, 0);
     defer y_value.deinit();
@@ -303,6 +306,7 @@ test "failed output seeding leaves the graph re-runnable" {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(operands(ptr));
             core.destroyNode(Self, allocator, self);
         }
 
@@ -322,13 +326,13 @@ test "failed output seeding leaves the graph re-runnable" {
     defer ctx.deinit();
 
     const x = try GradState.leaf(ctx.allocator);
-    defer x.deinit();
+    defer x.release();
 
     const y = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 2 });
-    defer y.deinit();
+    defer y.release();
 
     const z = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 3 });
-    defer z.deinit();
+    defer z.release();
 
     var y_value = try ctx.scalar(.f32, 0);
     defer y_value.deinit();

@@ -150,6 +150,7 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(self.states[0..]);
             for (&self.views) |*view| view.deinit();
             self.output.deinit();
             core.destroyNode(Self, allocator, self);
@@ -174,7 +175,7 @@ fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Out
 }
 
 fn finishWithBackward(comptime Output: type, value: RawTensor, state: *GradState) !Output {
-    errdefer state.deinit();
+    errdefer state.release();
     var owned_value = value;
     try tag_ops.validateTensorRank(.f32, Output.axis_tags, &owned_value);
     return .{ .value = owned_value, .grad_state = state };
@@ -190,7 +191,7 @@ fn adoptIntoScope(ctx: *ExecContext, t: anytype) void {
 
 fn destroyGradStateOpaque(ptr: *anyopaque) void {
     const state: *GradState = @ptrCast(@alignCast(ptr));
-    state.deinit();
+    state.release();
 }
 
 fn inputFields(comptime Inputs: type) []const std.builtin.Type.StructField {

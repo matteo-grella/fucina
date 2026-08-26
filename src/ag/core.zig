@@ -73,11 +73,15 @@ pub fn BackwardNode(comptime Record: type) type {
 }
 
 /// Allocate one `BackwardNode(Record)`, run `Record.init(&node.record, init_args...)`
-/// (the tuple must start with the allocator), and wire the header to the
-/// record's `pub const vtable`. On init failure the node is freed and any
-/// resources `init` did not consume stay with the caller (mirroring the old
-/// per-record `create` contracts). The returned state is destroyed through
-/// `GradState.deinit`, whose vtable call frees the entire node.
+/// (the tuple must start with the allocator), wire the header to the
+/// record's `pub const vtable`, and retain every non-null operand: the node
+/// holds one reference per parent for as long as it lives (dropped by the
+/// record's vtable deinit through `releaseParents`), so a parent handle may
+/// be released at any time without dangling the graph. On init failure the
+/// node is freed and any resources `init` did not consume stay with the
+/// caller (mirroring the old per-record `create` contracts). The returned
+/// state carries one reference for the caller; `GradState.release` drops
+/// it and, as the last one, frees the entire node through the vtable.
 pub fn createNode(comptime Record: type, init_args: anytype) !*GradState {
     const allocator: Allocator = init_args[0];
     const node = try allocator.create(BackwardNode(Record));
@@ -87,7 +91,25 @@ pub fn createNode(comptime Record: type, init_args: anytype) !*GradState {
         .allocator = allocator,
         .grad_fn = .{ .ptr = &node.record, .vtable = &Record.vtable },
     };
+    retainParents(Record.vtable.operands(&node.record));
     return &node.state;
+}
+
+/// One reference per non-null operand, taken by `createNode`.
+pub fn retainParents(parents: []const ?*GradState) void {
+    for (parents) |parent| {
+        if (parent) |state| _ = state.retain();
+    }
+}
+
+/// Drop the references `retainParents` took: the head of every record
+/// vtable deinit (`recordVTable` does it; a hand-written vtable calls it
+/// before releasing anything the operand slice lives in). Releasing a
+/// parent may free it, and with it its own parents, recursively.
+pub fn releaseParents(parents: []const ?*GradState) void {
+    for (parents) |parent| {
+        if (parent) |state| state.release();
+    }
 }
 
 /// Tail of every record vtable deinit: recover the co-allocated node from the
@@ -104,9 +126,9 @@ pub fn destroyNode(comptime Record: type, allocator: Allocator, record: *Record)
 /// - `backward` casts and delegates to
 ///   `Record.vjp(self, ctx, gy, needs_grad, out)` — the record's typed
 ///   backward body, verbatim minus the cast lines;
-/// - `deinit` runs `Record.deinitFields(self, allocator)` iff declared
-///   (records owning tensors/slices release them there), then frees the
-///   co-allocated node;
+/// - `deinit` releases the operand references (`releaseParents`), runs
+///   `Record.deinitFields(self, allocator)` iff declared (records owning
+///   tensors/slices release them there), then frees the co-allocated node;
 /// - `.estimated_work` is wired automatically iff the record carries an
 ///   `estimated_work` field, so a record can never hold the field and
 ///   silently lose async backward scheduling to a forgotten vtable line;
@@ -131,6 +153,7 @@ pub fn recordVTable(comptime Record: type) BackwardFunction.VTable {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Record = @ptrCast(@alignCast(ptr));
+            releaseParents(self.parents[0..]);
             if (comptime @hasDecl(Record, "deinitFields")) self.deinitFields(allocator);
             destroyNode(Record, allocator, self);
         }
@@ -170,6 +193,13 @@ pub const GradState = struct {
     /// gradient is released as soon as its own backward has consumed it
     /// (leaves have no backward and keep theirs for the optimizer).
     pass_output: bool = false,
+    /// Reference count. Every owner holds exactly one reference: a facade
+    /// handle, a consumer record (one per operand slot, taken by
+    /// `createNode`), an exec-scope entry. Starts at one for the creator.
+    /// Atomic because a record may be destroyed on the thread that closes
+    /// a scope while pool tasks of a finished backward are still unwinding
+    /// their own handles.
+    refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
     pub fn leaf(allocator: Allocator) !*GradState {
         const self = try allocator.create(GradState);
@@ -177,11 +207,23 @@ pub const GradState = struct {
         return self;
     }
 
-    pub fn deinit(self: *GradState) void {
+    /// Take one more reference; returns `self` so a retained pointer can be
+    /// stored in one expression.
+    pub fn retain(self: *GradState) *GradState {
+        _ = self.refs.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    /// Drop one reference. The last release frees the state: a leaf
+    /// directly, an interior node through its record vtable (which also
+    /// releases the node's operand references). `self` is dangling after
+    /// the last release; a handle that still holds a reference may keep
+    /// using it.
+    pub fn release(self: *GradState) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         self.zeroGrad();
         if (self.grad_fn) |function| {
-            // Frees the whole co-allocated node, self included — self is
-            // dangling after this call; return immediately.
+            // Frees the whole co-allocated node, self included.
             function.deinit(self.allocator);
             return;
         }
@@ -697,6 +739,7 @@ test "backward scheduler releases pending operand on missing gradient" {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            releaseParents(operands(ptr));
             destroyNode(Self, allocator, self);
         }
 
@@ -716,13 +759,13 @@ test "backward scheduler releases pending operand on missing gradient" {
     defer ctx.deinit();
 
     const parent = try GradState.leaf(ctx.allocator);
-    defer parent.deinit();
+    defer parent.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try createNode(MissingGradientBackward, .{ ctx.allocator, parent });
-    defer output.deinit();
+    defer output.release();
 
     try std.testing.expectError(AgError.MissingBackwardGradient, backwardGradOne(&ctx, output, &output_value));
     try std.testing.expectEqual(@as(u32, 0), parent.pending_grads.load(.acquire));
@@ -764,6 +807,7 @@ test "backward scheduler releases pending operand on backward error" {
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            releaseParents(operands(ptr));
             destroyNode(Self, allocator, self);
         }
 
@@ -783,13 +827,13 @@ test "backward scheduler releases pending operand on backward error" {
     defer ctx.deinit();
 
     const parent = try GradState.leaf(ctx.allocator);
-    defer parent.deinit();
+    defer parent.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
     const output = try createNode(FailingBackward, .{ ctx.allocator, parent });
-    defer output.deinit();
+    defer output.release();
 
     try std.testing.expectError(FailingBackward.BackwardError.FailedBackward, backwardGradOne(&ctx, output, &output_value));
     try std.testing.expectEqual(@as(u32, 0), parent.pending_grads.load(.acquire));

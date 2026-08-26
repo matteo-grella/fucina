@@ -408,17 +408,6 @@ test "public Tensor stack unbindInto flip roll repeatAxis shape compositions" {
     defer once.deinit();
     try expectCloseSlices(&.{ 1, 2 }, try once.dataConst(), 0);
     try std.testing.expectError(error.InvalidShape, a.repeatAxis(&ctx, .d, 0));
-
-    // Grad tracking without an exec scope is a LOUD error for the two
-    // compositions with function-local intermediates (stack, unbindInto);
-    // gradcheck covers their scoped gradient paths.
-    var xv = try V.variableFromSlice(&ctx, .{2}, &.{ 1, 2 });
-    defer xv.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xv.stack(&ctx, .s, 0, &.{&b}));
-    var sv = try Tensor(.{ .s, .d }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
-    defer sv.deinit();
-    var vparts: [2]Tensor(.{.d}) = undefined;
-    try std.testing.expectError(error.ActiveExecScopeRequired, sv.unbindInto(&ctx, .s, &vparts));
 }
 
 test "public Tensor contiguous borrows contiguous layouts and materializes strided views" {
@@ -536,7 +525,6 @@ test "public Tensor rollBy rotates per-section and shiftBy fills dropped positio
     // positions shifted out of the axis.
     var xr = try M.variableFromSlice(&ctx, .{ 2, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
     defer xr.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xr.rollBy(&ctx, .seq, &.{ 1, -1 }));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
@@ -628,10 +616,9 @@ test "public Tensor reshape reinterprets row-major with view-or-materialize" {
     defer zt.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 1, 4, 2, 5, 3, 6 }, try zt.dataConst());
 
-    // Gradient flows through the composed views (scope-required).
+    // Gradient flows through the composed views.
     var xv = try M.variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer xv.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xv.reshape(&ctx, .{ .a, .b }, .{ 3, 2 }));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);

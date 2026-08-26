@@ -662,15 +662,6 @@ test "public Tensor l2Normalize and cosineSimilarity compositions" {
     defer cos_rows.deinit();
     try std.testing.expectEqualSlices(usize, &.{2}, cos_rows.asRawTensor().shape.slice());
     try expectCloseSlices(&.{ 1, 0 }, try cos_rows.dataConst(), 1e-6);
-
-    // Grad tracking without an exec scope is a LOUD error for these
-    // compositions (gradcheck covers the scoped gradient path).
-    var vx = try V.variableFromSlice(&ctx, .{2}, &.{ 3, 4 });
-    defer vx.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, vx.l2Normalize(&ctx, .d, 1e-6));
-    var wx = try W.variableFromSlice(&ctx, .{4}, &.{ 1, 0, 1, 0 });
-    defer wx.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, wx.cosineSimilarity(&ctx, &b, .d, 1e-8));
 }
 
 test "public Tensor norm variants and the l2 gradient" {
@@ -698,10 +689,9 @@ test "public Tensor norm variants and the l2 gradient" {
     defer total.deinit();
     try std.testing.expectEqual(@as(f32, 9), try total.item());
 
-    // l2 gradient is x/‖x‖ (scope-required composed op).
+    // l2 gradient is x/‖x‖.
     var xv = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 3, -4 });
     defer xv.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xv.norm(&ctx, .d, .l2));
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);

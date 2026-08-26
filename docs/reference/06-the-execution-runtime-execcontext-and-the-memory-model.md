@@ -253,13 +253,12 @@ intra-pass reuse and a bounded cap.
 
 ## 6.3 Exec scopes: implicit ownership for training (`src/exec.zig`, `src/exec/runtime.zig`)
 
-Training breaks deinit-ASAP: every intermediate on the path from the
-parameters to the loss must stay alive until `backward()` returns, because
-each differentiable result owns a single-owner `GradState` graph node that
-`deinit` destroys unconditionally (see [§5](05-automatic-differentiation.md) and
-[TRAINING.md](../TRAINING.md) [§2](02-toolchain-build-and-project-wiring.md)). Exec scopes make the context itself the
-owner of those intermediates, so training forward passes look like inference
-code.
+Training does not break deinit-ASAP: each differentiable result's
+`GradState` is reference-counted and every consumer record retains its
+operands ([§5](05-automatic-differentiation.md), [TRAINING.md](../TRAINING.md) §2), so releasing an
+intermediate handle before `backward()` is always safe. Exec scopes make the
+context the owner of op results on top of that, so a training forward needs
+no handle bookkeeping at all.
 
 ```zig
 pub const ExecScope = struct { index: usize };
@@ -358,12 +357,6 @@ test "deinit on a scope-owned result is a safe no-op" {
 
 Scope-related errors (recoverable, not panics):
 
-- `error.ActiveExecScopeRequired` — facade-level *composed* differentiable
-  ops (`nllLoss`, `l2Normalize`, `cosineSimilarity`, [§4](04-tensor-operations.md)) build function-local
-  intermediate graph nodes; when gradients are tracked, only a scope can own
-  them until backward, so calling them with gradients enabled and no scope
-  open is a loud error instead of undefined behavior. No-grad composition
-  works unscoped.
 - `error.ActiveExecScopeUnsupported` — the storage-consuming
   `takeAddNoGrad` / `takeScaleNoGrad` ([§4](04-tensor-operations.md)) refuse a scope-owned operand:
   consuming a borrow would double-free at close.

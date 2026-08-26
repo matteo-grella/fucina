@@ -171,7 +171,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
     if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
     const state = try core.createNode(CheckpointBackward(block, Extra, Inputs), .{ ctx.allocator, extra, views, states });
     node_owns_views = true;
-    errdefer state.deinit();
+    errdefer state.release();
 
     var result = Output{ .value = out_value, .grad_state = state };
     if (ctx.execScopeActive()) {
@@ -273,9 +273,9 @@ fn blockTakesInputsTuple(comptime fn_info: std.builtin.Type.Fn, comptime Extra: 
 
 /// Backward node for `checkpoint`/`checkpointWithContext`: owns refcounted
 /// views of the block inputs, stores `extra` by value (the caller keeps
-/// whatever it points at alive until backward completes), and borrows the
-/// inputs' GradStates (the operands); rebuilds the block subgraph on demand
-/// inside backward.
+/// whatever it points at alive until backward completes), and retains the
+/// inputs' GradStates (the operands, one reference each); rebuilds the block
+/// subgraph on demand inside backward.
 fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime Inputs: type) type {
     const facade_types = facadeTypes(Inputs);
     const n = facade_types.len;
@@ -374,6 +374,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
 
         fn deinit(ptr: *anyopaque, allocator: Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ptr));
+            core.releaseParents(self.states[0..]);
             for (&self.views) |*view| view.deinit();
             core.destroyNode(Self, allocator, self);
         }
@@ -465,7 +466,7 @@ fn adoptIntoScope(ctx: *ExecContext, t: anytype) void {
 
 fn destroyGradStateOpaque(ptr: *anyopaque) void {
     const state: *GradState = @ptrCast(@alignCast(ptr));
-    state.deinit();
+    state.release();
 }
 
 test {

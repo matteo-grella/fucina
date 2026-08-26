@@ -36,11 +36,9 @@ Every operation below shares one contract, implemented by the shared tails
   receive gradients, say so inline; grad-incompatible calls fail with
   `error.UnsupportedGradient` (or a more specific error named per family).
   Ops **composed** from other facade ops (`nllLoss`, `l2Normalize`,
-  `cosineSimilarity`, `maskedSelect`, `stack`, `unbindInto`) additionally
-  require an active exec scope when gradients are tracked — their
-  intermediate graph nodes are function-local and only a scope can own them
-  until `backward`; they fail with `error.ActiveExecScopeRequired` otherwise.
-  No-grad use works unscoped.
+  `cosineSimilarity`, `maskedSelect`, `stack`, `unbindInto`) release their
+  intermediates on return; the consumer records retain the graph nodes, so
+  they differentiate with or without an exec scope ([§5](05-automatic-differentiation.md)).
 - **Thread-safety.** A context is single-threaded at the API surface: run
   ops on one `ExecContext` from one thread ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)). Kernels parallelize
   internally through the context's work pool ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)).
@@ -921,8 +919,8 @@ orders of magnitude).
 `einsum`, keeping at each step exactly the tags still needed by the
 remaining operands or the output. Contraction order is the operand order —
 order the tuple so early intermediates stay small. As with other composed
-facade ops, tracking gradients through it requires an active exec scope
-([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig); `error.ActiveExecScopeRequired`).
+facade ops, the intermediates are released on return and retained by the
+records, so gradients flow with or without an exec scope.
 
 ```zig
 test "einsum: one equation for a grouped-attention-style contraction" {

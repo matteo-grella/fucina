@@ -29,7 +29,7 @@ pub fn Ops(comptime Self: type) type {
             }
             self.value.deinit();
             if (comptime has_grad) {
-                if (self.grad_state) |state| state.deinit();
+                if (self.grad_state) |state| state.release();
             }
             self.* = undefined;
         }

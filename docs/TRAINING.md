@@ -42,36 +42,35 @@ for (0..total_steps) |step_i| {
 }
 ```
 
-## 2. Tensor lifetime: why training is not inference
+## 2. Tensor lifetime: training keeps the inference habit
 
 **Inference habit:** deinit every intermediate as soon as its consumer has run.
 Correct, and optimal — released buffers go straight back to the `BufferPool`.
 
-**Training rule:** every tensor on the path from the parameters to the loss
-must stay alive until `backward()` returns.
-
-**Why.** Each differentiable op result owns two things with *different*
-ownership models:
+**Training:** the same habit is safe. Each differentiable op result owns two
+reference-counted things:
 
 - its **value** (`RawTensor`) — refcounted storage. Backward functions clone
   *views* of the operand values they need, so early release of a value never
   dangles data; the views keep the storage alive.
-- its **GradState** — the autograd graph node. It is **single-owner, not
-  refcounted**: the tensor owns it, `tensor.deinit()` destroys it
-  unconditionally, and the consumers' backward functions hold **raw
-  `*GradState` pointers** to it (see `src/ag/backward/`; the scheduler in
-  `src/ag/core.zig` walks those pointers).
+- its **GradState**: the autograd graph node, reference-counted as well
+  (`refs` in `src/ag/core.zig`). The handle holds one reference; every
+  consumer's backward record holds one per operand, taken when the record is
+  created and dropped when the record is destroyed; an exec scope that adopts
+  the result holds one. `tensor.deinit()` drops the handle's reference, and
+  the node lives on for as long as a downstream record needs it.
 
-So "why are those freed?" — `deinit` always frees the node, by design: no
-atomic refcount traffic on the eager hot path, no ownership cycles, and
-inference (where `grad_state == null`) pays nothing. The price is a rule:
-deinit an intermediate before backward and the backward pass walks a dangling
-node — undefined behavior, not an error you can catch. Leaf parameters are
-unaffected between steps (their GradState persists; only the accumulated
-gradient is dropped by `zeroGrad`).
+So an intermediate may be released the moment its forward consumer has run,
+scoped or not: backward walks the records, and the records own their parents.
+The graph is a DAG by construction (in-place ops refuse gradient tracking),
+so there are no cycles to collect. The cost is one atomic increment per
+operand when a node is created and one decrement when it is destroyed;
+inference (where `grad_state == null`) pays nothing. Leaf parameters persist
+between steps (the parameter handle holds their GradState; only the
+accumulated gradient is dropped by `zeroGrad`).
 
-**The implicit mechanism: exec scopes.** The ctx is already threaded through
-every op call, so it is the natural owner. While a scope is open, **every
+**The convenience: exec scopes.** The ctx is already threaded through every
+op call, so it can own op results for you. While a scope is open, **every
 tensor returned by a facade op is owned by the innermost scope** and the value
 you receive is a borrow:
 
@@ -793,9 +792,6 @@ q/k/v, never from the forward output.
 
 ## 12. Pitfalls checklist
 
-- Deinit an intermediate before `backward()` with NO scope open → dangling
-  graph node (UB). Use an exec scope; under one, deinit on op results is a
-  safe no-op and the graph survives to backward.
 - Use a scope-owned tensor after `closeExecScope` → use-after-free (the one
   borrow hazard the `scope_owned` flag cannot remove).
 - Forgot `zeroGrad()` → gradients accumulate across steps (sometimes wanted:

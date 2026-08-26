@@ -30,7 +30,6 @@ pub fn Ops(comptime Self: type) type {
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const rowStatsAlloc = plumbing.rowStatsAlloc;
         const finishOp = plumbing.finishOp;
-        const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
@@ -254,10 +253,7 @@ pub fn Ops(comptime Self: type) type {
         /// reduction), differentiable in self through those ops — PREFER
         /// `crossEntropy` (fused log-softmax + NLL) when
         /// starting from logits; this exists for pipelines that already carry
-        /// log-probabilities. When gradients are tracked this requires an
-        /// active exec scope (the training pattern — the composition's
-        /// intermediate graph nodes must be scope-owned to survive until
-        /// backward); errors with `ActiveExecScopeRequired` otherwise.
+        /// log-probabilities.
         pub fn nllLoss(
             self: *const Self,
             ctx: *ExecContext,
@@ -265,7 +261,6 @@ pub fn Ops(comptime Self: type) type {
             labels: []const usize,
             comptime reduction: exec_mod.Reduction,
         ) !Tensor(if (reduction == .none) removeTag(tags, class_tag) else .{}) {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const class_axis = comptime axis(class_tag);
             const raw = self.asRawTensor();
             var raw_shape: [tensor_rank]usize = undefined;

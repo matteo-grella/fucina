@@ -128,10 +128,8 @@ test "public Tensor maskedSelect gathers masked elements and routes gradients" {
     defer misshapen.deinit();
     try std.testing.expectError(error.ShapeMismatch, c.maskedSelect(&ctx, misshapen, .m));
 
-    // Grad tracking without an exec scope is a LOUD error (composed op).
     var x = try M.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer x.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, x.maskedSelect(&ctx, mask, .m));
 
     // Scoped gradient: d(sum of selected)/dx = the mask itself.
     {
@@ -187,10 +185,8 @@ test "public Tensor maskedScatter scatters rank-1 values and routes gradients" {
     defer short.deinit();
     try std.testing.expectError(error.InvalidShape, field.maskedScatter(&ctx, mask, .nz, &short));
 
-    // Grad tracking without an exec scope is a LOUD error (composed op).
     var xf = try V.variableFromSlice(&ctx, .{4}, &.{ 10, 10, 10, 10 });
     defer xf.deinit();
-    try std.testing.expectError(error.ActiveExecScopeRequired, xf.maskedScatter(&ctx, mask, .nz, &vals));
 
     // Scoped gradients with a nontrivial upstream gradient: weight the output
     // by w = {2, 3, 5, 7} so d_field = w·(1-mask) and d_vals = w at the

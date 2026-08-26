@@ -68,10 +68,7 @@ pub fn Ops(comptime Self: type) type {
         /// the same single max(0,·) on the same numbers; on the Winograd
         /// route it folds into the output transform). When any operand
         /// requires gradients, falls back to the differentiable composition
-        /// `conv2d` then `relu`; like every composed facade op, its
-        /// intermediate conv node is function-local, so tracking gradients
-        /// requires an active exec scope (`error.ActiveExecScopeRequired`
-        /// otherwise); the no-grad path works unscoped.
+        /// `conv2d` then `relu`.
         pub fn conv2dRelu(
             self: *const Self,
             ctx: *ExecContext,
@@ -87,7 +84,6 @@ pub fn Ops(comptime Self: type) type {
             if (@TypeOf(bias) != @TypeOf(null)) {
                 any_grad = any_grad or tensorObjectPtrFrom(@TypeOf(bias), &bias).requiresGrad();
             }
-            try plumbing.requireScopeForComposedGrad(ctx, any_grad);
             if (any_grad) {
                 var y = try self.conv2d(ctx, weight, bias, stride, padding, groups, out_tags);
                 defer y.deinit();

@@ -41,7 +41,6 @@ pub fn Ops(comptime Self: type) type {
         fn Param(comptime tag: Tag) type {
             return Tensor(.{ .dtype = dtype, .tags = .{tag} });
         }
-        const requireScopeForComposedGrad = plumbing.requireScopeForComposedGrad;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
@@ -187,11 +186,8 @@ pub fn Ops(comptime Self: type) type {
         /// square root (the rmsNorm/qwen35 convention) — this deliberately
         /// differs from torch F.normalize, which computes x / max(‖x‖₂, eps).
         /// Composed from existing differentiable ops (mul → sum → addScalar →
-        /// rsqrt → insertAxis → broadcast mul); differentiable in self. When
-        /// gradients are tracked this requires an active exec scope (see
-        /// `nllLoss`); errors with `ActiveExecScopeRequired` otherwise.
+        /// rsqrt → insertAxis → broadcast mul); differentiable in self.
         pub fn l2Normalize(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32) !Self {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             const norm_axis = comptime axis(tag);
             var sq = try self.mul(ctx, self);
             defer sq.deinit();
@@ -212,11 +208,8 @@ pub fn Ops(comptime Self: type) type {
         /// (abs/mul → sum/max → sqrt), so the gradients are the composed
         /// exact ones — like the naive composition (and torch), the `.l2`
         /// gradient at an all-zero vector is NaN (`sqrt'(0)`), and
-        /// `.l1`/`.inf` follow `abs`'s sign convention at 0. When gradients
-        /// are tracked this requires an active exec scope (see `nllLoss`);
-        /// errors with `ActiveExecScopeRequired` otherwise.
+        /// `.l1`/`.inf` follow `abs`'s sign convention at 0.
         pub fn norm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, comptime order: exec_mod.NormOrder) !Tensor(removeTag(tags, tag)) {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             switch (comptime order) {
                 .l1 => {
                     var magnitude = try self.abs(ctx);
@@ -240,10 +233,8 @@ pub fn Ops(comptime Self: type) type {
 
         /// Scalar vector norm over every element (torch.linalg.vector_norm
         /// with no dim); see `norm` for the order semantics and gradient
-        /// caveats. Composed flatten → norm; scope-required under
-        /// gradients.
+        /// caveats. Composed flatten → norm.
         pub fn normAll(self: *const Self, ctx: *ExecContext, comptime order: exec_mod.NormOrder) !Tensor(.{}) {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad());
             var flat = try self.flatten(ctx, tags[0]);
             defer flat.deinit();
             return flat.norm(ctx, tags[0], order);
@@ -253,9 +244,7 @@ pub fn Ops(comptime Self: type) type {
         /// F.cosine_similarity): Σ x·y / max(‖x‖₂·‖y‖₂, eps) with the `tag`
         /// axis reduced away (torch's eps default is 1e-8). Composed from
         /// existing differentiable ops (mul/sum/sqrt/clamp/div);
-        /// differentiable in both operands. When gradients are tracked this
-        /// requires an active exec scope (see `nllLoss`); errors with
-        /// `ActiveExecScopeRequired` otherwise.
+        /// differentiable in both operands.
         pub fn cosineSimilarity(
             self: *const Self,
             ctx: *ExecContext,
@@ -263,7 +252,6 @@ pub fn Ops(comptime Self: type) type {
             comptime tag: Tag,
             eps: f32,
         ) !Tensor(removeTag(tags, tag)) {
-            try requireScopeForComposedGrad(ctx, self.requiresGrad() or other.requiresGrad());
             var pointwise_prod = try self.mul(ctx, other);
             defer pointwise_prod.deinit();
             var dot_sum = try pointwise_prod.sum(ctx, tag, .{});

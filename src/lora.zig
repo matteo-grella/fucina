@@ -19,14 +19,11 @@
 //! convention and rejected on adapter inputs.
 //!
 //! Lifetime contract (the same composite-op contract as `fucina.checkpoint`,
-//! see docs/TRAINING.md): `delta`/`apply` build a multi-op chain and release their
-//! interior tensors on return. Under an open exec scope
-//! (`ctx.openExecScope()`) those releases are no-ops and the scope keeps the
-//! whole graph alive — training (anything that calls `backward()` through the
-//! result) MUST run inside a scope, or backward walks freed graph nodes
-//! (GradState is single-owner). Without a scope the result is forward-only
-//! (eval), the usual inference deinit-ASAP contract. The adapter's own A/B are
-//! explicitly created variables: caller-owned, never scope-adopted.
+//! see docs/TRAINING.md): `delta`/`apply` build a multi-op chain and release
+//! their interior tensors on return; the graph keeps them alive (each consumer
+//! record holds a reference to its operands' states), so the result can be
+//! trained scoped or unscoped. The adapter's own A/B are explicitly created
+//! variables: caller-owned, never scope-adopted.
 
 const std = @import("std");
 

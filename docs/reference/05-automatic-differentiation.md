@@ -340,8 +340,10 @@ prefer `backwardWithGrad` ([§5.2](05-automatic-differentiation.md#52-running-ba
 shape-checks the output gradient; `setGrad` is the unchecked low-level hook
 underneath it (the checkpoint recompute seeds through it too, [§5.5](05-automatic-differentiation.md#55-activation-checkpointing-srcagcheckpointzig), and gradient
 clipping rewrites accumulated gradients with it, [§11.4](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#114-gradient-clipping-and-lr-schedules-srcoptimzig)).
-`GradState.leaf`/`deinit` and the `createNode`/`BackwardNode` record
-co-allocation exist for internal wiring and are managed by the facade.
+`GradState.leaf`/`retain`/`release` (the reference count: one per handle,
+one per consumer-record operand, one per exec-scope entry) and the
+`createNode`/`BackwardNode` record co-allocation exist for internal wiring
+and are managed by the facade.
 
 **Accumulation across backward calls** — the micro-batch idiom: build a
 fresh forward graph per micro-batch over the same leaf variables and call
@@ -375,18 +377,17 @@ test "micro-batch accumulation and zeroGrad" {
 ```
 
 When gradients are tracked, interior op results carry live `GradState`s that
-downstream records point at; keep them alive until after `backward` (the
-defer-deinit idiom above) or run the forward under an exec scope, which owns
-them for you ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md), [TRAINING.md](../TRAINING.md)). The *composed* facade ops
+downstream records retain (one reference per operand, taken when the record
+is created and dropped when it is destroyed; `src/ag/core.zig`). Releasing a
+handle before `backward` is therefore always safe: the graph keeps the node
+alive until its last consumer record goes. The *composed* facade ops
 (`nllLoss`, `l2Normalize`, `cosineSimilarity`, `norm`, `normAll`,
 `maskedSelect`, `maskedScatter`, `select`, `slice` (more than one sliced
 axis), `reshape` (multi-tag targets), `rollBy`, `shiftBy`, `trace`,
 `diag`, `diagEmbed`, `constantPad2d`/`zeroPad2d`, `stack`, `unbindInto`, `einsumMany`,
 `conv2dRelu` (its grad path is `conv2d` then `relu`))
-create function-local graph nodes and therefore require an active exec
-scope when any operand requires gradients — they fail loudly with
-`error.ActiveExecScopeRequired` instead of dangling operand pointers; the
-no-grad composition works unscoped.
+release their function-local intermediates on return and differentiate
+scoped or unscoped alike (pinned by `src/ag/tensor_tests/ownership.zig`).
 
 ## 5.4 noGrad scopes (`src/ag/control.zig`)
 
@@ -753,7 +754,7 @@ domain's file in `src/ag/backward/`. Coverage by family (op names as on the faca
 | Norms / softmax | `softmax` (all fused options; `.mask` must not require grad), `logSoftmax`, `rmsNorm`, `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm` (plain + affine), `groupNorm`, `l2Normalize`, `cosineSimilarity` | |
 | Losses | `crossEntropy`, `crossEntropy`, `linearCrossEntropy`, `linearDistill`, `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss`, `nllLoss` | `linearCrossEntropy` differentiates both the input and the classifier weight without materializing the logit gradient ([§4.15](04-tensor-operations.md#415-losses-and-similarity-srcagtensorzig-srcexeclosszig)) |
 | Contractions | `dot` (f32×f32: both operands; quantized RHS: lhs-only, the RHS is a frozen constant; f16/bf16 RHS: lhs always, plus an f32 dW when the RHS is a grad-requiring 16-bit variable), `einsum` (f32×f32: both operands; f16/bf16 RHS: same variable-RHS contract as dot; each gradient is itself an einsum — GEMM-lowered for every tag structure, broadcast over forward-summed axes; `DotBackward`/`ConstRhsDotBackward` delegate to the einsum records), `addDot` (the fused addmm: all three operands — the base gradient is the upstream gradient itself, shared as a view; the `a`/`b` gradients are the dot VJP contractions, with the same internal branch split as `dot`), `einsumMany` (composes binary einsum records), `matmul` (2-D GEMM `.plain`/`.trans_b`, batched bmm all kinds; rank-2 `.trans_a` is a compile error directing to `dot`), `dotTernarySte` (straight-through estimator: dx through the quantized weight, dW as-if-unquantized) | |
-| Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `unfold`, `fold`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed `conv2d` + `relu` path when any operand requires grad, which needs an active exec scope (`error.ActiveExecScopeRequired` unscoped, [§5.3](#53-reading-seeding-and-resetting-gradients-srcagtensorzig-srcagcorezig)); `unfold`/`fold` are exact adjoints of each other (im2col/col2im) |
+| Convolutions / pooling | `conv1d`, `convTranspose1d`, `causalConv1d`, `groupedCausalConv1d`, `causalDepthwiseConv1d`, `conv2d`, `conv2dRelu`, `maxPool2d`, `avgPool2d`, `upsample2xNearest`, `unfold`, `fold`, `channelAffine` | `conv2d` differentiates input, weight, and bias; `conv2dRelu` falls back to the composed `conv2d` + `relu` path when any operand requires grad; `unfold`/`fold` are exact adjoints of each other (im2col/col2im) |
 | Position / attention | `rope` (table and on-the-fly sources, both modes), `groupedAttention` | attention grad matrix: f32 KV = full q/k/v; f16 or q8_0 KV = q-only (caches are constants); `.bias` or multi-stream KV = inference-only (`error.UnsupportedGradient`) |
 
 Intentionally no-grad (result is a constant; grad-requiring operands are

@@ -208,11 +208,11 @@ pub const ExecContext = struct {
     // by the innermost scope (the ag facade adopts it here); the value the
     // caller receives is a borrow — never deinit it, never use it after the
     // scope closes. Tensors created explicitly (variable/constant/fromSlice)
-    // and fetched gradients (grad/gradView) stay caller-owned. This is what
-    // makes training forward passes look like inference code: intermediates
-    // between the parameters and the loss must outlive backward() because
-    // GradStates are single-owner (see docs/TRAINING.md), and the scope holds
-    // them so the user doesn't have to.
+    // and fetched gradients (grad/gradView) stay caller-owned. The graph
+    // itself is reference-counted (a record retains its operands' states,
+    // see ag/core.zig), so a scope is a convenience, not a correctness
+    // requirement: it lets a forward written in the deinit-ASAP idiom run
+    // as a training step without any handle bookkeeping.
     //
     // Scopes nest with strict stack discipline (close in reverse order) and
     // a stack is not thread-safe — open/close/ops on one ctx from one
