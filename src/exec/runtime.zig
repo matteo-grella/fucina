@@ -4,7 +4,11 @@
 //! in `exec.zig`, so `ctx.empty(.f32, ...)` and `exec_runtime.empty(ctx, ...)` are
 //! the same call. The fields these functions operate on are declared on
 //! `ExecContext` itself; domain modules under `src/exec/` reach the same
-//! substrate through the same `*ExecContext`.
+//! substrate through the same `*ExecContext`. The substrate fields (the
+//! conceptual `Runtime` group: allocator pair, worker team, buffer pool,
+//! scope stack, tuning, fp env) are the first banner-marked section of the
+//! `ExecContext` layout; the trailing section is model/session execution
+//! state, which this file does not manage beyond init/deinit.
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");

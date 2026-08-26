@@ -1,6 +1,8 @@
-//! `ExecContext`: the eager execution runtime. One struct carries the
-//! substrate state (allocator, worker team, buffer pool, exec-scope
-//! stack, MoE decode scratch) and every op as a method. Bodies live in
+//! `ExecContext`: the eager execution runtime. One struct carries two
+//! field groups — the runtime substrate (allocator pair, worker team,
+//! buffer pool, exec-scope stack, tuning, fp env; the section banners
+//! below mark it) and the per-model execution state (kernel pinning,
+//! MoE decode scratch) — and every op as a method. Bodies live in
 //! `exec/`: `exec/runtime.zig` holds the lifecycle, scope, pool, and tensor
 //! allocation primitives; `exec/<domain>.zig` holds the ops, each taking
 //! `*ExecContext` first. The struct body below is the alias registry (`pub
@@ -132,6 +134,14 @@ pub const BufferPool = exec_buffer_pool.BufferPool;
 /// `init` sets only what a fresh context must compute (see
 /// exec/runtime.zig).
 pub const ExecContext = struct {
+    // ------------------------------------------------------------------
+    // Runtime substrate (the conceptual `Runtime` group; lifecycle in
+    // exec/runtime.zig): allocation, the worker team, transient buffers,
+    // exec scopes, tuning, and the float environment. Model-independent —
+    // what every op needs to run at all. Zig has no field aliasing, so
+    // the group is a documented layout, not a nested struct: `ctx.<field>`
+    // spellings across the tree stay what they are.
+    // ------------------------------------------------------------------
     thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,
     /// The worker team as published to kernel dispatch (`pc` snapshots it).
@@ -158,6 +168,18 @@ pub const ExecContext = struct {
     /// has installed a recompute frame (`installScopeStack`, the
     /// checkpoint backward) goes to that frame instead.
     scopes: exec_runtime.ScopeStack = .{},
+    /// The IEEE floating-point environment observed when this context was
+    /// created, or null where the target does not expose it. Every numeric
+    /// contract the context goes on to honor (backend parity tolerances,
+    /// thread-count invariance, checkpoint reproducibility) is stated under
+    /// this environment; `checkFloatEnvironment` is how a caller confirms it
+    /// still holds after code outside our control has run on the thread.
+    fp_env_at_init: ?fpenv.Environment = null,
+    // ------------------------------------------------------------------
+    // Model/session execution state: per-context toggles and scratch that
+    // exist for the models running on this context, not for the runtime
+    // itself.
+    // ------------------------------------------------------------------
     /// Open `disableQuantDotGpu` scopes on this context (any thread); the
     /// quantized-RHS facade dot offloads only while zero.
     quant_dot_gpu_disabled: std.atomic.Value(u32) = .init(0),
@@ -174,13 +196,6 @@ pub const ExecContext = struct {
     /// and on streamed MoE the expert-fetch amortization — the part that
     /// pays — is preserved).
     pin_rowwise_kernels: bool = false,
-    /// The IEEE floating-point environment observed when this context was
-    /// created, or null where the target does not expose it. Every numeric
-    /// contract the context goes on to honor (backend parity tolerances,
-    /// thread-count invariance, checkpoint reproducibility) is stated under
-    /// this environment; `checkFloatEnvironment` is how a caller confirms it
-    /// still holds after code outside our control has run on the thread.
-    fp_env_at_init: ?fpenv.Environment = null,
     /// Grow-only MoE-decode scratch (`exec/moe.zig`): carved by the
     /// single-row MoE entries under its own mutex.
     moe_scratch: MoeDecodeScratch = .{},
