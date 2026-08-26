@@ -2,8 +2,7 @@
 //! (prefix/suffix) sums.
 //!
 //! Domain module: every op receives an explicit `*ExecContext`. Reduction math
-//! dispatches to the backend's `sumInto`/`sumSlice(Typed)` kernels. Carries a
-//! local copy of `ensureForwardFloatMath` (precedent: matmul.zig).
+//! dispatches to the backend's `sumInto`/`sumSlice(Typed)` kernels.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -23,12 +22,7 @@ const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
 const contiguousStridesArray = exec_shape.contiguousStridesArray;
 const productAfterAxis = exec_shape.productAfterAxis;
 const productBeforeAxis = exec_shape.productBeforeAxis;
-
-fn ensureForwardFloatMath(comptime dtype: DType) void {
-    if (!dtype_mod.supportsForwardFloatMath(dtype)) {
-        @compileError("forward math is currently supported only for floating dtypes");
-    }
-}
+const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
 
 fn isIntSum(comptime dtype: DType) bool {
     return dtype == .bool or dtype_mod.supportsIntMath(dtype);

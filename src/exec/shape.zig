@@ -1,13 +1,23 @@
 //! Shared shape/stride plumbing for the exec op files: comptime-rank
 //! dispatch (`dispatchRank`), same-shape/broadcast validation, coordinate
-//! and stride helpers over raw tensors. No kernels live here.
+//! and stride helpers over raw tensors, and the comptime dtype-policy
+//! check the forward float ops share. No kernels live here.
 
 const std = @import("std");
+const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
+
+/// Comptime guard of the forward float ops: the dtype must be one the
+/// float kernels serve (`dtype_mod.supportsForwardFloatMath`).
+pub fn ensureForwardFloatMath(comptime dtype: DType) void {
+    if (!dtype_mod.supportsForwardFloatMath(dtype)) {
+        @compileError("forward math is currently supported only for floating dtypes");
+    }
+}
 
 pub fn coordinateForLinear(comptime rank: usize, shape: [rank]usize, strides: [rank]usize, linear: usize, axis: usize) usize {
     return (linear / strides[axis]) % shape[axis];

@@ -813,6 +813,42 @@ pub fn splitGluBackwardRows(task: SplitGluBackwardTask) void {
     }
 }
 
+/// Sum of squares of one contiguous row, the RMS-norm statistic every
+/// rmsNorm row kernel shares: four 8-lane accumulators over the bulk,
+/// combined as `(acc0 + acc1) + (acc2 + acc3)`, one 8-lane loop over the
+/// remainder, a horizontal reduce, then the scalar tail. The order is the
+/// bit contract of the rmsNorm family (goldens pin it); keep it.
+inline fn rowSumSq(row: []const f32) f32 {
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    var i: usize = 0;
+    var acc0: Vec = @splat(0);
+    var acc1: Vec = @splat(0);
+    var acc2: Vec = @splat(0);
+    var acc3: Vec = @splat(0);
+    while (i + 4 * vector_width <= row.len) : (i += 4 * vector_width) {
+        const v0: Vec = row[i..][0..vector_width].*;
+        const v1: Vec = row[i + vector_width ..][0..vector_width].*;
+        const v2: Vec = row[i + 2 * vector_width ..][0..vector_width].*;
+        const v3: Vec = row[i + 3 * vector_width ..][0..vector_width].*;
+        acc0 += v0 * v0;
+        acc1 += v1 * v1;
+        acc2 += v2 * v2;
+        acc3 += v3 * v3;
+    }
+    var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
+    while (i + vector_width <= row.len) : (i += vector_width) {
+        const values: Vec = row[i..][0..vector_width].*;
+        sumsq_vec += values * values;
+    }
+    var sumsq: f32 = @reduce(.Add, sumsq_vec);
+    while (i < row.len) : (i += 1) {
+        const value = row[i];
+        sumsq += value * value;
+    }
+    return sumsq;
+}
+
 pub fn rmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;
@@ -834,31 +870,7 @@ pub fn rmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
             }
         }
 
-        var feature_i: usize = 0;
-        var acc0: Vec = @splat(0);
-        var acc1: Vec = @splat(0);
-        var acc2: Vec = @splat(0);
-        var acc3: Vec = @splat(0);
-        while (feature_i + 4 * vector_width <= task.feature_dim) : (feature_i += 4 * vector_width) {
-            const v0: Vec = task.input[input_base + feature_i ..][0..vector_width].*;
-            const v1: Vec = task.input[input_base + feature_i + vector_width ..][0..vector_width].*;
-            const v2: Vec = task.input[input_base + feature_i + 2 * vector_width ..][0..vector_width].*;
-            const v3: Vec = task.input[input_base + feature_i + 3 * vector_width ..][0..vector_width].*;
-            acc0 += v0 * v0;
-            acc1 += v1 * v1;
-            acc2 += v2 * v2;
-            acc3 += v3 * v3;
-        }
-        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
-        while (feature_i + vector_width <= task.feature_dim) : (feature_i += vector_width) {
-            const values: Vec = task.input[input_base + feature_i ..][0..vector_width].*;
-            sumsq_vec += values * values;
-        }
-        var sumsq: f32 = @reduce(.Add, sumsq_vec);
-        while (feature_i < task.feature_dim) : (feature_i += 1) {
-            const value = task.input[input_base + feature_i];
-            sumsq += value * value;
-        }
+        const sumsq = rowSumSq(task.input[input_base..][0..task.feature_dim]);
         const rms_scale = 1 / @sqrt(sumsq * task.inv_feature_dim + task.eps);
         const scale_vec: Vec = @splat(rms_scale);
 
@@ -888,35 +900,11 @@ pub fn rmsNormMulRows(task: RmsNormMulRowsTask) void {
 
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
-        var axis_i: usize = 0;
-        var acc0: Vec = @splat(0);
-        var acc1: Vec = @splat(0);
-        var acc2: Vec = @splat(0);
-        var acc3: Vec = @splat(0);
-        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
-            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
-            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
-            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
-            acc0 += v0 * v0;
-            acc1 += v1 * v1;
-            acc2 += v2 * v2;
-            acc3 += v3 * v3;
-        }
-        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
-        while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            sumsq_vec += values * values;
-        }
-        var sumsq: f32 = @reduce(.Add, sumsq_vec);
-        while (axis_i < task.axis_dim) : (axis_i += 1) {
-            const value = task.input[base + axis_i];
-            sumsq += value * value;
-        }
+        const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
         const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
         const scale_vec: Vec = @splat(scale_value);
 
-        axis_i = 0;
+        var axis_i: usize = 0;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             const weights: Vec = task.weights[axis_i..][0..vector_width].*;
@@ -934,35 +922,11 @@ pub fn rmsNormMulAddRows(task: RmsNormMulAddRowsTask) void {
 
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
-        var axis_i: usize = 0;
-        var acc0: Vec = @splat(0);
-        var acc1: Vec = @splat(0);
-        var acc2: Vec = @splat(0);
-        var acc3: Vec = @splat(0);
-        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
-            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
-            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
-            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
-            acc0 += v0 * v0;
-            acc1 += v1 * v1;
-            acc2 += v2 * v2;
-            acc3 += v3 * v3;
-        }
-        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
-        while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            sumsq_vec += values * values;
-        }
-        var sumsq: f32 = @reduce(.Add, sumsq_vec);
-        while (axis_i < task.axis_dim) : (axis_i += 1) {
-            const value = task.input[base + axis_i];
-            sumsq += value * value;
-        }
+        const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
         const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
         const scale_vec: Vec = @splat(scale_value);
 
-        axis_i = 0;
+        var axis_i: usize = 0;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
             const weights: Vec = task.weights[axis_i..][0..vector_width].*;
@@ -1039,35 +1003,11 @@ pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void
 
     for (task.row_start..task.row_end) |row_i| {
         const base = row_i * task.axis_dim;
-        var axis_i: usize = 0;
-        var acc0: Vec = @splat(0);
-        var acc1: Vec = @splat(0);
-        var acc2: Vec = @splat(0);
-        var acc3: Vec = @splat(0);
-        while (axis_i + 4 * vector_width <= task.axis_dim) : (axis_i += 4 * vector_width) {
-            const v0: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            const v1: Vec = task.input[base + axis_i + vector_width ..][0..vector_width].*;
-            const v2: Vec = task.input[base + axis_i + 2 * vector_width ..][0..vector_width].*;
-            const v3: Vec = task.input[base + axis_i + 3 * vector_width ..][0..vector_width].*;
-            acc0 += v0 * v0;
-            acc1 += v1 * v1;
-            acc2 += v2 * v2;
-            acc3 += v3 * v3;
-        }
-        var sumsq_vec: Vec = (acc0 + acc1) + (acc2 + acc3);
-        while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            const values: Vec = task.input[base + axis_i ..][0..vector_width].*;
-            sumsq_vec += values * values;
-        }
-        var sumsq: f32 = @reduce(.Add, sumsq_vec);
-        while (axis_i < task.axis_dim) : (axis_i += 1) {
-            const value = task.input[base + axis_i];
-            sumsq += value * value;
-        }
+        const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
 
         const rms_scale = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
         const rms_vec: Vec = @splat(rms_scale);
-        axis_i = 0;
+        var axis_i: usize = 0;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
             const current: Vec = task.output[axis_i..][0..vector_width].*;
             const values: Vec = task.input[base + axis_i ..][0..vector_width].*;

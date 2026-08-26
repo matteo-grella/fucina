@@ -21,6 +21,7 @@ const GatedOp = backend_mod.ops.GatedOp;
 const UnaryOp = backend_mod.ops.UnaryOp;
 
 const dispatchRank = exec_shape.dispatchRank;
+const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
 const requireSameRankShape = exec_shape.requireSameRankShape;
 const requireSameRankShapeOf = exec_shape.requireSameRankShapeOf;
 const shapeArrayFromSlice = exec_shape.shapeArrayFromSlice;
@@ -1856,12 +1857,6 @@ fn backendElementwiseContiguousUnchecked(
 }
 
 const small_in_place_elementwise_len = 2048;
-
-fn ensureForwardFloatMath(comptime dtype: DType) void {
-    if (!dtype_mod.supportsForwardFloatMath(dtype)) {
-        @compileError("forward math is currently supported only for floating dtypes");
-    }
-}
 
 fn takeTensor(target: *Tensor) Tensor {
     const out = target.*;

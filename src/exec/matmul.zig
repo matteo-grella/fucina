@@ -15,6 +15,8 @@ const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
 const exec_convert = @import("convert.zig");
+const exec_shape = @import("shape.zig");
+const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
@@ -800,11 +802,5 @@ fn runBmmChunkTask(task: *BmmChunkTask) void {
             task.start,
             task.count,
         );
-    }
-}
-
-fn ensureForwardFloatMath(comptime dtype: DType) void {
-    if (!dtype_mod.supportsForwardFloatMath(dtype)) {
-        @compileError("forward math is currently supported only for floating dtypes");
     }
 }

@@ -11,18 +11,14 @@ const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
+const exec_shape = @import("shape.zig");
+const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
 
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const q8_0_block_size = dtype_mod.q8_0_block_size;
-
-fn ensureForwardFloatMath(comptime dtype: DType) void {
-    if (!dtype_mod.supportsForwardFloatMath(dtype)) {
-        @compileError("forward math is currently supported only for floating dtypes");
-    }
-}
 
 pub fn cast(
     ctx: *ExecContext,
