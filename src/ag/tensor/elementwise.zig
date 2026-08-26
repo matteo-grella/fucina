@@ -55,6 +55,11 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const pointwise = plumbing.pointwise;
         const gatedPointwise = plumbing.gatedPointwise;
         const finishOp = plumbing.finishOp;
@@ -70,23 +75,6 @@ pub fn Ops(comptime Self: type) type {
 
         fn Out(comptime result_tags: anytype) type {
             return Tensor(.{ .dtype = dtype, .tags = result_tags });
-        }
-
-        /// Shared tail of the dtype-generic ops here (the `views.zig`
-        /// contract): f32 builds the VJP record, a typed result is a
-        /// caller-owned constant and a grad-requiring operand is rejected.
-        /// Consumes `value` on success; on error it stays with the caller.
-        fn finish(
-            comptime result_tags: anytype,
-            ctx: *ExecContext,
-            value: RawT,
-            wants_grad: bool,
-            comptime Backward: type,
-            create_args: anytype,
-        ) !Out(result_tags) {
-            if (comptime differentiable) return finishOp(result_tags, ctx, value, wants_grad, Backward, create_args);
-            if (wants_grad) return error.UnsupportedGradient;
-            return Out(result_tags).fromTensor(ctx, value);
         }
 
         /// In-place: add the `[axis_dim]` `bias` to every row of `self` along the
@@ -118,7 +106,9 @@ pub fn Ops(comptime Self: type) type {
             var value = try self.value.clone(ctx.allocator);
             errdefer value.deinit();
             try ctx.addAxisVectorInPlace(tensor_rank, null, &value, bias, comptime Self.axis(axis_tag));
-            return finishOp(tags, ctx, value, self.requiresGrad(), IdentityBackward(tags), .{ ctx.allocator, self.grad_state });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = IdentityBackward(tags);
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
         /// `cond ? self : other` elementwise (`cond[i] != 0` selects `self`).
@@ -135,7 +125,12 @@ pub fn Ops(comptime Self: type) type {
             }
             var value = try ctx.where(dtype, Cond.dtype, self.asRawTensor(), cond.asRawTensor(), other.asRawTensor());
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad() or other.requiresGrad(), WhereBackward(tags, Cond.dtype), .{ ctx.allocator, self.grad_state, other.grad_state, cond.asRawTensor() });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad() or other.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or other.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = WhereBackward(tags, Cond.dtype);
+            var saved_cond = try cond.asRawTensor().cloneView();
+            errdefer saved_cond.deinit();
+            return finishOp(tags, ctx, value, Record{ .parents = .{ self.grad_state, other.grad_state }, .cond = saved_cond });
         }
 
         /// `mask ? value : self` elementwise. `mask` is a same-tagged
@@ -150,7 +145,12 @@ pub fn Ops(comptime Self: type) type {
             }
             var v = try ctx.maskedFill(dtype, Mask.dtype, self.asRawTensor(), mask.asRawTensor(), value);
             errdefer v.deinit();
-            return finish(tags, ctx, v, self.requiresGrad(), MaskedFillBackward(tags, Mask.dtype), .{ ctx.allocator, self.grad_state, mask.asRawTensor() });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, v, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, v);
+            const Record = MaskedFillBackward(tags, Mask.dtype);
+            var saved_mask = try mask.asRawTensor().cloneView();
+            errdefer saved_mask.deinit();
+            return finishOp(tags, ctx, v, Record{ .parents = .{self.grad_state}, .mask = saved_mask });
         }
 
         /// Elementwise comparison: a same-tagged `.bool` mask (torch's
@@ -257,7 +257,17 @@ pub fn Ops(comptime Self: type) type {
             const any_grad = self.requiresGrad() or alpha_ptr.requiresGrad();
             var value = try ctx.preluChannels(self.asRawTensor(), alpha_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, any_grad, PreluChannelsBackward, .{ ctx.allocator, self.grad_state, alpha_ptr.grad_state, self.asRawTensor(), alpha_ptr.asRawTensor() });
+            if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_alpha = try alpha_ptr.asRawTensor().cloneView();
+            errdefer saved_alpha.deinit();
+            return finishOp(tags, ctx, value, PreluChannelsBackward{
+                .parents = .{ self.grad_state, alpha_ptr.grad_state },
+                .channels = alpha_ptr.asRawTensor().len(),
+                .input_value = saved_input,
+                .alpha_value = saved_alpha,
+            });
         }
 
         /// Per-channel affine `y = x·scale[c] + shift[c]` (rank-1 `[C]` params,
@@ -269,7 +279,17 @@ pub fn Ops(comptime Self: type) type {
             const any_grad = self.requiresGrad() or scale_ptr.requiresGrad() or shift_ptr.requiresGrad();
             var value = try ctx.channelAffine(self.asRawTensor(), scale_ptr.asRawTensor(), shift_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, any_grad, ChannelAffineBackward, .{ ctx.allocator, self.grad_state, scale_ptr.grad_state, shift_ptr.grad_state, self.asRawTensor(), scale_ptr.asRawTensor() });
+            if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_scale = try scale_ptr.asRawTensor().cloneView();
+            errdefer saved_scale.deinit();
+            return finishOp(tags, ctx, value, ChannelAffineBackward{
+                .parents = .{ self.grad_state, scale_ptr.grad_state, shift_ptr.grad_state },
+                .channels = scale_ptr.asRawTensor().len(),
+                .input_value = saved_input,
+                .scale_value = saved_scale,
+            });
         }
 
         pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
@@ -279,13 +299,17 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.cast(.f32, target_dtype, self.asRawTensor());
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
-                return finishOp(tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = CastBackward(tags);
+                return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
             }
             if (comptime (target_dtype == .f16 or target_dtype == .bf16)) {
                 // Differentiable narrow (the mixed-precision seam): the
                 // backward is the identity in f32 gradient space — the
                 // upstream f32 gradient passes through unrounded.
-                return typedFinishOp(target_dtype, tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
+                if (!recordsGrad(self.requiresGrad())) return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
+                const Record = CastBackward(tags);
+                return typedFinishOp(target_dtype, tags, ctx, value, Record{ .parents = .{self.grad_state} });
             }
             return Tensor(.{ .dtype = target_dtype, .tags = tags }).fromTensor(ctx, value);
         }
@@ -311,7 +335,10 @@ pub fn Ops(comptime Self: type) type {
         pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
             var value = try ctx.scale(dtype, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = ScaleBackward(tags);
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .scalar_value = scalar_value });
         }
 
         /// Consume `self` and return `self + other`, reusing `self`'s storage
@@ -343,7 +370,10 @@ pub fn Ops(comptime Self: type) type {
         pub fn addScalar(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
             var value = try ctx.addScalar(dtype, self.asRawTensor(), scalar_value);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), AddScalarBackward(tags), .{ ctx.allocator, self.grad_state });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = AddScalarBackward(tags);
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
         /// `self - scalar_value` (= `addScalar(-scalar_value)`).
@@ -361,7 +391,16 @@ pub fn Ops(comptime Self: type) type {
         pub fn powScalar(self: *const Self, ctx: *ExecContext, exponent: f32) !Self {
             var value = try ctx.powScalar(dtype, self.asRawTensor(), exponent);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), PowScalarBackward(tags), .{ ctx.allocator, self.grad_state, self.asRawTensor(), exponent });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = PowScalarBackward(tags);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .exponent = exponent,
+            });
         }
 
         /// `log(1 + self)` (elementwise). Differentiable: `d/dx = 1/(1+x)`.
@@ -385,7 +424,13 @@ pub fn Ops(comptime Self: type) type {
             if (p == 0) return self.withTags(ctx, tags);
             var value = try ctx.dropoutForward(self.asRawTensor(), p, seed);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), DropoutBackward(tags), .{ ctx.allocator, self.grad_state, p, seed });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = DropoutBackward(tags);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .p = p,
+                .seed = seed,
+            });
         }
 
         /// Per-channel Snake activation (the DAC codec op):
@@ -411,7 +456,20 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.snakeRows(self.asRawTensor(), alpha.asRawTensor(), inv_b.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or alpha.requiresGrad() or inv_b.requiresGrad(), SnakeBackward(tags), .{ ctx.allocator, self.grad_state, alpha.grad_state, inv_b.grad_state, self.asRawTensor(), alpha.asRawTensor(), inv_b.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or alpha.requiresGrad() or inv_b.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = SnakeBackward(tags);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_alpha = try alpha.asRawTensor().cloneView();
+            errdefer saved_alpha.deinit();
+            var saved_inv_b = try inv_b.asRawTensor().cloneView();
+            errdefer saved_inv_b.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, alpha.grad_state, inv_b.grad_state },
+                .input_value = saved_input,
+                .alpha_value = saved_alpha,
+                .inv_b_value = saved_inv_b,
+            });
         }
 
         pub fn gated(
@@ -481,7 +539,11 @@ pub fn Ops(comptime Self: type) type {
             };
             var value = try ctx.splitGated(dtype, tag_rank, op, self.asRawTensor(), split_axis);
             errdefer value.deinit();
-            return finish(result_tags, ctx, value, self.requiresGrad(), Backward, .{ ctx.allocator, self.grad_state, self.asRawTensor() });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(result_tags, ctx, value, Backward{ .parents = .{self.grad_state}, .input = saved_input });
         }
 
         pub fn unary(self: *const Self, ctx: *ExecContext, comptime op: UnaryOp) !Self {
@@ -571,13 +633,25 @@ pub fn Ops(comptime Self: type) type {
         pub fn relu(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.unary(dtype, .relu, self.asRawTensor());
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), ReluBackward, .{ ctx.allocator, self.grad_state, &self.value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, ReluBackward{ .parents = .{self.grad_state}, .input = saved_input });
         }
 
         pub fn leakyRelu(self: *const Self, ctx: *ExecContext, negative_slope: f32) !Self {
             var value = try ctx.leakyRelu(dtype, self.asRawTensor(), negative_slope);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), LeakyReluBackward, .{ ctx.allocator, self.grad_state, &self.value, negative_slope });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, LeakyReluBackward{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .negative_slope = negative_slope,
+            });
         }
 
         // Differentiable unary family: one decl alias per op, generated from
@@ -640,13 +714,30 @@ pub fn Ops(comptime Self: type) type {
         pub fn softcap(self: *const Self, ctx: *ExecContext, cap: f32) !Self {
             var value = try ctx.softcap(dtype, self.asRawTensor(), cap);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), SoftcapBackward, .{ ctx.allocator, self.grad_state, &value, cap });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            var saved_output = try (&value).cloneView();
+            errdefer saved_output.deinit();
+            return finishOp(tags, ctx, value, SoftcapBackward{
+                .parents = .{self.grad_state},
+                .output = saved_output,
+                .cap = cap,
+            });
         }
 
         pub fn clamp(self: *const Self, ctx: *ExecContext, min_value: f32, max_value: f32) !Self {
             var value = try ctx.clamp(dtype, self.asRawTensor(), min_value, max_value);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), ClampBackward, .{ ctx.allocator, self.grad_state, &self.value, min_value, max_value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, ClampBackward{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .min_value = min_value,
+                .max_value = max_value,
+            });
         }
 
         /// One-sided clamp (torch's `clamp_min`): `max(x, min_value)`.
@@ -668,7 +759,12 @@ pub fn Ops(comptime Self: type) type {
             // OUTPUT view: their VJP is transcendental-free in t (tanh' = 1-t²)
             // and exact for the value the SIMD forward actually produced.
             const saved: *const RawT = if (comptime unaryUsesOutput(op)) &value else &self.value;
-            return finish(tags, ctx, value, self.requiresGrad(), UnaryBackward(op, tags), .{ ctx.allocator, self.grad_state, saved });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = UnaryBackward(op, tags);
+            var saved_input = try saved.cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .input = saved_input });
         }
     };
 }

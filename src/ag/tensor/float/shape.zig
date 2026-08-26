@@ -33,12 +33,17 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const padding2dValues = plumbing.padding2dValues;
 
@@ -124,7 +129,9 @@ pub fn Ops(comptime Self: type) type {
             new_strides[tensor_rank - 2] = raw.strides.at(axis_a) + raw.strides.at(axis_b);
             var value = try self.value.viewWithStridesOffset(&new_shape, &new_strides, 0);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value, &value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = StridedViewBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record.of(self.grad_state, &self.value, &value));
         }
 
         /// Sum of the main diagonal over the (`tag_a`, `tag_b`) plane
@@ -230,7 +237,14 @@ pub fn Ops(comptime Self: type) type {
             const pad_axis = comptime axis(tag);
             var value = try ctx.pad(dtype, tag_rank, self.asRawTensor(), pad_axis, before, after, fill);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), PadBackward(tags, pad_axis), .{ ctx.allocator, self.grad_state, &self.value, before });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = PadBackward(tags, pad_axis);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .source_shape = rawShapeArray(tags, (&self.value)),
+                .before = before,
+            });
         }
 
         /// Zero-pad the two named axes: `constantPad2d` with fill 0.

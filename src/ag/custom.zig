@@ -81,7 +81,12 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
     errdefer if (!node_owns_output) output_view.deinit();
 
     if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-    const state = try core.createNode(CustomBackward(Spec, @TypeOf(extra), Inputs), .{ ctx.allocator, extra, views, output_view, states });
+    const state = try core.createNode(ctx.allocator, CustomBackward(Spec, @TypeOf(extra), Inputs){
+        .extra = extra,
+        .views = views,
+        .output = output_view,
+        .states = states,
+    });
     node_owns_views = true;
     node_owns_output = true;
     var out = try finishWithBackward(Spec.Output, value, state);
@@ -103,18 +108,6 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
         states: [n]?*GradState,
 
         const Self = @This();
-
-        /// Consumes `views` and `output` on success; on error (the node
-        /// allocation in `core.createNode`) they stay with the caller.
-        pub fn init(self: *Self, allocator: Allocator, extra: Extra, views: [n]RawTensor, output: RawTensor, states: [n]?*GradState) !void {
-            _ = allocator;
-            self.* = .{
-                .extra = extra,
-                .views = views,
-                .output = output,
-                .states = states,
-            };
-        }
 
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));

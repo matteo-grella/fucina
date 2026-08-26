@@ -46,6 +46,9 @@ const GatedBackward = backward_elementwise.GatedBackward;
 pub fn Mod(comptime ag_tensor: type) type {
     return struct {
         const Tensor = ag_tensor.Tensor;
+        pub const rawShapeArray = backward_common.rawShapeArray;
+        pub const rawShapeArrayOf = backward_common.rawShapeArrayOf;
+        pub const cloneInverseRopeTable = backward_common.cloneInverseRopeTable;
 
         /// The result of a binary op between `Left` and `Right`: the tag
         /// broadcast rule over the left operand's dtype (the operands must
@@ -60,35 +63,27 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// The dtype-generic tail of a binary op: f32 builds the VJP
         /// record; a typed result is a caller-owned constant and a
         /// grad-requiring operand is rejected.
-        /// The tail of a dtype-generic op: on the differentiable (f32) branch
-        /// the VJP record is built; elsewhere the result is a caller-owned
-        /// constant and a grad-requiring operand is rejected. Consumes `value`
-        /// on success; on error it stays with the caller.
-        pub fn finishOrConstant(
-            comptime differentiable: bool,
-            comptime out_dtype: DType,
-            comptime result_tags: anytype,
-            ctx: *ExecContext,
-            value: tensor_mod.TensorOf(out_dtype),
-            wants_grad: bool,
-            comptime Backward: type,
-            create_args: anytype,
-        ) !Tensor(.{ .dtype = out_dtype, .tags = result_tags }) {
-            if (comptime differentiable) return finishOp(result_tags, ctx, value, wants_grad, Backward, create_args);
+        /// True when this op must record a backward node: an operand wants
+        /// gradients and grad mode is on. Every op tail checks it BEFORE
+        /// taking the views its record would save, so the no-grad path
+        /// (inference) clones nothing.
+        pub fn recordsGrad(wants_grad: bool) bool {
+            return wants_grad and control.isGradEnabled();
+        }
+
+        /// The typed-branch tail of a dtype-generic op: a grad-requiring
+        /// operand is rejected (the typed branches never record), otherwise
+        /// the value is a no-grad constant. Consumes `value` on success; on
+        /// error it stays with the caller.
+        pub fn finishTypedNoGrad(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype), wants_grad: bool) !OutT {
             if (wants_grad) return error.UnsupportedGradient;
-            return Tensor(.{ .dtype = out_dtype, .tags = result_tags }).fromTensor(ctx, value);
+            return OutT.fromTensor(ctx, value);
         }
 
         /// The operand's gradient state, null on the branches without one.
         fn gradStateOf(t: anytype) ?*GradState {
             if (comptime @hasField(@TypeOf(t.*), "grad_state")) return t.grad_state;
             return null;
-        }
-
-        fn finishBinary(comptime OutT: type, ctx: *ExecContext, value: anytype, wants_grad: bool, comptime Backward: type, create_args: anytype) !OutT {
-            if (comptime OutT.dtype == .f32) return finishOp(OutT.axis_tags, ctx, value, wants_grad, Backward, create_args);
-            if (wants_grad) return error.UnsupportedGradient;
-            return OutT.fromTensor(ctx, value);
         }
 
         pub fn pointwise(comptime op: PointwiseOp, self: anytype, ctx: *ExecContext, other: anytype) !BinaryOut(@TypeOf(self), @TypeOf(other)) {
@@ -117,13 +112,39 @@ pub fn Mod(comptime ag_tensor: type) type {
                         .min => try ctx.min(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
                     };
                     errdefer value.deinit();
-                    return finishBinary(OutT, ctx, value, wants_grad, PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor });
+                    if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
+                    if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
+                    const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
+                    var saved_left: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try left_tensor.cloneView() else null;
+                    errdefer if (saved_left) |*v| v.deinit();
+                    var saved_right: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try right_tensor.cloneView() else null;
+                    errdefer if (saved_right) |*v| v.deinit();
+                    return finishOp(OutT.axis_tags, ctx, value, Record{
+                        .parents = .{ gradStateOf(left), gradStateOf(right) },
+                        .left_shape = rawShapeArray(left_tags, left_tensor),
+                        .right_shape = rawShapeArray(right_tags, right_tensor),
+                        .left_value = saved_left,
+                        .right_value = saved_right,
+                    });
                 }
             }
 
             var value = try tag_ops.pointwise(dtype, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
             errdefer value.deinit();
-            return finishBinary(OutT, ctx, value, wants_grad, PointwiseBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor });
+            if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
+            if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
+            const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
+            var saved_left: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try left_tensor.cloneView() else null;
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try right_tensor.cloneView() else null;
+            errdefer if (saved_right) |*v| v.deinit();
+            return finishOp(OutT.axis_tags, ctx, value, Record{
+                .parents = .{ gradStateOf(left), gradStateOf(right) },
+                .left_shape = rawShapeArray(left_tags, left_tensor),
+                .right_shape = rawShapeArray(right_tags, right_tensor),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
         }
 
         pub fn gatedPointwise(comptime op: GatedOp, self: anytype, ctx: *ExecContext, other: anytype) !BinaryOut(@TypeOf(self), @TypeOf(other)) {
@@ -145,13 +166,41 @@ pub fn Mod(comptime ag_tensor: type) type {
                 if (std.mem.eql(usize, left_tensor.shape.slice(), right_tensor.shape.slice())) {
                     var value = try ctx.gated(dtype, rawRank(result_tags.len), op, left_tensor, right_tensor);
                     errdefer value.deinit();
-                    return finishBinary(OutT, ctx, value, wants_grad, GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor, &value });
+                    if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
+                    if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
+                    const Record = GatedBackward(op, left_tags, right_tags, result_tags);
+                    var saved_left = try left_tensor.cloneView();
+                    errdefer saved_left.deinit();
+                    var saved_right = try right_tensor.cloneView();
+                    errdefer saved_right.deinit();
+                    return finishOp(OutT.axis_tags, ctx, value, Record{
+                        .parents = .{ gradStateOf(left), gradStateOf(right) },
+                        .left_shape = rawShapeArray(left_tags, left_tensor),
+                        .right_shape = rawShapeArray(right_tags, right_tensor),
+                        .result_shape = rawShapeArray(result_tags, (&value)),
+                        .left_value = saved_left,
+                        .right_value = saved_right,
+                    });
                 }
             }
 
             var value = try tag_ops.gatedPointwise(dtype, op, left_tags, left_tensor, ctx, right_tags, right_tensor);
             errdefer value.deinit();
-            return finishBinary(OutT, ctx, value, wants_grad, GatedBackward(op, left_tags, right_tags, result_tags), .{ ctx.allocator, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor, &value });
+            if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
+            if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
+            const Record = GatedBackward(op, left_tags, right_tags, result_tags);
+            var saved_left = try left_tensor.cloneView();
+            errdefer saved_left.deinit();
+            var saved_right = try right_tensor.cloneView();
+            errdefer saved_right.deinit();
+            return finishOp(OutT.axis_tags, ctx, value, Record{
+                .parents = .{ gradStateOf(left), gradStateOf(right) },
+                .left_shape = rawShapeArray(left_tags, left_tensor),
+                .right_shape = rawShapeArray(right_tags, right_tensor),
+                .result_shape = rawShapeArray(result_tags, (&value)),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
         }
 
         /// Per-position {max, sum_exp} buffer for the stats-saving forwards
@@ -160,33 +209,33 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// conditions in sync), so the node always receives real statistics. The
         /// caller frees it; the node dupes.
         pub fn rowStatsAlloc(ctx: *ExecContext, wants_grad: bool, position_count: usize) !?[]f32 {
-            if (!wants_grad or !control.isGradEnabled()) return null;
+            if (!recordsGrad(wants_grad)) return null;
             return try ctx.allocator.alloc(f32, 2 * position_count);
         }
 
-        /// Shared tail of every differentiable op: wrap `value` as a no-grad tensor
-        /// when no operand needs gradients, otherwise attach the backward node built
-        /// by `core.createNode(BackwardType, create_args)` — one allocation holding
-        /// the GradState header and the typed record. On error, ownership of `value`
-        /// stays with the caller (same contract as `fromTensor` and
-        /// `finishWithBackward`).
+        /// Shared tail of every differentiable op once `recordsGrad` said yes:
+        /// attach the backward node built from `record` (a typed struct literal
+        /// the op filled, saved views included) through `core.createNode`, one
+        /// allocation holding the GradState header and the record. Every
+        /// fallible step precedes the node allocation, and the allocation is
+        /// the last one, so on error the record's resources and `value` stay
+        /// with the caller (its errdefers), never double-released.
         ///
-        /// While an exec scope is open on `ctx` (ExecContext.openExecScope), the result
-        /// is adopted by the scope and the caller receives a borrow. The scope slot
-        /// is reserved BEFORE construction so adoption itself cannot fail after the
-        /// value has been consumed.
+        /// While an exec scope is open on `ctx` (ExecContext.openExecScope), the
+        /// result is adopted by the scope and the caller receives a borrow. The
+        /// scope slot is reserved BEFORE the node exists so adoption cannot fail
+        /// after the value has been consumed.
         pub fn finishOp(
             comptime result_tags: anytype,
             ctx: *ExecContext,
             value: RawTensor,
-            wants_grad: bool,
-            comptime BackwardType: type,
-            create_args: anytype,
+            record: anytype,
         ) !Tensor(result_tags) {
-            if (!wants_grad or !control.isGradEnabled()) return finishNoGrad(result_tags, ctx, value);
+            var owned_value = value;
+            try validateTensorRank(.f32, normalizeTags(result_tags), &owned_value);
             if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-            const state = try core.createNode(BackwardType, create_args);
-            var out = try finishWithBackward(result_tags, value, state);
+            const state = try core.createNode(ctx.allocator, record);
+            var out = Tensor(result_tags){ .value = owned_value, .grad_state = state };
             if (ctx.execScopeActive()) {
                 adoptIntoScope(ctx, &out);
                 out.scope_owned = true;
@@ -297,31 +346,26 @@ pub fn Mod(comptime ag_tensor: type) type {
         }
 
         /// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the
-        /// f32 -> f16/bf16 cast). Same contract as `finishOp`: consumes `value` on
-        /// success; under an active exec scope the result is a scope-owned borrow.
+        /// f32 -> f16/bf16 cast), once `recordsGrad` said yes. Same contract as
+        /// `finishOp`: consumes `value` on success; under an active exec scope
+        /// the result is a scope-owned borrow.
         pub fn typedFinishOp(
             comptime tensor_dtype: DType,
             comptime result_tags: anytype,
             ctx: *ExecContext,
             value: tensor_mod.TensorOf(tensor_dtype),
-            wants_grad: bool,
-            comptime BackwardType: type,
-            create_args: anytype,
+            record: anytype,
         ) !Tensor(.{ .dtype = tensor_dtype, .tags = result_tags }) {
-            const OutT = Tensor(.{ .dtype = tensor_dtype, .tags = result_tags });
-            if (!wants_grad or !control.isGradEnabled()) {
-                return OutT.fromTensor(ctx, value);
-            }
             if (ctx.execScopeActive()) {
                 try ctx.reserveScopeSlot();
                 const payload = try ctx.allocator.create(TypedScopePayload(tensor_dtype));
                 errdefer ctx.allocator.destroy(payload);
-                const state = try core.createNode(BackwardType, create_args);
+                const state = try core.createNode(ctx.allocator, record);
                 payload.* = .{ .allocator = ctx.allocator, .value = value, .state = state };
                 ctx.adoptScopeNodeAssumeCapacity(payload, TypedScopePayload(tensor_dtype).destroy);
                 return .{ .value = value, .grad_state = state, .scope_owned = true };
             }
-            const state = try core.createNode(BackwardType, create_args);
+            const state = try core.createNode(ctx.allocator, record);
             return .{ .value = value, .grad_state = state };
         }
 
@@ -348,17 +392,6 @@ pub fn Mod(comptime ag_tensor: type) type {
         pub fn destroyGradStateOpaque(ptr: *anyopaque) void {
             const state: *GradState = @ptrCast(@alignCast(ptr));
             state.release();
-        }
-
-        /// Consumes `value` and `state` on success. On error, ownership of `value`
-        /// stays with the caller (every call site holds an `errdefer value.deinit()`),
-        /// while `state`, a co-allocated node the caller cannot reach, is released
-        /// here.
-        pub fn finishWithBackward(comptime tags: anytype, value: RawTensor, state: *GradState) !Tensor(tags) {
-            errdefer state.release();
-            var owned_value = value;
-            try validateTensorRank(.f32, normalizeTags(tags), &owned_value);
-            return .{ .value = owned_value, .grad_state = state };
         }
 
         pub fn axisViewTensor(source: *const RawTensor, comptime axes: anytype, comptime target_tags: anytype) !RawTensor {

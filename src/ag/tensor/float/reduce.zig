@@ -42,12 +42,17 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
@@ -101,7 +106,9 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = removeTag(tags, tag);
             var value = try ctx.sumAxis(.f32, tag_rank, self.asRawTensor(), axis(tag));
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), SumBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = SumBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record{ .parents = .{self.grad_state}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
 
         fn meanUnmasked(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(removeTag(tags, tag)) {
@@ -109,7 +116,9 @@ pub fn Ops(comptime Self: type) type {
             const reduce_axis = comptime axis(tag);
             var value = try ctx.meanAxis(.f32, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), MeanBackward(tags, result_tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = MeanBackward(tags, result_tags, reduce_axis);
+            return finishOp(result_tags, ctx, value, Record{ .parents = .{self.grad_state}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
 
         /// Sum over `tag` (torch.sum); with a mask, restricted to the
@@ -142,7 +151,15 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = removeTag(tags, tag);
             var value = try ctx.sumMasked(Mask.dtype, tag_rank, self.asRawTensor(), opts.mask.asRawTensor(), axis(tag), maskedReduceEmpty(opts));
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), MaskedSumBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = MaskedSumBackward(tags, result_tags, Mask.dtype);
+            var saved_mask = try opts.mask.asRawTensor().cloneView();
+            errdefer saved_mask.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .source_shape = rawShapeArray(tags, (&self.value)),
+                .mask = saved_mask,
+            });
         }
 
         /// Mean over `tag` (torch.mean); with a mask, the masked sum divided
@@ -168,7 +185,19 @@ pub fn Ops(comptime Self: type) type {
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();
             defer raw.counts.deinit();
-            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMeanBackward(tags, result_tags, Mask.dtype), .{ ctx.allocator, self.grad_state, &self.value, opts.mask.asRawTensor(), &raw.counts });
+            const out = if (!recordsGrad(self.requiresGrad())) try finishNoGrad(result_tags, ctx, raw_values.?) else blk: {
+                const Record = MaskedMeanBackward(tags, result_tags, Mask.dtype);
+                var saved_mask = try opts.mask.asRawTensor().cloneView();
+                errdefer saved_mask.deinit();
+                var saved_counts = try raw.counts.cloneView();
+                errdefer saved_counts.deinit();
+                break :blk try finishOp(result_tags, ctx, raw_values.?, Record{
+                    .parents = .{self.grad_state},
+                    .source_shape = rawShapeArray(tags, &self.value),
+                    .mask = saved_mask,
+                    .counts = saved_counts,
+                });
+            };
             raw_values = null;
             return out;
         }
@@ -182,7 +211,10 @@ pub fn Ops(comptime Self: type) type {
             const scan_axis = comptime axis(tag);
             var value = try ctx.cumsum(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), CumsumBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = CumsumBackward(tags, scan_axis);
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
         /// Segmented sum along `tag`: contiguous index ranges
@@ -199,7 +231,15 @@ pub fn Ops(comptime Self: type) type {
             const n = self.dim(tag);
             var value = try ctx.segmentSum(tag_rank, self.asRawTensor(), seg_axis, offsets);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), SegmentSumBackward(tags, seg_axis), .{ ctx.allocator, self.grad_state, offsets, n });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = SegmentSumBackward(tags, seg_axis);
+            const owned_offsets = try ctx.allocator.dupe(usize, offsets);
+            errdefer ctx.allocator.free(owned_offsets);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .offsets = owned_offsets,
+                .n = n,
+            });
         }
 
         /// First-order linear recurrence along `time_tag` — the
@@ -274,7 +314,21 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.linearRecurrence(tag_rank, self.asRawTensor(), &a_view, time_axis, initial_raw);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, any_grad, LinearRecurrenceBackward(tags, Decay.axis_tags, time_axis), .{ ctx.allocator, self.grad_state, decay_ptr.grad_state, initial_grad, &a_view, &value, initial_raw, decay_ptr.asRawTensor() });
+            if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
+            const Record = LinearRecurrenceBackward(tags, Decay.axis_tags, time_axis);
+            var saved_a_view = try (&a_view).cloneView();
+            errdefer saved_a_view.deinit();
+            var saved_h = try (&value).cloneView();
+            errdefer saved_h.deinit();
+            var saved_initial: ?RawTensor = if (initial_raw) |p| try p.cloneView() else null;
+            errdefer if (saved_initial) |*v| v.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, decay_ptr.grad_state, initial_grad },
+                .a_view = saved_a_view,
+                .h_value = saved_h,
+                .initial_value = saved_initial,
+                .decay_shape = rawShapeArray(Decay.axis_tags, decay_ptr.asRawTensor()),
+            });
         }
 
         /// Product along `tag` (torch.prod over a dim), the tag removed.
@@ -287,7 +341,12 @@ pub fn Ops(comptime Self: type) type {
             const reduce_axis = comptime axis(tag);
             var value = try ctx.prod(dtype, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), ProdBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = reduced_dtype, .tags = result_tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = ProdBackward(tags, reduce_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(result_tags, ctx, value, Record{ .parents = .{self.grad_state}, .input = saved_input });
         }
 
         /// Inclusive running product along `tag` (torch.cumprod),
@@ -299,13 +358,26 @@ pub fn Ops(comptime Self: type) type {
             const scan_axis = comptime axis(tag);
             var value = try ctx.cumprod(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), CumprodBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = CumprodBackward(tags, scan_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            var saved_output = try (&value).cloneView();
+            errdefer saved_output.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .output = saved_output,
+            });
         }
 
         pub fn sumAll(self: *const Self, ctx: *ExecContext) !Tensor(.{}) {
             var value = try ctx.sum(.f32, self.asRawTensor());
             errdefer value.deinit();
-            return finishOp(.{}, ctx, value, self.requiresGrad(), SumBackward(tags, .{}), .{ ctx.allocator, self.grad_state, &self.value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(.{}, ctx, value);
+            const Record = SumBackward(tags, .{});
+            return finishOp(.{}, ctx, value, Record{ .parents = .{self.grad_state}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
 
         pub fn sumMany(self: *const Self, ctx: *ExecContext, comptime reduce_tags_spec: anytype) !Tensor(removeTags(tags, normalizeTags(reduce_tags_spec))) {
@@ -313,7 +385,9 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = removeTags(tags, reduce_tags);
             var value = try tag_ops.sumManyTensor(tags, self.asRawTensor(), ctx, reduce_tags);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), SumBackward(tags, result_tags), .{ ctx.allocator, self.grad_state, &self.value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = SumBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record{ .parents = .{self.grad_state}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
     };
 }

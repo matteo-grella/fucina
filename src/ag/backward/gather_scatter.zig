@@ -28,11 +28,6 @@ pub const RelposShiftBackward = struct {
     parents: [1]?*GradState,
     p: usize,
 
-    pub fn init(self: *RelposShiftBackward, allocator: std.mem.Allocator, parent: ?*GradState, p: usize) !void {
-        _ = allocator;
-        self.* = .{ .parents = .{parent}, .p = p };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -74,21 +69,6 @@ pub fn GatherBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            indices: []const usize,
-        ) !void {
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .estimated_work = if (parent != null) source.len() else 0,
-                .indices = try allocator.dupe(usize, indices),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.scatterAdd(rawRank(source_tags.len), gy, self.source_shape, axis, self.indices);
@@ -109,15 +89,6 @@ pub fn SetSliceBackward(comptime tags: anytype, comptime axis: usize) type {
         start: usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, base_parent: ?*GradState, update_parent: ?*GradState, update: *const RawTensor, start: usize) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ base_parent, update_parent },
-                .update_shape = rawShapeArray(tags, update),
-                .start = start,
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
@@ -140,13 +111,6 @@ pub fn SetRowsBackward(comptime tags: anytype, comptime axis: usize) type {
         indices: []usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, base_parent: ?*GradState, update_parent: ?*GradState, indices: []const usize) !void {
-            self.* = .{
-                .parents = .{ base_parent, update_parent },
-                .indices = try allocator.dupe(usize, indices),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
@@ -174,14 +138,6 @@ pub fn TakeAlongBackward(comptime tags: anytype, comptime axis: usize) type {
         const Self = @This();
         const rank = rawRank(tags.len);
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor, indices: []const usize) !void {
-            self.* = .{
-                .parents = .{parent},
-                .indices = try allocator.dupe(usize, indices),
-                .source_shape = rawShapeArray(tags, source),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // Adjoint of the elementwise gather: scatter-add gy into zeros.
@@ -206,14 +162,6 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
 
         const Self = @This();
         const rank = rawRank(tags.len);
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, base_parent: ?*GradState, src_parent: ?*GradState, indices: []const usize, src_axis_len: usize) !void {
-            self.* = .{
-                .parents = .{ base_parent, src_parent },
-                .indices = try allocator.dupe(usize, indices),
-                .src_axis_len = src_axis_len,
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
@@ -265,13 +213,6 @@ pub fn IndexAddBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, base_parent: ?*GradState, update_parent: ?*GradState, indices: []const usize) !void {
-            self.* = .{
-                .parents = .{ base_parent, update_parent },
-                .indices = try allocator.dupe(usize, indices),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             // out = self + scatterAdd(update): d/dself is the identity;
             // d/dupdate gathers the addressed rows (duplicate indices each
@@ -300,15 +241,6 @@ pub fn ZeroSliceBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, start: usize, length: usize) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .start = start,
-                .length = length,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.zeroSlice(rawRank(tags.len), gy, axis, self.start, self.length);
@@ -324,13 +256,6 @@ pub fn ZeroRowsBackward(comptime tags: anytype, comptime axis: usize) type {
         indices: []usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, indices: []const usize) !void {
-            self.* = .{
-                .parents = .{parent},
-                .indices = try allocator.dupe(usize, indices),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;

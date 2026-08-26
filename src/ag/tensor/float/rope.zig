@@ -20,6 +20,12 @@ pub fn Ops(comptime Self: type) type {
         const axis = Self.axis;
         const ag_tensor = Self.ag_root;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         /// Rotary position embedding over (`position_tag`, `feature_tag`).
@@ -56,7 +62,11 @@ pub fn Ops(comptime Self: type) type {
                 // partial); the backward mirrors it with the inverse table.
                 var value = try ctx.ropeWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
                 errdefer value.deinit();
-                return finishOp(tags, ctx, value, self.requiresGrad(), RopeTableBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, source });
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = RopeTableBackward(tags, position_axis, feature_axis, mode);
+                var owned_table = try cloneInverseRopeTable(ctx.allocator, source);
+                errdefer owned_table.deinit();
+                return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .inverse_table = owned_table });
             }
             if (comptime info == .@"struct") {
                 comptime {
@@ -70,7 +80,15 @@ pub fn Ops(comptime Self: type) type {
                 const theta = exec_mod.RopeTheta{ .positions = source.positions, .theta_base = source.theta_base };
                 var value = try ctx.rope(tag_rank, self.asRawTensor(), position_axis, feature_axis, theta, mode, false);
                 errdefer value.deinit();
-                return finishOp(tags, ctx, value, self.requiresGrad(), RopeBackward(tags, position_axis, feature_axis, mode), .{ ctx.allocator, self.grad_state, theta.positions, theta.theta_base });
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = RopeBackward(tags, position_axis, feature_axis, mode);
+                const owned_positions = try ctx.allocator.dupe(i32, theta.positions);
+                errdefer ctx.allocator.free(owned_positions);
+                return finishOp(tags, ctx, value, Record{
+                    .parents = .{self.grad_state},
+                    .positions = owned_positions,
+                    .theta_base = theta.theta_base,
+                });
             }
             @compileError("rope: source must be a *const exec.RopeTable or an exec.RopeTheta (.{ .positions, .theta_base }); got " ++ @typeName(SourceT));
         }

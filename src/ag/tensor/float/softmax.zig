@@ -29,12 +29,17 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
@@ -60,7 +65,18 @@ pub fn Ops(comptime Self: type) type {
             const reduce_axis = comptime axis(tag);
             var value = try ctx.logsumexp(dtype, tag_rank, self.asRawTensor(), reduce_axis);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), LogsumexpBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = reduced_dtype, .tags = result_tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = LogsumexpBackward(tags, reduce_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            var saved_output = try (&value).cloneView();
+            errdefer saved_output.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .output = saved_output,
+            });
         }
 
         /// Log-softmax over `tag` (torch.log_softmax): `x − logsumexp(x)`
@@ -74,7 +90,12 @@ pub fn Ops(comptime Self: type) type {
             const scan_axis = comptime axis(tag);
             var value = try ctx.logSoftmax(dtype, tag_rank, self.asRawTensor(), scan_axis);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), LogSoftmaxBackward(tags, scan_axis), .{ ctx.allocator, self.grad_state, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = LogSoftmaxBackward(tags, scan_axis);
+            var saved_output = try (&value).cloneView();
+            errdefer saved_output.deinit();
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .output = saved_output });
         }
 
         pub fn softmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag, options: anytype) !Self {
@@ -94,7 +115,12 @@ pub fn Ops(comptime Self: type) type {
             if (comptime @typeInfo(Options).@"struct".fields.len == 0) {
                 var value = try ctx.softmax(dtype, tag_rank, self.asRawTensor(), softmax_axis);
                 errdefer value.deinit();
-                return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), SoftmaxBackward(tags, softmax_axis), .{ ctx.allocator, self.grad_state, &value });
+                if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = SoftmaxBackward(tags, softmax_axis);
+                var saved_output = try (&value).cloneView();
+                errdefer saved_output.deinit();
+                return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .output = saved_output });
             }
             if (comptime !differentiable) @compileError("softmax options (scale, mask, sinks, causal, ...) are the f32 ext kernel's; cast to f32 first");
             const scale_value: f32 = if (comptime @hasField(Options, "scale")) options.scale else 1;
@@ -139,7 +165,15 @@ pub fn Ops(comptime Self: type) type {
                 },
             );
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), SoftmaxExtBackward(tags, softmax_axis), .{ ctx.allocator, self.grad_state, &value, scale_value });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = SoftmaxExtBackward(tags, softmax_axis);
+            var saved_output = try (&value).cloneView();
+            errdefer saved_output.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .output = saved_output,
+                .scale = scale_value,
+            });
         }
     };
 }

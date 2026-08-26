@@ -31,6 +31,12 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const TensorObject = plumbing.TensorObject;
 
@@ -41,7 +47,13 @@ pub fn Ops(comptime Self: type) type {
             const zero_axis = comptime Self.axis(axis_tag);
             var value = try ctx.zeroSlice(tensor_rank, self.asRawTensor(), zero_axis, start, length);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), ZeroSliceBackward(tags, zero_axis), .{ ctx.allocator, self.grad_state, start, length });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = ZeroSliceBackward(tags, zero_axis);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .start = start,
+                .length = length,
+            });
         }
 
         /// Copy of `self` with the given `indices` along `axis_tag` zeroed.
@@ -51,7 +63,11 @@ pub fn Ops(comptime Self: type) type {
             const zero_axis = comptime Self.axis(axis_tag);
             var value = try ctx.zeroRows(tensor_rank, self.asRawTensor(), zero_axis, indices);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), ZeroRowsBackward(tags, zero_axis), .{ ctx.allocator, self.grad_state, indices });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = ZeroRowsBackward(tags, zero_axis);
+            const owned_indices = try ctx.allocator.dupe(usize, indices);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .indices = owned_indices });
         }
 
         /// Transformer-XL relative-shift / "skew": a rank-3
@@ -62,7 +78,8 @@ pub fn Ops(comptime Self: type) type {
         pub fn relposShift(self: *const Self, ctx: *ExecContext, t_k: usize, comptime out_tags: anytype) !Tensor(out_tags) {
             var value = try ctx.relposShift(self.asRawTensor(), t_k);
             errdefer value.deinit();
-            return finishOp(out_tags, ctx, value, self.requiresGrad(), RelposShiftBackward, .{ ctx.allocator, self.grad_state, self.value.shape.slice()[2] });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(out_tags, ctx, value);
+            return finishOp(out_tags, ctx, value, RelposShiftBackward{ .parents = .{self.grad_state}, .p = self.value.shape.slice()[2] });
         }
 
         /// `gather` with a tensor of indices (torch.index_select): `indices`
@@ -233,7 +250,11 @@ pub fn Ops(comptime Self: type) type {
             defer scattered.deinit();
             var value = try ctx.elementwise(.f32, .add, self.asRawTensor(), &scattered);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), IndexAddBackward(tags, add_axis), .{ ctx.allocator, self.grad_state, update.grad_state, indices });
+            if (!recordsGrad(self.requiresGrad() or update.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = IndexAddBackward(tags, add_axis);
+            const owned_indices = try ctx.allocator.dupe(usize, indices);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(tags, ctx, value, Record{ .parents = .{ self.grad_state, update.grad_state }, .indices = owned_indices });
         }
 
         /// Read a same-tagged i64 index tensor into a host `[]usize`
@@ -273,7 +294,15 @@ pub fn Ops(comptime Self: type) type {
             defer ctx.allocator.free(idx_buf);
             var value = try ctx.takeAlong(tag_rank, raw, take_axis, idx_buf, idx_raw.shape.at(take_axis));
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), TakeAlongBackward(tags, take_axis), .{ ctx.allocator, self.grad_state, &self.value, idx_buf });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = TakeAlongBackward(tags, take_axis);
+            const owned_indices = try ctx.allocator.dupe(usize, idx_buf);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .indices = owned_indices,
+                .source_shape = rawShapeArray(tags, (&self.value)),
+            });
         }
 
         /// Functional elementwise scatter-add along `tag`
@@ -319,7 +348,15 @@ pub fn Ops(comptime Self: type) type {
             else
                 try ctx.scatterAlong(tag_rank, raw, src_raw, scatter_axis, idx_buf);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or src.requiresGrad(), ScatterAlongBackward(tags, scatter_axis, accumulate), .{ ctx.allocator, self.grad_state, src.grad_state, idx_buf, src_raw.shape.at(scatter_axis) });
+            if (!recordsGrad(self.requiresGrad() or src.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = ScatterAlongBackward(tags, scatter_axis, accumulate);
+            const owned_indices = try ctx.allocator.dupe(usize, idx_buf);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, src.grad_state },
+                .indices = owned_indices,
+                .src_axis_len = src_raw.shape.at(scatter_axis),
+            });
         }
     };
 }

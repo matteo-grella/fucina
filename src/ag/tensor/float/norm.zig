@@ -31,12 +31,17 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const normParamTagCheck = ag_tensor.normParamTagCheck;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         /// A rank-1 parameter of the normalized axis, in this branch's dtype.
         fn Param(comptime tag: Tag) type {
             return Tensor(.{ .dtype = dtype, .tags = .{tag} });
@@ -82,28 +87,73 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.groupNorm(self.asRawTensor(), groups, eps, .{ .weight = weight_raw, .bias = bias_raw });
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, any_grad, GroupNormBackward(tags), .{ ctx.allocator, self.grad_state, weight_parent, bias_parent, self.asRawTensor(), weight_raw, groups, eps });
+            if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
+            const Record = GroupNormBackward(tags);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight: ?RawTensor = if (weight_raw) |p| try p.cloneView() else null;
+            errdefer if (saved_weight) |*v| v.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight_parent, bias_parent },
+                .groups = groups,
+                .eps = eps,
+                .input_value = saved_input,
+                .weight_value = saved_weight,
+            });
         }
 
         pub fn rmsNorm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
             var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{});
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), RmsNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = RmsNormBackward(tags, norm_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .eps = eps,
+            });
         }
 
         pub fn rmsNormMul(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Param(tag), eps: f32) !Self {
             const norm_axis = comptime axis(tag);
             var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor() });
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad() or weight.requiresGrad(), RmsNormMulBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad() or weight.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = RmsNormMulBackward(tags, norm_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state },
+                .input = saved_input,
+                .weight = saved_weight,
+                .eps = eps,
+            });
         }
 
         pub fn rmsNormMulAdd(self: *const Self, ctx: *ExecContext, comptime tag: Tag, weight: *const Param(tag), residual: *const Self, eps: f32) !Self {
             const norm_axis = comptime axis(tag);
             var value = try ctx.rmsNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight.asRawTensor(), .residual = residual.asRawTensor() });
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad(), RmsNormMulAddBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, residual.grad_state, self.asRawTensor(), weight.asRawTensor(), eps });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad() or residual.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = RmsNormMulAddBackward(tags, norm_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state, residual.grad_state },
+                .input = saved_input,
+                .weight = saved_weight,
+                .eps = eps,
+            });
         }
 
         pub fn rmsNormMulRopeHalfPrepared(
@@ -128,7 +178,21 @@ pub fn Ops(comptime Self: type) type {
                 .half,
             );
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or weight.requiresGrad(), RmsNormMulRopeBackward(tags, position_axis, feature_axis, .half), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), eps, table });
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = RmsNormMulRopeBackward(tags, position_axis, feature_axis, .half);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            var owned_table = try cloneInverseRopeTable(ctx.allocator, table);
+            errdefer owned_table.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state },
+                .input = saved_input,
+                .weight = saved_weight,
+                .eps = eps,
+                .inverse_table = owned_table,
+            });
         }
 
         /// LayerNorm over `tag` with PyTorch semantics: y = (x − μ)/√(σ² + eps)
@@ -165,20 +229,32 @@ pub fn Ops(comptime Self: type) type {
                 }
                 var value = try ctx.layerNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{ .weight = weight_ptr.asRawTensor(), .bias = bias_ptr.asRawTensor() });
                 errdefer value.deinit();
-                return finishOrConstant(
-                    differentiable,
-                    dtype,
-                    tags,
-                    ctx,
-                    value,
-                    self.requiresGrad() or weight_ptr.requiresGrad() or bias_ptr.requiresGrad(),
-                    LayerNormAffineBackward(tags, norm_axis),
-                    .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, bias_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), eps },
-                );
+                if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad() or weight_ptr.requiresGrad() or bias_ptr.requiresGrad());
+                if (!recordsGrad(self.requiresGrad() or weight_ptr.requiresGrad() or bias_ptr.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = LayerNormAffineBackward(tags, norm_axis);
+                var saved_input = try self.asRawTensor().cloneView();
+                errdefer saved_input.deinit();
+                var saved_weight = try weight_ptr.asRawTensor().cloneView();
+                errdefer saved_weight.deinit();
+                return finishOp(tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, weight_ptr.grad_state, bias_ptr.grad_state },
+                    .input = saved_input,
+                    .weight = saved_weight,
+                    .eps = eps,
+                });
             }
             var value = try ctx.layerNorm(dtype, tag_rank, self.asRawTensor(), norm_axis, eps, .{});
             errdefer value.deinit();
-            return finishOrConstant(differentiable, dtype, tags, ctx, value, self.requiresGrad(), LayerNormBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, eps });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = dtype, .tags = tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = LayerNormBackward(tags, norm_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .eps = eps,
+            });
         }
 
         /// L2-normalize along `tag`: y = x · rsqrt(Σ x² + eps). NOTE the eps

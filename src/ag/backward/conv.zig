@@ -34,33 +34,6 @@ pub fn CausalDepthwiseConv1dBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            kernel_parent: ?*GradState,
-            input: *const RawTensor,
-            kernel: *const RawTensor,
-            dilation: usize,
-            state: ?[]const f32,
-        ) !void {
-            self.* = .{
-                .parents = .{ input_parent, kernel_parent },
-                .input_shape = rawShapeArray(input_tags, input),
-                .kernel_shape = rawShapeArray(kernel_tags, kernel),
-                .estimated_work = workEstimate(input_parent, kernel_parent, input, kernel),
-                .input_value = try input.cloneView(),
-                .kernel_value = undefined,
-                .dilation = dilation,
-            };
-            errdefer self.input_value.deinit();
-            self.kernel_value = try kernel.cloneView();
-            errdefer self.kernel_value.deinit();
-            if (state) |values| {
-                self.state = try allocator.dupe(f32, values);
-            }
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.causalDepthwiseConv1dBackwardInput(
@@ -86,7 +59,7 @@ pub fn CausalDepthwiseConv1dBackward(
             }
         }
 
-        fn workEstimate(input_parent: ?*GradState, kernel_parent: ?*GradState, input: *const RawTensor, kernel: *const RawTensor) usize {
+        pub fn workEstimate(input_parent: ?*GradState, kernel_parent: ?*GradState, input: *const RawTensor, kernel: *const RawTensor) usize {
             var branches: usize = 0;
             if (input_parent != null) branches += 1;
             if (kernel_parent != null) branches += 1;
@@ -126,33 +99,6 @@ pub fn CausalConv1dBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            dilation: usize,
-            state: ?[]const f32,
-        ) !void {
-            self.* = .{
-                .parents = .{ input_parent, weight_parent },
-                .input_shape = rawShapeArray(input_tags, input),
-                .weight_shape = rawShapeArray(weight_tags, weight),
-                .dilation = dilation,
-                .estimated_work = workEstimate(input_parent, weight_parent, input, weight),
-                .input_value = try input.cloneView(),
-                .weight_value = undefined,
-            };
-            errdefer self.input_value.deinit();
-            self.weight_value = try weight.cloneView();
-            errdefer self.weight_value.deinit();
-            if (state) |values| {
-                self.state = try allocator.dupe(f32, values);
-            }
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.causalConv1dBackwardInput(
@@ -178,7 +124,7 @@ pub fn CausalConv1dBackward(
             }
         }
 
-        fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
+        pub fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
             var branches: usize = 0;
             if (input_parent != null) branches += 1;
             if (weight_parent != null) branches += 1;
@@ -220,35 +166,6 @@ pub fn GroupedCausalConv1dBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            dilation: usize,
-            groups: usize,
-            state: ?[]const f32,
-        ) !void {
-            self.* = .{
-                .parents = .{ input_parent, weight_parent },
-                .input_shape = rawShapeArray(input_tags, input),
-                .weight_shape = rawShapeArray(weight_tags, weight),
-                .dilation = dilation,
-                .groups = groups,
-                .estimated_work = workEstimate(input_parent, weight_parent, input, weight),
-                .input_value = try input.cloneView(),
-                .weight_value = undefined,
-            };
-            errdefer self.input_value.deinit();
-            self.weight_value = try weight.cloneView();
-            errdefer self.weight_value.deinit();
-            if (state) |values| {
-                self.state = try allocator.dupe(f32, values);
-            }
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = try ctx.groupedCausalConv1dBackwardInput(
@@ -276,7 +193,7 @@ pub fn GroupedCausalConv1dBackward(
             }
         }
 
-        fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
+        pub fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
             var branches: usize = 0;
             if (input_parent != null) branches += 1;
             if (weight_parent != null) branches += 1;
@@ -321,33 +238,9 @@ pub const Conv2dBackward = struct {
 
     const Self = @This();
 
-    pub fn init(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        input_parent: ?*GradState,
-        weight_parent: ?*GradState,
-        bias_parent: ?*GradState,
-        input: *const RawTensor,
-        weight: *const RawTensor,
-        stride: [2]usize,
-        pad: [2]usize,
-        groups: usize,
-    ) !void {
-        _ = allocator;
-        const work = std.math.mul(usize, parallel.saturatedMul3(input.shape.at(0) * input.shape.at(1), weight.shape.at(3), weight.shape.at(0)), weight.shape.at(1) * weight.shape.at(2)) catch std.math.maxInt(usize);
-        self.* = .{
-            .parents = .{ input_parent, weight_parent, bias_parent },
-            .input_shape = .{ input.shape.at(0), input.shape.at(1), input.shape.at(2) },
-            .weight_shape = .{ weight.shape.at(0), weight.shape.at(1), weight.shape.at(2), weight.shape.at(3) },
-            .stride = stride,
-            .pad = pad,
-            .groups = groups,
-            .estimated_work = work,
-            .input_value = try input.cloneView(),
-            .weight_value = undefined,
-        };
-        errdefer self.input_value.deinit();
-        self.weight_value = try weight.cloneView();
+    /// (oh*ow) x cout x (kh*kw*cin_per_group) multiply-adds, saturating.
+    pub fn workEstimate(input: *const RawTensor, weight: *const RawTensor) usize {
+        return std.math.mul(usize, parallel.saturatedMul3(input.shape.at(0) * input.shape.at(1), weight.shape.at(3), weight.shape.at(0)), weight.shape.at(1) * weight.shape.at(2)) catch std.math.maxInt(usize);
     }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
@@ -385,25 +278,6 @@ pub const UnfoldBackward = struct {
 
     const Self = @This();
 
-    pub fn init(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        parent: ?*GradState,
-        input: *const RawTensor,
-        kernel: [2]usize,
-        stride: [2]usize,
-        pad: [2]usize,
-    ) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .output_size = .{ input.shape.at(0), input.shape.at(1) },
-            .kernel = kernel,
-            .stride = stride,
-            .pad = pad,
-        };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.fold(gy, self.output_size, self.kernel, self.stride, self.pad);
@@ -422,23 +296,6 @@ pub const FoldBackward = struct {
     pad: [2]usize,
 
     const Self = @This();
-
-    pub fn init(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        parent: ?*GradState,
-        kernel: [2]usize,
-        stride: [2]usize,
-        pad: [2]usize,
-    ) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .kernel = kernel,
-            .stride = stride,
-            .pad = pad,
-        };
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -467,35 +324,6 @@ pub fn Conv1dBackward(
         weight_value: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            stride: usize,
-            pad: usize,
-            dilation: usize,
-            groups: usize,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent },
-                .input_shape = rawShapeArray(input_tags, input),
-                .weight_shape = rawShapeArray(weight_tags, weight),
-                .stride = stride,
-                .pad = pad,
-                .dilation = dilation,
-                .groups = groups,
-                .estimated_work = workEstimate(input_parent, weight_parent, input, weight),
-                .input_value = try input.cloneView(),
-                .weight_value = undefined,
-            };
-            errdefer self.input_value.deinit();
-            self.weight_value = try weight.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
@@ -528,7 +356,7 @@ pub fn Conv1dBackward(
             }
         }
 
-        fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
+        pub fn workEstimate(input_parent: ?*GradState, weight_parent: ?*GradState, input: *const RawTensor, weight: *const RawTensor) usize {
             var branches: usize = 0;
             if (input_parent != null) branches += 1;
             if (weight_parent != null) branches += 1;
@@ -571,34 +399,6 @@ pub fn ConvTranspose1dBackward(comptime input_tags: anytype) type {
         weight_value: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            bias_parent: ?*GradState,
-            input: *const RawTensor,
-            weight2: *const RawTensor,
-            out_channels: usize,
-            taps: usize,
-            stride: usize,
-            pad: usize,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent, bias_parent },
-                .input_shape = rawShapeArray(input_tags, input),
-                .out_channels = out_channels,
-                .taps = taps,
-                .stride = stride,
-                .pad = pad,
-                .input_value = try input.cloneView(),
-                .weight_value = undefined,
-            };
-            errdefer self.input_value.deinit();
-            self.weight_value = try weight2.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];

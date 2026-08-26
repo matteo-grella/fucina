@@ -25,17 +25,6 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, output: *const RawTensor) !void {
-            _ = allocator;
-            var in_view = try input.cloneView();
-            errdefer in_view.deinit();
-            self.* = .{
-                .parents = .{parent},
-                .input = in_view,
-                .output = try output.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -91,14 +80,6 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
         const Self = @This();
         const rank = rawRank(source_tags.len);
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, output: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .output = try output.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -148,14 +129,6 @@ pub fn SoftmaxBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, output: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .output = try output.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.softmaxBackward(rawRank(tags.len), &self.output, gy, axis, 1);
@@ -177,15 +150,6 @@ pub fn SoftmaxExtBackward(comptime tags: anytype, comptime axis: usize) type {
         scale: f32,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, output: *const RawTensor, scale: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .output = try output.cloneView(),
-                .scale = scale,
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;

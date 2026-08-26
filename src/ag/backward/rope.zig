@@ -27,20 +27,6 @@ pub fn RopeBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            positions: []const i32,
-            theta_base: f32,
-        ) !void {
-            self.* = .{
-                .parents = .{parent},
-                .positions = try allocator.dupe(i32, positions),
-                .theta_base = theta_base,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.rope(rawRank(tags.len), gy, position_axis, feature_axis, .{ .positions = self.positions, .theta_base = self.theta_base }, mode, true);
@@ -69,18 +55,6 @@ pub fn RopeTableBackward(
         inverse_table: exec_mod.RopeTable,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            table: *const exec_mod.RopeTable,
-        ) !void {
-            self.* = .{
-                .parents = .{parent},
-                .inverse_table = try cloneInverseRopeTable(allocator, table),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;

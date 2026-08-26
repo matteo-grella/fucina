@@ -40,27 +40,6 @@ pub fn PointwiseBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-        ) !void {
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left_shape = rawShapeArray(left_tags, left),
-                .right_shape = rawShapeArray(right_tags, right),
-            };
-            errdefer self.deinitFields(allocator);
-
-            if (comptime op == .mul or op == .div or op == .max or op == .min) {
-                self.left_value = try left.cloneView();
-                self.right_value = try right.cloneView();
-            }
-        }
-
         const Side = enum { left, right };
 
         /// max/min gradient at the broadcast result shape: gy weighted by
@@ -149,11 +128,6 @@ pub fn IdentityBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent} };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -169,14 +143,6 @@ pub const ReluBackward = struct {
 
     parents: [1]?*GradState,
     input: RawTensor,
-
-    pub fn init(self: *ReluBackward, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .input = try input.cloneView(),
-        };
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -212,15 +178,6 @@ pub const SoftcapBackward = struct {
     output: RawTensor,
     cap: f32,
 
-    pub fn init(self: *SoftcapBackward, allocator: std.mem.Allocator, parent: ?*GradState, output: *const RawTensor, cap: f32) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .output = try output.cloneView(),
-            .cap = cap,
-        };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -253,15 +210,6 @@ pub const LeakyReluBackward = struct {
     parents: [1]?*GradState,
     input: RawTensor,
     negative_slope: f32,
-
-    pub fn init(self: *LeakyReluBackward, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, negative_slope: f32) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .input = try input.cloneView(),
-            .negative_slope = negative_slope,
-        };
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -334,14 +282,6 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
         input: RawTensor,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -418,14 +358,6 @@ pub fn ScaleBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, scalar_value: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .scalar_value = scalar_value,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.scale(.f32, gy, self.scalar_value);
@@ -448,15 +380,6 @@ pub fn DropoutBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, p: f32, seed: u64) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .p = p,
-                .seed = seed,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.dropoutBackward(gy, self.p, self.seed);
@@ -473,16 +396,6 @@ pub const ClampBackward = struct {
     input: RawTensor,
     min_value: f32,
     max_value: f32,
-
-    pub fn init(self: *ClampBackward, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, min_value: f32, max_value: f32) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .input = try input.cloneView(),
-            .min_value = min_value,
-            .max_value = max_value,
-        };
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -523,28 +436,6 @@ pub fn GatedBackward(
         right_value: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-            result: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left_shape = rawShapeArray(left_tags, left),
-                .right_shape = rawShapeArray(right_tags, right),
-                .result_shape = rawShapeArray(result_tags, result),
-                .left_value = try left.cloneView(),
-                .right_value = undefined,
-            };
-            errdefer self.left_value.deinit();
-            self.right_value = try right.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if ((needs_grad.len == 0 or !needs_grad[0]) and (needs_grad.len < 2 or !needs_grad[1])) return;
@@ -607,14 +498,6 @@ pub fn SplitSwiGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.splitSwiGluBackward(rawRank(tags.len), &self.input, gy, axis);
@@ -635,14 +518,6 @@ pub fn SplitGluBackward(comptime tags: anytype, comptime axis: usize) type {
         input: RawTensor,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -667,11 +542,6 @@ pub fn AddScalarBackward(comptime tags: anytype) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent} };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -691,11 +561,6 @@ pub fn PowScalarBackward(comptime tags: anytype) type {
         exponent: f32,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, exponent: f32) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent}, .input = try input.cloneView(), .exponent = exponent };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -731,11 +596,6 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, mask: *const tensor_mod.TensorOf(mask_dtype)) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent}, .mask = try mask.cloneView() };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             var m = try contiguousForReadTyped(mask_dtype, ctx, &self.mask);
@@ -768,11 +628,6 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
         cond: tensor_mod.TensorOf(cond_dtype),
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, x_parent: ?*GradState, y_parent: ?*GradState, cond: *const tensor_mod.TensorOf(cond_dtype)) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{ x_parent, y_parent }, .cond = try cond.cloneView() };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             var c = try contiguousForReadTyped(cond_dtype, ctx, &self.cond);
@@ -986,18 +841,6 @@ pub const PreluChannelsBackward = struct {
 
     const Self = @This();
 
-    pub fn init(self: *Self, allocator: std.mem.Allocator, input_parent: ?*GradState, alpha_parent: ?*GradState, input: *const RawTensor, alpha: *const RawTensor) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{ input_parent, alpha_parent },
-            .channels = alpha.len(),
-            .input_value = try input.cloneView(),
-            .alpha_value = undefined,
-        };
-        errdefer self.input_value.deinit();
-        self.alpha_value = try alpha.cloneView();
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len > 0 and needs_grad[0]) {
             out[0] = try ctx.preluChannelsBackwardInput(gy, &self.input_value, &self.alpha_value);
@@ -1026,18 +869,6 @@ pub const ChannelAffineBackward = struct {
     scale_value: RawTensor,
 
     const Self = @This();
-
-    pub fn init(self: *Self, allocator: std.mem.Allocator, input_parent: ?*GradState, scale_parent: ?*GradState, shift_parent: ?*GradState, input: *const RawTensor, scale: *const RawTensor) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{ input_parent, scale_parent, shift_parent },
-            .channels = scale.len(),
-            .input_value = try input.cloneView(),
-            .scale_value = undefined,
-        };
-        errdefer self.input_value.deinit();
-        self.scale_value = try scale.cloneView();
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len > 0 and needs_grad[0]) {
@@ -1077,29 +908,6 @@ pub fn SnakeBackward(comptime tags: anytype) type {
         inv_b_value: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            alpha_parent: ?*GradState,
-            inv_b_parent: ?*GradState,
-            input: *const RawTensor,
-            alpha: *const RawTensor,
-            inv_b: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, alpha_parent, inv_b_parent },
-                .input_value = try input.cloneView(),
-                .alpha_value = undefined,
-                .inv_b_value = undefined,
-            };
-            errdefer self.input_value.deinit();
-            self.alpha_value = try alpha.cloneView();
-            errdefer self.alpha_value.deinit();
-            self.inv_b_value = try inv_b.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {

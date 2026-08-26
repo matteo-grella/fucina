@@ -51,7 +51,9 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
                 if (comptime @hasField(Self, "grad_state")) {
-                    return plumbing.finishOp(tags, ctx, value, self.requiresGrad(), CastBackward(tags), .{ ctx.allocator, self.grad_state });
+                    if (!plumbing.recordsGrad(self.requiresGrad())) return plumbing.finishNoGrad(tags, ctx, value);
+                    const Record = CastBackward(tags);
+                    return plumbing.finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
                 }
                 // Integer/bool sources are grad-free: a plain f32 constant.
                 return plumbing.finishNoGrad(tags, ctx, value);

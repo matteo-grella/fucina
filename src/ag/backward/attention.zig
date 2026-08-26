@@ -30,43 +30,6 @@ pub const GroupedCausalAttentionBackward = struct {
     causal: bool,
     estimated_work: usize,
 
-    pub fn init(
-        self: *GroupedCausalAttentionBackward,
-        allocator: std.mem.Allocator,
-        q_parent: ?*GradState,
-        k_parent: ?*GradState,
-        v_parent: ?*GradState,
-        q: *const RawTensor,
-        k: *const RawTensor,
-        v: *const RawTensor,
-        kv_head_for_head: []const usize,
-        scale_value: f32,
-        window: usize,
-        causal: bool,
-        row_stats: []const f32,
-    ) !void {
-        self.* = .{
-            .parents = .{ q_parent, k_parent, v_parent },
-            .q = try q.cloneView(),
-            .k = undefined,
-            .v = undefined,
-            .kv_head_for_head = undefined,
-            .row_stats = undefined,
-            .scale_value = scale_value,
-            .window = window,
-            .causal = causal,
-            .estimated_work = workEstimate(q_parent, k_parent, v_parent, q, k),
-        };
-        errdefer self.q.deinit();
-        self.k = try k.cloneView();
-        errdefer self.k.deinit();
-        self.v = try v.cloneView();
-        errdefer self.v.deinit();
-        self.kv_head_for_head = try allocator.dupe(usize, kv_head_for_head);
-        errdefer allocator.free(self.kv_head_for_head);
-        self.row_stats = try allocator.dupe(f32, row_stats);
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         const need_q = needs_grad.len > 0 and needs_grad[0];
         const need_k = needs_grad.len > 1 and needs_grad[1];
@@ -98,7 +61,7 @@ pub const GroupedCausalAttentionBackward = struct {
         }
     }
 
-    fn workEstimate(q_parent: ?*GradState, k_parent: ?*GradState, v_parent: ?*GradState, q: *const RawTensor, k: *const RawTensor) usize {
+    pub fn workEstimate(q_parent: ?*GradState, k_parent: ?*GradState, v_parent: ?*GradState, q: *const RawTensor, k: *const RawTensor) usize {
         var branches: usize = 0;
         if (q_parent != null) branches += 1;
         if (k_parent != null) branches += 1;

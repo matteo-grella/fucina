@@ -23,21 +23,6 @@ pub fn TopKBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            indices: *const tensor_mod.TensorOf(.i64),
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .indices = try indices.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 

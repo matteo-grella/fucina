@@ -25,21 +25,6 @@ pub fn MaskedMinMaxBackward(comptime source_tags: anytype, comptime axis: usize)
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            indices: *const tensor_mod.TensorOf(.i64),
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .indices = try indices.cloneView(),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -90,15 +75,6 @@ pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {
         ddof: u1,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, ddof: u1) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-                .ddof = ddof,
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -160,23 +136,6 @@ pub fn StandardizeBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            input: *const RawTensor,
-            valid_len: ?usize,
-            options: exec_mod.StandardizeOptions,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-                .valid_len = valid_len,
-                .options = options,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try ctx.standardizeBackward(rawRank(tags.len), &self.input, gy, axis, self.valid_len, self.options);
@@ -204,21 +163,6 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
         indices: tensor_mod.TensorOf(.i64),
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            indices: *const tensor_mod.TensorOf(.i64),
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .indices = try indices.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;

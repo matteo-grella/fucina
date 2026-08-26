@@ -14,6 +14,12 @@ pub fn Ops(comptime Self: type) type {
         const tags = Self.axis_tags;
         const ag_tensor = Self.ag_root;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         /// 2-D max pool over a channel-last rank-3 `[H, W, C]` tensor
@@ -22,7 +28,10 @@ pub fn Ops(comptime Self: type) type {
         pub fn maxPool2d(self: *const Self, ctx: *ExecContext, kernel: [2]usize, stride: [2]usize, padding: [2]usize) !Self {
             var value = try ctx.maxPool2d(self.asRawTensor(), kernel, stride, padding);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), MaxPool2dBackward, .{ ctx.allocator, self.grad_state, self.asRawTensor(), kernel, stride, padding });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, MaxPool2dBackward{ .parents = .{self.grad_state}, .kernel = kernel, .stride = stride, .pad = padding, .input_value = saved_input });
         }
 
         /// 2-D average pool over a channel-last rank-3 `[H, W, C]` tensor;
@@ -31,7 +40,8 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.avgPool2d(self.asRawTensor(), kernel, stride, padding);
             errdefer value.deinit();
             const raw = self.asRawTensor();
-            return finishOp(tags, ctx, value, self.requiresGrad(), AvgPool2dBackward, .{ ctx.allocator, self.grad_state, raw.shape.at(0), raw.shape.at(1), kernel, stride, padding });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            return finishOp(tags, ctx, value, AvgPool2dBackward{ .parents = .{self.grad_state}, .in_h = raw.shape.at(0), .in_w = raw.shape.at(1), .kernel = kernel, .stride = stride, .pad = padding });
         }
 
         /// 2× nearest-neighbour upsample of a channel-last rank-3 tensor:
@@ -39,7 +49,8 @@ pub fn Ops(comptime Self: type) type {
         pub fn upsample2xNearest(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.upsample2xNearest(self.asRawTensor());
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), Upsample2xNearestBackward, .{ ctx.allocator, self.grad_state });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            return finishOp(tags, ctx, value, Upsample2xNearestBackward{ .parents = .{self.grad_state} });
         }
     };
 }

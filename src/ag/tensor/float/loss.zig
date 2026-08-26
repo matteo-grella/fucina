@@ -28,6 +28,12 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const rowStatsAlloc = plumbing.rowStatsAlloc;
         const finishOp = plumbing.finishOp;
         const TensorObject = plumbing.TensorObject;
@@ -53,7 +59,20 @@ pub fn Ops(comptime Self: type) type {
             stats_options.row_stats = row_stats;
             var value = try ctx.crossEntropyLoss(tag_rank, self.asRawTensor(), class_axis, labels, stats_options);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad(), CrossEntropyExtBackward(tags, class_axis, options), .{ ctx.allocator, self.grad_state, self.asRawTensor(), labels, row_stats orelse &[_]f32{} });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = CrossEntropyExtBackward(tags, class_axis, options);
+            var saved_logits = try self.asRawTensor().cloneView();
+            errdefer saved_logits.deinit();
+            const owned_labels = try ctx.allocator.dupe(usize, labels);
+            errdefer ctx.allocator.free(owned_labels);
+            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator.free(owned_row_stats);
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .logits = saved_logits,
+                .labels = owned_labels,
+                .row_stats = owned_row_stats,
+            });
         }
 
         /// Fused linear + cross-entropy: `crossEntropy(self·weightᵀ)` as
@@ -92,14 +111,27 @@ pub fn Ops(comptime Self: type) type {
             stats_options.row_stats = row_stats;
             var value = try ctx.crossEntropyLoss(2, &logits, 1, labels, stats_options);
             errdefer value.deinit();
-            return finishOp(
-                result_tags,
-                ctx,
-                value,
-                wants_grad,
-                LinearCrossEntropyBackward(options),
-                .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), &logits, labels, row_stats orelse &[_]f32{} },
-            );
+            if (!recordsGrad(wants_grad)) return finishNoGrad(result_tags, ctx, value);
+            const Record = LinearCrossEntropyBackward(options);
+            var saved_x = try self.asRawTensor().cloneView();
+            errdefer saved_x.deinit();
+            var saved_weight = try weight_ptr.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            var saved_logits = try (&logits).cloneView();
+            errdefer saved_logits.deinit();
+            const owned_labels = try ctx.allocator.dupe(usize, labels);
+            errdefer ctx.allocator.free(owned_labels);
+            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator.free(owned_row_stats);
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight_ptr.grad_state },
+                .x = saved_x,
+                .weight = saved_weight,
+                .logits = saved_logits,
+                .labels = owned_labels,
+                .row_stats = owned_row_stats,
+                .estimated_work = Record.workEstimate(self.grad_state, weight_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor()),
+            });
         }
 
         /// Fused linear + sparse-soft-target distillation loss:
@@ -149,28 +181,37 @@ pub fn Ops(comptime Self: type) type {
                 ctx.allocator.free(fwd.row_stats);
             }
             errdefer fwd.value.deinit();
-            return finishOp(
-                .{},
-                ctx,
-                fwd.value,
-                wants_grad,
-                LinearDistillBackward,
-                .{
-                    ctx.allocator,
-                    self.grad_state,
-                    weight_ptr.grad_state,
-                    &fwd.x_sel,
-                    weight_ptr.asRawTensor(),
-                    &fwd.logits,
-                    fwd.sel_rows,
-                    fwd.local_rows,
-                    classes,
-                    probs,
-                    fwd.row_stats,
-                    self.asRawTensor().shape.at(0),
-                    options,
-                },
-            );
+            if (!recordsGrad(wants_grad)) return finishNoGrad(.{}, ctx, fwd.value);
+            var saved_x_sel = try (&fwd.x_sel).cloneView();
+            errdefer saved_x_sel.deinit();
+            var saved_weight = try weight_ptr.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            var saved_logits = try (&fwd.logits).cloneView();
+            errdefer saved_logits.deinit();
+            const owned_sel_rows = try ctx.allocator.dupe(usize, fwd.sel_rows);
+            errdefer ctx.allocator.free(owned_sel_rows);
+            const owned_local_rows = try ctx.allocator.dupe(usize, fwd.local_rows);
+            errdefer ctx.allocator.free(owned_local_rows);
+            const owned_classes = try ctx.allocator.dupe(usize, classes);
+            errdefer ctx.allocator.free(owned_classes);
+            const owned_probs = try ctx.allocator.dupe(f32, probs);
+            errdefer ctx.allocator.free(owned_probs);
+            const owned_row_stats = try ctx.allocator.dupe(f32, fwd.row_stats);
+            errdefer ctx.allocator.free(owned_row_stats);
+            return finishOp(.{}, ctx, fwd.value, LinearDistillBackward{
+                .parents = .{ self.grad_state, weight_ptr.grad_state },
+                .x_sel = saved_x_sel,
+                .weight = saved_weight,
+                .logits = saved_logits,
+                .sel_rows = owned_sel_rows,
+                .local_rows = owned_local_rows,
+                .classes = owned_classes,
+                .probs = owned_probs,
+                .row_stats = owned_row_stats,
+                .row_count = self.asRawTensor().shape.at(0),
+                .options = options,
+                .estimated_work = LinearDistillBackward.workEstimate(self.grad_state, weight_ptr.grad_state, (&fwd.x_sel), weight_ptr.asRawTensor()),
+            });
         }
 
         /// Mean-squared-error loss vs a same-tagged `target` (torch F.mse_loss):
@@ -187,7 +228,17 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = comptime if (options.reduction == .none) tags else .{};
             var value = try ctx.mseLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or target.requiresGrad(), MseLossBackward(tags, options), .{ ctx.allocator, self.grad_state, target.grad_state, self.asRawTensor(), target.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = MseLossBackward(tags, options);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_target = try target.asRawTensor().cloneView();
+            errdefer saved_target.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, target.grad_state },
+                .input = saved_input,
+                .target = saved_target,
+            });
         }
 
         /// Huber loss vs a same-tagged `target` (torch F.huber_loss): quadratic
@@ -202,7 +253,17 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = comptime if (options.reduction == .none) tags else .{};
             var value = try ctx.huberLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or target.requiresGrad(), HuberLossBackward(tags, options), .{ ctx.allocator, self.grad_state, target.grad_state, self.asRawTensor(), target.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = HuberLossBackward(tags, options);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_target = try target.asRawTensor().cloneView();
+            errdefer saved_target.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, target.grad_state },
+                .input = saved_input,
+                .target = saved_target,
+            });
         }
 
         /// Binary cross-entropy vs a same-tagged `target`. With
@@ -221,7 +282,17 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = comptime if (options.reduction == .none) tags else .{};
             var value = try ctx.bceLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or target.requiresGrad(), BceLossBackward(tags, options), .{ ctx.allocator, self.grad_state, target.grad_state, self.asRawTensor(), target.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = BceLossBackward(tags, options);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_target = try target.asRawTensor().cloneView();
+            errdefer saved_target.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, target.grad_state },
+                .input = saved_input,
+                .target = saved_target,
+            });
         }
 
         /// Pointwise KL divergence vs a same-tagged `target` (torch F.kl_div
@@ -240,7 +311,17 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = comptime if (options.reduction == .none) tags else .{};
             var value = try ctx.klDivLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or target.requiresGrad(), KlDivLossBackward(tags, options), .{ ctx.allocator, self.grad_state, target.grad_state, self.asRawTensor(), target.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = KlDivLossBackward(tags, options);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_target = try target.asRawTensor().cloneView();
+            errdefer saved_target.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, target.grad_state },
+                .input = saved_input,
+                .target = saved_target,
+            });
         }
 
         /// Negative log-likelihood over `class_tag` (torch F.nll_loss with unit

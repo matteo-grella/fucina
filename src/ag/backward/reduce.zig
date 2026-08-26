@@ -26,14 +26,6 @@ pub fn SumBackward(comptime source_tags: anytype, comptime result_tags: anytype)
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
@@ -49,14 +41,6 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
         source_shape: [rawRank(source_tags.len)]usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -82,21 +66,6 @@ pub fn MaskedSumBackward(comptime source_tags: anytype, comptime result_tags: an
         mask: tensor_mod.TensorOf(mask_dtype),
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            mask: *const tensor_mod.TensorOf(mask_dtype),
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .mask = try mask.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -128,23 +97,6 @@ pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: a
         counts: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            source: *const RawTensor,
-            mask: *const tensor_mod.TensorOf(mask_dtype),
-            counts: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .mask = try mask.cloneView(),
-                .counts = try counts.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -187,11 +139,6 @@ pub fn CumsumBackward(comptime source_tags: anytype, comptime axis: usize) type 
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{parent} };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             _ = self;
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -211,14 +158,6 @@ pub fn SegmentSumBackward(comptime source_tags: anytype, comptime axis: usize) t
         n: usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, offsets: []const usize, n: usize) !void {
-            self.* = .{
-                .parents = .{parent},
-                .offsets = try allocator.dupe(usize, offsets),
-                .n = n,
-            };
-        }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.offsets);
@@ -249,31 +188,6 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
         decay_shape: [rawRank(decay_tags.len)]usize,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            b_parent: ?*GradState,
-            decay_parent: ?*GradState,
-            initial_parent: ?*GradState,
-            a_view: *const RawTensor,
-            h: *const RawTensor,
-            initial: ?*const RawTensor,
-            decay: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ b_parent, decay_parent, initial_parent },
-                .a_view = try a_view.cloneView(),
-                .h_value = undefined,
-                .initial_value = null,
-                .decay_shape = rawShapeArray(decay_tags, decay),
-            };
-            errdefer self.a_view.deinit();
-            self.h_value = try h.cloneView();
-            errdefer self.h_value.deinit();
-            if (initial) |ini| self.initial_value = try ini.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_b = needs_grad.len > 0 and needs_grad[0];
@@ -320,14 +234,6 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
         const rank = rawRank(source_tags.len);
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -390,17 +296,6 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
 
         const Self = @This();
         const rank = rawRank(source_tags.len);
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, output: *const RawTensor) !void {
-            _ = allocator;
-            var in_view = try input.cloneView();
-            errdefer in_view.deinit();
-            self.* = .{
-                .parents = .{parent},
-                .input = in_view,
-                .output = try output.cloneView(),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;

@@ -36,24 +36,6 @@ pub fn Matmul2DBackward(comptime trans_b: bool) type {
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left = try left.cloneView(),
-                .right = undefined,
-            };
-            errdefer self.left.deinit();
-            self.right = try right.cloneView();
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 out[0] = if (comptime trans_b)
@@ -86,24 +68,6 @@ pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
         right: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left = try left.cloneView(),
-                .right = undefined,
-            };
-            errdefer self.left.deinit();
-            self.right = try right.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
@@ -174,27 +138,6 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
             err: ?anyerror = null,
         };
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left_shape = rawShapeArray(left_tags, left),
-                .right_shape = rawShapeArray(right_tags, right),
-                .estimated_work = einsumBackwardWorkEstimate(left_parent, right_parent, left, right),
-                .left_value = try left.cloneView(),
-                .right_value = undefined,
-            };
-            errdefer self.left_value.deinit();
-            self.right_value = try right.cloneView();
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_left = needs_grad.len > 0 and needs_grad[0];
             const need_right = needs_grad.len > 1 and needs_grad[1];
@@ -248,7 +191,7 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
             };
         }
 
-        fn einsumBackwardWorkEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
+        pub fn einsumBackwardWorkEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
             var branches: usize = 0;
             if (left_parent != null) branches += 1;
             if (right_parent != null) branches += 1;
@@ -308,26 +251,6 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
             err: ?anyerror = null,
         };
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            base_parent: ?*GradState,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ base_parent, left_parent, right_parent },
-                .estimated_work = workEstimate(left_parent, right_parent, left, right),
-                .left_value = try left.cloneView(),
-                .right_value = undefined,
-            };
-            errdefer self.left_value.deinit();
-            self.right_value = try right.cloneView();
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_base = needs_grad.len > 0 and needs_grad[0];
             const need_left = needs_grad.len > 1 and needs_grad[1];
@@ -382,7 +305,7 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
             };
         }
 
-        fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
+        pub fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
             var branches: usize = 0;
             if (left_parent != null) branches += 1;
             if (right_parent != null) branches += 1;
@@ -446,26 +369,6 @@ pub fn ConstRhsEinsumBackward(
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left: *const RawTensor,
-            right: *const tensor_mod.TensorOf(rhs_dtype),
-        ) !void {
-            _ = allocator;
-            var right_value = try right.cloneView();
-            errdefer right_value.deinit();
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left_shape = rawShapeArray(left_tags, left),
-                .right_shape = rawShapeArrayOf(rhs_dtype, right_tags, right),
-                .right_value = right_value,
-                .left_value = if (right_parent != null) try left.cloneView() else null,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {
                 var right_f32 = if (comptime dtype_mod.isBlockQuantized(rhs_dtype))
@@ -516,37 +419,13 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
 
         const Self = @This();
 
-        /// Takes ownership of `rhs` on success; on any failure — including a
-        /// node-allocation failure in `core.createNode`, which happens before
-        /// this runs — it stays with the caller (who holds the errdefer).
-        /// `left_full` only provides the original activation shape; `left2d`
-        /// is cloned as a view.
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            left_parent: ?*GradState,
-            right_parent: ?*GradState,
-            left_full: *const RawTensor,
-            left2d: *const RawTensor,
-            rhs: backend_quant.QuantizedMatmulRhsTQ2_0,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ left_parent, right_parent },
-                .left = try left2d.cloneView(),
-                .left_shape = rawShapeArray(left_tags, left_full),
-                .estimated_work = workEstimate(left_parent, right_parent, left2d, rhs.n),
-                .rhs = rhs,
-            };
-        }
-
         /// DotBackward's accounting adapted to this op's fixed shapes: each
         /// live branch is one [m, n] x [n, k]-shaped dense contraction, so
         /// work = result_elems (m*n) * contract (k) * branches. The dx
         /// branch additionally dequantizes the [n, k] snapshot — one more
         /// n*k pass, dominated by the contractions above — so the dot-shaped
         /// estimate stays representative.
-        fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left2d: *const RawTensor, n: usize) usize {
+        pub fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left2d: *const RawTensor, n: usize) usize {
             var branches: usize = 0;
             if (left_parent != null) branches += 1;
             if (right_parent != null) branches += 1;

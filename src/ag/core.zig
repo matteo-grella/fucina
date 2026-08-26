@@ -72,21 +72,22 @@ pub fn BackwardNode(comptime Record: type) type {
     };
 }
 
-/// Allocate one `BackwardNode(Record)`, run `Record.init(&node.record, init_args...)`
-/// (the tuple must start with the allocator), wire the header to the
-/// record's `pub const vtable`, and retain every non-null operand: the node
-/// holds one reference per parent for as long as it lives (dropped by the
-/// record's vtable deinit through `releaseParents`), so a parent handle may
-/// be released at any time without dangling the graph. On init failure the
-/// node is freed and any resources `init` did not consume stay with the
-/// caller (mirroring the old per-record `create` contracts). The returned
-/// state carries one reference for the caller; `GradState.release` drops
-/// it and, as the last one, frees the entire node through the vtable.
-pub fn createNode(comptime Record: type, init_args: anytype) !*GradState {
-    const allocator: Allocator = init_args[0];
+/// Allocate one `BackwardNode(@TypeOf(record))`, move `record` into it,
+/// wire the header to the record's `pub const vtable`, and retain every
+/// non-null operand: the node holds one reference per parent for as long
+/// as it lives (dropped by the record's vtable deinit through
+/// `releaseParents`), so a parent handle may be released at any time
+/// without dangling the graph. The record is a typed struct literal built
+/// by the op: the views and slices it saves were taken by the op and are
+/// owned by the node from here on; on allocation failure they stay with
+/// the op (its errdefers). This is the last fallible step of an op tail.
+/// The returned state carries one reference for the caller;
+/// `GradState.release` drops it and, as the last one, frees the entire
+/// node through the vtable.
+pub fn createNode(allocator: Allocator, record: anytype) !*GradState {
+    const Record = @TypeOf(record);
     const node = try allocator.create(BackwardNode(Record));
-    errdefer allocator.destroy(node);
-    try @call(.auto, Record.init, .{&node.record} ++ init_args);
+    node.record = record;
     node.state = .{
         .allocator = allocator,
         .grad_fn = .{ .ptr = &node.record, .vtable = &Record.vtable },
@@ -711,11 +712,6 @@ test "backward scheduler releases pending operand on missing gradient" {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: Allocator, parent: *GradState) !void {
-            _ = allocator;
-            self.* = .{ .parent = parent };
-        }
-
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             return @as([*]const ?*GradState, @ptrCast(&self.parent))[0..1];
@@ -764,7 +760,7 @@ test "backward scheduler releases pending operand on missing gradient" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(MissingGradientBackward, .{ ctx.allocator, parent });
+    const output = try createNode(ctx.allocator, MissingGradientBackward{ .parent = parent });
     defer output.release();
 
     try std.testing.expectError(AgError.MissingBackwardGradient, backwardGradOne(&ctx, output, &output_value));
@@ -778,11 +774,6 @@ test "backward scheduler releases pending operand on backward error" {
 
         const Self = @This();
         const BackwardError = error{FailedBackward};
-
-        pub fn init(self: *Self, allocator: Allocator, parent: *GradState) !void {
-            _ = allocator;
-            self.* = .{ .parent = parent };
-        }
 
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
@@ -832,7 +823,7 @@ test "backward scheduler releases pending operand on backward error" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(FailingBackward, .{ ctx.allocator, parent });
+    const output = try createNode(ctx.allocator, FailingBackward{ .parent = parent });
     defer output.release();
 
     try std.testing.expectError(FailingBackward.BackwardError.FailedBackward, backwardGradOne(&ctx, output, &output_value));

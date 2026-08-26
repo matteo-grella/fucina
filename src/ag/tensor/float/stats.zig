@@ -28,12 +28,17 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const TensorObject = plumbing.TensorObject;
         const validateMaskedReduceOptions = plumbing.validateMaskedReduceOptions;
@@ -49,7 +54,16 @@ pub fn Ops(comptime Self: type) type {
             const reduce_axis = comptime axis(tag);
             var value = try ctx.varAxis(dtype, tag_rank, self.asRawTensor(), reduce_axis, ddof);
             errdefer value.deinit();
-            return finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, value, self.requiresGrad(), VarBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, ddof });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = reduced_dtype, .tags = result_tags }), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = VarBackward(tags, reduce_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .ddof = ddof,
+            });
         }
 
         /// Standardize over `tag` while preserving shape:
@@ -77,11 +91,29 @@ pub fn Ops(comptime Self: type) type {
             if (comptime @hasField(Options, "valid_len")) {
                 var value = try ctx.standardizeValidPrefix(tag_rank, self.asRawTensor(), norm_axis, options.valid_len, exec_options);
                 errdefer value.deinit();
-                return finishOp(tags, ctx, value, self.requiresGrad(), StandardizeBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, @as(?usize, options.valid_len), exec_options });
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+                const Record = StandardizeBackward(tags, norm_axis);
+                var saved_input = try (&self.value).cloneView();
+                errdefer saved_input.deinit();
+                return finishOp(tags, ctx, value, Record{
+                    .parents = .{self.grad_state},
+                    .input = saved_input,
+                    .valid_len = @as(?usize, options.valid_len),
+                    .options = exec_options,
+                });
             }
             var value = try ctx.standardize(tag_rank, self.asRawTensor(), norm_axis, exec_options);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad(), StandardizeBackward(tags, norm_axis), .{ ctx.allocator, self.grad_state, &self.value, @as(?usize, null), exec_options });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = StandardizeBackward(tags, norm_axis);
+            var saved_input = try (&self.value).cloneView();
+            errdefer saved_input.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{self.grad_state},
+                .input = saved_input,
+                .valid_len = @as(?usize, null),
+                .options = exec_options,
+            });
         }
 
         /// Index of the row maximum along `tag` (torch.argmax over a dim):
@@ -234,7 +266,21 @@ pub fn Ops(comptime Self: type) type {
                 var raw_values: ?RawTensor = raw.values;
                 errdefer if (raw_values) |*value| value.deinit();
                 defer raw.indices.deinit();
-                const out = try finishOrConstant(differentiable, reduced_dtype, result_tags, ctx, raw_values.?, self.requiresGrad(), MinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+                if (comptime !differentiable) {
+                    const out = try finishTypedNoGrad(Tensor(.{ .dtype = reduced_dtype, .tags = result_tags }), ctx, raw_values.?, self.requiresGrad());
+                    raw_values = null;
+                    return out;
+                }
+                const out = if (!recordsGrad(self.requiresGrad())) try finishNoGrad(result_tags, ctx, raw_values.?) else blk: {
+                    const Record = MinMaxBackward(tags, reduce_axis);
+                    var saved_indices = try raw.indices.cloneView();
+                    errdefer saved_indices.deinit();
+                    break :blk try finishOp(result_tags, ctx, raw_values.?, Record{
+                        .parents = .{self.grad_state},
+                        .source_shape = rawShapeArray(tags, &self.value),
+                        .indices = saved_indices,
+                    });
+                };
                 raw_values = null;
                 return out;
             }
@@ -255,7 +301,16 @@ pub fn Ops(comptime Self: type) type {
             var raw_values: ?RawTensor = raw.values;
             errdefer if (raw_values) |*value| value.deinit();
             defer raw.indices.deinit();
-            const out = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), MaskedMinMaxBackward(tags, reduce_axis), .{ ctx.allocator, self.grad_state, &self.value, &raw.indices });
+            const out = if (!recordsGrad(self.requiresGrad())) try finishNoGrad(result_tags, ctx, raw_values.?) else blk: {
+                const Record = MaskedMinMaxBackward(tags, reduce_axis);
+                var saved_indices = try raw.indices.cloneView();
+                errdefer saved_indices.deinit();
+                break :blk try finishOp(result_tags, ctx, raw_values.?, Record{
+                    .parents = .{self.grad_state},
+                    .source_shape = rawShapeArray(tags, &self.value),
+                    .indices = saved_indices,
+                });
+            };
             raw_values = null;
             return out;
         }

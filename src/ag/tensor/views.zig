@@ -63,6 +63,13 @@ pub fn Ops(comptime Self: type) type {
         const SliceRange = ag_tensor.SliceRange;
         const concat_inline_inputs = ag_tensor.concat_inline_inputs;
         const plumbing = @import("plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const finishOp = plumbing.finishOp;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const RawT = tensor_mod.TensorOf(dtype);
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
@@ -80,25 +87,6 @@ pub fn Ops(comptime Self: type) type {
             return null;
         }
 
-        /// Shared tail of every op here. f32: `finishOp` (the VJP record,
-        /// exec-scope adoption). Typed: a grad-requiring operand is rejected
-        /// and the value is wrapped as a caller-owned constant; `Backward`
-        /// and `create_args` are never instantiated on that arm. Consumes
-        /// `value` on success; on error it stays with the caller (every call
-        /// site holds an `errdefer value.deinit()`).
-        fn finish(
-            comptime result_tags: anytype,
-            ctx: *ExecContext,
-            value: RawT,
-            wants_grad: bool,
-            comptime Backward: type,
-            create_args: anytype,
-        ) !Out(result_tags) {
-            if (comptime differentiable) return plumbing.finishOp(result_tags, ctx, value, wants_grad, Backward, create_args);
-            if (wants_grad) return error.UnsupportedGradient;
-            return Out(result_tags).fromTensor(ctx, value);
-        }
-
         /// The no-grad tail: an f32 result is scope-adopted (`finishNoGrad`),
         /// a typed result is a caller-owned constant.
         fn finishConstant(comptime result_tags: anytype, ctx: *ExecContext, value: RawT) !Out(result_tags) {
@@ -109,7 +97,10 @@ pub fn Ops(comptime Self: type) type {
         pub fn materialize(self: *const Self, ctx: *ExecContext) !Self {
             var value = try ctx.materialize(dtype, self.asRawTensor());
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, tags), .{ ctx.allocator, gradStateOf(self), &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = StridedViewBackward(tags, tags);
+            return finishOp(tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
         }
 
         /// Borrow-if-contiguous materialize: an already-contiguous tensor
@@ -131,7 +122,10 @@ pub fn Ops(comptime Self: type) type {
             if (!self.isContiguous()) return self.materialize(ctx);
             var value = try self.value.cloneView();
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), IdentityBackward(tags), .{ ctx.allocator, gradStateOf(self) });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = IdentityBackward(tags);
+            return finishOp(tags, ctx, value, Record{ .parents = .{gradStateOf(self)} });
         }
 
         /// No-grad view of the same storage.
@@ -164,7 +158,10 @@ pub fn Ops(comptime Self: type) type {
             comptime validateUniqueTags(new_tags);
             var value = try self.value.viewWithStrides(raw_shape[0..], raw_strides[0..]);
             errdefer value.deinit();
-            return finish(new_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, new_tags), .{ ctx.allocator, gradStateOf(self), &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(new_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(new_tags, ctx, value);
+            const Record = StridedViewBackward(tags, new_tags);
+            return finishOp(new_tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
         }
 
         pub fn alignTo(self: *const Self, ctx: *ExecContext, comptime target_tags_spec: anytype) !Out(normalizeTags(target_tags_spec)) {
@@ -205,7 +202,10 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = splitTags(tags, tag, split_tags);
             var value = try tag_ops.splitAxisView(dtype, tags, self.asRawTensor(), tag, split_tags, split_shape);
             errdefer value.deinit();
-            return finish(result_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, result_tags), .{ ctx.allocator, gradStateOf(self), &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = StridedViewBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
         }
 
         pub fn merge(self: *const Self, ctx: *ExecContext, comptime out_tag: Tag, comptime merge_tags_spec: anytype) !Out(mergeTags(tags, out_tag, normalizeTags(merge_tags_spec))) {
@@ -213,7 +213,10 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = mergeTags(tags, out_tag, merge_tags);
             var value = try tag_ops.mergeAxesView(dtype, tags, self.asRawTensor(), out_tag, merge_tags);
             errdefer value.deinit();
-            return finish(result_tags, ctx, value, self.requiresGrad(), StridedViewBackward(tags, result_tags), .{ ctx.allocator, gradStateOf(self), &self.value, &value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = StridedViewBackward(tags, result_tags);
+            return finishOp(result_tags, ctx, value, Record.of(gradStateOf(self), &self.value, &value));
         }
 
         /// Arbitrary row-major reinterpretation to `new_tags_spec` /
@@ -248,13 +251,20 @@ pub fn Ops(comptime Self: type) type {
             const target_tags = normalizeTags(target_tags_spec);
             var value = try tag_ops.broadcastTensorTo(dtype, tags, self.asRawTensor(), target_tags, target_shape);
             errdefer value.deinit();
-            return finish(target_tags, ctx, value, self.requiresGrad(), BroadcastBackward(tags, target_tags), .{ ctx.allocator, gradStateOf(self), &self.value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(target_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(target_tags, ctx, value);
+            const Record = BroadcastBackward(tags, target_tags);
+            return finishOp(target_tags, ctx, value, Record{ .parents = .{gradStateOf(self)}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
 
         pub fn flatten(self: *const Self, ctx: *ExecContext, comptime out_tag: Tag) !Out(.{out_tag}) {
             var value = try tag_ops.flattenTensor(dtype, ctx, self.asRawTensor());
             errdefer value.deinit();
-            return finish(.{out_tag}, ctx, value, self.requiresGrad(), ReshapeBackward, .{ ctx.allocator, gradStateOf(self), &self.value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(.{out_tag}), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(.{out_tag}, ctx, value);
+            const owned_shape = try ctx.allocator.dupe(usize, (&self.value).shape.slice());
+            errdefer ctx.allocator.free(owned_shape);
+            return finishOp(.{out_tag}, ctx, value, ReshapeBackward{ .parents = .{gradStateOf(self)}, .source_shape = owned_shape });
         }
 
         /// Reverse the order of `tag` (torch.flip on one dim): a gather with
@@ -333,7 +343,14 @@ pub fn Ops(comptime Self: type) type {
             const slice_axis = comptime axis(tag);
             var value = try ctx.narrowAxis(dtype, tag_rank, self.asRawTensor(), slice_axis, start, length);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad(), NarrowBackward(tags, slice_axis), .{ ctx.allocator, gradStateOf(self), &self.value, start });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = NarrowBackward(tags, slice_axis);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{gradStateOf(self)},
+                .source_shape = rawShapeArray(tags, (&self.value)),
+                .start = start,
+            });
         }
 
         /// Select one position of `tag` and remove the axis (torch.select /
@@ -483,21 +500,43 @@ pub fn Ops(comptime Self: type) type {
             const gather_axis = comptime axis(tag);
             var value = try ctx.gatherAxis(dtype, tag_rank, self.asRawTensor(), gather_axis, indices);
             errdefer value.deinit();
-            return finish(result_tags, ctx, value, self.requiresGrad(), GatherBackward(tags, gather_axis), .{ ctx.allocator, gradStateOf(self), &self.value, indices });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = GatherBackward(tags, gather_axis);
+            const owned_indices = try ctx.allocator.dupe(usize, indices);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{gradStateOf(self)},
+                .source_shape = rawShapeArray(tags, (&self.value)),
+                .estimated_work = if (gradStateOf(self) != null) (&self.value).len() else 0,
+                .indices = owned_indices,
+            });
         }
 
         pub fn setSlice(self: *const Self, ctx: *ExecContext, comptime tag: Tag, start: usize, update: *const Self) !Self {
             const slice_axis = comptime axis(tag);
             var value = try ctx.setSliceAxis(dtype, tag_rank, self.asRawTensor(), update.asRawTensor(), slice_axis, start);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetSliceBackward(tags, slice_axis), .{ ctx.allocator, gradStateOf(self), gradStateOf(update), update.asRawTensor(), start });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad() or update.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or update.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = SetSliceBackward(tags, slice_axis);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ gradStateOf(self), gradStateOf(update) },
+                .update_shape = rawShapeArray(tags, update.asRawTensor()),
+                .start = start,
+            });
         }
 
         pub fn setRows(self: *const Self, ctx: *ExecContext, comptime tag: Tag, indices: []const usize, update: *const Self) !Self {
             const rows_axis = comptime axis(tag);
             var value = try ctx.setRows(dtype, tag_rank, self.asRawTensor(), update.asRawTensor(), rows_axis, indices);
             errdefer value.deinit();
-            return finish(tags, ctx, value, self.requiresGrad() or update.requiresGrad(), SetRowsBackward(tags, rows_axis), .{ ctx.allocator, gradStateOf(self), gradStateOf(update), indices });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad() or update.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or update.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = SetRowsBackward(tags, rows_axis);
+            const owned_indices = try ctx.allocator.dupe(usize, indices);
+            errdefer ctx.allocator.free(owned_indices);
+            return finishOp(tags, ctx, value, Record{ .parents = .{ gradStateOf(self), gradStateOf(update) }, .indices = owned_indices });
         }
 
         pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
@@ -514,42 +553,24 @@ pub fn Ops(comptime Self: type) type {
             raw_inputs[0] = self.asRawTensor();
             for (others, raw_inputs[1..]) |other, *raw| raw.* = other.asRawTensor();
 
-            // Backward metadata is only materialized when finishOp will attach
-            // a backward record (same gate finishOp itself applies); its
-            // no-grad branch never reads create_args, so the empty slices are
-            // never touched there. ConcatBackward copies both slices when it
-            // is constructed, so stack-backed temporaries are safe on the grad
-            // path.
-            const track_grad = differentiable and any_grad and control.isGradEnabled();
-            var parents_stack: [concat_inline_inputs]?*GradState = undefined;
-            var sizes_stack: [concat_inline_inputs]usize = undefined;
-            var parents: []?*GradState = parents_stack[0..0];
-            var sizes: []usize = sizes_stack[0..0];
-            const metadata_on_heap = track_grad and input_count > parents_stack.len;
-            defer if (metadata_on_heap) {
-                ctx.allocator.free(parents);
-                ctx.allocator.free(sizes);
-            };
-            if (track_grad) {
-                if (metadata_on_heap) {
-                    parents = try ctx.allocator.alloc(?*GradState, input_count);
-                    sizes = try ctx.allocator.alloc(usize, input_count);
-                } else {
-                    parents = parents_stack[0..input_count];
-                    sizes = sizes_stack[0..input_count];
-                }
-                parents[0] = gradStateOf(self);
-                sizes[0] = self.asRawTensor().shape.at(axis(tag));
-                for (others, parents[1..], sizes[1..]) |other, *parent, *size| {
-                    parent.* = gradStateOf(other);
-                    size.* = other.asRawTensor().shape.at(axis(tag));
-                }
-            }
-
             const concat_axis = comptime axis(tag);
             var value = try ctx.concatAxis(dtype, tag_rank, raw_inputs, concat_axis);
             errdefer value.deinit();
-            return finish(tags, ctx, value, any_grad, ConcatBackward(tags, concat_axis), .{ ctx.allocator, parents, sizes });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, any_grad);
+            if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
+            // The record owns one parent slot and one axis size per input.
+            const Record = ConcatBackward(tags, concat_axis);
+            const owned_parents = try ctx.allocator.alloc(?*GradState, input_count);
+            errdefer ctx.allocator.free(owned_parents);
+            const owned_sizes = try ctx.allocator.alloc(usize, input_count);
+            errdefer ctx.allocator.free(owned_sizes);
+            owned_parents[0] = gradStateOf(self);
+            owned_sizes[0] = self.asRawTensor().shape.at(concat_axis);
+            for (others, owned_parents[1..], owned_sizes[1..]) |other, *parent, *size| {
+                parent.* = gradStateOf(other);
+                size.* = other.asRawTensor().shape.at(concat_axis);
+            }
+            return finishOp(tags, ctx, value, Record{ .parents = owned_parents, .sizes = owned_sizes });
         }
 
         /// Stack `self` and `others` along a NEW axis tagged `new_tag`
@@ -629,7 +650,10 @@ pub fn Ops(comptime Self: type) type {
         fn axisView(self: *const Self, ctx: *ExecContext, comptime axes: anytype, comptime target_tags: anytype) !Out(target_tags) {
             var value = try plumbing.axisViewTensorOf(dtype, self.asRawTensor(), axes, target_tags);
             errdefer value.deinit();
-            return finish(target_tags, ctx, value, self.requiresGrad(), AxisViewBackward(tags, axes), .{ ctx.allocator, gradStateOf(self), &self.value });
+            if (comptime !differentiable) return finishTypedNoGrad(Out(target_tags), ctx, value, self.requiresGrad());
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(target_tags, ctx, value);
+            const Record = AxisViewBackward(tags, axes);
+            return finishOp(target_tags, ctx, value, Record{ .parents = .{gradStateOf(self)}, .source_shape = rawShapeArray(tags, (&self.value)) });
         }
     };
 }

@@ -30,6 +30,11 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const Tensor = ag_tensor.Tensor;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const finishNoGrad = plumbing.finishNoGrad;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
@@ -60,7 +65,12 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.conv2d(self.asRawTensor(), weight_ptr.asRawTensor(), bias_raw, stride, padding, groups);
             errdefer value.deinit();
-            return finishOp(out_tags, ctx, value, any_grad, Conv2dBackward, .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, bias_grad_state, self.asRawTensor(), weight_ptr.asRawTensor(), stride, padding, groups });
+            if (!recordsGrad(any_grad)) return finishNoGrad(out_tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight_ptr.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(out_tags, ctx, value, Conv2dBackward{ .parents = .{ self.grad_state, weight_ptr.grad_state, bias_grad_state }, .input_shape = .{ self.asRawTensor().shape.at(0), self.asRawTensor().shape.at(1), self.asRawTensor().shape.at(2) }, .weight_shape = .{ weight_ptr.asRawTensor().shape.at(0), weight_ptr.asRawTensor().shape.at(1), weight_ptr.asRawTensor().shape.at(2), weight_ptr.asRawTensor().shape.at(3) }, .stride = stride, .pad = padding, .groups = groups, .estimated_work = Conv2dBackward.workEstimate(self.asRawTensor(), weight_ptr.asRawTensor()), .input_value = saved_input, .weight_value = saved_weight });
         }
 
         /// conv2d + relu with the relu fused into the conv epilogue on the
@@ -92,7 +102,12 @@ pub fn Ops(comptime Self: type) type {
             const bias_raw: ?*const RawTensor = if (@TypeOf(bias) == @TypeOf(null)) null else tensorObjectPtrFrom(@TypeOf(bias), &bias).asRawTensor();
             var value = try ctx.conv2dRelu(self.asRawTensor(), weight_ptr.asRawTensor(), bias_raw, stride, padding, groups);
             errdefer value.deinit();
-            return finishOp(out_tags, ctx, value, false, Conv2dBackward, .{ ctx.allocator, null, null, null, self.asRawTensor(), weight_ptr.asRawTensor(), stride, padding, groups });
+            if (!recordsGrad(false)) return finishNoGrad(out_tags, ctx, value);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight_ptr.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(out_tags, ctx, value, Conv2dBackward{ .parents = .{ null, null, null }, .input_shape = .{ self.asRawTensor().shape.at(0), self.asRawTensor().shape.at(1), self.asRawTensor().shape.at(2) }, .weight_shape = .{ weight_ptr.asRawTensor().shape.at(0), weight_ptr.asRawTensor().shape.at(1), weight_ptr.asRawTensor().shape.at(2), weight_ptr.asRawTensor().shape.at(3) }, .stride = stride, .pad = padding, .groups = groups, .estimated_work = Conv2dBackward.workEstimate(self.asRawTensor(), weight_ptr.asRawTensor()), .input_value = saved_input, .weight_value = saved_weight });
         }
 
         /// Load-time Winograd weight preparation for this rank-4
@@ -194,7 +209,14 @@ pub fn Ops(comptime Self: type) type {
             }
             var value = try ctx.unfold(self.asRawTensor(), kernel, stride, padding);
             errdefer value.deinit();
-            return finishOp(normalizeTags(out_tags), ctx, value, self.requiresGrad(), UnfoldBackward, .{ ctx.allocator, self.grad_state, self.asRawTensor(), kernel, stride, padding });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(normalizeTags(out_tags), ctx, value);
+            return finishOp(normalizeTags(out_tags), ctx, value, UnfoldBackward{
+                .parents = .{self.grad_state},
+                .output_size = .{ self.asRawTensor().shape.at(0), self.asRawTensor().shape.at(1) },
+                .kernel = kernel,
+                .stride = stride,
+                .pad = padding,
+            });
         }
 
         /// Adjoint of `unfold` (torch.nn.Fold): scatter-ADD rank-2
@@ -221,7 +243,13 @@ pub fn Ops(comptime Self: type) type {
             }
             var value = try ctx.fold(self.asRawTensor(), output_size, kernel, stride, padding);
             errdefer value.deinit();
-            return finishOp(normalizeTags(out_tags), ctx, value, self.requiresGrad(), FoldBackward, .{ ctx.allocator, self.grad_state, kernel, stride, padding });
+            if (!recordsGrad(self.requiresGrad())) return finishNoGrad(normalizeTags(out_tags), ctx, value);
+            return finishOp(normalizeTags(out_tags), ctx, value, FoldBackward{
+                .parents = .{self.grad_state},
+                .kernel = kernel,
+                .stride = stride,
+                .pad = padding,
+            });
         }
 
         /// Depthwise causal 1-D convolution:
@@ -251,7 +279,24 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.causalDepthwiseConv1d(tag_rank, self.asRawTensor(), kernel.asRawTensor(), time_axis, channel_axis, dilation, state);
             errdefer value.deinit();
-            return finishOp(tags, ctx, value, self.requiresGrad() or kernel.requiresGrad(), CausalDepthwiseConv1dBackward(tags, .{ channel_tag, tap_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, kernel.grad_state, self.asRawTensor(), kernel.asRawTensor(), dilation, state });
+            if (!recordsGrad(self.requiresGrad() or kernel.requiresGrad())) return finishNoGrad(tags, ctx, value);
+            const Record = CausalDepthwiseConv1dBackward(tags, .{ channel_tag, tap_tag }, time_axis, channel_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_kernel = try kernel.asRawTensor().cloneView();
+            errdefer saved_kernel.deinit();
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, kernel.grad_state },
+                .input_shape = rawShapeArray(tags, self.asRawTensor()),
+                .kernel_shape = rawShapeArray(.{ channel_tag, tap_tag }, kernel.asRawTensor()),
+                .estimated_work = Record.workEstimate(self.grad_state, kernel.grad_state, self.asRawTensor(), kernel.asRawTensor()),
+                .input_value = saved_input,
+                .kernel_value = saved_kernel,
+                .dilation = dilation,
+                .state = owned_state,
+            });
         }
 
         /// General causal 1-D convolution mixing channels:
@@ -285,7 +330,24 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.causalConv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, state);
             errdefer value.deinit();
-            return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), CausalConv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), dilation, state });
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad())) return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+            const Record = CausalConv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state },
+                .input_shape = rawShapeArray(tags, self.asRawTensor()),
+                .weight_shape = rawShapeArray(.{ tap_tag, in_tag, out_tag }, weight.asRawTensor()),
+                .dilation = dilation,
+                .estimated_work = Record.workEstimate(self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor()),
+                .input_value = saved_input,
+                .weight_value = saved_weight,
+                .state = owned_state,
+            });
         }
 
         /// Grouped causal 1-D convolution. Input is `[time, in]`, output is
@@ -316,7 +378,25 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.groupedCausalConv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, dilation, groups, state);
             errdefer value.deinit();
-            return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), GroupedCausalConv1dBackward(tags, .{ tap_tag, in_per_group_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), dilation, groups, state });
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad())) return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+            const Record = GroupedCausalConv1dBackward(tags, .{ tap_tag, in_per_group_tag, out_tag }, time_axis, channel_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state },
+                .input_shape = rawShapeArray(tags, self.asRawTensor()),
+                .weight_shape = rawShapeArray(.{ tap_tag, in_per_group_tag, out_tag }, weight.asRawTensor()),
+                .dilation = dilation,
+                .groups = groups,
+                .estimated_work = Record.workEstimate(self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor()),
+                .input_value = saved_input,
+                .weight_value = saved_weight,
+                .state = owned_state,
+            });
         }
 
         /// General 1-D convolution (PyTorch Conv1d semantics — standard
@@ -352,7 +432,24 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.conv1d(tag_rank, self.asRawTensor(), weight.asRawTensor(), time_axis, channel_axis, stride, padding, dilation, groups);
             errdefer value.deinit();
-            return finishOp(.{ time_tag, out_tag }, ctx, value, self.requiresGrad() or weight.requiresGrad(), Conv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis), .{ ctx.allocator, self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor(), stride, padding, dilation, groups });
+            if (!recordsGrad(self.requiresGrad() or weight.requiresGrad())) return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+            const Record = Conv1dBackward(tags, .{ tap_tag, in_tag, out_tag }, time_axis, channel_axis);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
+                .parents = .{ self.grad_state, weight.grad_state },
+                .input_shape = rawShapeArray(tags, self.asRawTensor()),
+                .weight_shape = rawShapeArray(.{ tap_tag, in_tag, out_tag }, weight.asRawTensor()),
+                .stride = stride,
+                .pad = padding,
+                .dilation = dilation,
+                .groups = groups,
+                .estimated_work = Record.workEstimate(self.grad_state, weight.grad_state, self.asRawTensor(), weight.asRawTensor()),
+                .input_value = saved_input,
+                .weight_value = saved_weight,
+            });
         }
 
         /// ConvTranspose1d (GEMM + col2im_1d gather, the ggml decomposition):
@@ -400,7 +497,22 @@ pub fn Ops(comptime Self: type) type {
 
             var value = try ctx.convTranspose1d(self.asRawTensor(), weight2.asRawTensor(), bias_raw, out_channels, taps, stride, padding, output_pad);
             errdefer value.deinit();
-            return finishOp(.{ time_tag, out_tag }, ctx, value, any_grad, ConvTranspose1dBackward(tags), .{ ctx.allocator, self.grad_state, weight2.grad_state, bias_parent, self.asRawTensor(), weight2.asRawTensor(), out_channels, taps, stride, padding });
+            if (!recordsGrad(any_grad)) return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+            const Record = ConvTranspose1dBackward(tags);
+            var saved_input = try self.asRawTensor().cloneView();
+            errdefer saved_input.deinit();
+            var saved_weight = try weight2.asRawTensor().cloneView();
+            errdefer saved_weight.deinit();
+            return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
+                .parents = .{ self.grad_state, weight2.grad_state, bias_parent },
+                .input_shape = rawShapeArray(tags, self.asRawTensor()),
+                .out_channels = out_channels,
+                .taps = taps,
+                .stride = stride,
+                .pad = padding,
+                .input_value = saved_input,
+                .weight_value = saved_weight,
+            });
         }
     };
 }

@@ -14,6 +14,7 @@ const tags_mod = @import("../../../tags.zig");
 const backward_matmul = @import("../../backward/matmul.zig");
 
 const TensorError = tensor_mod.TensorError;
+const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
 const normalizeTags = tags_mod.normalizeTags;
@@ -50,16 +51,18 @@ pub fn Ops(comptime Self: type) type {
         const PackedRhs = ag_tensor.PackedRhs;
         const packedRhsType = ag_tensor.packedRhsType;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const finishOrConstant = plumbing.finishOrConstant;
         const matmul_dtype = dtype_mod.outputDType(.matmul, dtype);
         const finishNoGrad = plumbing.finishNoGrad;
-        const adoptIntoScope = plumbing.adoptIntoScope;
-        const finishWithBackward = plumbing.finishWithBackward;
         const quantizedRhsDotRaw = plumbing.quantizedRhsDotRaw;
         const halfRhsDotRaw = plumbing.halfRhsDotRaw;
         const TensorObject = plumbing.TensorObject;
@@ -89,11 +92,33 @@ pub fn Ops(comptime Self: type) type {
                 };
                 var value = try ctx.matmul(dtype, kind, self.asRawTensor(), other_ptr.asRawTensor());
                 errdefer value.deinit();
-                return finishOrConstant(differentiable, matmul_dtype, out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), Matmul2DBackward(kind == .trans_b), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = matmul_dtype, .tags = out_tags }), ctx, value, self.requiresGrad() or other_ptr.requiresGrad());
+                if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(out_tags, ctx, value);
+                const Record = Matmul2DBackward(kind == .trans_b);
+                var saved_left = try self.asRawTensor().cloneView();
+                errdefer saved_left.deinit();
+                var saved_right = try other_ptr.asRawTensor().cloneView();
+                errdefer saved_right.deinit();
+                return finishOp(out_tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, other_ptr.grad_state },
+                    .left = saved_left,
+                    .right = saved_right,
+                });
             }
             var value = try ctx.bmm(dtype, kind, self.asRawTensor(), other_ptr.asRawTensor());
             errdefer value.deinit();
-            return finishOrConstant(differentiable, matmul_dtype, out_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), BmmBackward(kind), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+            if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = matmul_dtype, .tags = out_tags }), ctx, value, self.requiresGrad() or other_ptr.requiresGrad());
+            if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(out_tags, ctx, value);
+            const Record = BmmBackward(kind);
+            var saved_left = try self.asRawTensor().cloneView();
+            errdefer saved_left.deinit();
+            var saved_right = try other_ptr.asRawTensor().cloneView();
+            errdefer saved_right.deinit();
+            return finishOp(out_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, other_ptr.grad_state },
+                .left = saved_left,
+                .right = saved_right,
+            });
         }
 
         // --- Axis bias-add + scaled residual-add (no-grad) -------------------
@@ -122,21 +147,70 @@ pub fn Ops(comptime Self: type) type {
                 const allow_gpu = ctx.quantDotGpuEnabled();
                 var value = try quantizedRhsDotRaw(Other.dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag, allow_gpu);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad(), ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, null, self.asRawTensor(), other_ptr.asRawTensor() });
+                if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+                const Record = ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag);
+                var saved_right = try other_ptr.asRawTensor().cloneView();
+                errdefer saved_right.deinit();
+                var saved_left: ?RawTensor = if (null != null) try self.asRawTensor().cloneView() else null;
+                errdefer if (saved_left) |*v| v.deinit();
+                return finishOp(result_tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, null },
+                    .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                    .right_shape = rawShapeArrayOf(Other.dtype, other_tags, other_ptr.asRawTensor()),
+                    .right_value = saved_right,
+                    .left_value = saved_left,
+                });
             }
             if (comptime Other.dtype == .f16) {
                 var value = try halfRhsDotRaw(.f16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.f16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+                const Record = ConstRhsDotBackward(.f16, tags, other_tags, contract_tag);
+                var saved_right = try other_ptr.asRawTensor().cloneView();
+                errdefer saved_right.deinit();
+                var saved_left: ?RawTensor = if (other_ptr.grad_state != null) try self.asRawTensor().cloneView() else null;
+                errdefer if (saved_left) |*v| v.deinit();
+                return finishOp(result_tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, other_ptr.grad_state },
+                    .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                    .right_shape = rawShapeArrayOf(.f16, other_tags, other_ptr.asRawTensor()),
+                    .right_value = saved_right,
+                    .left_value = saved_left,
+                });
             }
             if (comptime Other.dtype == .bf16) {
                 var value = try halfRhsDotRaw(.bf16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+                const Record = ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag);
+                var saved_right = try other_ptr.asRawTensor().cloneView();
+                errdefer saved_right.deinit();
+                var saved_left: ?RawTensor = if (other_ptr.grad_state != null) try self.asRawTensor().cloneView() else null;
+                errdefer if (saved_left) |*v| v.deinit();
+                return finishOp(result_tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, other_ptr.grad_state },
+                    .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                    .right_shape = rawShapeArrayOf(.bf16, other_tags, other_ptr.asRawTensor()),
+                    .right_value = saved_right,
+                    .left_value = saved_left,
+                });
             }
             var value = try tag_ops.taggedDot(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), DotBackward(tags, other_tags, contract_tag), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = DotBackward(tags, other_tags, contract_tag);
+            var saved_left = try self.asRawTensor().cloneView();
+            errdefer saved_left.deinit();
+            var saved_right = try other_ptr.asRawTensor().cloneView();
+            errdefer saved_right.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, other_ptr.grad_state },
+                .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                .right_shape = rawShapeArray(other_tags, other_ptr.asRawTensor()),
+                .estimated_work = Record.einsumBackwardWorkEstimate(self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor()),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
         }
 
         /// `self + a·b` in one op (torch's addmm). The product accumulates
@@ -172,7 +246,18 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.matmulAdd(a_ptr.asRawTensor(), b_ptr.asRawTensor(), self.asRawTensor());
             errdefer value.deinit();
             const wants_grad = self.requiresGrad() or a_ptr.requiresGrad() or b_ptr.requiresGrad();
-            return finishOp(tags, ctx, value, wants_grad, AddDotBackward(tags, left_tags, right_tags, contract_tag), .{ ctx.allocator, self.grad_state, a_ptr.grad_state, b_ptr.grad_state, a_ptr.asRawTensor(), b_ptr.asRawTensor() });
+            if (!recordsGrad(wants_grad)) return finishNoGrad(tags, ctx, value);
+            const Record = AddDotBackward(tags, left_tags, right_tags, contract_tag);
+            var saved_left = try a_ptr.asRawTensor().cloneView();
+            errdefer saved_left.deinit();
+            var saved_right = try b_ptr.asRawTensor().cloneView();
+            errdefer saved_right.deinit();
+            return finishOp(tags, ctx, value, Record{
+                .parents = .{ self.grad_state, a_ptr.grad_state, b_ptr.grad_state },
+                .estimated_work = Record.workEstimate(a_ptr.grad_state, b_ptr.grad_state, a_ptr.asRawTensor(), b_ptr.asRawTensor()),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
         }
 
         /// Multi-index tagged contraction (einsum). `out_tags` is the whole
@@ -206,7 +291,7 @@ pub fn Ops(comptime Self: type) type {
                 comptime if (Other.dtype != dtype) @compileError("einsum on a 16-bit tensor requires a same-dtype RHS; cast explicitly");
                 var value = try tag_ops.taggedEinsum(dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
                 errdefer value.deinit();
-                return finishOrConstant(false, matmul_dtype, result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), void, .{});
+                return finishTypedNoGrad(Tensor(.{ .dtype = matmul_dtype, .tags = result_tags }), ctx, value, self.requiresGrad() or other_ptr.requiresGrad());
             }
             if (comptime (Other.dtype == .f16 or Other.dtype == .bf16)) {
                 // Mixed-precision RHS: widen once per call and run the f32
@@ -217,11 +302,36 @@ pub fn Ops(comptime Self: type) type {
                 defer right_f32.deinit();
                 var value = try tag_ops.taggedEinsum(.f32, tags, self.asRawTensor(), ctx, other_tags, &right_f32, result_tags);
                 errdefer value.deinit();
-                return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), ConstRhsEinsumBackward(Other.dtype, tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+                if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+                const Record = ConstRhsEinsumBackward(Other.dtype, tags, other_tags, result_tags);
+                var saved_right = try other_ptr.asRawTensor().cloneView();
+                errdefer saved_right.deinit();
+                var saved_left: ?RawTensor = if (other_ptr.grad_state != null) try self.asRawTensor().cloneView() else null;
+                errdefer if (saved_left) |*v| v.deinit();
+                return finishOp(result_tags, ctx, value, Record{
+                    .parents = .{ self.grad_state, other_ptr.grad_state },
+                    .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                    .right_shape = rawShapeArrayOf(Other.dtype, other_tags, other_ptr.asRawTensor()),
+                    .right_value = saved_right,
+                    .left_value = saved_left,
+                });
             }
             var value = try tag_ops.taggedEinsum(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags);
             errdefer value.deinit();
-            return finishOp(result_tags, ctx, value, self.requiresGrad() or other_ptr.requiresGrad(), EinsumBackward(tags, other_tags, result_tags), .{ ctx.allocator, self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor() });
+            if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
+            const Record = EinsumBackward(tags, other_tags, result_tags);
+            var saved_left = try self.asRawTensor().cloneView();
+            errdefer saved_left.deinit();
+            var saved_right = try other_ptr.asRawTensor().cloneView();
+            errdefer saved_right.deinit();
+            return finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, other_ptr.grad_state },
+                .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                .right_shape = rawShapeArray(other_tags, other_ptr.asRawTensor()),
+                .estimated_work = Record.einsumBackwardWorkEstimate(self.grad_state, other_ptr.grad_state, self.asRawTensor(), other_ptr.asRawTensor()),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
         }
 
         /// Trainable ternary linear (BitNet b1.58 straight-through estimator):
@@ -293,24 +403,26 @@ pub fn Ops(comptime Self: type) type {
             };
             errdefer value.deinit();
 
-            // Inlined finishOp tail: the encoded rhs is a non-refcounted
-            // resource, so ownership must transfer to the Backward exactly at
-            // its node creation (finishOp's opaque create_args cannot express
-            // that hand-off).
-            const wants_grad = (self.requiresGrad() or weight_ptr.requiresGrad()) and control.isGradEnabled();
-            if (!wants_grad) {
+            // The encoded rhs is a non-refcounted resource: the record
+            // literal moves it into the node, and `finishOp` cannot fail
+            // once the node exists, so the site's errdefer covers exactly
+            // the failures before the hand-off.
+            if (!recordsGrad(self.requiresGrad() or weight_ptr.requiresGrad())) {
                 rhs_owned = false;
                 rhs.deinit();
                 return finishNoGrad(result_tags, ctx, value);
             }
-            if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-            const state = try core.createNode(TernarySteDotBackward(tags), .{ ctx.allocator, self.grad_state, weight_ptr.grad_state, self.asRawTensor(), &left_matrix, rhs });
+            const Record = TernarySteDotBackward(tags);
+            var saved_left = try left_matrix.cloneView();
+            errdefer saved_left.deinit();
+            const out = try finishOp(result_tags, ctx, value, Record{
+                .parents = .{ self.grad_state, weight_ptr.grad_state },
+                .left = saved_left,
+                .left_shape = rawShapeArray(tags, self.asRawTensor()),
+                .estimated_work = Record.workEstimate(self.grad_state, weight_ptr.grad_state, &left_matrix, rhs.n),
+                .rhs = rhs,
+            });
             rhs_owned = false; // owned by the node from here on
-            var out = try finishWithBackward(result_tags, value, state);
-            if (ctx.execScopeActive()) {
-                adoptIntoScope(ctx, &out);
-                out.scope_owned = true;
-            }
             return out;
         }
 

@@ -169,7 +169,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
     // Reserve the outer-scope slot BEFORE consuming views/value so adoption
     // cannot fail afterwards (same two-phase contract as tensor.zig finishOp).
     if (ctx.execScopeActive()) try ctx.reserveScopeSlot();
-    const state = try core.createNode(CheckpointBackward(block, Extra, Inputs), .{ ctx.allocator, extra, views, states });
+    const state = try core.createNode(ctx.allocator, CheckpointBackward(block, Extra, Inputs){ .extra = extra, .views = views, .states = states });
     node_owns_views = true;
     errdefer state.release();
 
@@ -286,13 +286,6 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
         states: [n]?*GradState,
 
         const Self = @This();
-
-        /// Consumes `views` on success; on error (the node allocation in
-        /// `core.createNode`) they stay with the caller.
-        pub fn init(self: *Self, allocator: Allocator, extra: Extra, views: [n]RawTensor, states: [n]?*GradState) !void {
-            _ = allocator;
-            self.* = .{ .extra = extra, .views = views, .states = states };
-        }
 
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));

@@ -33,37 +33,12 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            x_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            x: *const RawTensor,
-            weight: *const RawTensor,
-            logits: *const RawTensor,
-            labels: []const usize,
-            row_stats: []const f32,
-        ) !void {
+        /// rows x vocab per grad-requiring operand, saturating.
+        pub fn workEstimate(x_parent: ?*GradState, weight_parent: ?*GradState, x: *const RawTensor, weight: *const RawTensor) usize {
             var branches: usize = 0;
             if (x_parent != null) branches += 1;
             if (weight_parent != null) branches += 1;
-            self.* = .{
-                .parents = .{ x_parent, weight_parent },
-                .x = try x.cloneView(),
-                .weight = undefined,
-                .logits = undefined,
-                .labels = undefined,
-                .row_stats = undefined,
-                .estimated_work = std.math.mul(usize, x.len(), weight.shape.at(0) * branches) catch std.math.maxInt(usize),
-            };
-            errdefer self.x.deinit();
-            self.weight = try weight.cloneView();
-            errdefer self.weight.deinit();
-            self.logits = try logits.cloneView();
-            errdefer self.logits.deinit();
-            self.labels = try allocator.dupe(usize, labels);
-            errdefer allocator.free(self.labels);
-            self.row_stats = try allocator.dupe(f32, row_stats);
+            return std.math.mul(usize, x.len(), weight.shape.at(0) * branches) catch std.math.maxInt(usize);
         }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
@@ -132,53 +107,12 @@ pub const LinearDistillBackward = struct {
 
     const Self = @This();
 
-    pub fn init(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        x_parent: ?*GradState,
-        weight_parent: ?*GradState,
-        x_sel: *const RawTensor,
-        weight: *const RawTensor,
-        logits: *const RawTensor,
-        sel_rows: []const usize,
-        local_rows: []const usize,
-        classes: []const usize,
-        probs: []const f32,
-        row_stats: []const f32,
-        row_count: usize,
-        options: exec_mod.LinearDistillOptions,
-    ) !void {
+    /// selected rows x vocab per grad-requiring operand (at least one), saturating.
+    pub fn workEstimate(x_parent: ?*GradState, weight_parent: ?*GradState, x_sel: *const RawTensor, weight: *const RawTensor) usize {
         var branches: usize = 0;
         if (x_parent != null) branches += 1;
         if (weight_parent != null) branches += 1;
-        self.* = .{
-            .parents = .{ x_parent, weight_parent },
-            .x_sel = try x_sel.cloneView(),
-            .weight = undefined,
-            .logits = undefined,
-            .sel_rows = undefined,
-            .local_rows = undefined,
-            .classes = undefined,
-            .probs = undefined,
-            .row_stats = undefined,
-            .row_count = row_count,
-            .options = options,
-            .estimated_work = std.math.mul(usize, x_sel.len(), weight.shape.at(0) * @max(branches, 1)) catch std.math.maxInt(usize),
-        };
-        errdefer self.x_sel.deinit();
-        self.weight = try weight.cloneView();
-        errdefer self.weight.deinit();
-        self.logits = try logits.cloneView();
-        errdefer self.logits.deinit();
-        self.sel_rows = try allocator.dupe(usize, sel_rows);
-        errdefer allocator.free(self.sel_rows);
-        self.local_rows = try allocator.dupe(usize, local_rows);
-        errdefer allocator.free(self.local_rows);
-        self.classes = try allocator.dupe(usize, classes);
-        errdefer allocator.free(self.classes);
-        self.probs = try allocator.dupe(f32, probs);
-        errdefer allocator.free(self.probs);
-        self.row_stats = try allocator.dupe(f32, row_stats);
+        return std.math.mul(usize, x_sel.len(), weight.shape.at(0) * @max(branches, 1)) catch std.math.maxInt(usize);
     }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
@@ -246,26 +180,6 @@ pub fn CrossEntropyExtBackward(comptime tags: anytype, comptime axis: usize, com
 
         const Self = @This();
 
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            parent: ?*GradState,
-            logits: *const RawTensor,
-            labels: []const usize,
-            row_stats: []const f32,
-        ) !void {
-            self.* = .{
-                .parents = .{parent},
-                .logits = try logits.cloneView(),
-                .labels = undefined,
-                .row_stats = undefined,
-            };
-            errdefer self.logits.deinit();
-            self.labels = try allocator.dupe(usize, labels);
-            errdefer allocator.free(self.labels);
-            self.row_stats = try allocator.dupe(f32, row_stats);
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             // For `.mean`/`.sum` the upstream gy must be a scalar; for `.none`
@@ -297,24 +211,6 @@ fn ElementwiseLossBackward(comptime Options: type, comptime options: Options, co
         target: RawTensor,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            target_parent: ?*GradState,
-            input: *const RawTensor,
-            target: *const RawTensor,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, target_parent },
-                .input = try input.cloneView(),
-                .target = undefined,
-            };
-            errdefer self.input.deinit();
-            self.target = try target.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len > 0 and needs_grad[0]) {

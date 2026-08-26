@@ -26,14 +26,6 @@ pub fn BroadcastBackward(comptime source_tags: anytype, comptime result_tags: an
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = try reduceGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
@@ -50,15 +42,6 @@ pub fn NarrowBackward(comptime source_tags: anytype, comptime axis: usize) type 
         start: usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor, start: usize) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .start = start,
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -80,15 +63,6 @@ pub fn PadBackward(comptime source_tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor, before: usize) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-                .before = before,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             var view = try ctx.narrowAxis(.f32, rawRank(source_tags.len), gy, axis, self.before, self.source_shape[axis]);
@@ -106,16 +80,6 @@ pub fn ConcatBackward(comptime tags: anytype, comptime axis: usize) type {
         sizes: []usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parents: []const ?*GradState, sizes: []const usize) !void {
-            if (parents.len != sizes.len) return tensor_mod.TensorError.InvalidShape;
-            self.* = .{
-                .parents = try allocator.dupe(?*GradState, parents),
-                .sizes = undefined,
-            };
-            errdefer allocator.free(self.parents);
-            self.sizes = try allocator.dupe(usize, sizes);
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             var start: usize = 0;
@@ -143,13 +107,6 @@ pub const ReshapeBackward = struct {
     parents: [1]?*GradState,
     source_shape: []usize,
 
-    pub fn init(self: *ReshapeBackward, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor) !void {
-        self.* = .{
-            .parents = .{parent},
-            .source_shape = try allocator.dupe(usize, source.shape.slice()),
-        };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
 
@@ -171,14 +128,6 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
         source_shape: [rawRank(source_tags.len)]usize,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .source_shape = rawShapeArray(source_tags, source),
-            };
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
@@ -224,14 +173,15 @@ pub fn StridedViewBackward(comptime source_tags: anytype, comptime view_tags: an
         const Self = @This();
         const view_to_source_axis = viewToSourceAxis();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, source: *const RawTensor, view: *const RawTensor) !void {
-            _ = allocator;
+        /// The record for `view` over `source`: pure geometry, no resource
+        /// is taken (the VJP scatters by strides, it never reads a value).
+        pub fn of(parent: ?*GradState, source: *const RawTensor, view: *const RawTensor) Self {
             const source_shape = rawShapeArray(source_tags, source);
             const source_strides = rawStrideArray(source_tags, source);
             const view_shape = rawShapeArray(view_tags, view);
             const view_strides = rawStrideArray(view_tags, view);
             const aliases_source = source.buffer == view.buffer;
-            self.* = .{
+            return .{
                 .parents = .{parent},
                 .source_shape = source_shape,
                 .source_strides = source_strides,

@@ -203,6 +203,17 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Backward records are typed struct literals built by the op
+  (`finishOp(tags, ctx, value, Record{ .parents = ..., ... })`;
+  `core.createNode(allocator, record)` moves the record into the
+  co-allocated node). The 84 `Record.init(self, allocator, ...)` constructors
+  and the positional `create_args` tuple forwarded by `@call` are gone: the op
+  takes the views its record saves with `cloneView` and holds them under
+  `errdefer` until the node exists, node allocation is the last fallible step
+  of an op tail, and the no-grad path (`plumbing.recordsGrad`) clones
+  nothing. A swapped pair of parents no longer compiles. Internal
+  (`src/ag/backward`, `src/ag/core.zig`); the public tensor surface is
+  unchanged.
 - `GradState` is reference-counted (`src/ag/core.zig`): a facade handle holds
   one reference, every backward record holds one per non-null operand (taken
   when the node is created, dropped when the record is destroyed), and an

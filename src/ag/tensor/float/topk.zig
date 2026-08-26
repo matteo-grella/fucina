@@ -22,6 +22,12 @@ pub fn Ops(comptime Self: type) type {
         const Tensor = ag_tensor.Tensor;
         const TopKResult = ag_tensor.TopKResult;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
+        const recordsGrad = plumbing.recordsGrad;
+        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
+        const finishNoGrad = plumbing.finishNoGrad;
+        const rawShapeArray = plumbing.rawShapeArray;
+        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
+        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         pub fn topK(self: *const Self, ctx: *ExecContext, comptime tag: Tag, k: usize, comptime out_tag: Tag) !TopKResult(replaceTag(tags, tag, out_tag)) {
@@ -31,7 +37,16 @@ pub fn Ops(comptime Self: type) type {
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
             errdefer if (raw_indices) |*value| value.deinit();
-            var values = try finishOp(result_tags, ctx, raw_values.?, self.requiresGrad(), TopKBackward(tags, axis(tag)), .{ ctx.allocator, self.grad_state, &self.value, &raw_indices.? });
+            var values = if (!recordsGrad(self.requiresGrad())) try finishNoGrad(result_tags, ctx, raw_values.?) else blk: {
+                const Record = TopKBackward(tags, axis(tag));
+                var saved_indices = try (&raw_indices.?).cloneView();
+                errdefer saved_indices.deinit();
+                break :blk try finishOp(result_tags, ctx, raw_values.?, Record{
+                    .parents = .{self.grad_state},
+                    .source_shape = rawShapeArray(tags, (&self.value)),
+                    .indices = saved_indices,
+                });
+            };
             raw_values = null;
             errdefer values.deinit();
             var indices = try Tensor(.{ .dtype = .i64, .tags = result_tags }).fromTensor(ctx, raw_indices.?);
@@ -56,7 +71,16 @@ pub fn Ops(comptime Self: type) type {
             var raw_indices: ?tensor_mod.TensorOf(.i64) = raw.indices;
             errdefer if (raw_values) |*value| value.deinit();
             errdefer if (raw_indices) |*value| value.deinit();
-            var values = try finishOp(tags, ctx, raw_values.?, self.requiresGrad(), TopKBackward(tags, axis(tag)), .{ ctx.allocator, self.grad_state, &self.value, &raw_indices.? });
+            var values = if (!recordsGrad(self.requiresGrad())) try finishNoGrad(tags, ctx, raw_values.?) else blk: {
+                const Record = TopKBackward(tags, axis(tag));
+                var saved_indices = try (&raw_indices.?).cloneView();
+                errdefer saved_indices.deinit();
+                break :blk try finishOp(tags, ctx, raw_values.?, Record{
+                    .parents = .{self.grad_state},
+                    .source_shape = rawShapeArray(tags, (&self.value)),
+                    .indices = saved_indices,
+                });
+            };
             raw_values = null;
             errdefer values.deinit();
             var indices = try Tensor(.{ .dtype = .i64, .tags = tags }).fromTensor(ctx, raw_indices.?);

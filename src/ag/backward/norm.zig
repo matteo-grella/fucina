@@ -23,15 +23,6 @@ pub fn RmsNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, eps: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-                .eps = eps,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = (try ctx.rmsNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
@@ -54,26 +45,6 @@ pub fn RmsNormMulBackward(comptime tags: anytype, comptime axis: usize) type {
         eps: f32,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            eps: f32,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent },
-                .input = try input.cloneView(),
-                .weight = undefined,
-                .eps = eps,
-            };
-            errdefer self.input.deinit();
-            self.weight = try weight.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
@@ -102,27 +73,6 @@ pub fn RmsNormMulAddBackward(comptime tags: anytype, comptime axis: usize) type 
         eps: f32,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            residual_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            eps: f32,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent, residual_parent },
-                .input = try input.cloneView(),
-                .weight = undefined,
-                .eps = eps,
-            };
-            errdefer self.input.deinit();
-            self.weight = try weight.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
@@ -155,15 +105,6 @@ pub fn LayerNormBackward(comptime tags: anytype, comptime axis: usize) type {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, eps: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{parent},
-                .input = try input.cloneView(),
-                .eps = eps,
-            };
-        }
-
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             if (needs_grad.len == 0 or !needs_grad[0]) return;
             out[0] = (try ctx.layerNormBackward(rawRank(tags.len), &self.input, gy, axis, self.eps, .{})).input;
@@ -186,27 +127,6 @@ pub fn LayerNormAffineBackward(comptime tags: anytype, comptime axis: usize) typ
         eps: f32,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            bias_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            eps: f32,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent, bias_parent },
-                .input = try input.cloneView(),
-                .weight = undefined,
-                .eps = eps,
-            };
-            errdefer self.input.deinit();
-            self.weight = try weight.cloneView();
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
@@ -244,29 +164,6 @@ pub fn RmsNormMulRopeBackward(
         inverse_table: exec_mod.RopeTable,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: *const RawTensor,
-            eps: f32,
-            table: *const exec_mod.RopeTable,
-        ) !void {
-            self.* = .{
-                .parents = .{ input_parent, weight_parent },
-                .input = try input.cloneView(),
-                .weight = undefined,
-                .eps = eps,
-                .inverse_table = undefined,
-            };
-            errdefer self.input.deinit();
-            self.weight = try weight.cloneView();
-            errdefer self.weight.deinit();
-            self.inverse_table = try cloneInverseRopeTable(allocator, table);
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];
@@ -308,30 +205,6 @@ pub fn GroupNormBackward(comptime tags: anytype) type {
         weight_value: ?RawTensor = null,
 
         const Self = @This();
-
-        pub fn init(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            input_parent: ?*GradState,
-            weight_parent: ?*GradState,
-            bias_parent: ?*GradState,
-            input: *const RawTensor,
-            weight: ?*const RawTensor,
-            groups: usize,
-            eps: f32,
-        ) !void {
-            _ = allocator;
-            self.* = .{
-                .parents = .{ input_parent, weight_parent, bias_parent },
-                .groups = groups,
-                .eps = eps,
-                .input_value = try input.cloneView(),
-            };
-            errdefer self.input_value.deinit();
-            if (weight) |w| {
-                self.weight_value = try w.cloneView();
-            }
-        }
 
         pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
             const need_input = needs_grad.len > 0 and needs_grad[0];

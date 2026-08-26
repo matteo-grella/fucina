@@ -22,11 +22,6 @@ test "backward scheduler handles more operands than stack scratch capacity" {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: Allocator, parents: []const ?*GradState) !void {
-            const owned_parents = try allocator.dupe(?*GradState, parents);
-            self.* = .{ .parents = owned_parents };
-        }
-
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             return self.parents;
@@ -97,7 +92,9 @@ test "backward scheduler handles more operands than stack scratch capacity" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try core.createNode(WideBackward, .{ ctx.allocator, &parent_operands });
+    const owned_parents = try ctx.allocator.dupe(?*GradState, &parent_operands);
+    errdefer ctx.allocator.free(owned_parents);
+    const output = try core.createNode(ctx.allocator, WideBackward{ .parents = owned_parents });
     defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
@@ -114,11 +111,6 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
         parents: [3]?*GradState,
 
         const Self = @This();
-
-        pub fn init(self: *Self, allocator: Allocator, a: *GradState, b: *GradState) !void {
-            _ = allocator;
-            self.* = .{ .parents = .{ a, b, a } };
-        }
 
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
@@ -173,7 +165,7 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try core.createNode(DuplicateViewBackward, .{ ctx.allocator, a, b });
+    const output = try core.createNode(ctx.allocator, DuplicateViewBackward{ .parents = .{ a, b, a } });
     defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
@@ -199,14 +191,6 @@ test "multi-output backward adds a seed when a prior output already touched that
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: Allocator, parent: *GradState, factor: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parent = .{parent},
-                .factor = factor,
-            };
-        }
-
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             return self.parent[0..];
@@ -249,10 +233,10 @@ test "multi-output backward adds a seed when a prior output already touched that
     const x = try GradState.leaf(ctx.allocator);
     defer x.release();
 
-    const z = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 3 });
+    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 3 });
     defer z.release();
 
-    const y = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, z, 2 });
+    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{z}, .factor = 2 });
     defer y.release();
 
     var y_value = try ctx.scalar(.f32, 0);
@@ -278,14 +262,6 @@ test "failed output seeding leaves the graph re-runnable" {
 
         const Self = @This();
 
-        pub fn init(self: *Self, allocator: Allocator, parent: *GradState, factor: f32) !void {
-            _ = allocator;
-            self.* = .{
-                .parent = .{parent},
-                .factor = factor,
-            };
-        }
-
         fn operands(ptr: *const anyopaque) []const ?*GradState {
             const self: *const Self = @ptrCast(@alignCast(ptr));
             return self.parent[0..];
@@ -328,10 +304,10 @@ test "failed output seeding leaves the graph re-runnable" {
     const x = try GradState.leaf(ctx.allocator);
     defer x.release();
 
-    const y = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 2 });
+    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 2 });
     defer y.release();
 
-    const z = try core.createNode(ScaleToParentBackward, .{ ctx.allocator, x, 3 });
+    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parent = .{x}, .factor = 3 });
     defer z.release();
 
     var y_value = try ctx.scalar(.f32, 0);

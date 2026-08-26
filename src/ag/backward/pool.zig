@@ -21,17 +21,6 @@ pub const MaxPool2dBackward = struct {
 
     const Self = @This();
 
-    pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, input: *const RawTensor, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !void {
-        _ = allocator;
-        self.* = .{
-            .parents = .{parent},
-            .kernel = kernel,
-            .stride = stride,
-            .pad = pad,
-            .input_value = try input.cloneView(),
-        };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.maxPool2dBackward(&self.input_value, gy, self.kernel, self.stride, self.pad);
@@ -57,11 +46,6 @@ pub const AvgPool2dBackward = struct {
 
     const Self = @This();
 
-    pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState, in_h: usize, in_w: usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !void {
-        _ = allocator;
-        self.* = .{ .parents = .{parent}, .in_h = in_h, .in_w = in_w, .kernel = kernel, .stride = stride, .pad = pad };
-    }
-
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         if (needs_grad.len == 0 or !needs_grad[0]) return;
         out[0] = try ctx.avgPool2dBackward(gy, self.in_h, self.in_w, self.kernel, self.stride, self.pad);
@@ -75,11 +59,6 @@ pub const Upsample2xNearestBackward = struct {
     parents: [1]?*GradState,
 
     const Self = @This();
-
-    pub fn init(self: *Self, allocator: std.mem.Allocator, parent: ?*GradState) !void {
-        _ = allocator;
-        self.* = .{ .parents = .{parent} };
-    }
 
     pub fn vjp(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, needs_grad: []const bool, out: []?RawTensor) !void {
         _ = self;
