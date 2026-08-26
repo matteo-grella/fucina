@@ -275,8 +275,10 @@ test "exec context layer norm backward matches a naive f64 reference and is bitw
             try std.testing.expectEqualSlices(f32, full.bias.?.dataConst(), bias_only.bias.?.dataConst());
 
             // Bitwise determinism across runs (the big case exercises the
-            // parallel dx dispatch; dweight/dbias are one serial row pass,
-            // bitwise identical for any thread count by construction).
+            // parallel dx dispatch; dweight/dbias are column-partitioned
+            // across the pool, every column accumulated in row order by
+            // exactly one task, so they are bitwise identical for any
+            // thread count).
             var again = try ctx.layerNormBackward(rank, &x, &gy, 1, eps, .{ .weight = &w, .need_input = true, .need_weight = true, .need_bias = true });
             defer again.deinit();
             try std.testing.expectEqualSlices(f32, full.input.?.dataConst(), again.input.?.dataConst());

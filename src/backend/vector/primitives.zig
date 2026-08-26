@@ -595,10 +595,11 @@ pub inline fn vecDot(x: []const f32, y: []const f32) f32 {
     return s;
 }
 
-// Fused multiply-add of a contiguous slice with a broadcast scalar: out += in * s.
+// Multiply-add of a contiguous slice with a broadcast scalar: out += in * s.
 // This is the hot path of matmul / matmulTransA — every output row receives
-// one vecFmaScalar per k-step. Compiles to a tight loop of vfma instructions
-// on AArch64 and AVX2/AVX-512 on x86_64.
+// one vecFmaScalar per k-step. Spelled as a separate multiply and add
+// (`ov + iv * sv`, no `@mulAdd`): the rounding class is unfused, whatever
+// the target's FMA support.
 pub inline fn vecFmaScalar(out: []f32, in: []const f32, s: f32) void {
     const sv: Vf32 = @splat(s);
     var i: usize = 0;
