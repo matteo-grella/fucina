@@ -358,15 +358,29 @@ pub const GradState = struct {
         current.* = materialized;
     }
 
+    /// Accumulate one owned contribution, then count it against the pending
+    /// counter iff a pass has counters installed (state not `.idle`); true
+    /// means this was the last contribution and the caller must schedule the
+    /// node. On error the contribution is released AND still counted (the
+    /// entry-time check), so a failing pass never strands a nonzero counter.
     fn accGradOwnedReady(self: *GradState, engine: *GradEngine, gx: Tensor) !bool {
-        var owned = gx;
-        var moved = false;
-        var must_finish = self.loadState() != .idle;
-        errdefer if (must_finish) {
-            if (self.finishGradContributionReady()) engine.scheduleReady(self);
+        const counted_at_entry = self.loadState() != .idle;
+        self.accumulateOwned(engine, gx) catch |err| {
+            if (counted_at_entry and self.finishGradContributionReady()) engine.scheduleReady(self);
+            return err;
         };
-        errdefer if (!moved) owned.deinit();
+        if (self.loadState() != .idle) return self.finishGradContributionReady();
+        return false;
+    }
+
+    /// The accumulation body: add `gx` into the stored gradient (or install
+    /// it as the initial accumulator). Consumes `gx` on success and on error
+    /// alike; the release stays outside the mutex on the add path.
+    fn accumulateOwned(self: *GradState, engine: *GradEngine, gx: Tensor) !void {
+        var owned = gx;
+        errdefer owned.deinit();
         const will_accumulate_more = self.pending_grads.load(.acquire) > 1;
+        var moved = false;
         {
             self.grad_mutex.lock();
             defer self.grad_mutex.unlock();
@@ -380,17 +394,7 @@ pub const GradState = struct {
                 moved = true;
             }
         }
-        if (!moved) {
-            owned.deinit();
-        }
-
-        if (self.loadState() != .idle) {
-            must_finish = false;
-            return self.finishGradContributionReady();
-        }
-
-        must_finish = false;
-        return false;
+        if (!moved) owned.deinit();
     }
 
     fn finishGradContribution(self: *GradState, engine: *GradEngine) void {
@@ -416,17 +420,9 @@ pub const GradState = struct {
         self.grad_mutex.unlock();
         const local_gy = gy orelse return;
 
-        const stack_operand_capacity = 8;
-        var gxs_stack: [stack_operand_capacity]?Tensor = undefined;
-        var gxs_heap: ?[]?Tensor = null;
-        defer if (gxs_heap) |buf| engine.allocator.free(buf);
-        const gxs = if (operands.len <= stack_operand_capacity)
-            gxs_stack[0..operands.len]
-        else blk: {
-            const buf = try engine.allocator.alloc(?Tensor, operands.len);
-            gxs_heap = buf;
-            break :blk buf;
-        };
+        var gxs_scratch: SmallSlice(?Tensor, 8) = .{};
+        defer gxs_scratch.deinit(engine.allocator);
+        const gxs = try gxs_scratch.init(engine.allocator, operands.len);
         @memset(gxs, null);
         defer {
             for (gxs) |*gx| {
@@ -448,16 +444,9 @@ pub const GradState = struct {
             return err;
         };
 
-        var ready_stack: [stack_operand_capacity]*GradState = undefined;
-        var ready_heap: ?[]*GradState = null;
-        defer if (ready_heap) |buf| engine.allocator.free(buf);
-        const ready = if (operands.len <= stack_operand_capacity)
-            ready_stack[0..operands.len]
-        else blk: {
-            const buf = try engine.allocator.alloc(*GradState, operands.len);
-            ready_heap = buf;
-            break :blk buf;
-        };
+        var ready_scratch: SmallSlice(*GradState, 8) = .{};
+        defer ready_scratch.deinit(engine.allocator);
+        const ready = try ready_scratch.init(engine.allocator, operands.len);
         var ready_len: usize = 0;
 
         var missing_backward_gradient = false;
@@ -512,25 +501,35 @@ pub const GradEngine = struct {
     allocator: Allocator,
     ctx: *ExecContext,
     pool: ?*thread.Pool,
+    /// The one completion mechanism: every spawned backward task is a member
+    /// of this group (`trySpawnWg`), and `waitAll`/`deinit` await it. Inline
+    /// tasks need no membership — they run to completion either on the
+    /// driving thread before `waitAll` or inside a member task, so an empty
+    /// group means the whole pass is done. A member task spawning a successor
+    /// keeps the group nonempty until the spawn returns, the exact proviso
+    /// `std.Io.Group.await` requires for concurrent spawns.
     wait_group: thread.WaitGroup = .{},
-    wait_group_mutex: thread.Mutex = .{},
-    active_tasks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    done_mutex: thread.Mutex = .{},
-    done_cond: thread.Condition = .{},
     error_mutex: thread.Mutex = .{},
     first_error: ?anyerror = null,
 
-    pub fn init(self: *GradEngine, ctx: *ExecContext, jobs: ?u32) !void {
-        _ = jobs;
-        self.* = .{
+    pub const Mode = enum { parallel, serial };
+
+    /// `.parallel` schedules big independent VJPs onto the context's work
+    /// pool; `.serial` runs every node inline on the calling thread (the
+    /// checkpoint-recompute contract, `backwardGradSerial`).
+    pub fn init(ctx: *ExecContext, mode: Mode) GradEngine {
+        return .{
             .allocator = ctx.allocator,
             .ctx = ctx,
-            .pool = ctx.tryWorkPool() catch null,
+            .pool = switch (mode) {
+                .parallel => ctx.tryWorkPool() catch null,
+                .serial => null,
+            },
         };
     }
 
     pub fn deinit(self: *GradEngine) void {
-        if (self.pool) |pool| pool.waitAndWork(&self.wait_group);
+        self.waitAll();
     }
 
     fn scheduleReady(self: *GradEngine, state: *GradState) void {
@@ -555,25 +554,10 @@ pub const GradEngine = struct {
         if (!state.compareState(.pending, .ongoing)) {
             return;
         }
-        _ = self.active_tasks.fetchAdd(1, .monotonic);
-        const function = state.grad_fn orelse {
-            runGradBackwardTask(self, state);
-            return;
-        };
-        if (!allow_async or !self.canRunAsync(function)) {
-            runGradBackwardTask(self, state);
-            return;
+        if (allow_async and self.isAsyncCandidate(state)) {
+            if (self.pool.?.trySpawnWg(&self.wait_group, runGradBackwardTask, .{ self, state })) return;
         }
-        const pool = self.pool orelse {
-            runGradBackwardTask(self, state);
-            return;
-        };
-        self.wait_group_mutex.lock();
-        const spawned = pool.trySpawnWg(&self.wait_group, runGradBackwardTask, .{ self, state });
-        self.wait_group_mutex.unlock();
-        if (!spawned) {
-            runGradBackwardTask(self, state);
-        }
+        runGradBackwardTask(self, state);
     }
 
     fn isAsyncCandidate(self: *const GradEngine, state: *const GradState) bool {
@@ -603,41 +587,48 @@ pub const GradEngine = struct {
         return self.first_error;
     }
 
+    /// Await every spawned task (idempotent; serial mode has none). Inline
+    /// work needs no wait — see the `wait_group` field doc.
     fn waitAll(self: *GradEngine) void {
-        const pool = self.pool orelse {
-            std.debug.assert(self.active_tasks.load(.acquire) == 0);
-            return;
-        };
-        self.done_mutex.lock();
-        while (self.active_tasks.load(.acquire) != 0) {
-            self.done_cond.wait(pool.io, &self.done_mutex);
-        }
-        self.done_mutex.unlock();
+        const pool = self.pool orelse return;
         pool.waitAndWork(&self.wait_group);
-    }
-
-    fn taskDone(self: *GradEngine) void {
-        const old = self.active_tasks.fetchSub(1, .acq_rel);
-        std.debug.assert(old > 0);
-        if (old == 1) {
-            const pool = self.pool orelse return;
-            self.done_mutex.lock();
-            self.done_cond.broadcast(pool.io);
-            self.done_mutex.unlock();
-        }
     }
 };
 
 fn runGradBackwardTask(engine: *GradEngine, state: *GradState) void {
-    defer engine.taskDone();
     state.executeBackward(engine) catch |err| {
         state.storeState(.idle);
         engine.recordError(err);
     };
 }
 
+/// Stack-or-heap scratch: `init` returns a `len`-item slice backed by the
+/// inline buffer when it fits, heap-allocated past `capacity`. The caller
+/// initializes the items; `deinit` frees the heap case. The value must stay
+/// in place while the slice is in use (the slice may point into `buffer`).
+fn SmallSlice(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        buffer: [capacity]T = undefined,
+        heap: ?[]T = null,
+
+        const Self = @This();
+
+        fn init(self: *Self, allocator: Allocator, len: usize) ![]T {
+            if (len <= capacity) return self.buffer[0..len];
+            const buf = try allocator.alloc(T, len);
+            self.heap = buf;
+            return buf;
+        }
+
+        fn deinit(self: *Self, allocator: Allocator) void {
+            if (self.heap) |buf| allocator.free(buf);
+            self.* = undefined;
+        }
+    };
+}
+
 pub fn backwardGrad(ctx: *ExecContext, outputs: []const *GradState, output_values: []const *const Tensor) !void {
-    return backwardGradImpl(ctx, outputs, output_values, true);
+    return backwardGradImpl(ctx, outputs, output_values, .parallel);
 }
 
 /// As `backwardGrad`, but with node-level async spawning disabled (the engine
@@ -647,16 +638,14 @@ pub fn backwardGrad(ctx: *ExecContext, outputs: []const *GradState, output_value
 /// (ag/checkpoint.zig), whose threadlocal nested-recompute guard is only
 /// sound when the whole recomputed subgraph stays on one thread.
 pub fn backwardGradSerial(ctx: *ExecContext, outputs: []const *GradState, output_values: []const *const Tensor) !void {
-    return backwardGradImpl(ctx, outputs, output_values, false);
+    return backwardGradImpl(ctx, outputs, output_values, .serial);
 }
 
-fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_values: []const *const Tensor, allow_async: bool) !void {
+fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_values: []const *const Tensor, mode: GradEngine.Mode) !void {
     if (outputs.len == 0) return;
     if (outputs.len != output_values.len) return AgError.MissingOutputGradient;
 
-    var engine: GradEngine = undefined;
-    try engine.init(ctx, null);
-    if (!allow_async) engine.pool = null;
+    var engine = GradEngine.init(ctx, mode);
     defer engine.deinit();
 
     // Validate every output and pre-allocate the implicit scalar seeds before
@@ -664,17 +653,9 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
     // would strand nonzero counters, and the next backward over the same
     // states would stop at their `.pending` check and report success with
     // missing gradients.
-    const stack_output_capacity = 8;
-    var seeds_stack: [stack_output_capacity]?Tensor = undefined;
-    var seeds_heap: ?[]?Tensor = null;
-    defer if (seeds_heap) |buf| ctx.allocator.free(buf);
-    const seeds = if (outputs.len <= stack_output_capacity)
-        seeds_stack[0..outputs.len]
-    else blk: {
-        const buf = try ctx.allocator.alloc(?Tensor, outputs.len);
-        seeds_heap = buf;
-        break :blk buf;
-    };
+    var seeds_scratch: SmallSlice(?Tensor, 8) = .{};
+    defer seeds_scratch.deinit(ctx.allocator);
+    const seeds = try seeds_scratch.init(ctx.allocator, outputs.len);
     @memset(seeds, null);
     defer {
         for (seeds) |*seed| {

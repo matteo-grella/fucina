@@ -737,7 +737,7 @@ things to keep straight:
 
 A design habit worth stealing: order operations so an error exit leaves zero
 debris. Seeds are validated and pre-allocated *before* any pending counter is
-installed, and the comment at `src/ag/core.zig:543-547` says why: "an error
+installed, and the comment at `src/ag/core.zig:651-655` says why: "an error
 exit after `prepareBackwardPass` would strand nonzero counters, and the next
 backward over the same states would stop at their `.pending` check and
 report success with missing gradients." That is why the unseeded
@@ -761,7 +761,7 @@ immediately, on whatever thread observed it. No node ever waits; it simply
 doesn't exist as a task until it is ready.
 
 When several independent nodes become ready at once, the engine may fan
-them out to Chapter 6's worker team (`src/ag/core.zig:421-433`):
+them out to Chapter 6's worker team (`src/ag/core.zig:539-551`):
 
 ```zig
     fn scheduleReadyBatch(self: *GradEngine, states: []const *GradState) void {
