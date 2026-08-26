@@ -253,50 +253,27 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
     }
 }
 
-pub fn packMatmulRhsQ8_0x4(
-    allocator: Allocator,
-    blocks: []const BlockQ8_0,
-    n: usize,
-    k: usize,
-    blocks_per_row: usize,
-) !types.QuantizedMatmulRhsQ8_0x4 {
-    if (n % 4 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try q8k.q8_0BlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+pub fn packMatmulRhsQ8_0x4(allocator: Allocator, blocks: []const BlockQ8_0, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ8_0x4 {
+    return q8k.packLaneGroups(4, BlockQ8_0, types.QuantizedMatmulRhsQ8_0x4, packGroupQ8_0x4, allocator, blocks, n, k, blocks_per_row);
+}
 
-    const group_count = n / 4;
-    const packed_blocks = try allocator.alloc(BlockQ8_0x4, try types.checkedProduct(group_count, blocks_per_row));
-    errdefer allocator.free(packed_blocks);
+fn packGroupQ8_0x4(dst: *BlockQ8_0x4, cols: [4]*const BlockQ8_0) void {
+    const b0 = cols[0];
+    const b1 = cols[1];
+    const b2 = cols[2];
+    const b3 = cols[3];
+    dst.d = .{ b0.d, b1.d, b2.d, b3.d };
 
-    for (0..group_count) |group_i| {
-        for (0..blocks_per_row) |block_i| {
-            const b0 = &blocks[(4 * group_i + 0) * blocks_per_row + block_i];
-            const b1 = &blocks[(4 * group_i + 1) * blocks_per_row + block_i];
-            const b2 = &blocks[(4 * group_i + 2) * blocks_per_row + block_i];
-            const b3 = &blocks[(4 * group_i + 3) * blocks_per_row + block_i];
-            var dst = &packed_blocks[group_i * blocks_per_row + block_i];
-            dst.d = .{ b0.d, b1.d, b2.d, b3.d };
-
-            for (0..8) |feature_group| {
-                const src_offset = feature_group * 4;
-                const dst_offset = feature_group * 16;
-                inline for (0..4) |lane| {
-                    dst.qs[dst_offset + 0 * 4 + lane] = b0.qs[src_offset + lane];
-                    dst.qs[dst_offset + 1 * 4 + lane] = b1.qs[src_offset + lane];
-                    dst.qs[dst_offset + 2 * 4 + lane] = b2.qs[src_offset + lane];
-                    dst.qs[dst_offset + 3 * 4 + lane] = b3.qs[src_offset + lane];
-                }
-            }
+    for (0..8) |feature_group| {
+        const src_offset = feature_group * 4;
+        const dst_offset = feature_group * 16;
+        inline for (0..4) |lane| {
+            dst.qs[dst_offset + 0 * 4 + lane] = b0.qs[src_offset + lane];
+            dst.qs[dst_offset + 1 * 4 + lane] = b1.qs[src_offset + lane];
+            dst.qs[dst_offset + 2 * 4 + lane] = b2.qs[src_offset + lane];
+            dst.qs[dst_offset + 3 * 4 + lane] = b3.qs[src_offset + lane];
         }
     }
-
-    return .{
-        .allocator = allocator,
-        .blocks = packed_blocks,
-        .k = k,
-        .n = n,
-        .blocks_per_group = blocks_per_row,
-    };
 }
 
 pub fn matmulQ8_0RhsTile(

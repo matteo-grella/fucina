@@ -30,183 +30,97 @@ const q4Kx8Scales = q8k.q4Kx8Scales;
 const q4LowNibbleI8 = common.q4LowNibbleI8;
 const sdotI8x16Lane = common.sdotI8x16Lane;
 
-pub fn packMatmulRhsQ4_Kx4(
-    allocator: Allocator,
-    blocks: []const BlockQ4_K,
-    n: usize,
-    k: usize,
-    blocks_per_row: usize,
-) !types.QuantizedMatmulRhsQ4_Kx4 {
-    if (n % 4 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try q8k.qkBlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+pub fn packMatmulRhsQ4_Kx4(allocator: Allocator, blocks: []const BlockQ4_K, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ4_Kx4 {
+    return q8k.packLaneGroups(4, BlockQ4_K, types.QuantizedMatmulRhsQ4_Kx4, packGroupQ4_Kx4, allocator, blocks, n, k, blocks_per_row);
+}
 
-    const group_count = n / 4;
-    const packed_blocks = try allocator.alloc(types.BlockQ4_Kx4, try types.checkedProduct(group_count, blocks_per_row));
-    errdefer allocator.free(packed_blocks);
+fn packGroupQ4_Kx4(dst: *types.BlockQ4_Kx4, cols: [4]*const BlockQ4_K) void {
+    const b0 = cols[0];
+    const b1 = cols[1];
+    const b2 = cols[2];
+    const b3 = cols[3];
+    dst.d = .{ b0.dm[0], b1.dm[0], b2.dm[0], b3.dm[0] };
+    dst.dmin = .{ b0.dm[1], b1.dm[1], b2.dm[1], b3.dm[1] };
 
-    for (0..group_count) |group_i| {
-        for (0..blocks_per_row) |block_i| {
-            const b0 = &blocks[(4 * group_i + 0) * blocks_per_row + block_i];
-            const b1 = &blocks[(4 * group_i + 1) * blocks_per_row + block_i];
-            const b2 = &blocks[(4 * group_i + 2) * blocks_per_row + block_i];
-            const b3 = &blocks[(4 * group_i + 3) * blocks_per_row + block_i];
-            const cols = [_]*const BlockQ4_K{ b0, b1, b2, b3 };
-            var dst = &packed_blocks[group_i * blocks_per_row + block_i];
-            dst.d = .{ b0.dm[0], b1.dm[0], b2.dm[0], b3.dm[0] };
-            dst.dmin = .{ b0.dm[1], b1.dm[1], b2.dm[1], b3.dm[1] };
+    for (0..8) |subblock| {
+        inline for (0..4) |col| {
+            const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
+            dst.scales[subblock * 4 + col] = scale_min.scale;
+            dst.mins[subblock * 4 + col] = scale_min.min;
+        }
 
-            for (0..8) |subblock| {
-                inline for (0..4) |col| {
-                    const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
-                    dst.scales[subblock * 4 + col] = scale_min.scale;
-                    dst.mins[subblock * 4 + col] = scale_min.min;
-                }
-
-                for (0..8) |feature_group| {
-                    for (0..4) |col| {
-                        const block = cols[col];
-                        for (0..4) |lane| {
-                            const feature_offset = feature_group * 4 + lane;
-                            dst.qs[subblock * 128 + feature_group * 16 + col * 4 + lane] =
-                                @intCast(q4KValue(block, subblock, feature_offset));
-                        }
-                    }
+        for (0..8) |feature_group| {
+            for (0..4) |col| {
+                const block = cols[col];
+                for (0..4) |lane| {
+                    const feature_offset = feature_group * 4 + lane;
+                    dst.qs[subblock * 128 + feature_group * 16 + col * 4 + lane] =
+                        @intCast(q4KValue(block, subblock, feature_offset));
                 }
             }
         }
     }
-
-    return .{
-        .allocator = allocator,
-        .blocks = packed_blocks,
-        .k = k,
-        .n = n,
-        .blocks_per_group = blocks_per_row,
-    };
 }
 
-pub fn packMatmulRhsQ4_Kx8(
-    allocator: Allocator,
-    blocks: []const BlockQ4_K,
-    n: usize,
-    k: usize,
-    blocks_per_row: usize,
-) !types.QuantizedMatmulRhsQ4_Kx8 {
-    if (n % 8 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try q8k.qkBlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+pub fn packMatmulRhsQ4_Kx8(allocator: Allocator, blocks: []const BlockQ4_K, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ4_Kx8 {
+    return q8k.packLaneGroups(8, BlockQ4_K, types.QuantizedMatmulRhsQ4_Kx8, packGroupQ4_Kx8, allocator, blocks, n, k, blocks_per_row);
+}
 
-    const group_count = n / 8;
-    const packed_blocks = try allocator.alloc(BlockQ4_Kx8, try types.checkedProduct(group_count, blocks_per_row));
-    errdefer allocator.free(packed_blocks);
+fn packGroupQ4_Kx8(dst: *BlockQ4_Kx8, cols: [8]*const BlockQ4_K) void {
+    inline for (0..8) |col| {
+        dst.d[col] = cols[col].dm[0];
+        dst.dmin[col] = cols[col].dm[1];
+    }
 
-    for (0..group_count) |group_i| {
-        for (0..blocks_per_row) |block_i| {
-            const cols = [_]*const BlockQ4_K{
-                &blocks[(8 * group_i + 0) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 1) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 2) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 3) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 4) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 5) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 6) * blocks_per_row + block_i],
-                &blocks[(8 * group_i + 7) * blocks_per_row + block_i],
-            };
-            var dst = &packed_blocks[group_i * blocks_per_row + block_i];
+    for (0..8) |subblock| {
+        inline for (0..8) |col| {
+            const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
+            dst.scales[subblock * 8 + col] = scale_min.scale;
+            dst.mins[subblock * 8 + col] = scale_min.min;
+        }
+    }
 
+    for (0..4) |subblock_pair| {
+        for (0..8) |feature_group| {
             inline for (0..8) |col| {
-                dst.d[col] = cols[col].dm[0];
-                dst.dmin[col] = cols[col].dm[1];
-            }
-
-            for (0..8) |subblock| {
-                inline for (0..8) |col| {
-                    const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
-                    dst.scales[subblock * 8 + col] = scale_min.scale;
-                    dst.mins[subblock * 8 + col] = scale_min.min;
-                }
-            }
-
-            for (0..4) |subblock_pair| {
-                for (0..8) |feature_group| {
-                    inline for (0..8) |col| {
-                        const block = cols[col];
-                        inline for (0..4) |lane| {
-                            const feature_offset = feature_group * 4 + lane;
-                            dst.qs[subblock_pair * 256 + feature_group * 32 + col * 4 + lane] =
-                                block.qs[subblock_pair * 32 + feature_offset];
-                        }
-                    }
+                const block = cols[col];
+                inline for (0..4) |lane| {
+                    const feature_offset = feature_group * 4 + lane;
+                    dst.qs[subblock_pair * 256 + feature_group * 32 + col * 4 + lane] =
+                        block.qs[subblock_pair * 32 + feature_offset];
                 }
             }
         }
     }
-
-    return .{
-        .allocator = allocator,
-        .blocks = packed_blocks,
-        .k = k,
-        .n = n,
-        .blocks_per_group = blocks_per_row,
-    };
 }
 
-pub fn packMatmulRhsQ4_Kx2Mmla(
-    allocator: Allocator,
-    blocks: []const BlockQ4_K,
-    n: usize,
-    k: usize,
-    blocks_per_row: usize,
-) !types.QuantizedMatmulRhsQ4_Kx2Mmla {
-    if (n % 2 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try q8k.qkBlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+pub fn packMatmulRhsQ4_Kx2Mmla(allocator: Allocator, blocks: []const BlockQ4_K, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ4_Kx2Mmla {
+    return q8k.packLaneGroups(2, BlockQ4_K, types.QuantizedMatmulRhsQ4_Kx2Mmla, packGroupQ4_Kx2Mmla, allocator, blocks, n, k, blocks_per_row);
+}
 
-    const group_count = n / 2;
-    const packed_blocks = try allocator.alloc(types.BlockQ4_Kx2Mmla, try types.checkedProduct(group_count, blocks_per_row));
-    errdefer allocator.free(packed_blocks);
+fn packGroupQ4_Kx2Mmla(dst: *types.BlockQ4_Kx2Mmla, cols: [2]*const BlockQ4_K) void {
+    inline for (0..2) |col| {
+        dst.d[col] = cols[col].dm[0];
+        dst.dmin[col] = cols[col].dm[1];
+    }
 
-    for (0..group_count) |group_i| {
-        for (0..blocks_per_row) |block_i| {
-            const cols = [_]*const BlockQ4_K{
-                &blocks[(2 * group_i + 0) * blocks_per_row + block_i],
-                &blocks[(2 * group_i + 1) * blocks_per_row + block_i],
-            };
-            var dst = &packed_blocks[group_i * blocks_per_row + block_i];
+    for (0..8) |subblock| {
+        inline for (0..2) |col| {
+            const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
+            dst.scales[subblock * 2 + col] = scale_min.scale;
+            dst.mins[subblock * 2 + col] = scale_min.min;
+        }
 
-            inline for (0..2) |col| {
-                dst.d[col] = cols[col].dm[0];
-                dst.dmin[col] = cols[col].dm[1];
-            }
-
-            for (0..8) |subblock| {
-                inline for (0..2) |col| {
-                    const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
-                    dst.scales[subblock * 2 + col] = scale_min.scale;
-                    dst.mins[subblock * 2 + col] = scale_min.min;
-                }
-
-                inline for (0..2) |half| {
-                    const base = subblock * 64 + half * 32;
-                    inline for (0..8) |lane| {
-                        dst.qs[base + lane] = @intCast(q4KValue(cols[0], subblock, half * 16 + lane));
-                        dst.qs[base + 8 + lane] = @intCast(q4KValue(cols[1], subblock, half * 16 + lane));
-                        dst.qs[base + 16 + lane] = @intCast(q4KValue(cols[0], subblock, half * 16 + 8 + lane));
-                        dst.qs[base + 24 + lane] = @intCast(q4KValue(cols[1], subblock, half * 16 + 8 + lane));
-                    }
-                }
+        inline for (0..2) |half| {
+            const base = subblock * 64 + half * 32;
+            inline for (0..8) |lane| {
+                dst.qs[base + lane] = @intCast(q4KValue(cols[0], subblock, half * 16 + lane));
+                dst.qs[base + 8 + lane] = @intCast(q4KValue(cols[1], subblock, half * 16 + lane));
+                dst.qs[base + 16 + lane] = @intCast(q4KValue(cols[0], subblock, half * 16 + 8 + lane));
+                dst.qs[base + 24 + lane] = @intCast(q4KValue(cols[1], subblock, half * 16 + 8 + lane));
             }
         }
     }
-
-    return .{
-        .allocator = allocator,
-        .blocks = packed_blocks,
-        .k = k,
-        .n = n,
-        .blocks_per_group = blocks_per_row,
-    };
 }
 
 const moe_row_tile = 4;

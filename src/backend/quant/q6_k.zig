@@ -25,57 +25,33 @@ const QKV8i32 = common.QKV8i32;
 const q8_0_row_block = common.q8_0_row_block;
 const sdotI8x16Lane = common.sdotI8x16Lane;
 
-pub fn packMatmulRhsQ6_Kx4(
-    allocator: Allocator,
-    blocks: []const BlockQ6_K,
-    n: usize,
-    k: usize,
-    blocks_per_row: usize,
-) !types.QuantizedMatmulRhsQ6_Kx4 {
-    if (n % 4 != 0) return tensor.TensorError.InvalidShape;
-    if (blocks_per_row != try q8k.qkBlockCount(k)) return tensor.TensorError.InvalidShape;
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+pub fn packMatmulRhsQ6_Kx4(allocator: Allocator, blocks: []const BlockQ6_K, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ6_Kx4 {
+    return q8k.packLaneGroups(4, BlockQ6_K, types.QuantizedMatmulRhsQ6_Kx4, packGroupQ6_Kx4, allocator, blocks, n, k, blocks_per_row);
+}
 
-    const group_count = n / 4;
-    const packed_blocks = try allocator.alloc(BlockQ6_Kx4, try types.checkedProduct(group_count, blocks_per_row));
-    errdefer allocator.free(packed_blocks);
+fn packGroupQ6_Kx4(dst: *BlockQ6_Kx4, cols: [4]*const BlockQ6_K) void {
+    const b0 = cols[0];
+    const b1 = cols[1];
+    const b2 = cols[2];
+    const b3 = cols[3];
+    dst.d = .{ b0.d, b1.d, b2.d, b3.d };
 
-    for (0..group_count) |group_i| {
-        for (0..blocks_per_row) |block_i| {
-            const b0 = &blocks[(4 * group_i + 0) * blocks_per_row + block_i];
-            const b1 = &blocks[(4 * group_i + 1) * blocks_per_row + block_i];
-            const b2 = &blocks[(4 * group_i + 2) * blocks_per_row + block_i];
-            const b3 = &blocks[(4 * group_i + 3) * blocks_per_row + block_i];
-            const cols = [_]*const BlockQ6_K{ b0, b1, b2, b3 };
-            var dst = &packed_blocks[group_i * blocks_per_row + block_i];
-            dst.d = .{ b0.d, b1.d, b2.d, b3.d };
+    for (0..16) |scale_group| {
+        dst.scales[scale_group * 4 + 0] = b0.scales[scale_group];
+        dst.scales[scale_group * 4 + 1] = b1.scales[scale_group];
+        dst.scales[scale_group * 4 + 2] = b2.scales[scale_group];
+        dst.scales[scale_group * 4 + 3] = b3.scales[scale_group];
 
-            for (0..16) |scale_group| {
-                dst.scales[scale_group * 4 + 0] = b0.scales[scale_group];
-                dst.scales[scale_group * 4 + 1] = b1.scales[scale_group];
-                dst.scales[scale_group * 4 + 2] = b2.scales[scale_group];
-                dst.scales[scale_group * 4 + 3] = b3.scales[scale_group];
-
-                for (0..4) |feature_group| {
-                    for (0..4) |col| {
-                        const block = cols[col];
-                        for (0..4) |lane| {
-                            const feature = scale_group * 16 + feature_group * 4 + lane;
-                            dst.qs[scale_group * 64 + feature_group * 16 + col * 4 + lane] = q6KValue(block, feature);
-                        }
-                    }
+        for (0..4) |feature_group| {
+            for (0..4) |col| {
+                const block = cols[col];
+                for (0..4) |lane| {
+                    const feature = scale_group * 16 + feature_group * 4 + lane;
+                    dst.qs[scale_group * 64 + feature_group * 16 + col * 4 + lane] = q6KValue(block, feature);
                 }
             }
         }
     }
-
-    return .{
-        .allocator = allocator,
-        .blocks = packed_blocks,
-        .k = k,
-        .n = n,
-        .blocks_per_group = blocks_per_row,
-    };
 }
 
 pub fn matmulQ6_KRhsTile(

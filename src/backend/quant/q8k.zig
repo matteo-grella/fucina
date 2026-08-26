@@ -17,6 +17,50 @@ const QKV4f32 = common.QKV4f32;
 
 const qk_k_block_size = types.qk_k_block_size;
 
+/// The shared shell of the lane-pack RHS constructors
+/// (`packMatmulRhs*x4/x8/x2Mmla` in the format files): validation, group
+/// allocation, the group/block walk and the container literal. `packGroup`
+/// packs one destination block from its `lanes` source column blocks; the
+/// per-format layout stays beside its kernels. Byte-for-byte the walk each
+/// constructor spelled out.
+pub fn packLaneGroups(
+    comptime lanes: usize,
+    comptime SrcBlock: type,
+    comptime Rhs: type,
+    comptime packGroup: anytype,
+    allocator: Allocator,
+    blocks: []const SrcBlock,
+    n: usize,
+    k: usize,
+    blocks_per_row: usize,
+) !Rhs {
+    if (n % lanes != 0) return tensor.TensorError.InvalidShape;
+    const expected = if (comptime SrcBlock == dtype_mod.BlockQ8_0) try q8_0BlockCount(k) else try qkBlockCount(k);
+    if (blocks_per_row != expected) return tensor.TensorError.InvalidShape;
+    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
+
+    const group_count = n / lanes;
+    const DstBlock = @typeInfo(@FieldType(Rhs, "blocks")).pointer.child;
+    const packed_blocks = try allocator.alloc(DstBlock, try types.checkedProduct(group_count, blocks_per_row));
+    errdefer allocator.free(packed_blocks);
+
+    for (0..group_count) |group_i| {
+        for (0..blocks_per_row) |block_i| {
+            var cols: [lanes]*const SrcBlock = undefined;
+            inline for (0..lanes) |lane| cols[lane] = &blocks[(lanes * group_i + lane) * blocks_per_row + block_i];
+            packGroup(&packed_blocks[group_i * blocks_per_row + block_i], cols);
+        }
+    }
+
+    return .{
+        .allocator = allocator,
+        .blocks = packed_blocks,
+        .k = k,
+        .n = n,
+        .blocks_per_group = blocks_per_row,
+    };
+}
+
 pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
     const block_count = try q8_0BlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
