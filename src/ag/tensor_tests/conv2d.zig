@@ -50,6 +50,55 @@ test "public Tensor conv2d facade matches ctx.conv2d (with and without bias)" {
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.asRawTensor().dataConst());
 }
 
+test "public Tensor conv2dRelu grad path is composed: scope required, gradients pass the relu mask" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // input [H=3, W=3, Cin=1], weight [Cout=1, kH=2, kW=2, 1] = x(i,j) - x(i+1,j+1):
+    // conv = [2, -3, -5, 3] -> relu keeps positions (0,0) and (1,1) only.
+    var x = try Tensor(.{ .h, .w, .cin }).variableFromSlice(&ctx, .{ 3, 3, 1 }, &.{ 5, 1, 2, 1, 3, 4, 2, 6, 0 });
+    defer x.deinit();
+    var w = try Tensor(.{ .cout, .kh, .kw, .cinpg }).variableFromSlice(&ctx, .{ 1, 2, 2, 1 }, &.{ 1, 0, 0, -1 });
+    defer w.deinit();
+
+    // Grad tracking without an exec scope is a LOUD error (composed op:
+    // conv2d then relu; the conv node is function-local).
+    try std.testing.expectError(
+        error.ActiveExecScopeRequired,
+        x.conv2dRelu(&ctx, w, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout }),
+    );
+
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var y = try x.conv2dRelu(&ctx, w, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout });
+        defer y.deinit();
+        try std.testing.expectEqualSlices(f32, &.{ 2, 0, 0, 3 }, try y.dataConst());
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+    }
+    var gw = (try w.grad(&ctx)).?;
+    defer gw.deinit();
+    // dL/dw[k] = sum of the input patch over the two surviving positions.
+    try std.testing.expectEqualSlices(f32, &.{ 8, 5, 7, 3 }, try gw.dataConst());
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 1, 0, 0, 0, 0, 0, 0, 0, -1 }, try gx.dataConst());
+
+    // The no-grad path stays unscoped.
+    var xc = try Tensor(.{ .h, .w, .cin }).fromSlice(&ctx, .{ 3, 3, 1 }, &.{ 5, 1, 2, 1, 3, 4, 2, 6, 0 });
+    defer xc.deinit();
+    var wc = try Tensor(.{ .cout, .kh, .kw, .cinpg }).fromSlice(&ctx, .{ 1, 2, 2, 1 }, &.{ 1, 0, 0, -1 });
+    defer wc.deinit();
+    var yc = try xc.conv2dRelu(&ctx, wc, null, .{ 1, 1 }, .{ 0, 0 }, 1, .{ .oh, .ow, .cout });
+    defer yc.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 0, 0, 3 }, try yc.dataConst());
+}
+
 test "public Tensor maxPool2d avgPool2d upsample2xNearest prelu channelAffine forward values" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
