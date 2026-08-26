@@ -23,14 +23,12 @@ const native = @This();
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-const q8_0_lhs_stack_blocks: usize = 512;
-// Off-multiple-m row minimums for the x4/x8 fast paths. q4_k pads the final
-// partial row group inside the x4 kernel, so every m >= 4 takes it (one pass
-// over the packed weights). q5_k has no padded-group kernel: its bulk+tail
-// split re-reads the packed weights once more for the 1-3 remainder rows, so
-// below 128 rows the one-pass per-row path wins.
-const q4_k_x4_min_rows: usize = 4;
-const q5_k_x4_prefix_min_rows: usize = 128;
+// The numeric dispatch gates live in src/parallel.zig's policy table
+// (values and measurement rationale there); aliased file-locally so the
+// kernels below read bare names.
+const q8_0_lhs_stack_blocks = parallel.q8_0_lhs_stack_blocks;
+const q4_k_x4_min_rows = parallel.q4_k_x4_min_rows;
+const q5_k_x4_prefix_min_rows = parallel.q5_k_x4_prefix_min_rows;
 
 /// The `[rows, cols]` f32 activation behind an LHS tensor, validated once
 /// at the dispatch tier (rank 2, the declared dims, contiguous) so the
@@ -559,22 +557,9 @@ pub fn matmul2DQuantizedRhsQ1_0(
     return matmul2DQuantizedRhsQ8_0Rows(pc, vector.matmul_quant.matmul2DQ1_0RhsInto, allocator, out, a, rhs, m, n, k);
 }
 
-/// Prefill row count at/above which the Q2_0 matmul dequantizes weight
-/// panels to f32 and rides BLAS (Accelerate AMX / OpenBLAS): the dequant
-/// pass costs O(n*k) regardless of m, so its amortization — and the GEMM's
-/// O(m) operand reuse, out of the int8 sdot path's reach on AMX-class
-/// units — grows with m, while below the threshold (decode, short bursts)
-/// the int8 mul-free path wins. Same split llama.cpp's BLAS backend makes
-/// for its quantized prefill. The BLAS arm consumes exact f32 activations
-/// (no Q8_0 LHS quantization), so its numerics differ from the int path
-/// exactly as the dense-f32 BLAS GEMMs already do from the scalar backend.
-const q2_0_blas_min_m: usize = 192;
-/// f32 scratch budget for one dequantized weight panel. Panels slice the
-/// CONTRACT dimension, never the output dimension: every GEMM is then
-/// full-width with a contiguous C (accumulating across slices via beta=1),
-/// where output-dimension panels would give narrow GEMMs writing a strided
-/// C — a shape BLAS handles poorly.
-const q2_0_blas_panel_floats: usize = 12 * 1024 * 1024; // 48 MiB
+/// Q2_0 BLAS crossover and panel budget: src/parallel.zig's policy table.
+const q2_0_blas_min_m = parallel.q2_0_blas_min_m;
+const q2_0_blas_panel_floats = parallel.q2_0_blas_panel_floats;
 
 const Q2_0DequantSliceTask = struct {
     rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
@@ -1056,14 +1041,8 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     rows(pc, cd[prefix_rows * n .. m * n], tail_blocks, rhs, m - prefix_rows, n, k);
 }
 
-/// Prefill row count at/above which the table-decoded formats (iq*/fp4)
-/// dequantize weight panels to f32 and ride BLAS, exactly like the Q2_0
-/// arm above. Their int path pays a per-block table decode per
-/// (weight-row, LHS-row) pair, so the dequant-once panel amortizes even
-/// earlier than Q2_0's mul-free path — same accepted-numerics stance: the
-/// BLAS arm consumes exact f32 activations, the int kernels keep decode
-/// and short bursts (and every bitwise contract).
-const table_blas_min_m: usize = 64;
+/// Table-format BLAS crossover: src/parallel.zig's policy table.
+const table_blas_min_m = parallel.table_blas_min_m;
 
 fn TableDequantSliceTask(comptime rhs_dtype: DType) type {
     return struct {
@@ -1141,14 +1120,8 @@ fn matmul2DQuantizedRhsTableBlas(
     }
 }
 
-/// Prefill row count at/above which the folded tied-K=2 PTQTP path
-/// (`tq2_0_fx4`) dequantizes weight panels to f32 and rides BLAS. The
-/// mul-free ternary tile owns decode and short bursts — it beats a GEMM
-/// there — but its 4-column pack has no AMX-class batch form, so past this
-/// width the dequant-once panel plus sgemm wins on operand reuse. Accepted
-/// numerics, like every BLAS arm: exact f32 activations instead of the
-/// Q8_K-quantized ones the integer kernel consumes.
-const folded_blas_min_m: usize = 64;
+/// Folded-PTQTP BLAS crossover: src/parallel.zig's policy table.
+const folded_blas_min_m = parallel.folded_blas_min_m;
 
 /// C[m, n] = A[m, k] · dequant(folded)ᵀ through BLAS, k-sliced so each
 /// GEMM is full output width with a contiguous C (the Q2_0 arm's panel

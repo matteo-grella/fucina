@@ -484,7 +484,7 @@ fn splitSwiGluMatmulQ8_0x4Impl(
         .row_group_start = 0,
         .row_group_end = row_groups,
     };
-    const pooled = m * k >= parallel.vector_elementwise_len_threshold / 8 and
+    const pooled = m * k >= parallel.fused_chain_len_threshold and
         self.dispatchRange(SplitSwiGluQuantQ8_0x4Task, "row_group_start", "row_group_end", base, row_groups, runSplitSwiGluQuantQ8_0x4Task);
     if (!pooled) backend_mod.quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
         qlhs_blocks,
@@ -506,7 +506,7 @@ fn splitSwiGluMatmulQ8_0x4Impl(
 
 fn fusedActQuantDispatch(self: *ExecContext, comptime TaskT: type, base: TaskT, row_groups: usize, scratch: []f32) void {
     const cols = base.cols;
-    if (base.rows * cols >= parallel.vector_elementwise_len_threshold / 8) {
+    if (base.rows * cols >= parallel.fused_chain_len_threshold) {
         if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), row_groups);
             var tasks: [parallel.vector_max_threads]TaskT = undefined;

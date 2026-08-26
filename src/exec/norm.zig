@@ -746,7 +746,7 @@ pub fn rmsNormMulRopeWithTable(
             .vector_end = total_vectors,
         };
 
-        if (total_vectors > 1 and source.len() >= parallel.vector_elementwise_len_threshold / 8) {
+        if (total_vectors > 1 and source.len() >= parallel.fused_chain_len_threshold) {
             if (ctx.dispatchRange(RmsNormMulRopeHalfTask, "vector_start", "vector_end", base_task, total_vectors, runRmsNormMulRopeHalfTask)) {
                 return out;
             }

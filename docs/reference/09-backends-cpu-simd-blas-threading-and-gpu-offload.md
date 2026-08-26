@@ -334,6 +334,10 @@ splits is decided by the thread-count gates in `common.zig`
 | `vector_max_threads` | `-Dmax-threads` (default 8) | comptime team ceiling and stack-array bound |
 | `vector_elementwise_len_threshold` | 256 Ki elements | below this, elementwise/conv kernels stay serial |
 | `row_kernel_len_threshold` | `vector_elementwise_len_threshold / 2` | pool gate of the fused row kernels (softmax/norm/loss rows, quantized row passes); the halving is policy in one place |
+| `fused_chain_len_threshold` | `vector_elementwise_len_threshold / 8` | pool gate of the fused op-chain walks (splitGated forward rows, fused activation+quantize, rmsNorm-mul-rope); same one-place ratio policy |
+| `split_backward_len_threshold` | `vector_elementwise_len_threshold / 4` | pool gate of the split gated-activation backward rows (splitGlu/splitSwiGlu VJPs) |
+| `materialize_parallel_len_threshold` | 256 Ki elements | strided-view materialize copies stay serial below this (`src/exec/runtime.zig`) |
+| `materialize_parallel_min_chunk` | 64 Ki elements | minimum elements per task of a pooled materialize copy |
 | `vector_matmul_work_threshold` | 1 Mi (m·n·k) | row-split GEMM gate |
 | `attention_work_threshold` | `vector_matmul_work_threshold / 2` | pool gate of the attention kernels (same one-place ratio policy) |
 | `vector_batched_work_threshold` | 2 Mi | batched GEMM gate |
@@ -344,6 +348,13 @@ splits is decided by the thread-count gates in `common.zig`
 | `backward_async_work_threshold` | 256 Mi | dot-backward async offload gate ([§5](05-automatic-differentiation.md)) |
 | `bmm_loop_work_threshold` | 262 144 (= `backward_matmul_work_threshold`) | total m·n·k·batches above which a multi-batch matmul loop splits batches across the pool (`src/exec/matmul.zig`) |
 | `bmm_loop_max_chunks` | 16 | chunk cap and stack task-array bound for that batched-loop split |
+| `q8_0_lhs_stack_blocks` | 512 blocks | stack budget for the per-call Q8_0 LHS-quantization scratch of the quantized-RHS dispatch tier (decode stays heap-free) |
+| `q4_k_x4_min_rows` | 4 | q4_k prefill rows at/above which the padded x4 kernel takes every m in one pass over the packed weights |
+| `q5_k_x4_prefix_min_rows` | 128 | q5_k's bulk+tail x4 split re-reads the packed weights for the 1-3 remainder rows, so the per-row path wins below this |
+| `q2_0_blas_min_m` | 192 | prefill rows at/above which Q2_0 dequantizes weight panels to f32 and rides BLAS; below, the int8 mul-free path wins ([§9.7](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#97-quantized-matmul-dispatch-packed-rhs-and-the-int8-dot-arms)) |
+| `q2_0_blas_panel_floats` | 12 Mi floats (48 MiB) | f32 scratch budget per dequantized weight panel; panels slice the contract dimension so every GEMM is full-width with contiguous C |
+| `table_blas_min_m` | 64 | BLAS crossover of the table-decoded formats (iq*/fp4), whose per-block decode amortizes earlier than Q2_0's mul-free path |
+| `folded_blas_min_m` | 64 | BLAS crossover of the folded tied-K=2 PTQTP path (`tq2_0_fx4`) |
 
 Parallel splits are deterministic: tasks own disjoint output ranges, so the
 threaded result is bit-identical to the serial path for elementwise, conv,

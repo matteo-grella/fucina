@@ -394,3 +394,25 @@ test "GPU hooks are internal, not public Tensor API" {
     try std.testing.expect(!@hasDecl(fucina, "gpuTraceDump"));
     try std.testing.expect(@hasDecl(fucina.internal, "gpu"));
 }
+
+test "every parallel.zig policy leaf appears in the reference threshold table" {
+    // docs/reference/09 section 9.4 promises to list every tuned comptime
+    // crossover; this is the doc-check-style teeth. A new `pub const`
+    // usize leaf in src/parallel.zig fails here until the table names it.
+    const allocator = std.testing.allocator;
+    const doc = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md",
+        allocator,
+        .limited(1 << 20),
+    );
+    defer allocator.free(doc);
+    inline for (@typeInfo(fucina.parallel).@"struct".decls) |decl| {
+        if (@TypeOf(@field(fucina.parallel, decl.name)) == usize) {
+            if (std.mem.indexOf(u8, doc, "`" ++ decl.name ++ "`") == null) {
+                std.debug.print("parallel.{s} is missing from the docs/reference/09 threshold table\n", .{decl.name});
+                return error.ThresholdLeafUndocumented;
+            }
+        }
+    }
+}

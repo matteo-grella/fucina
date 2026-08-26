@@ -42,6 +42,17 @@ pub const vector_elementwise_len_threshold: usize = 256 * 1024;
 /// The ratio is policy in ONE place — retuning the base retunes every row
 /// gate with it, deliberately.
 pub const row_kernel_len_threshold: usize = vector_elementwise_len_threshold / 2;
+/// Fused op-chain walk gate (splitGated forward rows, the fused
+/// activation+quantize passes, the fused rmsNorm-mul-rope walk): several
+/// ops per element, so the pool pays at an EIGHTH of the
+/// plain-elementwise crossover. Same one-place ratio policy as
+/// `row_kernel_len_threshold`.
+pub const fused_chain_len_threshold: usize = vector_elementwise_len_threshold / 8;
+/// Split gated-activation BACKWARD row gate (splitGlu/splitSwiGlu VJPs):
+/// the pool pays at a QUARTER of the plain-elementwise crossover (fewer
+/// fused ops per element than the forward chains above). Same one-place
+/// ratio policy.
+pub const split_backward_len_threshold: usize = vector_elementwise_len_threshold / 4;
 pub const materialize_parallel_len_threshold: usize = 256 * 1024;
 pub const materialize_parallel_min_chunk: usize = 64 * 1024;
 pub const vector_matmul_work_threshold: usize = 1024 * 1024;
@@ -59,6 +70,56 @@ pub const backward_matmul_work_threshold: usize = 262_144;
 pub const backward_async_work_threshold: usize = 256 * 1024 * 1024;
 pub const bmm_loop_work_threshold: usize = backward_matmul_work_threshold;
 pub const bmm_loop_max_chunks: usize = 16;
+
+// Quantized-RHS dispatch gates of `backend/native.zig`: comptime
+// crossovers like the ones above, kept here so the whole policy table is
+// one place (native.zig aliases them file-locally). Values and their
+// measurement rationale moved verbatim from native.zig.
+
+/// Stack budget (in Q8_0 blocks) for the per-call LHS-quantization
+/// scratch of the quantized-RHS dispatch tier: decode-shaped calls stay
+/// heap-free, larger LHS rows take the caller-supplied allocator.
+pub const q8_0_lhs_stack_blocks: usize = 512;
+/// Off-multiple-m row minimum of the q4_k x4 fast path. q4_k pads the
+/// final partial row group inside the x4 kernel, so every m >= 4 takes it
+/// (one pass over the packed weights).
+pub const q4_k_x4_min_rows: usize = 4;
+/// q5_k has no padded-group kernel: its bulk+tail split re-reads the
+/// packed weights once more for the 1-3 remainder rows, so below 128 rows
+/// the one-pass per-row path wins.
+pub const q5_k_x4_prefix_min_rows: usize = 128;
+/// Prefill row count at/above which the Q2_0 matmul dequantizes weight
+/// panels to f32 and rides BLAS (Accelerate AMX / OpenBLAS): the dequant
+/// pass costs O(n*k) regardless of m, so its amortization — and the GEMM's
+/// O(m) operand reuse, out of the int8 sdot path's reach on AMX-class
+/// units — grows with m, while below the threshold (decode, short bursts)
+/// the int8 mul-free path wins. Same split llama.cpp's BLAS backend makes
+/// for its quantized prefill. The BLAS arm consumes exact f32 activations
+/// (no Q8_0 LHS quantization), so its numerics differ from the int path
+/// exactly as the dense-f32 BLAS GEMMs already do from the scalar backend.
+pub const q2_0_blas_min_m: usize = 192;
+/// f32 scratch budget for one dequantized weight panel (48 MiB). Panels
+/// slice the CONTRACT dimension, never the output dimension: every GEMM is
+/// then full-width with a contiguous C (accumulating across slices via
+/// beta=1), where output-dimension panels would give narrow GEMMs writing
+/// a strided C — a shape BLAS handles poorly.
+pub const q2_0_blas_panel_floats: usize = 12 * 1024 * 1024;
+/// Prefill row count at/above which the table-decoded formats (iq*/fp4)
+/// dequantize weight panels to f32 and ride BLAS, exactly like the Q2_0
+/// arm. Their int path pays a per-block table decode per (weight-row,
+/// LHS-row) pair, so the dequant-once panel amortizes even earlier than
+/// Q2_0's mul-free path — same accepted-numerics stance: the BLAS arm
+/// consumes exact f32 activations, the int kernels keep decode and short
+/// bursts (and every bitwise contract).
+pub const table_blas_min_m: usize = 64;
+/// Prefill row count at/above which the folded tied-K=2 PTQTP path
+/// (`tq2_0_fx4`) dequantizes weight panels to f32 and rides BLAS. The
+/// mul-free ternary tile owns decode and short bursts — it beats a GEMM
+/// there — but its 4-column pack has no AMX-class batch form, so past this
+/// width the dequant-once panel plus sgemm wins on operand reuse. Accepted
+/// numerics, like every BLAS arm: exact f32 activations instead of the
+/// Q8_K-quantized ones the integer kernel consumes.
+pub const folded_blas_min_m: usize = 64;
 
 var cached_cpu_count = std.atomic.Value(usize).init(0);
 

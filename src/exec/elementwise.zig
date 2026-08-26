@@ -637,7 +637,7 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
             .outer_start = 0,
             .outer_end = outer,
         };
-        if (out.len() >= parallel.vector_elementwise_len_threshold / 8) {
+        if (out.len() >= parallel.fused_chain_len_threshold) {
             if (ctx.dispatchRange(Task, "outer_start", "outer_end", base, outer, runTask)) return out;
         }
         rowsKernel(base);
@@ -699,7 +699,7 @@ pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Te
             .outer_start = 0,
             .outer_end = outer,
         };
-        if (out.len() >= parallel.vector_elementwise_len_threshold / 4 and outer > 1) {
+        if (out.len() >= parallel.split_backward_len_threshold and outer > 1) {
             if (ctx.dispatchRange(SplitSwiGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitSwiGluBackwardTask)) {
                 return out;
             }
@@ -767,7 +767,7 @@ pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
             .outer_start = 0,
             .outer_end = outer,
         };
-        if (out.len() >= parallel.vector_elementwise_len_threshold / 4 and outer > 1) {
+        if (out.len() >= parallel.split_backward_len_threshold and outer > 1) {
             if (ctx.dispatchRange(SplitGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitGluBackwardTask)) {
                 return out;
             }
