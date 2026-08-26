@@ -275,9 +275,9 @@ test "gpu conformance: eager async f32 input mutation waits for the device reade
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
     try std.testing.expect(impl.gemmF32Async(.plain, &a, &b, &out, m, n, k));
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
+    try std.testing.expect(a.buffer.accel.pending_use.load(.acquire) != null);
     a.data()[0] += 100; // mutable host boundary must wait for the old value's reader
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
+    try std.testing.expect(a.buffer.accel.pending_use.load(.acquire) == null);
     for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-4);
 }
 
@@ -311,9 +311,9 @@ test "gpu conformance: eager async f16 NT writes f32 directly and fences input m
     defer out.deinit();
     try std.testing.expect(impl.gemmF16NtAsync(&a, &b, &out, m, n, k));
     try std.testing.expect(out.buffer.pending() != null);
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) != null);
+    try std.testing.expect(a.buffer.accel.pending_use.load(.acquire) != null);
     a.data()[0] += 10;
-    try std.testing.expect(a.buffer.pending_use.load(.acquire) == null);
+    try std.testing.expect(a.buffer.accel.pending_use.load(.acquire) == null);
     for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 4e-4);
     try std.testing.expect(out.buffer.pending() == null);
 }

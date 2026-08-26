@@ -271,9 +271,8 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         refs: std.atomic.Value(u32),
         release_ctx: ?*anyopaque = null,
         release_fn: ?*const fn (*anyopaque, *Self) void = null,
-        pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
-        pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
-        accelerator_resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
+        accel: AcceleratorSlots = .{},      // pending_work / pending_use / resource / pending_claim; an empty struct without -Dgpu
+        host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
         pub const dtype = buffer_dtype;
         pub const Element = Elem;
@@ -331,6 +330,16 @@ Refcount operations:
   lifetime (Metal's pooled page-wrapper cache; CUDA host page registration).
   It survives ordinary pool release/reacquire and is destroyed with the
   backing allocation.
+- The accelerator slots (`accel`: the pending output Work, the latest device
+  reader, the provider Resource, the completion claim) exist only when a GPU
+  provider is compiled in (`storage.has_accelerator`, i.e. `-Dgpu=metal|cuda`);
+  otherwise `AcceleratorSlots` is an empty struct, the header shrinks from
+  80 to 64 bytes, the waits and queries above are inert, and the setters are
+  unreachable (`src/storage_tests.zig` pins the size).
+- `setHostShadow()` / `hostShadow()` — the `HostShadow` slot: a host-side
+  derived copy of the allocation with its own destroy hook (the widen-once
+  f32 weight shadow of `FUCINA_CPU_F32_SHADOW`), present in every build and
+  independent of the accelerator slots. Destroyed with the header.
 
 **Release-hook contract.** For the borrowed-with-release variants the hook
 runs once, at the final `release()`, and takes *full* cleanup responsibility:

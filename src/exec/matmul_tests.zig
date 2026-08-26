@@ -344,11 +344,11 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     for (wantbf.dataConst(), gotbf.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
 
     // Second call reuses the cached shadow (the buffer's .cpu resource).
-    try std.testing.expect(b16.buffer.acceleratorResource(.cpu) != null);
-    const first = b16.buffer.acceleratorResource(.cpu).?;
+    try std.testing.expect(b16.buffer.hostShadow() != null);
+    const first = b16.buffer.hostShadow().?;
     var again = try ctx.matmulHalfRhs(.f16, &a, &b16);
     defer again.deinit();
-    try std.testing.expect(b16.buffer.acceleratorResource(.cpu).? == first);
+    try std.testing.expect(b16.buffer.hostShadow().? == first);
     try std.testing.expectEqualSlices(f32, got16.dataConst(), again.dataConst());
 
     // Per-context override beats the process gate: with the process gate
@@ -367,12 +367,12 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     defer a_ovr.deinit();
     var got_ovr = try ctx_on.matmulHalfRhs(.f16, &a_ovr, &b16_ovr);
     defer got_ovr.deinit();
-    try std.testing.expect(b16_ovr.buffer.acceleratorResource(.cpu) != null); // shadow route ran
+    try std.testing.expect(b16_ovr.buffer.hostShadow() != null); // shadow route ran
     for (want16.dataConst(), got_ovr.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3);
 
     var b16_plain = try ctx.fromSlice(.f16, .{ n, k }, &b16_data);
     defer b16_plain.deinit();
     var got_plain = try ctx.matmulHalfRhs(.f16, &a, &b16_plain);
     defer got_plain.deinit();
-    try std.testing.expect(b16_plain.buffer.acceleratorResource(.cpu) == null); // gate off, no shadow
+    try std.testing.expect(b16_plain.buffer.hostShadow() == null); // gate off, no shadow
 }

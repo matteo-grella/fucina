@@ -376,13 +376,12 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
 // 1.5-2.5x at the Qwen3 projection shapes (m=64: ~2.5x across the board),
 // while decode (m < 32) stays with the streaming kernels — half the bytes
 // per weight is what decode speed is. The shadow is a widen-ONCE f32 copy
-// attached to the 16-bit weight's storage as its (.cpu-provider)
-// accelerator Resource: created on the first eligible GEMM, it lives
-// exactly as long as the weight buffer and costs +4 bytes/weight resident —
-// which is why it is opt-in. Mutation-safe by lifetime only for weights
-// that are not trained in place; 16-bit TRAINING should leave the flag off
-// (the streaming kernels read the live bytes). GPU builds never take this
-// route: the Resource slot belongs to their page wraps and they offload
+// attached to the 16-bit weight's storage in its `HostShadow` slot: created
+// on the first eligible GEMM, it lives exactly as long as the weight buffer
+// and costs +4 bytes/weight resident — which is why it is opt-in.
+// Mutation-safe by lifetime only for weights that are not trained in
+// place; 16-bit TRAINING should leave the flag off (the streaming kernels
+// read the live bytes). GPU builds never take this route: they offload
 // these shapes anyway.
 //
 // FUCINA_CPU_F32_SHADOW_MIN_M overrides the m >= 32 crossover.
@@ -396,10 +395,8 @@ fn cpuShadowMinM(ctx: *const ExecContext) ?u64 {
 }
 
 const CpuShadow = struct {
-    resource: accelerator.Resource,
+    shadow: storage_mod.HostShadow,
     buffer: *storage_mod.Buffer,
-
-    const vtable: accelerator.ResourceVTable = .{ .destroy = destroy };
 
     fn destroy(ctx: *anyopaque) void {
         const self: *CpuShadow = @ptrCast(@alignCast(ctx));
@@ -410,11 +407,11 @@ const CpuShadow = struct {
 
 /// Get-or-create the f32 shadow of a contiguous 16-bit weight buffer.
 /// Returns a borrowed pointer valid while the weight buffer lives (the
-/// Resource holds the owning reference). Loser of a concurrent first-touch
+/// HostShadow holds the owning reference). Loser of a concurrent first-touch
 /// race frees its copy and adopts the winner's (the storageWrap dance).
 fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
-    if (b.buffer.acceleratorResource(.cpu)) |resource| {
-        const cached: *CpuShadow = @ptrCast(@alignCast(resource.ctx));
+    if (b.buffer.hostShadow()) |shadow| {
+        const cached: *CpuShadow = @ptrCast(@alignCast(shadow.ctx));
         return cached.buffer;
     }
     const elems = b.buffer.data.len;
@@ -433,12 +430,12 @@ fn cpuShadowBuffer(comptime dtype: DType, b: anytype) ?*storage_mod.Buffer {
         return null;
     };
     created.* = .{
-        .resource = .{ .provider = .cpu, .ctx = created, .vtable = &CpuShadow.vtable },
+        .shadow = .{ .ctx = created, .destroy_fn = CpuShadow.destroy },
         .buffer = shadow,
     };
-    if (b.buffer.setAcceleratorResource(&created.resource)) return shadow;
-    created.resource.destroy();
-    const winner = b.buffer.acceleratorResource(.cpu) orelse return null;
+    if (b.buffer.setHostShadow(&created.shadow)) return shadow;
+    created.shadow.destroy();
+    const winner = b.buffer.hostShadow() orelse return null;
     const cached: *CpuShadow = @ptrCast(@alignCast(winner.ctx));
     return cached.buffer;
 }

@@ -63,7 +63,53 @@ test "borrowed buffer with release hook fires once at refs==0" {
     try std.testing.expectEqual(@as(f32, 2), values[1]);
 }
 
+test "buffer header carries the accelerator slots only with a provider" {
+    // Without a GPU provider nothing can be pending on a buffer, so the four
+    // accelerator slots cost no bytes: the header is the allocator, the data
+    // slice, the refcount, the release hook pair, and the host-shadow slot.
+    const base = 2 * @sizeOf(usize) + @sizeOf([]f32) + @sizeOf(u32) + @sizeOf(?*anyopaque) + @sizeOf(?*const fn (*anyopaque, *Buffer) void) + @sizeOf(?*storage.HostShadow);
+    if (comptime storage.has_accelerator) {
+        try std.testing.expect(@sizeOf(storage.AcceleratorSlots) > 0);
+        try std.testing.expect(@sizeOf(Buffer) > std.mem.alignForward(usize, base, @alignOf(Buffer)));
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), @sizeOf(storage.AcceleratorSlots));
+        try std.testing.expectEqual(std.mem.alignForward(usize, base, @alignOf(Buffer)), @sizeOf(Buffer));
+        const buf = try Buffer.fromSlice(std.testing.allocator, &.{ 1, 2 });
+        defer buf.release();
+        // The accessors are inert: nothing is ever pending, no resource exists.
+        buf.waitReady();
+        buf.waitMutable();
+        try std.testing.expect(buf.pending() == null);
+        try std.testing.expect(buf.acceleratorResource(.metal) == null);
+    }
+}
+
+test "host shadow slot is independent of the accelerator slots and dies with the header" {
+    const Probe = struct {
+        var destroys: usize = 0;
+        fn destroy(_: *anyopaque) void {
+            destroys += 1;
+        }
+    };
+    Probe.destroys = 0;
+    var first: storage.HostShadow = .{ .ctx = @ptrCast(&Probe.destroys), .destroy_fn = Probe.destroy };
+    var second: storage.HostShadow = .{ .ctx = @ptrCast(&Probe.destroys), .destroy_fn = Probe.destroy };
+
+    const buf = try Buffer.fromSlice(std.testing.allocator, &.{ 1, 2, 3 });
+    try std.testing.expect(buf.hostShadow() == null);
+    try std.testing.expect(buf.setHostShadow(&first));
+    // A race loser keeps ownership of its own copy.
+    try std.testing.expect(!buf.setHostShadow(&second));
+    try std.testing.expect(buf.hostShadow() == &first);
+    try std.testing.expect(buf.acceleratorResource(.metal) == null);
+    buf.release();
+    try std.testing.expectEqual(@as(usize, 1), Probe.destroys);
+}
+
 test "waitReady completes a pending work exactly once under concurrent readers" {
+    // Only a compiled-in provider can attach work; the probe below exercises
+    // the claim protocol through the real slots.
+    if (comptime !storage.has_accelerator) return error.SkipZigTest;
     // Regression for the parallel-materialize crash: N chunk workers call
     // waitReady on the SAME buffer (copyRangeTo's disjoint-range contract).
     // Only the claimant may dereference — and thereby free — the Work; the

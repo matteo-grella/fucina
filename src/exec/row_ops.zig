@@ -1035,7 +1035,6 @@ pub fn rmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void {
     }
 }
 
-
 pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void {
     const Vec = @Vector(8, f32);
     const vector_width = 8;

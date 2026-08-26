@@ -2177,8 +2177,8 @@ test "metal eager async bf16 NT matches the CPU bf16 reference" {
     defer out.deinit();
     try std.testing.expect(gemmBf16NtAsync(&a, &b, &out, m, n, k));
     try std.testing.expect(out.buffer.pending() != null);
-    try std.testing.expect(b.buffer.pending_use.load(.acquire) != null);
+    try std.testing.expect(b.buffer.accel.pending_use.load(.acquire) != null);
     for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 4e-4);
     try std.testing.expect(out.buffer.pending() == null);
-    try std.testing.expect(b.buffer.pending_use.load(.acquire) == null);
+    try std.testing.expect(b.buffer.accel.pending_use.load(.acquire) == null);
 }
