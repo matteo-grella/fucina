@@ -190,7 +190,6 @@ pub fn Ops(comptime Self: type) type {
                         window,
                         mask == .causal,
                         row_stats orelse &[_]f32{},
-                        &value,
                     });
                 },
                 .f16_kv => {
@@ -266,7 +265,6 @@ pub fn Ops(comptime Self: type) type {
                 window,
                 true,
                 row_stats orelse &[_]f32{},
-                &value,
             });
         }
         // (q8KvAttentionWithGrad above stays causal-only: no bidirectional
@@ -308,7 +306,6 @@ pub fn Ops(comptime Self: type) type {
                 window,
                 causal,
                 row_stats orelse &[_]f32{},
-                &value,
             });
         }
     };

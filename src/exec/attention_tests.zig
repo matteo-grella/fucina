@@ -1256,22 +1256,15 @@ test "exec attention stats capture is output-neutral and feeds the backward stat
         var out = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.125, .{ .mask = mask, .window = window, .stats_out = stats });
         defer out.deinit();
 
-        var ref = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, null, null, true, true, true);
+        var ref = try ctx.groupedAttentionBackward(.{ .q = &q, .k = &k, .v = &v, .gy = &gy, .kv_head_for_head = &kv_head_for_head, .scale = 0.125, .window = window, .causal = causal });
         defer ref.deinit();
-        // Stats + output: the autograd-record route (one-pass softmax rebuild
-        // AND the gy.O row dot).
-        var got = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, &out, true, true, true);
+        // Stats: the autograd-record route (one-pass softmax rebuild).
+        var got = try ctx.groupedAttentionBackward(.{ .q = &q, .k = &k, .v = &v, .gy = &gy, .kv_head_for_head = &kv_head_for_head, .scale = 0.125, .window = window, .causal = causal, .stats = stats });
         defer got.deinit();
-        // Stats without output: the in-panel row dot fallback.
-        var got_no_out = try ctx.groupedAttentionBackward(&q, &k, &v, &gy, &kv_head_for_head, 0.125, window, causal, stats, null, true, true, true);
-        defer got_no_out.deinit();
         for ([_][2][]const f32{
             .{ ref.q.?.dataConst(), got.q.?.dataConst() },
             .{ ref.k.?.dataConst(), got.k.?.dataConst() },
             .{ ref.v.?.dataConst(), got.v.?.dataConst() },
-            .{ ref.q.?.dataConst(), got_no_out.q.?.dataConst() },
-            .{ ref.k.?.dataConst(), got_no_out.k.?.dataConst() },
-            .{ ref.v.?.dataConst(), got_no_out.v.?.dataConst() },
         }) |pair| {
             for (pair[0], pair[1]) |want, gotv| {
                 try std.testing.expect(@abs(gotv - want) <= 2e-5 + 2e-4 * @abs(want));

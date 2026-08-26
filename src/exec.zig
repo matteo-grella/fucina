@@ -96,6 +96,7 @@ pub const AttentionMask = exec_attention.AttentionMask;
 pub const KvView = exec_attention.KvView;
 pub const AttentionOptions = exec_attention.AttentionOptions;
 pub const GroupedCausalAttentionBackwardResult = exec_attention.GroupedCausalAttentionBackwardResult;
+pub const AttentionBackwardRequest = exec_attention.AttentionBackwardRequest;
 
 /// Masked-mean forward result: the per-lane means plus the per-lane counts of
 /// selected elements (the mean's divisor, which the VJP reuses).

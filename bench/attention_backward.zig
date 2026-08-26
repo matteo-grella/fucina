@@ -98,21 +98,20 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case) !R
     var base = try Base.init(&ctx, case);
     defer base.deinit();
 
-    // Forward-saved stats + output for the "+s" rows — the autograd
-    // record's route (one-pass softmax rebuild + gy.O row dots).
+    // Forward-saved stats for the "+s" rows — the autograd record's route
+    // (one-pass softmax rebuild); the forward output itself is not kept.
     var stats: ?[]f32 = null;
     defer if (stats) |values| counted.allocator().free(values);
-    var stats_out: ?Tensor = null;
-    defer if (stats_out) |*value| value.deinit();
     if (case.stats) {
         const values = try counted.allocator().alloc(f32, case.heads * case.q_seq * 2);
         stats = values;
-        stats_out = try ctx.groupedAttention(&base.q, .{ .f32 = .{ .k = &base.k, .v = &base.v } }, base.kv_head_for_head, 0.125, .{ .stats_out = values });
+        var forward = try ctx.groupedAttention(&base.q, .{ .f32 = .{ .k = &base.k, .v = &base.v } }, base.kv_head_for_head, 0.125, .{ .stats_out = values });
+        forward.deinit();
     }
-    const out_arg: ?*const Tensor = if (stats_out) |*value| value else null;
+    const request: bench_raw.AttentionBackwardRequest = .{ .q = &base.q, .k = &base.k, .v = &base.v, .gy = &base.gy, .kv_head_for_head = base.kv_head_for_head, .scale = 0.125, .stats = stats };
 
     for (0..3) |_| {
-        var grads = try ctx.groupedAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
+        var grads = try ctx.groupedAttentionBackward(request);
         std.mem.doNotOptimizeAway(checksum(&grads));
         grads.deinit();
     }
@@ -125,7 +124,7 @@ fn runCase(io: std.Io, allocator_mode: bench_alloc.AllocatorMode, case: Case) !R
     var timer = try Timer.start(io);
     for (times) |*time| {
         timer.reset();
-        var grads = try ctx.groupedAttentionBackward(&base.q, &base.k, &base.v, &base.gy, base.kv_head_for_head, 0.125, 0, true, stats, out_arg, true, true, true);
+        var grads = try ctx.groupedAttentionBackward(request);
         time.* = timer.read();
         checksum_value += checksum(&grads);
         grads.deinit();

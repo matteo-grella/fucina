@@ -23,10 +23,6 @@ pub const GroupedCausalAttentionBackward = struct {
     // forward's probabilities in ONE pass instead of the max/sum recompute
     // (see `groupedCausalAttentionBackwardTiles`).
     row_stats: []f32,
-    // The forward's output (refcounted view, no copy): kept on the record
-    // for compatibility; the tiled route derives the softmax-backward row
-    // dot from its own panels and does not read it.
-    out: RawTensor,
     scale_value: f32,
     window: usize,
     // false = bidirectional attention (block-diffusion canvas); the backward
@@ -48,7 +44,6 @@ pub const GroupedCausalAttentionBackward = struct {
         window: usize,
         causal: bool,
         row_stats: []const f32,
-        out: *const RawTensor,
     ) !void {
         self.* = .{
             .parents = .{ q_parent, k_parent, v_parent },
@@ -57,7 +52,6 @@ pub const GroupedCausalAttentionBackward = struct {
             .v = undefined,
             .kv_head_for_head = undefined,
             .row_stats = undefined,
-            .out = undefined,
             .scale_value = scale_value,
             .window = window,
             .causal = causal,
@@ -68,8 +62,6 @@ pub const GroupedCausalAttentionBackward = struct {
         errdefer self.k.deinit();
         self.v = try v.cloneView();
         errdefer self.v.deinit();
-        self.out = try out.cloneView();
-        errdefer self.out.deinit();
         self.kv_head_for_head = try allocator.dupe(usize, kv_head_for_head);
         errdefer allocator.free(self.kv_head_for_head);
         self.row_stats = try allocator.dupe(f32, row_stats);
@@ -79,21 +71,18 @@ pub const GroupedCausalAttentionBackward = struct {
         const need_q = needs_grad.len > 0 and needs_grad[0];
         const need_k = needs_grad.len > 1 and needs_grad[1];
         const need_v = needs_grad.len > 2 and needs_grad[2];
-        var grads = try ctx.groupedAttentionBackward(
-            &self.q,
-            &self.k,
-            &self.v,
-            gy,
-            self.kv_head_for_head,
-            self.scale_value,
-            self.window,
-            self.causal,
-            if (self.row_stats.len == 0) null else self.row_stats,
-            if (self.row_stats.len == 0) null else &self.out,
-            need_q,
-            need_k,
-            need_v,
-        );
+        var grads = try ctx.groupedAttentionBackward(.{
+            .q = &self.q,
+            .k = &self.k,
+            .v = &self.v,
+            .gy = gy,
+            .kv_head_for_head = self.kv_head_for_head,
+            .scale = self.scale_value,
+            .window = self.window,
+            .causal = self.causal,
+            .stats = if (self.row_stats.len == 0) null else self.row_stats,
+            .need = .{ .q = need_q, .k = need_k, .v = need_v },
+        });
         defer grads.deinit();
         if (need_q) {
             out[0] = grads.q.?;
@@ -127,7 +116,6 @@ pub const GroupedCausalAttentionBackward = struct {
         self.q.deinit();
         self.k.deinit();
         self.v.deinit();
-        self.out.deinit();
         allocator.free(self.kv_head_for_head);
         allocator.free(self.row_stats);
     }

@@ -17,6 +17,7 @@ pub const RawTensorOf = tensor.TensorOf;
 pub const ExecContext = exec.ExecContext;
 pub const RopeMode = exec.RopeMode;
 pub const RopeTable = exec.RopeTable;
+pub const AttentionBackwardRequest = exec.AttentionBackwardRequest;
 pub const simd = @import("fucina.zig").simd;
 pub const active_backend_kind = backend.active_kind;
 pub const BlockQ8_0 = dtype.BlockQ8_0;

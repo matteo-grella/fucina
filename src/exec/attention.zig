@@ -1728,30 +1728,47 @@ pub fn groupedAttention(
     }
 }
 
-/// `stats` (optional): the forward's saved per-(head, query) {max, sum_exp}
-/// pairs from `groupedAttention`'s `.stats_out` capture — length
-/// heads * q_seq * 2. The tiled route rebuilds the forward's probabilities
-/// from them in one pass instead of the max/sum recompute (gated by
-/// FUCINA_ATTN_BWD_STATS=0); the small-shape per-kv-head route always
-/// recomputes. `out` (the forward output) is accepted for the autograd
-/// record's convenience but unused: the tiled route's row dot comes from
-/// its own cache-resident panels.
-pub fn groupedAttentionBackward(
-    self: *ExecContext,
+/// The fused grouped attention backward's request: the forward operands
+/// and head map, the upstream gradient, the softmax parameters, the
+/// forward's optional saved row stats, and which gradients to produce.
+pub const AttentionBackwardRequest = struct {
     q: *const Tensor,
     k: *const Tensor,
     v: *const Tensor,
+    /// Upstream gradient, `[q_seq, heads * d]`.
     gy: *const Tensor,
     kv_head_for_head: []const usize,
-    scale_value: f32,
-    window: usize,
-    causal: bool,
-    stats: ?[]const f32,
-    out: ?*const Tensor,
-    need_q: bool,
-    need_k: bool,
-    need_v: bool,
-) !GroupedCausalAttentionBackwardResult {
+    scale: f32,
+    window: usize = 0,
+    causal: bool = true,
+    /// The forward's saved per-(head, query) {max, sum_exp} pairs from
+    /// `groupedAttention`'s `.stats_out` capture (length heads * q_seq * 2),
+    /// or null to recompute them.
+    stats: ?[]const f32 = null,
+    need: struct { q: bool = true, k: bool = true, v: bool = true } = .{},
+};
+
+/// With `request.stats` the tiled route rebuilds the forward's
+/// probabilities in one pass instead of the max/sum recompute (gated by
+/// FUCINA_ATTN_BWD_STATS=0); the small-shape per-kv-head route always
+/// recomputes. The forward output is not an input: the tiled route builds
+/// full-width probability and dO·Vᵀ panels per query tile and takes the
+/// softmax-backward row dot from them, so the flash-style rowsum(dO ∘ O)
+/// term would only replace that in-panel reduction, not a pass.
+pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRequest) !GroupedCausalAttentionBackwardResult {
+    const q = request.q;
+    const k = request.k;
+    const v = request.v;
+    const gy = request.gy;
+    const kv_head_for_head = request.kv_head_for_head;
+    const scale_value = request.scale;
+    const window = request.window;
+    const causal = request.causal;
+    const stats = request.stats;
+    const need_q = request.need.q;
+    const need_k = request.need.k;
+    const need_v = request.need.v;
+
     const q_view = try q.rankView(3);
     const k_view = try k.rankView(3);
     const v_view = try v.rankView(3);
@@ -1801,9 +1818,6 @@ pub fn groupedAttentionBackward(
     if (stats_active) |values| {
         if (values.len != heads * q_seq * 2) return tensor.TensorError.InvalidDataLength;
     }
-    // The tiled route derives the softmax-backward row dot from its own
-    // cache-resident P/dP panels, so the forward output is not consulted.
-    _ = out;
     if ((need_q or need_k or need_v) and
         q_seq >= 8 and kv_seq >= 8 and d >= 4 and d <= attention_tile_max_d and
         attention_work >= grouped_attention_backward_gemm_work_threshold)
