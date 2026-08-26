@@ -88,7 +88,9 @@ pub const ThreadPool = thread.Pool;
 // `kernels`, `blas`, or `simd`, never through a provider by name.
 pub const scalar_impl = @import("backend/cpu.zig");
 pub const native_impl = @import("backend/native.zig");
-const interface = @import("backend/interface.zig");
+/// The kernel name lists (`names`, `generic_names`, `pool_free_names`) and
+/// `conform`; exported so the reference can assert its kernel inventory.
+pub const interface = @import("backend/interface.zig");
 // GPU GEMM provider selected by -Dgpu (metal.zig or cuda.zig, via the
 // backend/gpu.zig leaf); inert (never analyzed past the `enabled` flag) on
 // -Dgpu=none builds. This is the SECOND conformed contract: providers are

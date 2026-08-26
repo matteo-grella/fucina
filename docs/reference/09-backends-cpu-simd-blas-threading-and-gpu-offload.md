@@ -106,9 +106,9 @@ test "backend build facts" {
 
 ```zig
 // src/backend/interface.zig
-pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 99 kernels
-pub const generic_names = [_][]const u8{ ... };    // 12: take a comptime dtype or op
-pub const pool_free_names = [_][]const u8{ ... };  // 18: take no `pc`
+pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 77 kernels
+pub const generic_names = [_][]const u8{ ... };    // 15: take a comptime dtype, op, or request
+pub const pool_free_names = [_][]const u8{ ... };  // 14: take no `pc`
 pub fn conform(comptime Impl: type) void;          // the single comptime check
 
 // src/backend/cpu.zig and src/backend/native.zig
@@ -147,19 +147,20 @@ per-call snapshot with acquire ordering ([§6.6](06-the-execution-runtime-execco
 ```zig
 const kernels = backend_mod.kernels;           // file-level, in each exec/ module
 kernels.sumInto(ctx.pc(), &out, &x);           // pool-taking
-kernels.matmulInto(&out, &a, &b);              // pool-free
+kernels.addInto(&out, &a, &b);                 // pool-free
 ```
 
 Kernel naming encodes the checking tier — with one caveat:
 
 - `...Into(out, ...) !void` — validates shapes itself (`rankView`, dim
   checks) and returns `TensorError.ShapeMismatch` on disagreement. This
-  holds for the elementwise/reduction/dot/matmul families (`addInto`,
-  `sumInto`, `dotInto`, `matmulInto`, …). The conv/pool/norm families
-  (`conv2dInto`, `im2colInto`, `pool2dInto`, `upsample2xNearestInto`,
-  `conv1dInto`, `col2im1dInto`, `snakeInto`, `groupNormInto`,
-  `causalDepthwiseConv1dInto`, …) are `...Into`-named but plain `void` and
-  **unchecked** — the exec layer validates geometry before calling them.
+  holds for the elementwise and reduction families (`addInto`, `sumInto`,
+  `scaleInto`, `dot`, …) and for the quantized-RHS entries. The
+  conv/pool/norm families (`conv2dInto`, `im2colInto`, `pool2dInto`,
+  `upsample2xNearestInto`, `conv1dInto`, `col2im1dInto`, `snakeInto`,
+  `groupNormInto`, `causalDepthwiseConv1dInto`, …) are `...Into`-named but
+  plain `void` and **unchecked** — the exec layer validates geometry before
+  calling them.
 - `...IntoUnchecked` and the slice kernels (`addScaledSlice`,
   `unaryRowSlice`, `preluChannelsInto`, ...) — `void`; the caller (exec) has
   already validated shape and contiguity. Passing wrong geometry is illegal
@@ -167,23 +168,48 @@ Kernel naming encodes the checking tier — with one caveat:
 - `...Typed` variants take a comptime `DType` and typed tensors
   (`TensorOf(dtype)`), with output dtype derived by
   `dtype_mod.outputDType(...)`.
+- The dense GEMM is one entry, `gemm(pc, comptime g: ops.Gemm, out, a, b,
+  m, n, k) void`: the request states the operand orientation
+  (`ops.MatmulKind`: `.plain`, `.trans_a`, `.trans_b`), the operand and
+  output dtypes, and `accumulate`; each provider implements the
+  combinations it has kernels for and rejects the rest at comptime.
+  `gemmBatched` takes `comptime kind: ops.MatmulKind` plus batch strides.
 
 The full kernel inventory, grouped (every name is an entry of
-`interface.names`; entries marked with an asterisk take no `pc`):
+`interface.names`; entries marked `*` take no `pc`, entries marked `†` are
+generic over a comptime dtype, op, request, or container type):
 
 | Family | Kernels |
 |---|---|
-| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`, `scaleInto`, `unaryContiguousIntoUnchecked`, `leakyReluContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked` |
-| row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*, `unaryRowSlice`*, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`, `channelAffineInto` |
-| reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`, `dotInto`, `dotIntoTyped` |
+| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`†, `scaleInto`, `unaryContiguousIntoUnchecked`†, `leakyReluContiguousIntoUnchecked`, `softcapContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked`† |
+| row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*†, `unaryRowSlice`*†, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`, `channelAffineInto` |
+| reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`†, `dot`† (comptime dtype; f32 takes the dedicated reduction, every other float dtype the typed one) |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
-| 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
+| 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
-| dense GEMM | `matmulInto`*, `matmul2DIntoUnchecked`, `matmul2DAccIntoUnchecked`, `matmul2DIntoUncheckedTyped`, `matmulTransAInto`*, `matmulTransA2DIntoUnchecked`, `matmulTransBInto`*, `matmulTransB2DIntoUnchecked`, `matmulTransB2DIntoUncheckedF16Operands`, `matmulTransB2DIntoUncheckedBf16Rhs` |
-| batched GEMM | `matmulBatched2DIntoUnchecked`, `matmulBatchedTransA2DIntoUnchecked`, `matmulBatchedTransB2DIntoUnchecked` |
-| packed dense RHS | `packDenseMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedDenseRhs`, `packMatmulRhsTyped`*, `matmul2DIntoUncheckedPackedRhsTyped` |
-| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs`, `matmulQuantizedRhs` (comptime dtype, the plain K-quant containers), `matmulPacked` (comptime container dispatch over the packed layouts), `matmulPackedSlice` (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs` |
+| dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
+| packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`), `packHalfRhs`*† (f16/bf16 `[k, n]` weight to the same-dtype panel `PackedMatmulRhsFor(dtype)`); both are consumed by `matmulPacked` |
+| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulQuantizedRhs`† (comptime dtype, the plain K-quant containers), `matmulPacked`† (comptime container dispatch over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs` |
+
+The counts above are asserted against the lists themselves (the name
+lists are reachable as `fucina.internal.backend_mod.interface`):
+
+```zig
+test "kernel interface inventory" {
+    const backend = fucina.internal.backend_mod;
+    const interface = backend.interface;
+    try std.testing.expectEqual(@as(usize, 77), interface.names.len);
+    try std.testing.expectEqual(@as(usize, 15), interface.generic_names.len);
+    try std.testing.expectEqual(@as(usize, 14), interface.pool_free_names.len);
+    // Every named kernel is a declaration of the active provider's set
+    // (`conform` pins that set to exactly `names`, so the same check on the
+    // generic and pool-free lists shows they are subsets of the names).
+    inline for (interface.names ++ interface.generic_names ++ interface.pool_free_names) |name| {
+        try std.testing.expect(@hasDecl(backend.kernels, name));
+    }
+}
+```
 
 Geometry structs re-exported through `backend.zig` (and used in the
 signatures above): `Conv2dDims` (channel-last `[H,W,Cin] → [OH,OW,Cout]`;
