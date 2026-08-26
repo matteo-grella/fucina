@@ -289,11 +289,11 @@ fn benchQuant(
     const format = comptime raw.offload.QuantFormat.fromDType(dtype).?;
 
     try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
-    if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
+    if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, &gpu_out)) return error.GpuDispatchFailed;
     _ = gpu_out.dataConst();
     for (0..3) |_| {
         try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
-        if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
+        if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, &gpu_out)) return error.GpuDispatchFailed;
         _ = gpu_out.dataConst();
     }
 
@@ -310,12 +310,12 @@ fn benchQuant(
             try cpuPackedQuant(dtype, allocator, &cpu_out, &a, &packed_rhs, cpu_blocks, m, n, k, config);
             cpu_times[rep] = timer.read();
             timer.reset();
-            if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
+            if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, &gpu_out)) return error.GpuDispatchFailed;
             _ = gpu_out.dataConst();
             gpu_times[rep] = timer.read();
         } else {
             timer.reset();
-            if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
+            if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, &gpu_out)) return error.GpuDispatchFailed;
             _ = gpu_out.dataConst();
             gpu_times[rep] = timer.read();
             timer.reset();
@@ -323,12 +323,12 @@ fn benchQuant(
             cpu_times[rep] = timer.read();
         }
         timer.reset();
-        if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, &gpu_out, 1, m, n, k)) return error.GpuDispatchFailed;
+        if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, &gpu_out)) return error.GpuDispatchFailed;
         submit_times[rep] = timer.read();
         _ = gpu_out.dataConst();
 
         timer.reset();
-        for (queued) |*value| if (!gpu.gemmQuantNtAsync(format, resident, true, blocks_per_row * @sizeOf(Block), 0, &a, value, 1, m, n, k)) return error.GpuDispatchFailed;
+        for (queued) |*value| if (!gpu.gemmQuantNtAsync(.{ .format = format, .rhs = resident, .rhs_cacheable = true, .nb01 = blocks_per_row * @sizeOf(Block), .m = m, .n = n, .k = k }, &a, value)) return error.GpuDispatchFailed;
         for (queued) |*value| _ = value.dataConst();
         queue_times[rep] = timer.read();
     }

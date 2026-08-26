@@ -27,11 +27,12 @@ comptime {
     if (build_options.use_gpu != (build_options.gpu_kind != .none))
         @compileError("build_options.use_gpu and build_options.gpu_kind are out of sync");
 
-    // The selected provider implements the whole interface, checked on
-    // signatures only (no function addresses taken). The unselected real
-    // providers ride their compile legs: `zig build metal-check` for the
-    // Metal arm, `zig build cuda-check` for the CUDA arm.
-    provider.assertConforms(impl);
+    // The selected provider implements the whole interface — stated as the
+    // null provider's public declarations — checked on signatures only (no
+    // function addresses taken). The unselected real providers ride their
+    // compile legs: `zig build metal-check` for the Metal arm, `zig build
+    // cuda-check` for the CUDA arm.
+    provider.assertConforms(@import("gpu_none.zig"), impl);
 }
 
 test {

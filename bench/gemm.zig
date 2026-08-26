@@ -202,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
             // threshold is tuned from.
             const Gpu = struct {
                 fn go(c: []f32, a: []const f32, b: []const f32, m: usize, n: usize, k: usize) void {
-                    if (!raw_backend.gpu_impl.gemmF32(.plain, a, b, c, m, n, k)) @panic("gpu gemm failed");
+                    if (!raw_backend.gpu_impl.gemmF32(a, b, c, .{ .orient = .plain, .m = m, .n = n, .k = k })) @panic("gpu gemm failed");
                 }
             }.go;
             const gpu_ns = try median(Gpu, .{ data.c, data.a, data.b, s.m, s.n, s.k }, iters);

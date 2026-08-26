@@ -209,8 +209,8 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
     // Warm every path, including storage wrappers/registration, device-slot growth,
     // pipeline/JIT creation, and the resident RHS prefetch.
     cpuGemm(cpu_out, a, b, m, n, k);
-    if (!gpu.gemmF32(.nn, a, resident_b, sync_out, m, n, k)) return error.GpuDispatchFailed;
-    if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+    if (!gpu.gemmF32(a, resident_b, sync_out, .{ .orient = .plain, .m = m, .n = n, .k = k })) return error.GpuDispatchFailed;
+    if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
     _ = async_out.dataConst();
     if (gpu.shouldUseGpuForRhs(&b_tensor, m, n, k)) {
         var routed = try Tensor.zeros(allocator, &.{ m, n });
@@ -223,7 +223,7 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
     // state before collecting a crossover-sensitive distribution.
     for (0..4) |_| {
         cpuGemm(cpu_out, a, b, m, n, k);
-        if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+        if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
         _ = async_out.dataConst();
     }
 
@@ -239,12 +239,12 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
                 cpuGemm(cpu_out, a, b, m, n, k);
                 cpu_pair[rep] = timer.read();
                 timer.reset();
-                if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+                if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
                 _ = async_out.dataConst();
                 gpu_pair[rep] = timer.read();
             } else {
                 timer.reset();
-                if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+                if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
                 _ = async_out.dataConst();
                 gpu_pair[rep] = timer.read();
                 timer.reset();
@@ -290,12 +290,12 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
             cpu_times[rep] = timer.read();
 
             timer.reset();
-            if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+            if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
             _ = async_out.dataConst();
             async_times[rep] = timer.read();
         } else {
             timer.reset();
-            if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+            if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
             _ = async_out.dataConst();
             async_times[rep] = timer.read();
 
@@ -305,17 +305,17 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
         }
 
         timer.reset();
-        if (!gpu.gemmF32(.nn, a, resident_b, sync_out, m, n, k)) return error.GpuDispatchFailed;
+        if (!gpu.gemmF32(a, resident_b, sync_out, .{ .orient = .plain, .m = m, .n = n, .k = k })) return error.GpuDispatchFailed;
         sync_times[rep] = timer.read();
 
         timer.reset();
-        if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
+        if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, &async_out, m, n, k)) return error.GpuDispatchFailed;
         submit_times[rep] = timer.read();
         _ = async_out.dataConst();
 
         timer.reset();
         for (queued) |*value| {
-            if (!gpu.gemmF32Async(.nn, &a_tensor, &b_tensor, value, m, n, k)) return error.GpuDispatchFailed;
+            if (!gpu.gemmF32Async(.plain, &a_tensor, &b_tensor, value, m, n, k)) return error.GpuDispatchFailed;
         }
         for (queued) |*value| _ = value.dataConst();
         queue_times[rep] = timer.read();

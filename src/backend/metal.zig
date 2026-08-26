@@ -53,6 +53,9 @@ pub const enabled = build_options.gpu_kind == .metal;
 pub const has_quant_gemm = enabled;
 
 pub const Orient = gpu_provider.Orient;
+pub const GemmRequest = gpu_provider.GemmRequest;
+pub const QuantGemmRequest = gpu_provider.QuantGemmRequest;
+pub const AttentionRequest = gpu_provider.AttentionRequest;
 
 const CommandTiming = extern struct {
     gpu_ns: u64,
@@ -507,45 +510,15 @@ pub fn shouldUseGpuAttentionFwd(q_seq: usize, kv_seq: usize, heads: usize, d: us
 /// the training backward. Values differ from the CPU kernels in summation
 /// order only (the tier-shared ~1e-6 relative class). Returns false when
 /// the GPU did not run (caller falls through to the CPU tiers).
-pub fn attentionFwdF32(
-    q_data: []const f32,
-    k_data: []const f32,
-    v_data: []const f32,
-    out_data: []f32,
-    stats: ?[]f32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    window: usize,
-    causal: bool,
-    heads_per_kv: usize,
-    scale_value: f32,
-) bool {
-    return attentionFwdImpl(f32, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+pub fn attentionFwdF32(q_data: []const f32, k_data: []const f32, v_data: []const f32, out_data: []f32, stats: ?[]f32, req: AttentionRequest) bool {
+    return attentionFwdImpl(f32, q_data, k_data, v_data, out_data, stats, req.q_seq, req.kv_seq, req.heads, req.kv_heads, req.d, req.window, req.causal, req.heads_per_kv, req.scale);
 }
 
 /// The f16-KV-cache instantiation of the same kernel (inference prefill:
 /// f32 queries against the half K/V cache, widened per load, f32
 /// accumulation — the CPU f16-KV tier's contract).
-pub fn attentionFwdF16Kv(
-    q_data: []const f32,
-    k_data: []const f16,
-    v_data: []const f16,
-    out_data: []f32,
-    stats: ?[]f32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    window: usize,
-    causal: bool,
-    heads_per_kv: usize,
-    scale_value: f32,
-) bool {
-    return attentionFwdImpl(f16, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+pub fn attentionFwdF16Kv(q_data: []const f32, k_data: []const f16, v_data: []const f16, out_data: []f32, stats: ?[]f32, req: AttentionRequest) bool {
+    return attentionFwdImpl(f16, q_data, k_data, v_data, out_data, stats, req.q_seq, req.kv_seq, req.heads, req.kv_heads, req.d, req.window, req.causal, req.heads_per_kv, req.scale);
 }
 
 fn attentionFwdImpl(
@@ -670,47 +643,26 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
 /// C[m,n] = op(A)·op(B), f32 row-major, overwrite (beta = 0). Slices use the
 /// same operand conventions as the BLAS arm: nn A[m,k]/B[k,n]; tn A stored
 /// [k,m]; nt B stored [n,k]. Returns false when the GPU didn't run.
-pub fn gemmF32(
-    orient: Orient,
-    a: []const f32,
-    b: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    return gemmBatchedF32(orient, a, b, c, m, n, k, 1, 0, 0, 0);
-}
-
-pub fn gemmBatchedF32(
-    orient: Orient,
-    a: []const f32,
-    b: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) bool {
+/// Blocking dense f32 GEMM — plain or strided-batched (a `req.batch`
+/// above 1 is ONE dispatch with grid depth = batch) — for
+/// parity/benchmark callers; production dispatch uses the async twin.
+pub fn gemmF32(a: []const f32, b: []const f32, c: []f32, req: GemmRequest) bool {
     const ctx = context() orelse return false;
     var timing: CommandTiming = .{ .gpu_ns = 0, .sched_ns = 0 };
     const timer = trace.start();
     const rc = fucina_metal_gemm_f32(
         ctx,
-        @intFromEnum(orient),
+        @intFromEnum(req.orient),
         a.ptr,
         b.ptr,
         c.ptr,
-        @intCast(m),
-        @intCast(n),
-        @intCast(k),
-        @intCast(batch_count),
-        @intCast(stride_a),
-        @intCast(stride_b),
-        @intCast(stride_c),
+        @intCast(req.m),
+        @intCast(req.n),
+        @intCast(req.k),
+        @intCast(req.batch),
+        @intCast(req.stride_a),
+        @intCast(req.stride_b),
+        @intCast(req.stride_c),
         if (trace.on) &timing else null,
     );
     if (trace.on) {
@@ -719,7 +671,7 @@ pub fn gemmBatchedF32(
         trace.inc(.f32_gpu_ns, timing.gpu_ns);
         trace.inc(.f32_sched_ns, timing.sched_ns);
         trace.inc(.f32_calls, 1);
-        traceRecordShape(.f32, m, n, k, batch_count, 0, wall_ns, timing);
+        traceRecordShape(.f32, req.m, req.n, req.k, req.batch, 0, wall_ns, timing);
         if (rc != 0) trace.inc(.shim_err, 1);
     }
     return rc == 0;
@@ -1145,19 +1097,16 @@ const MetalQuantWork = struct {
 /// input/output storage is used directly and host visibility is deferred to
 /// the ordinary output Work. The 4 KiB command-data tile limit admits up to
 /// 8192 rows per call; longer rare prompts retain the blocking chunk fallback.
-pub fn gemmQuantNtAsync(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    input: *const Tensor,
-    out: *Tensor,
-    batch_count: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNtAsync(req: QuantGemmRequest, input: *const Tensor, out: *Tensor) bool {
+    const format = req.format;
+    const rhs_bytes = req.rhs;
+    const rhs_cacheable = req.rhs_cacheable;
+    const nb01 = req.nb01;
+    const nb02 = req.nb02;
+    const batch_count = req.batch;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (!rhs_cacheable or rhs_bytes.len == 0 or batch_count == 0 or m == 0 or m > 8192 or n == 0 or k == 0) return false;
     if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32) or batch_count > std.math.maxInt(i32)) return false;
     if (k % 32 != 0 or k % format.kMultiple() != 0 or n % 4 != 0) return false;
@@ -1388,16 +1337,14 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// (`allocResidentBytes`) whose owner evicts via `freeResidentBytes` before
 /// freeing. A cached wrap of freed-and-reused pages reads stale data.
 /// Returns false when the GPU didn't run — caller falls back to CPU.
-pub fn gemmQGroupedNt(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    n_out: usize,
-    k: usize,
-    tiles: []const QMMTile,
-) bool {
+pub fn gemmQGroupedNt(req: QuantGemmRequest, tiles: []const QMMTile) bool {
+    const format = req.format;
+    const rhs_bytes = req.rhs;
+    const rhs_cacheable = req.rhs_cacheable;
+    const nb01 = req.nb01;
+    const nb02 = req.nb02;
+    const n_out = req.n;
+    const k = req.k;
     if (k == 0 or k % 32 != 0 or k % format.kMultiple() != 0) return false;
     if (n_out == 0 or n_out % 4 != 0) return false; // float4 row copies in the store
     if (tiles.len == 0) return false;
@@ -1449,17 +1396,10 @@ fn rowsCoveredByTiles(tiles: []const QMMTile) usize {
 /// ONLY for stable storage (`internal.gpu.allocResidentBytes`), false for
 /// transient buffers. A cached wrap of a freed-and-reused page reads stale
 /// data.
-pub fn gemmQuantNt(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    a: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNt(req: QuantGemmRequest, a: []const f32, c: []f32) bool {
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (m == 0 or m > std.math.maxInt(i32)) return false;
     const in_elems = std.math.mul(usize, m, k) catch return false;
     const out_elems = std.math.mul(usize, m, n) catch return false;
@@ -1481,7 +1421,9 @@ pub fn gemmQuantNt(
     for (0..n_tiles) |t| {
         tiles_buf[t] = .{ .expert = 0, .base_row = 0, .m = @intCast(m), .tile_m = @intCast(t) };
     }
-    if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, 0, n, k, tiles_buf[0..n_tiles])) return false;
+    var greq = req;
+    greq.nb02 = 0; // one matrix: the batched stride never applies here
+    if (!gemmQGroupedNt(greq, tiles_buf[0..n_tiles])) return false;
     const out_timer = trace.start();
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
     trace.elapsed(.quant_stage_ns, out_timer);
@@ -1494,19 +1436,11 @@ pub fn gemmQuantNt(
 /// quant kernel's expert dimension to collapse same-shape independent linears
 /// into one Metal command, while the caller still owns an ordinary CPU-visible
 /// result tensor. `nb02` is the byte stride between consecutive RHS operands.
-pub fn gemmQuantNtSharedABatch(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    a: []const f32,
-    c: []f32,
-    batch_count: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNtSharedABatch(req: QuantGemmRequest, a: []const f32, c: []f32) bool {
+    const batch_count = req.batch;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (batch_count == 0 or m == 0 or m > std.math.maxInt(i32)) return false;
     const in_elems = std.math.mul(usize, m, k) catch return false;
     const rows_total = std.math.mul(usize, batch_count, m) catch return false;
@@ -1546,7 +1480,7 @@ pub fn gemmQuantNtSharedABatch(
             tile_i += 1;
         }
     }
-    if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, nb02, n, k, tiles_buf[0..n_tiles_total])) return false;
+    if (!gemmQGroupedNt(req, tiles_buf[0..n_tiles_total])) return false;
     const out_timer = trace.start();
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
     trace.elapsed(.quant_stage_ns, out_timer);
@@ -1640,30 +1574,14 @@ pub fn attnPrefillF16(
     v: []const f16,
     out: []f32,
     kv_head_for_head: []const i32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    source_offset: usize,
-    scale: f32,
-    window: usize,
-    causal: bool,
+    req: AttentionRequest,
 ) bool {
     _ = q;
     _ = k;
     _ = v;
     _ = out;
     _ = kv_head_for_head;
-    _ = q_seq;
-    _ = kv_seq;
-    _ = heads;
-    _ = kv_heads;
-    _ = d;
-    _ = source_offset;
-    _ = scale;
-    _ = window;
-    _ = causal;
+    _ = req;
     return false;
 }
 
@@ -1709,7 +1627,17 @@ test "metal attention forward parity vs scalar reference (causal, window, offset
 
         const scale: f32 = 0.125;
         const heads_per_kv = case.heads / case.kv_heads;
-        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, case.q_seq, case.kv_seq, case.heads, case.kv_heads, case.d, case.window, case.causal, heads_per_kv, scale));
+        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, .{
+            .q_seq = case.q_seq,
+            .kv_seq = case.kv_seq,
+            .heads = case.heads,
+            .kv_heads = case.kv_heads,
+            .d = case.d,
+            .window = case.window,
+            .causal = case.causal,
+            .heads_per_kv = heads_per_kv,
+            .scale = scale,
+        }));
 
         const source_offset = case.kv_seq - case.q_seq;
         const scores = try allocator.alloc(f64, case.kv_seq);
@@ -1786,7 +1714,17 @@ test "metal attention forward f16-KV parity vs scalar reference" {
     for (v16) |*x| x.* = @floatCast(random.floatNorm(f32));
     @memset(out, std.math.nan(f32));
 
-    try std.testing.expect(attentionFwdF16Kv(q, k16, v16, out, stats, q_seq, kv_seq, heads, kv_heads, d, 0, true, heads_per_kv, scale));
+    try std.testing.expect(attentionFwdF16Kv(q, k16, v16, out, stats, .{
+        .q_seq = q_seq,
+        .kv_seq = kv_seq,
+        .heads = heads,
+        .kv_heads = kv_heads,
+        .d = d,
+        .window = 0,
+        .causal = true,
+        .heads_per_kv = heads_per_kv,
+        .scale = scale,
+    }));
 
     const source_offset = kv_seq - q_seq;
     const scores = try allocator.alloc(f64, kv_seq);
@@ -1868,17 +1806,15 @@ test "metal quant gemm q6_K/q4_K/q8_0 parity vs dequantized reference" {
             defer allocator.free(c);
             @memset(c, std.math.nan(f32));
 
-            try std.testing.expect(gemmQuantNt(
-                fmt,
-                std.mem.sliceAsBytes(blocks),
-                false, // transient test buffer: must not enter the wrap cache
-                bpr * @sizeOf(Block),
-                a,
-                c,
-                m,
-                n,
-                k,
-            ));
+            try std.testing.expect(gemmQuantNt(.{
+                .format = fmt,
+                .rhs = std.mem.sliceAsBytes(blocks),
+                .rhs_cacheable = false, // transient test buffer: must not enter the wrap cache
+                .nb01 = bpr * @sizeOf(Block),
+                .m = m,
+                .n = n,
+                .k = k,
+            }, a, c));
             try expectQuantGemmRows(a, wref, c, m, n, k);
         }
     }
@@ -1924,17 +1860,15 @@ test "metal quant gemm tq2_0_folded parity vs dequantized reference" {
     const c = try allocator.alloc(f32, m * n);
     defer allocator.free(c);
 
-    try std.testing.expect(gemmQuantNt(
-        .tq2_0_folded,
-        std.mem.sliceAsBytes(blocks),
-        false, // transient test buffer: must not enter the wrap cache
-        bpr * @sizeOf(Block),
-        a,
-        c,
-        m,
-        n,
-        k,
-    ));
+    try std.testing.expect(gemmQuantNt(.{
+        .format = .tq2_0_folded,
+        .rhs = std.mem.sliceAsBytes(blocks),
+        .rhs_cacheable = false, // transient test buffer: must not enter the wrap cache
+        .nb01 = bpr * @sizeOf(Block),
+        .m = m,
+        .n = n,
+        .k = k,
+    }, a, c));
     try expectQuantGemmRows(a, wref, c, m, n, k);
 }
 
@@ -1973,19 +1907,17 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
         var out = try Tensor.zeros(allocator, &.{ batch_count * m, n });
         defer out.deinit();
 
-        try std.testing.expect(gemmQuantNtAsync(
-            fmt,
-            resident,
-            true,
-            bpr * @sizeOf(Block),
-            n * bpr * @sizeOf(Block),
-            &input,
-            &out,
-            batch_count,
-            m,
-            n,
-            k,
-        ));
+        try std.testing.expect(gemmQuantNtAsync(.{
+            .format = fmt,
+            .rhs = resident,
+            .rhs_cacheable = true,
+            .nb01 = bpr * @sizeOf(Block),
+            .nb02 = n * bpr * @sizeOf(Block),
+            .batch = batch_count,
+            .m = m,
+            .n = n,
+            .k = k,
+        }, &input, &out));
         try std.testing.expect(out.buffer.pending() != null);
         input.data()[0] += 100;
         const got = out.dataConst();

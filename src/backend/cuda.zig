@@ -72,6 +72,9 @@ pub const enabled = build_options.gpu_kind == .cuda;
 pub const has_quant_gemm = enabled;
 
 pub const Orient = gpu_provider.Orient;
+pub const GemmRequest = gpu_provider.GemmRequest;
+pub const QuantGemmRequest = gpu_provider.QuantGemmRequest;
+pub const AttentionRequest = gpu_provider.AttentionRequest;
 
 /// Offload policy is read live from the process tuning table
 /// (`tuning.get().gpu` — loaded once from the environment and cached; the
@@ -431,45 +434,15 @@ pub fn shouldUseGpuAttentionFwd(q_seq: usize, kv_seq: usize, heads: usize, d: us
 /// kernels in summation order only (the tier-shared ~1e-6 relative class).
 /// Returns false when the GPU did not run (caller falls through to the CPU
 /// tiers).
-pub fn attentionFwdF32(
-    q_data: []const f32,
-    k_data: []const f32,
-    v_data: []const f32,
-    out_data: []f32,
-    stats: ?[]f32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    window: usize,
-    causal: bool,
-    heads_per_kv: usize,
-    scale_value: f32,
-) bool {
-    return attentionFwdUniform(f32, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+pub fn attentionFwdF32(q_data: []const f32, k_data: []const f32, v_data: []const f32, out_data: []f32, stats: ?[]f32, req: AttentionRequest) bool {
+    return attentionFwdUniform(f32, q_data, k_data, v_data, out_data, stats, req.q_seq, req.kv_seq, req.heads, req.kv_heads, req.d, req.window, req.causal, req.heads_per_kv, req.scale);
 }
 
 /// The f16-KV-cache instantiation of the same kernel (inference prefill:
 /// f32 queries against the half K/V cache, widened per load, f32
 /// accumulation — the CPU f16-KV tier's contract).
-pub fn attentionFwdF16Kv(
-    q_data: []const f32,
-    k_data: []const f16,
-    v_data: []const f16,
-    out_data: []f32,
-    stats: ?[]f32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    window: usize,
-    causal: bool,
-    heads_per_kv: usize,
-    scale_value: f32,
-) bool {
-    return attentionFwdUniform(f16, q_data, k_data, v_data, out_data, stats, q_seq, kv_seq, heads, kv_heads, d, window, causal, heads_per_kv, scale_value);
+pub fn attentionFwdF16Kv(q_data: []const f32, k_data: []const f16, v_data: []const f16, out_data: []f32, stats: ?[]f32, req: AttentionRequest) bool {
+    return attentionFwdUniform(f16, q_data, k_data, v_data, out_data, stats, req.q_seq, req.kv_seq, req.heads, req.kv_heads, req.d, req.window, req.causal, req.heads_per_kv, req.scale);
 }
 
 fn attentionFwdUniform(
@@ -652,18 +625,6 @@ pub fn gemmF16Nt(a: []const f16, b: []const f16, m: usize, n: usize, k: usize, r
 /// C[m,n] = op(A)·op(B), f32 row-major, overwrite (beta = 0). Same operand
 /// conventions as the BLAS arm and the Metal provider: nn A[m,k]/B[k,n];
 /// tn A stored [k,m]; nt B stored [n,k]. Returns false when the GPU didn't run.
-pub fn gemmF32(
-    orient: Orient,
-    a: []const f32,
-    b: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
-    return gemmBatchedF32(orient, a, b, c, m, n, k, 1, 0, 0, 0);
-}
-
 /// Grow-only device operand buffers, guarded by `dispatch_lock`. A and C
 /// cross PCIe on every call, B only when non-resident — the transient floor
 /// in the gates prices that in.
@@ -698,19 +659,17 @@ var dev_a16: DeviceBuf = .{};
 var dev_b16: DeviceBuf = .{};
 var dev_c16: DeviceBuf = .{};
 
-pub fn gemmBatchedF32(
-    orient: Orient,
-    a: []const f32,
-    b: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) bool {
+/// Blocking dense f32 GEMM — plain or strided-batched — for
+/// parity/benchmark callers; production dispatch uses the async twin.
+pub fn gemmF32(a: []const f32, b: []const f32, c: []f32, req: GemmRequest) bool {
+    const orient = req.orient;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
+    const batch_count = req.batch;
+    const stride_a = req.stride_a;
+    const stride_b = req.stride_b;
+    const stride_c = req.stride_c;
     ensureConfig();
     if (batch_count == 0 or m == 0 or n == 0 or k == 0) return false;
     if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32)) return false;
@@ -1818,19 +1777,16 @@ fn quantDecodeUsesGemv(format: Fmt, m: usize) bool {
 /// compute stream and host output is deferred through the standard Work. For
 /// batch_count > 1 the same input is consumed by one launch per weight matrix
 /// without materializing repeated activation rows.
-pub fn gemmQuantNtAsync(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    input: *const Tensor,
-    out: *Tensor,
-    batch_count: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNtAsync(req: QuantGemmRequest, input: *const Tensor, out: *Tensor) bool {
+    const format = req.format;
+    const rhs_bytes = req.rhs;
+    const rhs_cacheable = req.rhs_cacheable;
+    const nb01 = req.nb01;
+    const nb02 = req.nb02;
+    const batch_count = req.batch;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (!rhs_cacheable or rhs_bytes.len == 0 or batch_count == 0 or m == 0 or n == 0 or k == 0) return false;
     if (m > std.math.maxInt(i32) or n > std.math.maxInt(i32) or k > std.math.maxInt(i32) or batch_count > std.math.maxInt(i32)) return false;
     if (k % 32 != 0 or k % format.kMultiple() != 0 or n % 4 != 0) return false;
@@ -2058,16 +2014,14 @@ pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
 /// byte strides `nb01`/`nb02`. Caller holds `qmoe_lock`. A resident RHS
 /// (managed registry hit) dispatches with zero weight transfer; a transient
 /// RHS streams. Returns false when the GPU didn't run.
-pub fn gemmQGroupedNt(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    n_out: usize,
-    k: usize,
-    tiles: []const QMMTile,
-) bool {
+pub fn gemmQGroupedNt(req: QuantGemmRequest, tiles: []const QMMTile) bool {
+    const format = req.format;
+    const rhs_bytes = req.rhs;
+    const rhs_cacheable = req.rhs_cacheable;
+    const nb01 = req.nb01;
+    const nb02 = req.nb02;
+    const n_out = req.n;
+    const k = req.k;
     if (k == 0 or k % 32 != 0 or k % format.kMultiple() != 0) return false;
     if (n_out == 0 or n_out % 4 != 0) return false;
     if (tiles.len == 0 or tiles.len > 1 << 24) return false;
@@ -2212,17 +2166,14 @@ fn gemvQuant(
 /// shared panels: `c[m,n] = a[m,k] · dequant(W)ᵀ` (one "expert"). Same
 /// wrapper shape as the Metal provider; takes `qmoe_lock` itself. With
 /// FUCINA_GPU_DECODE=1 it takes the selected decode route instead.
-pub fn gemmQuantNt(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    a: []const f32,
-    c: []f32,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNt(req: QuantGemmRequest, a: []const f32, c: []f32) bool {
+    const format = req.format;
+    const rhs_bytes = req.rhs;
+    const rhs_cacheable = req.rhs_cacheable;
+    const nb01 = req.nb01;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (m == 0 or m > std.math.maxInt(i32)) return false;
     if (k == 0 or k > std.math.maxInt(i32) or k % 32 != 0 or k % format.kMultiple() != 0) return false;
     const in_elems = std.math.mul(usize, m, k) catch return false;
@@ -2246,7 +2197,9 @@ pub fn gemmQuantNt(
     for (0..n_tiles) |t| {
         tiles_buf[t] = .{ .expert = 0, .base_row = 0, .m = @intCast(m), .tile_m = @intCast(t) };
     }
-    if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, 0, n, k, tiles_buf[0..n_tiles])) return false;
+    var greq = req;
+    greq.nb02 = 0; // one matrix: the batched stride never applies here
+    if (!gemmQGroupedNt(greq, tiles_buf[0..n_tiles])) return false;
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
     return true;
 }
@@ -2255,19 +2208,11 @@ pub fn gemmQuantNt(
 /// for each batch `b`, `c[b,m,n] = a[m,k] · dequant(W[b,n,k])ᵀ` — the narrow
 /// eager command-batching seam, one launch via the expert dimension. Same
 /// wrapper shape as the Metal provider.
-pub fn gemmQuantNtSharedABatch(
-    format: Fmt,
-    rhs_bytes: []const u8,
-    rhs_cacheable: bool,
-    nb01: usize,
-    nb02: usize,
-    a: []const f32,
-    c: []f32,
-    batch_count: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-) bool {
+pub fn gemmQuantNtSharedABatch(req: QuantGemmRequest, a: []const f32, c: []f32) bool {
+    const batch_count = req.batch;
+    const m = req.m;
+    const n = req.n;
+    const k = req.k;
     if (batch_count == 0 or m == 0 or m > std.math.maxInt(i32)) return false;
     const in_elems = std.math.mul(usize, m, k) catch return false;
     const rows_total = std.math.mul(usize, batch_count, m) catch return false;
@@ -2303,7 +2248,7 @@ pub fn gemmQuantNtSharedABatch(
             tile_i += 1;
         }
     }
-    if (!gemmQGroupedNt(format, rhs_bytes, rhs_cacheable, nb01, nb02, n, k, tiles_buf[0..n_tiles_total])) return false;
+    if (!gemmQGroupedNt(req, tiles_buf[0..n_tiles_total])) return false;
     @memcpy(c[0..out_elems], stage.out[0..out_elems]);
     return true;
 }
@@ -2430,17 +2375,9 @@ pub fn attnPrefillF16(
     v: []const f16,
     out: []f32,
     kv_head_for_head: []const i32,
-    q_seq: usize,
-    kv_seq: usize,
-    heads: usize,
-    kv_heads: usize,
-    d: usize,
-    source_offset: usize,
-    scale: f32,
-    window: usize,
-    causal: bool,
+    req: AttentionRequest,
 ) bool {
-    return attnFwdHostImpl(f16, q, k, v, out, null, kv_head_for_head, q_seq, kv_seq, heads, kv_heads, d, source_offset, scale, window, causal);
+    return attnFwdHostImpl(f16, q, k, v, out, null, kv_head_for_head, req.q_seq, req.kv_seq, req.heads, req.kv_heads, req.d, req.source_offset, req.scale, req.window, req.causal);
 }
 
 /// Shared host body for both attention seams: stream Q/K/V (+ per-head kv
@@ -2655,7 +2592,7 @@ test "cuda resident bytes: CPU-readable roundtrip + zero-copy RHS dispatch" {
     const expected = try allocator.alloc(f32, m * n);
     defer allocator.free(expected);
 
-    try std.testing.expect(gemmF32(.trans_b, a, w, c, m, n, k));
+    try std.testing.expect(gemmF32(a, w, c, .{ .orient = .trans_b, .m = m, .n = n, .k = k }));
     cpuReference(.trans_b, a, w, expected, m, n, k);
     for (c, expected) |got, want| {
         const tol = @max(2e-5 * @max(@abs(want), @abs(got)), 2e-5);
@@ -2738,31 +2675,27 @@ test "cuda quant gemm q4_K/q5_K/q6_K/q8_0 parity vs dequantized reference" {
             @memset(c_scalar, std.math.nan(f32));
 
             setQuantMmaForTest(true);
-            try std.testing.expect(gemmQuantNt(
-                fmt,
-                std.mem.sliceAsBytes(blocks),
-                false,
-                bpr * @sizeOf(Block),
-                a,
-                c,
-                m,
-                n,
-                k,
-            ));
+            try std.testing.expect(gemmQuantNt(.{
+                .format = fmt,
+                .rhs = std.mem.sliceAsBytes(blocks),
+                .rhs_cacheable = false,
+                .nb01 = bpr * @sizeOf(Block),
+                .m = m,
+                .n = n,
+                .k = k,
+            }, a, c));
             try expectQuantGemmRows(a, wref, c, m, n, k);
 
             setQuantMmaForTest(false);
-            try std.testing.expect(gemmQuantNt(
-                fmt,
-                std.mem.sliceAsBytes(blocks),
-                false,
-                bpr * @sizeOf(Block),
-                a,
-                c_scalar,
-                m,
-                n,
-                k,
-            ));
+            try std.testing.expect(gemmQuantNt(.{
+                .format = fmt,
+                .rhs = std.mem.sliceAsBytes(blocks),
+                .rhs_cacheable = false,
+                .nb01 = bpr * @sizeOf(Block),
+                .m = m,
+                .n = n,
+                .k = k,
+            }, a, c_scalar));
             try expectQuantGemmRows(a, wref, c_scalar, m, n, k);
             try expectQuantKernelAgreement(c, c_scalar);
         }
@@ -2812,19 +2745,17 @@ test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storag
         var out = try Tensor.zeros(allocator, &.{ batch_count * m, n });
         defer out.deinit();
 
-        try std.testing.expect(gemmQuantNtAsync(
-            fmt,
-            resident,
-            true,
-            bpr * @sizeOf(Block),
-            n * bpr * @sizeOf(Block),
-            &input,
-            &out,
-            batch_count,
-            m,
-            n,
-            k,
-        ));
+        try std.testing.expect(gemmQuantNtAsync(.{
+            .format = fmt,
+            .rhs = resident,
+            .rhs_cacheable = true,
+            .nb01 = bpr * @sizeOf(Block),
+            .nb02 = n * bpr * @sizeOf(Block),
+            .batch = batch_count,
+            .m = m,
+            .n = n,
+            .k = k,
+        }, &input, &out));
         try std.testing.expect(out.buffer.pending() != null);
         input.data()[0] += 100;
         const got = out.dataConst();
@@ -3006,7 +2937,17 @@ test "cuda prefill attention parity vs f64 reference (gqa, offset, window, bidi)
         var map: [8]i32 = undefined;
         for (0..nh) |h| map[h] = @intCast(h * nkh / nh);
 
-        try std.testing.expect(attnPrefillF16(q, k, v, out, map[0..nh], qs, ks, nh, nkh, d, offset, scale, case.window, case.causal));
+        try std.testing.expect(attnPrefillF16(q, k, v, out, map[0..nh], .{
+            .q_seq = qs,
+            .kv_seq = ks,
+            .heads = nh,
+            .kv_heads = nkh,
+            .d = d,
+            .window = case.window,
+            .causal = case.causal,
+            .scale = scale,
+            .source_offset = offset,
+        }));
 
         const scores = try allocator.alloc(f64, ks);
         defer allocator.free(scores);
@@ -3082,7 +3023,17 @@ test "cuda attention forward parity vs f64 reference (f32 kv, uniform gqa, stats
         @memset(out, std.math.nan(f32));
         @memset(stats, std.math.nan(f32));
 
-        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, qs, ks, nh, nkh, d, case.window, case.causal, heads_per_kv, scale));
+        try std.testing.expect(attentionFwdF32(q, k, v, out, stats, .{
+            .q_seq = qs,
+            .kv_seq = ks,
+            .heads = nh,
+            .kv_heads = nkh,
+            .d = d,
+            .window = case.window,
+            .causal = case.causal,
+            .heads_per_kv = heads_per_kv,
+            .scale = scale,
+        }));
 
         const scores = try allocator.alloc(f64, ks);
         defer allocator.free(scores);

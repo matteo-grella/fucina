@@ -1,10 +1,17 @@
 //! The GPU provider interface: ONE statement of the surface every `-Dgpu`
-//! provider implements, plus the wire types they share with their kernel
-//! side. `backend/gpu.zig` asserts the selected provider against it, so a
-//! signature that drifts in one provider is a compile error on that
-//! provider's own leg (`zig build` with `-Dgpu=metal`, `zig build
-//! cuda-check` for the CUDA arm) instead of a link error or a silent
-//! capability hole.
+//! provider implements, plus the wire and request types they share. The
+//! interface itself is DEFINED by the null provider's public declarations
+//! (`gpu_none.zig` — one stub per entry, so the list cannot drift from its
+//! reference implementation); `backend/gpu.zig` asserts the selected
+//! provider against it with `assertConforms`, so a signature that drifts
+//! in one provider is a compile error on that provider's own leg
+//! (`zig build` with `-Dgpu=metal`, `zig build cuda-check` for the CUDA
+//! arm) instead of a link error or a silent capability hole.
+//!
+//! Multi-parameter entries take the request structs below (`GemmRequest`,
+//! `QuantGemmRequest`, `AttentionRequest`). They are host-side
+//! descriptions: the provider unpacks them into its kernel ABI, so none
+//! are `extern`. `QMMTile` alone crosses to the kernel side verbatim.
 //!
 //! The format vocabulary is ONE enum: `QuantFormat` below names every
 //! quantized RHS layout an accelerator may take, and every interface entry
@@ -21,12 +28,6 @@
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const ops = @import("ops.zig");
-const tensor = @import("../tensor.zig");
-const thread = @import("../thread.zig");
-
-const Tensor = tensor.Tensor;
-const TensorF16 = tensor.TensorOf(.f16);
-const TensorBf16 = tensor.TensorOf(.bf16);
 
 /// GEMM operand orientation, as the provider kernels take it.
 pub const Orient = ops.MatmulKind;
@@ -64,6 +65,60 @@ pub const QuantFormat = enum {
     }
 };
 
+/// One dense GEMM description: `c[m,n] = op(a)·op(b)` under `orient`,
+/// optionally strided-batched — a `batch` above 1 is ONE dispatch with
+/// grid depth = batch, strides in elements. The operand slices stay
+/// parameters (their element types name the entry).
+pub const GemmRequest = struct {
+    orient: Orient,
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize = 1,
+    stride_a: usize = 0,
+    stride_b: usize = 0,
+    stride_c: usize = 0,
+};
+
+/// One quantized-RHS NT GEMM description: `input[m,k] · dequant(rhs[n,k])ᵀ`.
+/// `rhs` is the raw block bytes with row stride `nb01` and per-matrix
+/// (expert/batch) stride `nb02`. `rhs_cacheable` is the RHS lifetime
+/// statement: true only for bytes that stay mapped for the process
+/// lifetime (resident weights) — a cached wrap of a freed-and-reused page
+/// reads stale data. `batch` is the shared-input batch count of the
+/// batched forms (1 elsewhere); the grouped entry takes its rows from the
+/// tile table and receives `m` = 0.
+pub const QuantGemmRequest = struct {
+    format: QuantFormat,
+    rhs: []const u8,
+    rhs_cacheable: bool,
+    nb01: usize,
+    nb02: usize = 0,
+    batch: usize = 1,
+    m: usize,
+    n: usize,
+    k: usize,
+};
+
+/// One grouped-attention call description (the Q/K/V/out slices stay
+/// parameters: the f32 and f16-KV entries differ in element type). The
+/// `attentionFwd*` entries use `heads_per_kv` (the uniform GQA map,
+/// kv_head = head / heads_per_kv) and derive the query offset as
+/// `kv_seq - q_seq`; the prefill entry takes an explicit per-head map
+/// parameter plus `source_offset` and ignores `heads_per_kv`.
+pub const AttentionRequest = struct {
+    q_seq: usize,
+    kv_seq: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    window: usize,
+    causal: bool,
+    scale: f32,
+    heads_per_kv: usize = 1,
+    source_offset: usize = 0,
+};
+
 /// One grouped-MoE tile: which expert, which rows of the batch, how many.
 /// `extern` because the tile table crosses to the kernel side verbatim.
 pub const QMMTile = extern struct {
@@ -82,199 +137,56 @@ pub const QMoeStage = struct {
 /// Element type for the ES device kernels (perturb/update/anchor).
 pub const FlatDType = enum(usize) { f16 = 0, f32 = 1 };
 
-/// Capability flags every provider declares. `enabled` says the provider
-/// is the selected one; `has_quant_gemm`/`has_attention_fwd` gate whole
-/// kernel families. Per-format capability is NOT a flag: it is
-/// `abiValue(fmt) != null` (`offload.supportsQuant`).
-const capability_flags = [_][]const u8{
-    "enabled",
-    "has_quant_gemm",
-    "has_attention_fwd",
-};
-
-/// The wire types a provider must re-export from THIS module (identical
-/// type identity, not a structural copy — they cross to the kernel side).
-const shared_types = [_]struct { name: []const u8, T: type }{
-    .{ .name = "Orient", .T = Orient },
-    .{ .name = "QMMTile", .T = QMMTile },
-    .{ .name = "QMoeStage", .T = QMoeStage },
-    .{ .name = "FlatDType", .T = FlatDType },
-};
-
-/// Process-global serialization for the two staging-panel protocols. Both
-/// providers own one grow-only panel pair per protocol and dispatch
-/// blocking, so callers (and the conformance suite) hold these across a
-/// stage/write/dispatch/read sequence.
-const shared_vars = [_]struct { name: []const u8, T: type }{
-    .{ .name = "f16_lock", .T = thread.Mutex },
-    .{ .name = "qmoe_lock", .T = thread.Mutex },
-};
-
-const Signature = struct {
-    name: []const u8,
-    params: []const type,
-    ret: type,
-};
-
-/// Every function on the interface, with its exact parameter and return
-/// types. Format-taking entries speak `QuantFormat`; the kernel-side
-/// integer never crosses this seam.
-const interface_signatures = [_]Signature{
-    // Dispatch tracing (`FUCINA_GPU_TRACE`); the reset/dump pair is a
-    // no-op when tracing is off, so callers invoke unconditionally.
-    .{ .name = "traceEnabled", .params = &.{}, .ret = bool },
-    .{ .name = "traceReset", .params = &.{}, .ret = void },
-    .{ .name = "traceDump", .params = &.{}, .ret = void },
-    .{ .name = "deviceName", .params = &.{}, .ret = ?[]const u8 },
-
-    // Work gates: should this shape go to the GPU at all.
-    .{ .name = "shouldUseGpu", .params = &.{ usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuBatched", .params = &.{ usize, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuF16", .params = &.{ usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuF16ForRhs", .params = &.{ *const TensorF16, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuBf16ForRhs", .params = &.{ *const TensorBf16, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuGemv", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuForRhs", .params = &.{ *const Tensor, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuBatchedForRhs", .params = &.{ *const Tensor, usize, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuAttentionFwd", .params = &.{ usize, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuQMoe", .params = &.{u64}, .ret = bool },
-    .{ .name = "qmoeFillAcceptable", .params = &.{ usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuDenseQuant", .params = &.{ QuantFormat, u64 }, .ret = bool },
-    .{ .name = "shouldUseGpuDenseQuantPacked", .params = &.{ QuantFormat, u64 }, .ret = bool },
-    .{ .name = "shouldUseGpuQuantDecode", .params = &.{ QuantFormat, usize, usize, usize }, .ret = bool },
-    .{ .name = "shouldUseGpuAttn", .params = &.{ usize, usize, usize, usize }, .ret = bool },
-
-    // Seams the shared conformance suite drives (see gpu_conformance.zig):
-    // a device probe that is exactly "the provider has a live context",
-    // and save/restore access to the grouped-MoE occupancy gate.
-    .{ .name = "deviceAvailableForTest", .params = &.{}, .ret = bool },
-    .{ .name = "setMinWorkQMoeForTest", .params = &.{u64}, .ret = void },
-    .{ .name = "qmoeMinFillForTest", .params = &.{}, .ret = u64 },
-    .{ .name = "setQmoeMinFillForTest", .params = &.{u64}, .ret = void },
-
-    // Attention forward.
-    .{
-        .name = "attentionFwdF32",
-        .params = &.{ []const f32, []const f32, []const f32, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
-        .ret = bool,
-    },
-    .{
-        .name = "attentionFwdF16Kv",
-        .params = &.{ []const f32, []const f16, []const f16, []f32, ?[]f32, usize, usize, usize, usize, usize, usize, bool, usize, f32 },
-        .ret = bool,
-    },
-    .{
-        .name = "attnPrefillF16",
-        .params = &.{ []const f32, []const f16, []const f16, []f32, []const i32, usize, usize, usize, usize, usize, usize, f32, usize, bool },
-        .ret = bool,
-    },
-
-    // Dense GEMM: blocking host-slice forms and eager async forms.
-    .{ .name = "gemmF16Nt", .params = &.{ []const f16, []const f16, usize, usize, usize, bool }, .ret = ?[]const f16 },
-    .{ .name = "gemmF32", .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize }, .ret = bool },
-    .{
-        .name = "gemmBatchedF32",
-        .params = &.{ Orient, []const f32, []const f32, []f32, usize, usize, usize, usize, usize, usize, usize },
-        .ret = bool,
-    },
-    .{
-        .name = "gemmBatchedF32Async",
-        .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize, usize, usize, usize, usize },
-        .ret = bool,
-    },
-    .{ .name = "gemmF32Async", .params = &.{ Orient, *const Tensor, *const Tensor, *Tensor, usize, usize, usize }, .ret = bool },
-    .{ .name = "gemmF16NtAsync", .params = &.{ *const TensorF16, *const TensorF16, *Tensor, usize, usize, usize }, .ret = bool },
-    .{ .name = "gemmBf16NtAsync", .params = &.{ *const Tensor, *const TensorBf16, *Tensor, usize, usize, usize }, .ret = bool },
-
-    // Quantized GEMM: dense (blocking + async) and grouped MoE.
-    .{
-        .name = "gemmQuantNtAsync",
-        .params = &.{ QuantFormat, []const u8, bool, usize, usize, *const Tensor, *Tensor, usize, usize, usize, usize },
-        .ret = bool,
-    },
-    .{
-        .name = "gemmQuantNt",
-        .params = &.{ QuantFormat, []const u8, bool, usize, []const f32, []f32, usize, usize, usize },
-        .ret = bool,
-    },
-    .{
-        .name = "gemmQuantNtSharedABatch",
-        .params = &.{ QuantFormat, []const u8, bool, usize, usize, []const f32, []f32, usize, usize, usize, usize },
-        .ret = bool,
-    },
-    .{
-        .name = "gemmQGroupedNt",
-        .params = &.{ QuantFormat, []const u8, bool, usize, usize, usize, usize, []const QMMTile },
-        .ret = bool,
-    },
-    .{ .name = "qmoeStage", .params = &.{ usize, usize }, .ret = ?QMoeStage },
-
-    // Device-owned bytes for loader residency.
-    .{ .name = "allocResidentBytes", .params = &.{usize}, .ret = ?[]u8 },
-    .{ .name = "freeResidentBytes", .params = &.{[]const u8}, .ret = void },
-
-    // Flat-parameter device kernels: seed-regenerated noise algebra over
-    // a flat byte slice (perturb, z-scored weighted update, anchor
-    // decay). Consumer-neutral contract; fucina.es is the consumer today.
-    .{ .name = "flatPerturb", .params = &.{ FlatDType, []u8, u64, f32, usize }, .ret = bool },
-    .{ .name = "flatWeightedUpdate", .params = &.{ FlatDType, []u8, []const u64, []const f32, f32, usize }, .ret = bool },
-    .{ .name = "flatAnchorDecay", .params = &.{ FlatDType, []u8, []const u8, f32, bool, usize }, .ret = bool },
-};
-
-/// Compile-error unless `P` implements the whole interface. Signature-only:
-/// this never takes a function's address, so asserting conformance does not
-/// pull a provider's bodies (or its shim) into a build that elided them.
-pub fn assertConforms(comptime P: type) void {
+/// Compile-error unless `P` implements the whole interface, stated as
+/// `Reference`'s public declarations (the null provider). Exact-type
+/// checks: a type declaration must be the same type (identity, not a
+/// structural copy — the wire and request types cross module boundaries),
+/// a function must match the reference signature parameter-by-parameter,
+/// and any other value (capability flags, the staging-panel locks) must
+/// have the reference declaration's type. Signature-only: this never
+/// takes a function's address, so asserting conformance does not pull a
+/// provider's bodies (or its shim) into a build that elided them.
+pub fn assertConforms(comptime Reference: type, comptime P: type) void {
     comptime {
+        if (P == Reference) return;
         const who = @typeName(P);
-
-        for (capability_flags) |name| {
-            if (!@hasDecl(P, name)) @compileError(who ++ " is missing GPU capability flag `" ++ name ++ "`");
-            if (@TypeOf(@field(P, name)) != bool)
-                @compileError(who ++ "." ++ name ++ " must be `bool`, found " ++ @typeName(@TypeOf(@field(P, name))));
-        }
-
-        for (shared_vars) |entry| {
-            if (!@hasDecl(P, entry.name)) @compileError(who ++ " is missing shared lock `" ++ entry.name ++ "`");
-            if (@TypeOf(@field(P, entry.name)) != entry.T)
-                @compileError(who ++ "." ++ entry.name ++ " must be a `" ++ @typeName(entry.T) ++ "`, found " ++
-                    @typeName(@TypeOf(@field(P, entry.name))));
-        }
-
-        for (shared_types) |entry| {
-            if (!@hasDecl(P, entry.name)) @compileError(who ++ " is missing shared wire type `" ++ entry.name ++ "`");
-            if (@field(P, entry.name) != entry.T)
-                @compileError(who ++ "." ++ entry.name ++ " must re-export backend/gpu_provider.zig's `" ++
-                    entry.name ++ "`, found a distinct type " ++ @typeName(@field(P, entry.name)));
-        }
-
-        if (!@hasDecl(P, "abiValue"))
-            @compileError(who ++ " is missing `abiValue` (the QuantFormat -> kernel-side ABI integer map; null = no kernel)");
-        for (@typeInfo(QuantFormat).@"enum".fields) |f| {
-            const v = P.abiValue(@field(QuantFormat, f.name));
-            if (@TypeOf(v) != ?c_int)
-                @compileError(who ++ ".abiValue must return `?c_int` (the kernel-side ABI integer, or null for no kernel)");
-        }
-
-        for (interface_signatures) |sig| {
-            if (!@hasDecl(P, sig.name)) @compileError(who ++ " is missing GPU provider function `" ++ sig.name ++ "`");
-            const info = @typeInfo(@TypeOf(@field(P, sig.name)));
-            if (info != .@"fn") @compileError(who ++ "." ++ sig.name ++ " must be a function");
-            const f = info.@"fn";
-            if (f.params.len != sig.params.len)
-                @compileError(std.fmt.comptimePrint("{s}.{s} takes {d} parameters, the GPU provider interface declares {d}", .{
-                    who, sig.name, f.params.len, sig.params.len,
-                }));
-            for (f.params, sig.params, 0..) |got, want, i| {
-                if (got.type != want)
-                    @compileError(std.fmt.comptimePrint("{s}.{s} parameter {d} is {s}, the GPU provider interface declares {s}", .{
-                        who, sig.name, i, @typeName(got.type orelse void), @typeName(want),
-                    }));
+        for (@typeInfo(Reference).@"struct".decls) |decl| {
+            const name = decl.name;
+            if (!@hasDecl(P, name)) @compileError(who ++ " is missing GPU provider decl `" ++ name ++ "`");
+            const RefType = @TypeOf(@field(Reference, name));
+            if (RefType == type) {
+                if (@field(P, name) != @field(Reference, name))
+                    @compileError(who ++ "." ++ name ++ " must re-export the interface type `" ++
+                        name ++ "`, found a distinct type " ++ @typeName(@field(P, name)));
+            } else if (@typeInfo(RefType) == .@"fn") {
+                assertSameFn(who, name, RefType, @TypeOf(@field(P, name)));
+            } else if (@TypeOf(@field(P, name)) != RefType) {
+                @compileError(who ++ "." ++ name ++ " must be `" ++ @typeName(RefType) ++ "`, found " ++
+                    @typeName(@TypeOf(@field(P, name))));
             }
-            if (f.return_type != sig.ret)
-                @compileError(std.fmt.comptimePrint("{s}.{s} returns {s}, the GPU provider interface declares {s}", .{
-                    who, sig.name, @typeName(f.return_type orelse void), @typeName(sig.ret),
+        }
+    }
+}
+
+fn assertSameFn(comptime who: []const u8, comptime name: []const u8, comptime Want: type, comptime Got: type) void {
+    comptime {
+        const got_info = @typeInfo(Got);
+        if (got_info != .@"fn") @compileError(who ++ "." ++ name ++ " must be a function");
+        const got = got_info.@"fn";
+        const want = @typeInfo(Want).@"fn";
+        if (got.params.len != want.params.len)
+            @compileError(std.fmt.comptimePrint("{s}.{s} takes {d} parameters, the GPU provider interface declares {d}", .{
+                who, name, got.params.len, want.params.len,
+            }));
+        for (got.params, want.params, 0..) |g, w, i| {
+            if (g.type != w.type)
+                @compileError(std.fmt.comptimePrint("{s}.{s} parameter {d} is {s}, the GPU provider interface declares {s}", .{
+                    who, name, i, @typeName(g.type orelse void), @typeName(w.type orelse void),
                 }));
         }
+        if (got.return_type != want.return_type)
+            @compileError(std.fmt.comptimePrint("{s}.{s} returns {s}, the GPU provider interface declares {s}", .{
+                who, name, @typeName(got.return_type orelse void), @typeName(want.return_type orelse void),
+            }));
     }
 }

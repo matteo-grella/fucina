@@ -6,6 +6,11 @@
 //! value their callers already handle (false, null, no-op); the format
 //! tag set is empty in effect, so format-keyed dispatch never survives
 //! comptime resolution.
+//!
+//! This file is also the interface's reference statement: `assertConforms`
+//! (`gpu_provider.zig`) checks a real provider against the public
+//! declarations HERE, so adding an entry means adding its stub, and a
+//! stray public declaration would become a requirement on every provider.
 const gpu_provider = @import("gpu_provider.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
@@ -16,16 +21,17 @@ const TensorBf16 = tensor.TensorOf(.bf16);
 
 pub const enabled = false;
 pub const has_quant_gemm = false;
-pub const has_q5_k_quant = false;
-pub const has_tq2_0_quant = false;
-pub const has_tq2_0_folded_quant = false;
 pub const has_attention_fwd = false;
 
-// Shared wire types (identical type identity per the provider interface).
+// Shared wire and request types (identical type identity per the provider
+// interface).
 pub const Orient = gpu_provider.Orient;
 pub const QMMTile = gpu_provider.QMMTile;
 pub const QMoeStage = gpu_provider.QMoeStage;
 pub const FlatDType = gpu_provider.FlatDType;
+pub const GemmRequest = gpu_provider.GemmRequest;
+pub const QuantGemmRequest = gpu_provider.QuantGemmRequest;
+pub const AttentionRequest = gpu_provider.AttentionRequest;
 
 // The staging-panel locks exist for interface conformance; nothing stages.
 pub var f16_lock: thread.Mutex = .{};
@@ -106,24 +112,23 @@ pub fn qmoeMinFillForTest() u64 {
 pub fn setQmoeMinFillForTest(_: u64) void {}
 
 // Attention forward: never handled; callers keep their CPU path.
-pub fn attentionFwdF32(_: []const f32, _: []const f32, _: []const f32, _: []f32, _: ?[]f32, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: bool, _: usize, _: f32) bool {
+pub fn attentionFwdF32(_: []const f32, _: []const f32, _: []const f32, _: []f32, _: ?[]f32, _: gpu_provider.AttentionRequest) bool {
     return false;
 }
-pub fn attentionFwdF16Kv(_: []const f32, _: []const f16, _: []const f16, _: []f32, _: ?[]f32, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: bool, _: usize, _: f32) bool {
+pub fn attentionFwdF16Kv(_: []const f32, _: []const f16, _: []const f16, _: []f32, _: ?[]f32, _: gpu_provider.AttentionRequest) bool {
     return false;
 }
-pub fn attnPrefillF16(_: []const f32, _: []const f16, _: []const f16, _: []f32, _: []const i32, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: f32, _: usize, _: bool) bool {
+pub fn attnPrefillF16(_: []const f32, _: []const f16, _: []const f16, _: []f32, _: []const i32, _: gpu_provider.AttentionRequest) bool {
     return false;
 }
 
-// Dense GEMM: never handled.
+// Dense GEMM: never handled. The blocking f32 entry serves plain and
+// strided-batched calls through one request; the async twins keep their
+// tensor-operand contract (they attach completion tokens to storage).
 pub fn gemmF16Nt(_: []const f16, _: []const f16, _: usize, _: usize, _: usize, _: bool) ?[]const f16 {
     return null;
 }
-pub fn gemmF32(_: Orient, _: []const f32, _: []const f32, _: []f32, _: usize, _: usize, _: usize) bool {
-    return false;
-}
-pub fn gemmBatchedF32(_: Orient, _: []const f32, _: []const f32, _: []f32, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize) bool {
+pub fn gemmF32(_: []const f32, _: []const f32, _: []f32, _: gpu_provider.GemmRequest) bool {
     return false;
 }
 pub fn gemmBatchedF32Async(_: Orient, _: *const Tensor, _: *const Tensor, _: *Tensor, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize, _: usize) bool {
@@ -140,16 +145,16 @@ pub fn gemmBf16NtAsync(_: *const Tensor, _: *const TensorBf16, _: *Tensor, _: us
 }
 
 // Quantized GEMM: never handled.
-pub fn gemmQuantNtAsync(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: *const Tensor, _: *Tensor, _: usize, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNtAsync(_: gpu_provider.QuantGemmRequest, _: *const Tensor, _: *Tensor) bool {
     return false;
 }
-pub fn gemmQuantNt(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNt(_: gpu_provider.QuantGemmRequest, _: []const f32, _: []f32) bool {
     return false;
 }
-pub fn gemmQuantNtSharedABatch(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: []const f32, _: []f32, _: usize, _: usize, _: usize, _: usize) bool {
+pub fn gemmQuantNtSharedABatch(_: gpu_provider.QuantGemmRequest, _: []const f32, _: []f32) bool {
     return false;
 }
-pub fn gemmQGroupedNt(_: gpu_provider.QuantFormat, _: []const u8, _: bool, _: usize, _: usize, _: usize, _: usize, _: []const QMMTile) bool {
+pub fn gemmQGroupedNt(_: gpu_provider.QuantGemmRequest, _: []const QMMTile) bool {
     return false;
 }
 pub fn qmoeStage(_: usize, _: usize) ?QMoeStage {

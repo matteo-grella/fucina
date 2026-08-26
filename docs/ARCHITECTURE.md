@@ -330,7 +330,9 @@ backend.zig
      tensor.zig, thread.zig
 
 backend/gpu.zig (comptime -Dgpu selector, a leaf so native.zig can reach it)
-  -> backend/{gpu_provider,metal,cuda}.zig
+  -> backend/{gpu_provider,gpu_none,metal,cuda}.zig
+     (the providers share backend/{gpu_policy,gpu_trace}.zig: gate
+     arithmetic over the tuning table, and the trace counter shell)
 
 tags.zig -> tensor.zig
 tensor.zig -> storage.zig, dtype.zig

@@ -105,7 +105,16 @@ pub fn quantGemmAccepts(comptime fmt: QuantFormat, m: usize, n: usize, k: usize,
 pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bool, nb01: usize, input: *const Tensor, out: *Tensor, m: usize, n: usize, k: usize) bool {
     if (comptime !enabled) return false;
     if (comptime !supportsQuant(fmt)) return false;
-    if (cacheable and gpu.gemmQuantNtAsync(fmt, rhs_bytes, true, nb01, 0, input, out, 1, m, n, k)) return true;
+    var req: gpu_provider.QuantGemmRequest = .{
+        .format = fmt,
+        .rhs = rhs_bytes,
+        .rhs_cacheable = cacheable,
+        .nb01 = nb01,
+        .m = m,
+        .n = n,
+        .k = k,
+    };
+    if (cacheable and gpu.gemmQuantNtAsync(req, input, out)) return true;
 
     const in_data = input.dataConst();
     const in_elems = std.math.mul(usize, m, k) catch return false;
@@ -116,7 +125,8 @@ pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bo
     var row0: usize = 0;
     while (row0 < m) : (row0 += rows_per) {
         const rows = @min(rows_per, m - row0);
-        if (!gpu.gemmQuantNt(fmt, rhs_bytes, cacheable, nb01, in_data[row0 * k .. (row0 + rows) * k], out.data()[row0 * n .. (row0 + rows) * n], rows, n, k)) return false;
+        req.m = rows;
+        if (!gpu.gemmQuantNt(req, in_data[row0 * k .. (row0 + rows) * k], out.data()[row0 * n .. (row0 + rows) * n])) return false;
     }
     return true;
 }
@@ -137,11 +147,22 @@ pub fn quantGemmSharedInputAccepts(comptime fmt: QuantFormat, batch_count: usize
 pub fn gemmQuantSharedInput(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bool, nb01: usize, nb02: usize, input: *const Tensor, out: *Tensor, batch_count: usize, m: usize, n: usize, k: usize) bool {
     if (comptime !enabled) return false;
     if (comptime !supportsQuant(fmt)) return false;
-    if (cacheable and gpu.gemmQuantNtAsync(fmt, rhs_bytes, true, nb01, nb02, input, out, batch_count, m, n, k)) return true;
+    const req: gpu_provider.QuantGemmRequest = .{
+        .format = fmt,
+        .rhs = rhs_bytes,
+        .rhs_cacheable = cacheable,
+        .nb01 = nb01,
+        .nb02 = nb02,
+        .batch = batch_count,
+        .m = m,
+        .n = n,
+        .k = k,
+    };
+    if (cacheable and gpu.gemmQuantNtAsync(req, input, out)) return true;
     const in_data = input.dataConst();
     const in_elems = std.math.mul(usize, m, k) catch return false;
     if (m > 2048 or in_data.len != in_elems) return false;
-    return gpu.gemmQuantNtSharedABatch(fmt, rhs_bytes, cacheable, nb01, nb02, in_data, out.data(), batch_count, m, n, k);
+    return gpu.gemmQuantNtSharedABatch(req, in_data, out.data());
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +201,17 @@ pub fn attnPrefillF16(
     for (0..heads) |h| {
         map_buf[h] = if (head_group == 2) @intCast(h / 2) else @intCast(kv_head_for_head[h]);
     }
-    return gpu.attnPrefillF16(q, k, v, out, map_buf[0..heads], q_seq, kv_seq, heads, kv_heads, d, source_offset, scale, window, causal);
+    return gpu.attnPrefillF16(q, k, v, out, map_buf[0..heads], .{
+        .q_seq = q_seq,
+        .kv_seq = kv_seq,
+        .heads = heads,
+        .kv_heads = kv_heads,
+        .d = d,
+        .window = window,
+        .causal = causal,
+        .scale = scale,
+        .source_offset = source_offset,
+    });
 }
 
 /// The attention forward with row statistics (the training path). Only the
@@ -212,11 +243,21 @@ pub fn attentionFwd(
         if (kv_head_i != head_i / heads_per_kv) return false;
     }
     if (!gpu.shouldUseGpuAttentionFwd(q_seq, kv_seq, heads, d)) return false;
-    const win = @min(window, kv_seq);
+    const req: gpu_provider.AttentionRequest = .{
+        .q_seq = q_seq,
+        .kv_seq = kv_seq,
+        .heads = heads,
+        .kv_heads = kv_heads,
+        .d = d,
+        .window = @min(window, kv_seq),
+        .causal = causal,
+        .scale = scale,
+        .heads_per_kv = heads_per_kv,
+    };
     return if (comptime KvElem == f32)
-        gpu.attentionFwdF32(q, k, v, out, stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale)
+        gpu.attentionFwdF32(q, k, v, out, stats, req)
     else
-        gpu.attentionFwdF16Kv(q, k, v, out, stats, q_seq, kv_seq, heads, kv_heads, d, win, causal, heads_per_kv, scale);
+        gpu.attentionFwdF16Kv(q, k, v, out, stats, req);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +298,16 @@ pub const QMoeSession = struct {
         _ = self;
         if (comptime !enabled) return false;
         if (!supportsQuantAt(fmt)) return false;
-        return gpu.gemmQGroupedNt(fmt, rhs_bytes, cacheable, nb01, nb02, n, k, tiles);
+        return gpu.gemmQGroupedNt(.{
+            .format = fmt,
+            .rhs = rhs_bytes,
+            .rhs_cacheable = cacheable,
+            .nb01 = nb01,
+            .nb02 = nb02,
+            .m = 0, // rows live in the tile table
+            .n = n,
+            .k = k,
+        }, tiles);
     }
 
     pub fn end(self: *QMoeSession) void {

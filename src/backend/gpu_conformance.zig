@@ -65,7 +65,7 @@ test "gpu conformance: gemm f32 parity vs reference (all orientations, edge tile
             for (a) |*x| x.* = random.floatNorm(f32);
             for (b) |*x| x.* = random.floatNorm(f32);
             @memset(c, std.math.nan(f32));
-            try std.testing.expect(impl.gemmF32(orient, a, b, c, m, n, k));
+            try std.testing.expect(impl.gemmF32(a, b, c, .{ .orient = orient, .m = m, .n = n, .k = k }));
             cpuReference(orient, a, b, expected, m, n, k);
             // Strict FP32 on both providers (cuBLAS default math mode, MLX
             // steel f32): one tolerance covers them.
@@ -100,7 +100,16 @@ test "gpu conformance: gemm f32 batched matches per-matrix reference" {
     for (b) |*x| x.* = random.floatNorm(f32);
     @memset(c, 0);
 
-    try std.testing.expect(impl.gemmBatchedF32(.plain, a, b, c, m, n, k, batch, m * k, k * n, m * n));
+    try std.testing.expect(impl.gemmF32(a, b, c, .{
+        .orient = .plain,
+        .m = m,
+        .n = n,
+        .k = k,
+        .batch = batch,
+        .stride_a = m * k,
+        .stride_b = k * n,
+        .stride_c = m * n,
+    }));
     for (0..batch) |bi| {
         cpuReference(.plain, a[bi * m * k ..][0 .. m * k], b[bi * k * n ..][0 .. k * n], expected[bi * m * n ..][0 .. m * n], m, n, k);
     }
@@ -208,16 +217,16 @@ test "gpu conformance: quant gemm grouped expert tiles parity" {
             const stage = impl.qmoeStage(total_rows * k * @sizeOf(f32), total_rows * n * @sizeOf(f32)) orelse
                 return error.TestUnexpectedResult;
             @memcpy(stage.in[0 .. total_rows * k], a);
-            try std.testing.expect(impl.gemmQGroupedNt(
-                fmt,
-                std.mem.sliceAsBytes(blocks),
-                false, // transient test buffer: must not enter the wrap cache
-                bpr * @sizeOf(Block),
-                n * bpr * @sizeOf(Block),
-                n,
-                k,
-                tiles_buf[0..n_tiles],
-            ));
+            try std.testing.expect(impl.gemmQGroupedNt(.{
+                .format = fmt,
+                .rhs = std.mem.sliceAsBytes(blocks),
+                .rhs_cacheable = false, // transient test buffer: must not enter the wrap cache
+                .nb01 = bpr * @sizeOf(Block),
+                .nb02 = n * bpr * @sizeOf(Block),
+                .m = 0, // rows live in the tile table
+                .n = n,
+                .k = k,
+            }, tiles_buf[0..n_tiles]));
             for (ms, 0..) |m_e, e| {
                 try expectQuantGemmRows(
                     a[bases[e] * k ..][0 .. m_e * k],
