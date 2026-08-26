@@ -31,31 +31,31 @@ chain is:
 
 ```
 tensor.deinit()  →  buffer.release()  →  refcount hits 0  →  reclaim()  →  buffer returns to the free-list
-   ag/tensor.zig:102   tensor.zig:250      storage.zig:123     exec/buffer_pool.zig:171
+   ag/tensor.zig:102   tensor.zig:250      storage.zig:123     exec/buffer_pool.zig:176
 ```
 
 `ExecContext` owns one `BufferPool` (the `buffers` field in `src/exec.zig`;
-type at `src/exec/buffer_pool.zig:47`). It is:
+type at `src/exec/buffer_pool.zig:52`). It is:
 
-- **A size-bucketed free-list.** `acquire(len)` (`src/exec/buffer_pool.zig:82`) does
+- **A size-bucketed free-list.** `acquire(len)` (`src/exec/buffer_pool.zig:87`) does
   first-fit over a list kept **sorted ascending by `data.len`**, returning the
   first buffer with `data.len >= allocationLen(len)`; on a miss it creates a new
   `Buffer` with `reclaim` as the release callback. `reclaim` inserts *before*
   existing same-length entries, so within a size class reuse is LIFO — the
   most recently released buffer is handed back first.
-- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:273`): `len <= 1024` →
+- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:278`): `len <= 1024` →
   `ceilPowerOfTwo`; else `alignForward(len, 1024)`. This collapses nearby
   logical sizes into shared buckets, which *helps* reuse.
 - **Bounded.** `max_cached_bytes` caps the CACHED (free-list) bytes at 1 GiB
-  (`src/exec/buffer_pool.zig:59` — raised from the original 64 MB so big prefill
+  (`src/exec/buffer_pool.zig:64` — raised from the original 64 MB so big prefill
   transients stay cached; per the code comment at `:54-58`, retention is bounded
   by the actual peak transient set, not by this cap). In `reclaim`
-  (`src/exec/buffer_pool.zig:171`) a returned buffer is destroyed instead of
+  (`src/exec/buffer_pool.zig:176`) a returned buffer is destroyed instead of
   cached if it alone exceeds the cap, or if adding it would; otherwise it is
   inserted (sorted) and `cached_bytes` is bumped.
 - **Mutex-guarded**, with an atomic `outstanding` counter incremented on every
   `acquire` and decremented in `reclaim`; `BufferPool.deinit` asserts
-  `outstanding == 0` (`src/exec/buffer_pool.zig:70`), i.e. no live pooled buffer
+  `outstanding == 0` (`src/exec/buffer_pool.zig:75`), i.e. no live pooled buffer
   may leak past context teardown.
 
 The recycle invariant is asserted by a dedicated unit test: after `first.deinit()`,
@@ -145,7 +145,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
-   (`src/exec/buffer_pool.zig:54-59`).
+   (`src/exec/buffer_pool.zig:59-64`).
 2. **It destroys cache locality.** Bump allocation returns a fresh address per
    op; the pool returns the *same* address for same-sized successive
    allocations, keeping the hot working buffer warm in L1/L2. Address reuse is
@@ -245,7 +245,7 @@ inference frame helper is unchanged.
   context alive holds up to `max_cached_bytes` of cache. `ExecContext.deinit`
   frees everything.
 - **`acquire`/`acquireSlab` release the mutex before allocating** a fresh
-  buffer/slab on the miss path (`src/exec/buffer_pool.zig:82-108/:205-225`). Correct
+  buffer/slab on the miss path (`src/exec/buffer_pool.zig:87-113/:210-230`). Correct
   today (the new buffer is not yet shared, `outstanding` is atomic), but any
   future change touching shared pool state in that window must re-take the lock.
 - **Typed pooled buffers must never be marked stable-lifetime GPU RHS.** The

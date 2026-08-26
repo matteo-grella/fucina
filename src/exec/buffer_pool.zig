@@ -5,6 +5,11 @@
 //! the f32 arm (a free list of `*storage.Buffer`, the dominant transient
 //! path) and a byte-granular slab arm serving every other storage dtype
 //! (`acquireTyped`) plus non-DType packed block scratch (`acquireScratch`).
+//! The arms stay separate on measurement: the byte arm pays one header
+//! create/destroy per acquire, and routing f32 through it doubles the
+//! empty/deinit cycle (27 -> 50 ns/op and 0 -> 1 alloc/op at 1M
+//! iterations, ReleaseFast, prod allocator, M1 Max); collapsing them
+//! without that cost would need header recycling below `storage`.
 //! This is a LEAF module: it never references `ExecContext`, so anything
 //! may depend on it without forming an import cycle (arch-check SCC
 //! invariant).
