@@ -4,7 +4,8 @@
 //! type-erased `Param` handle with its f32 master discipline, gradient
 //! access and global-norm clipping, and the cross-instance grad-state
 //! set. Every optimizer file imports this; nothing here knows a specific
-//! optimizer. Public surface is re-exported by `optim.zig`.
+//! optimizer (the optimizer body itself is `optimizer.Optimizer`). Public
+//! surface is re-exported by `optim.zig`.
 
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");

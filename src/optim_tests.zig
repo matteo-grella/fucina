@@ -303,7 +303,7 @@ test "optim Apollo converges on a quadratic (channel and mini variants)" {
         try opt.addParam(&w); // rank 2 -> APOLLO path
         try opt.addParam(&b); // rank 1 -> HF-AdamW fallback
         try std.testing.expectEqual(@as(usize, 1), opt.slots.items.len);
-        try std.testing.expectEqual(@as(usize, 1), opt.fallback_slots.items.len);
+        try std.testing.expectEqual(@as(usize, 1), opt.fallback.slots.items.len);
 
         for (0..600) |_| {
             var wd = try w.sub(&ctx, &w_target);
@@ -934,8 +934,8 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         defer opt.deinit();
         try opt.addParam(&w);
         // Inject the fixed projection used by the golden run (tall: P is (rank, cols)).
-        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 0.4, -0.7, 0.2, -0.3, 0.6, 0.9 });
-        opt.slots.items[0].proj_chunk = 0;
+        opt.slots.items[0].state.proj = try ctx.fromSlice(.f32, .{ 2, 3 }, &.{ 0.4, -0.7, 0.2, -0.3, 0.6, 0.9 });
+        opt.slots.items[0].state.proj_chunk = 0;
 
         const grads = [_][12]f32{
             .{ 0.5, -1.0, 2.0, 0.25, -0.75, 1.25, -0.6, 0.45, -0.15, 0.9, -1.1, 0.7 },
@@ -966,8 +966,8 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         defer opt.deinit();
         try opt.addParam(&w);
         // Wide: P is (rows, rank).
-        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 0.3, -0.5, 0.8, 0.1, -0.6, 0.4 });
-        opt.slots.items[0].proj_chunk = 0;
+        opt.slots.items[0].state.proj = try ctx.fromSlice(.f32, .{ 3, 2 }, &.{ 0.3, -0.5, 0.8, 0.1, -0.6, 0.4 });
+        opt.slots.items[0].state.proj_chunk = 0;
 
         const grads = [_][15]f32{
             .{ 0.2, -0.9, 1.3, 0.45, -0.7, -0.55, 0.85, -0.2, 0.65, -1.15, 0.95, -0.35, 0.5, -0.6, 0.1 },
@@ -995,8 +995,8 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         var opt = optim.Apollo.init(allocator, config);
         defer opt.deinit();
         try opt.addParam(&w);
-        opt.slots.items[0].proj = try ctx.fromSlice(.f32, .{ 1, 3 }, &.{ 0.7, -0.2, 0.5 });
-        opt.slots.items[0].proj_chunk = 0;
+        opt.slots.items[0].state.proj = try ctx.fromSlice(.f32, .{ 1, 3 }, &.{ 0.7, -0.2, 0.5 });
+        opt.slots.items[0].state.proj_chunk = 0;
 
         const grads = [_][12]f32{
             .{ 0.5, -1.0, 2.0, 0.25, -0.75, 1.25, -0.6, 0.45, -0.15, 0.9, -1.1, 0.7 },
@@ -1331,12 +1331,12 @@ test "optim AdamW.loadState is transactional: a truncated record leaves prior sl
     try opt.addParamNamed(&a, "a");
     try opt.addParamNamed(&b, "b");
     // Give both slots non-trivial state directly (slots are in registration order).
-    opt.slots.items[0].step = 7;
-    @memcpy(opt.slots.items[0].m.f32, &[_]f32{ 0.1, 0.2 });
-    @memcpy(opt.slots.items[0].v.f32, &[_]f32{ 0.3, 0.4 });
-    opt.slots.items[1].step = 9;
-    @memcpy(opt.slots.items[1].m.f32, &[_]f32{ 0.5, 0.6 });
-    @memcpy(opt.slots.items[1].v.f32, &[_]f32{ 0.7, 0.8 });
+    opt.slots.items[0].state.step = 7;
+    @memcpy(opt.slots.items[0].state.m.f32, &[_]f32{ 0.1, 0.2 });
+    @memcpy(opt.slots.items[0].state.v.f32, &[_]f32{ 0.3, 0.4 });
+    opt.slots.items[1].state.step = 9;
+    @memcpy(opt.slots.items[1].state.m.f32, &[_]f32{ 0.5, 0.6 });
+    @memcpy(opt.slots.items[1].state.v.f32, &[_]f32{ 0.7, 0.8 });
 
     var buf: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
@@ -1349,18 +1349,18 @@ test "optim AdamW.loadState is transactional: a truncated record leaves prior sl
     defer opt2.deinit();
     try opt2.addParamNamed(&a, "a");
     try opt2.addParamNamed(&b, "b");
-    opt2.slots.items[0].step = 123;
-    @memcpy(opt2.slots.items[0].m.f32, &[_]f32{ 8, 8 });
-    @memcpy(opt2.slots.items[0].v.f32, &[_]f32{ 8, 8 });
+    opt2.slots.items[0].state.step = 123;
+    @memcpy(opt2.slots.items[0].state.m.f32, &[_]f32{ 8, 8 });
+    @memcpy(opt2.slots.items[0].state.v.f32, &[_]f32{ 8, 8 });
 
     var reader = std.Io.Reader.fixed(truncated);
     if (opt2.loadState(&reader)) |_| {
         return error.TestExpectedTruncationError;
     } else |_| {}
     // Transactional: slot "a" (read OK before "b" truncated) is byte-unchanged.
-    try std.testing.expectEqual(@as(u64, 123), opt2.slots.items[0].step);
-    try std.testing.expectEqualSlices(f32, &[_]f32{ 8, 8 }, opt2.slots.items[0].m.f32);
-    try std.testing.expectEqualSlices(f32, &[_]f32{ 8, 8 }, opt2.slots.items[0].v.f32);
+    try std.testing.expectEqual(@as(u64, 123), opt2.slots.items[0].state.step);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 8, 8 }, opt2.slots.items[0].state.m.f32);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 8, 8 }, opt2.slots.items[0].state.v.f32);
 }
 
 test "optim OptimizerSet rejects the same variable registered into two member optimizers" {
@@ -1479,11 +1479,11 @@ test "optim bf16 state: AdamW kernel matches the widen-narrow reference exactly"
             }
         }
         try std.testing.expectEqualSlices(f32, &p_ref, try w.dataConst());
-        try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].m.bf16);
+        try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].state.m.bf16);
         if (v_bf16) {
-            try std.testing.expectEqualSlices(u16, &v_bits, opt.slots.items[0].v.bf16);
+            try std.testing.expectEqualSlices(u16, &v_bits, opt.slots.items[0].state.v.bf16);
         } else {
-            try std.testing.expectEqualSlices(f32, &v_f32, opt.slots.items[0].v.f32);
+            try std.testing.expectEqualSlices(f32, &v_f32, opt.slots.items[0].state.v.f32);
         }
     }
 }
@@ -1543,8 +1543,8 @@ test "optim bf16 state: Adam kernel matches the widen-narrow reference exactly" 
         }
     }
     try std.testing.expectEqualSlices(f32, &p_ref, try w.dataConst());
-    try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].m.bf16);
-    try std.testing.expectEqualSlices(u16, &v_bits, opt.slots.items[0].v.bf16);
+    try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].state.m.bf16);
+    try std.testing.expectEqualSlices(u16, &v_bits, opt.slots.items[0].state.v.bf16);
 }
 
 test "optim bf16 state: SGD momentum kernel matches the widen-narrow reference exactly" {
@@ -1598,7 +1598,7 @@ test "optim bf16 state: SGD momentum kernel matches the widen-narrow reference e
         }
     }
     try std.testing.expectEqualSlices(f32, &p_ref, try w.dataConst());
-    try std.testing.expectEqualSlices(u16, &buf_bits, opt.slots.items[0].buf.bf16);
+    try std.testing.expectEqualSlices(u16, &buf_bits, opt.slots.items[0].state.buf.bf16);
 }
 
 test "optim bf16 state: Muon momentum kernel matches the widen-narrow reference exactly" {
@@ -1656,7 +1656,7 @@ test "optim bf16 state: Muon momentum kernel matches the widen-narrow reference 
         }
     }
     try std.testing.expectEqualSlices(f32, &p_ref, try w.dataConst());
-    try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].momentum.bf16);
+    try std.testing.expectEqualSlices(u16, &m_bits, opt.slots.items[0].state.momentum.bf16);
 }
 
 test "optim bf16 state: AdamW converges on a quadratic" {
@@ -2055,12 +2055,12 @@ test "optim v4 loadState is transactional: a truncated record leaves prior slot 
     defer opt.deinit();
     try opt.addParamNamed(&a, "a");
     try opt.addParamNamed(&b, "b");
-    opt.slots.items[0].step = 7;
-    @memcpy(opt.slots.items[0].m.bf16, &[_]u16{ f32ToBf16(0.1), f32ToBf16(0.2) });
-    @memcpy(opt.slots.items[0].v.bf16, &[_]u16{ f32ToBf16(0.3), f32ToBf16(0.4) });
-    opt.slots.items[1].step = 9;
-    @memcpy(opt.slots.items[1].m.bf16, &[_]u16{ f32ToBf16(0.5), f32ToBf16(0.6) });
-    @memcpy(opt.slots.items[1].v.bf16, &[_]u16{ f32ToBf16(0.7), f32ToBf16(0.8) });
+    opt.slots.items[0].state.step = 7;
+    @memcpy(opt.slots.items[0].state.m.bf16, &[_]u16{ f32ToBf16(0.1), f32ToBf16(0.2) });
+    @memcpy(opt.slots.items[0].state.v.bf16, &[_]u16{ f32ToBf16(0.3), f32ToBf16(0.4) });
+    opt.slots.items[1].state.step = 9;
+    @memcpy(opt.slots.items[1].state.m.bf16, &[_]u16{ f32ToBf16(0.5), f32ToBf16(0.6) });
+    @memcpy(opt.slots.items[1].state.v.bf16, &[_]u16{ f32ToBf16(0.7), f32ToBf16(0.8) });
 
     var buf: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
@@ -2072,19 +2072,19 @@ test "optim v4 loadState is transactional: a truncated record leaves prior slot 
     defer opt2.deinit();
     try opt2.addParamNamed(&a, "a");
     try opt2.addParamNamed(&b, "b");
-    opt2.slots.items[0].step = 123;
+    opt2.slots.items[0].state.step = 123;
     const sentinel = f32ToBf16(8);
-    @memcpy(opt2.slots.items[0].m.bf16, &[_]u16{ sentinel, sentinel });
-    @memcpy(opt2.slots.items[0].v.bf16, &[_]u16{ sentinel, sentinel });
+    @memcpy(opt2.slots.items[0].state.m.bf16, &[_]u16{ sentinel, sentinel });
+    @memcpy(opt2.slots.items[0].state.v.bf16, &[_]u16{ sentinel, sentinel });
 
     var reader = std.Io.Reader.fixed(truncated);
     if (opt2.loadState(&reader)) |_| {
         return error.TestExpectedTruncationError;
     } else |_| {}
     // Transactional: slot "a" (read OK before "b" truncated) is byte-unchanged.
-    try std.testing.expectEqual(@as(u64, 123), opt2.slots.items[0].step);
-    try std.testing.expectEqualSlices(u16, &[_]u16{ sentinel, sentinel }, opt2.slots.items[0].m.bf16);
-    try std.testing.expectEqualSlices(u16, &[_]u16{ sentinel, sentinel }, opt2.slots.items[0].v.bf16);
+    try std.testing.expectEqual(@as(u64, 123), opt2.slots.items[0].state.step);
+    try std.testing.expectEqualSlices(u16, &[_]u16{ sentinel, sentinel }, opt2.slots.items[0].state.m.bf16);
+    try std.testing.expectEqualSlices(u16, &[_]u16{ sentinel, sentinel }, opt2.slots.items[0].state.v.bf16);
 }
 
 test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-tagged v4" {
@@ -2104,9 +2104,9 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
         var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&a, "a");
-        opt.slots.items[0].step = 3;
-        @memcpy(opt.slots.items[0].m.f32, &[_]f32{ 0.25, -0.5 });
-        @memcpy(opt.slots.items[0].v.f32, &[_]f32{ 0.125, 2.0 });
+        opt.slots.items[0].state.step = 3;
+        @memcpy(opt.slots.items[0].state.m.f32, &[_]f32{ 0.25, -0.5 });
+        @memcpy(opt.slots.items[0].state.v.f32, &[_]f32{ 0.125, 2.0 });
 
         var buf: [256]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buf);
@@ -2131,9 +2131,9 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
         var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&a, "a");
-        opt.slots.items[0].step = 3;
-        @memcpy(opt.slots.items[0].m.bf16, &[_]u16{ f32ToBf16(0.25), f32ToBf16(-0.5) });
-        @memcpy(opt.slots.items[0].v.f32, &[_]f32{ 0.125, 2.0 });
+        opt.slots.items[0].state.step = 3;
+        @memcpy(opt.slots.items[0].state.m.bf16, &[_]u16{ f32ToBf16(0.25), f32ToBf16(-0.5) });
+        @memcpy(opt.slots.items[0].state.v.f32, &[_]f32{ 0.125, 2.0 });
 
         var buf: [256]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buf);
@@ -2160,9 +2160,9 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
         try opt2.addParamNamed(&a, "a");
         var reader = std.Io.Reader.fixed(writer.buffered());
         try opt2.loadState(&reader);
-        try std.testing.expectEqual(@as(u64, 3), opt2.slots.items[0].step);
-        try std.testing.expectEqualSlices(u16, opt.slots.items[0].m.bf16, opt2.slots.items[0].m.bf16);
-        try std.testing.expectEqualSlices(f32, opt.slots.items[0].v.f32, opt2.slots.items[0].v.f32);
+        try std.testing.expectEqual(@as(u64, 3), opt2.slots.items[0].state.step);
+        try std.testing.expectEqualSlices(u16, opt.slots.items[0].state.m.bf16, opt2.slots.items[0].state.m.bf16);
+        try std.testing.expectEqualSlices(f32, opt.slots.items[0].state.v.f32, opt2.slots.items[0].state.v.f32);
     }
 }
 

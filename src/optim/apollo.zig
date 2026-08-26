@@ -3,11 +3,14 @@
 //! space, channel/tensor scaling, the Fira norm-growth limiter, a scaled
 //! SGD update, and the reference's legacy-HF AdamW fallback path (eps
 //! outside the bias correction, decay after the step). Frame magics
-//! FZP3/FZP5; projections are regenerated from (seed, step), never stored.
+//! FZP3/FZP5 (state is always f32, never dtype-tagged; the fallback's slot
+//! list rides inline in the same frame); projections are regenerated from
+//! (seed, step), never stored.
 
 const std = @import("std");
 const common = @import("common.zig");
 const frame = @import("frame.zig");
+const optimizer = @import("optimizer.zig");
 // The (seed -> values) mapping of rng.gaussianFill is part of the APOLLO
 // checkpoint contract (projections are regenerated from seed, not stored).
 const rng = @import("../rng.zig");
@@ -16,31 +19,12 @@ const gaussianFill = rng.gaussianFill;
 const Allocator = std.mem.Allocator;
 const RawTensor = common.RawTensor;
 const ExecContext = common.ExecContext;
-const GradState = common.GradState;
-const OptimError = common.OptimError;
 const Param = common.Param;
 const parallelMap = common.parallelMap;
 const sumSquares = common.sumSquares;
-const takeGrad = common.takeGrad;
-const paramGradSqNorm = common.paramGradSqNorm;
-const scaleParamGrad = common.scaleParamGrad;
-const clipByGlobalNorm = common.clipByGlobalNorm;
-const GradStateSet = common.GradStateSet;
-const gradStatesCollide = common.gradStatesCollide;
-const insertGradStates = common.insertGradStates;
-const StagedSlot = frame.StagedSlot;
-const freeStaged = frame.freeStaged;
-const SlotMatcher = frame.SlotMatcher;
-const FrameVersion = frame.FrameVersion;
-const slotsCarryMasters = frame.slotsCarryMasters;
-const validateSlotNames = frame.validateSlotNames;
-const writeSlotName = frame.writeSlotName;
-const writeSlotDims = frame.writeSlotDims;
-const expectSlotDims = frame.expectSlotDims;
-const writeF32Slice = frame.writeF32Slice;
-const writeSlotMaster = frame.writeSlotMaster;
-const readSlotMaster = frame.readSlotMaster;
-const commitSlotMaster = frame.commitSlotMaster;
+const Optimizer = optimizer.Optimizer;
+const FallbackFrame = optimizer.FallbackFrame;
+const Magics = frame.Magics;
 
 // ---------------------------------------------------------------------------
 // APOLLO — official apollo_torch semantics (arXiv 2412.05270).
@@ -75,16 +59,28 @@ pub const ApolloConfig = struct {
     }
 };
 
-pub const Apollo = struct {
-    allocator: Allocator,
-    config: ApolloConfig,
-    slots: std.ArrayList(Slot) = .empty,
-    /// Non-2D params (biases, norms) and explicitly routed params use the
-    /// reference's plain-AdamW path (legacy HF order, NOT `optim.AdamW`).
-    fallback_slots: std.ArrayList(FallbackSlot) = .empty,
+const ApolloKernel = struct {
+    pub const Config = ApolloConfig;
+    pub const magics: Magics = .{ .v3 = "FZP3", .v5 = "FZP5" };
+    pub const pinned_config_fields = [_][]const u8{ "rank", "update_proj_gap", "scale", "scale_type", "correct_bias", "scale_front", "disable_norm_growth_limiter" };
+    pub const record = [_][]const u8{ "step", "seed", "prev_norm", "m", "v" };
 
-    const Slot = struct {
-        param: Param,
+    /// 2D params get the APOLLO low-rank path; everything else (biases,
+    /// norms) and explicitly routed params get the reference's plain-AdamW
+    /// path (legacy HF order, NOT `optim.AdamW`), whose slot list shares
+    /// this frame.
+    pub const Fallback = Optimizer(HfAdamwKernel);
+    pub const fallback_frame: FallbackFrame = .inline_slots;
+
+    pub fn fallbackConfig(config: ApolloConfig) ApolloConfig {
+        return config;
+    }
+
+    pub fn routesToFallback(param: *const Param) bool {
+        return param.raw_rank != 2;
+    }
+
+    pub const State = struct {
         m: []f32,
         v: []f32,
         /// Per-channel (or single-element, for tensor scaling) factor scratch.
@@ -98,132 +94,39 @@ pub const Apollo = struct {
         step: u64 = 0,
         /// Norm-growth-limiter memory; negative means "not recorded yet".
         prev_norm: f32 = -1,
+
+        pub fn deinit(self: *State, allocator: Allocator) void {
+            allocator.free(self.m);
+            allocator.free(self.v);
+            allocator.free(self.scaling);
+            allocator.free(self.norms);
+            if (self.proj) |*proj| proj.deinit();
+            self.* = undefined;
+        }
     };
 
-    const FallbackSlot = struct {
-        param: Param,
-        m: []f32,
-        v: []f32,
-        step: u64 = 0,
-    };
-
-    pub fn init(allocator: Allocator, config: ApolloConfig) Apollo {
-        return .{ .allocator = allocator, .config = config };
-    }
-
-    pub fn deinit(self: *Apollo) void {
-        for (self.slots.items) |*slot| {
-            self.allocator.free(slot.m);
-            self.allocator.free(slot.v);
-            self.allocator.free(slot.scaling);
-            self.allocator.free(slot.norms);
-            if (slot.proj) |*proj| proj.deinit();
-            slot.param.deinit(self.allocator);
-        }
-        self.slots.deinit(self.allocator);
-        for (self.fallback_slots.items) |*slot| {
-            self.allocator.free(slot.m);
-            self.allocator.free(slot.v);
-            slot.param.deinit(self.allocator);
-        }
-        self.fallback_slots.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn collectGradStates(self: *const Apollo, set: *GradStateSet, allocator: Allocator) !void {
-        if (gradStatesCollide(set, self.slots.items) or
-            gradStatesCollide(set, self.fallback_slots.items)) return OptimError.DuplicateParam;
-        try insertGradStates(set, allocator, self.slots.items);
-        try insertGradStates(set, allocator, self.fallback_slots.items);
-    }
-
-    fn containsGradState(self: *const Apollo, state: *const GradState) bool {
-        for (self.slots.items) |*slot| {
-            if (slot.param.grad_state == state) return true;
-        }
-        for (self.fallback_slots.items) |*slot| {
-            if (slot.param.grad_state == state) return true;
-        }
-        return false;
-    }
-
-    /// 2D params get the APOLLO low-rank path; everything else gets the plain
-    /// AdamW fallback (the reference restricts the rank path to Linear weights).
-    pub fn addParam(self: *Apollo, t: anytype) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        try self.addOwnedParam(param);
-    }
-
-    /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
-    pub fn addParamNamed(self: *Apollo, t: anytype, name: []const u8) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        param.name = name;
-        try self.addOwnedParam(param);
-    }
-
-    fn addOwnedParam(self: *Apollo, param: Param) !void {
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        if (param.raw_rank != 2) {
-            try self.addOwnedFallback(param);
-            return;
-        }
-        var owned = param;
-        try owned.ensureMaster(self.allocator);
-        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
-        const compressed = compressedLen(&owned, self.config.rank);
-        const m = try self.allocator.alloc(f32, compressed);
-        errdefer self.allocator.free(m);
-        const v = try self.allocator.alloc(f32, compressed);
-        errdefer self.allocator.free(v);
-        const channels: usize = switch (self.config.scale_type) {
+    pub fn initState(allocator: Allocator, config: ApolloConfig, param: *const Param, index: usize) !State {
+        const compressed = compressedLen(param, config.rank);
+        const m = try allocator.alloc(f32, compressed);
+        errdefer allocator.free(m);
+        const v = try allocator.alloc(f32, compressed);
+        errdefer allocator.free(v);
+        const channels: usize = switch (config.scale_type) {
             .channel => if (param.rows >= param.cols) param.rows else param.cols,
             .tensor => 1,
         };
-        const scaling = try self.allocator.alloc(f32, channels);
-        errdefer self.allocator.free(scaling);
-        const norms = try self.allocator.alloc(f64, 2 * channels);
-        errdefer self.allocator.free(norms);
+        const scaling = try allocator.alloc(f32, channels);
+        errdefer allocator.free(scaling);
+        const norms = try allocator.alloc(f64, 2 * channels);
+        errdefer allocator.free(norms);
         @memset(m, 0);
         @memset(v, 0);
         // Distinct per-param seed (base + 1-based rank-slot index). The
         // reference enumerates every param for its torch RNG; only "distinct
         // seed, i.i.d. N(0, 1/rank) entries" is semantically required, and the
         // torch RNG stream is not reproducible here anyway.
-        const seed = self.config.seed +% (self.slots.items.len + 1);
-        try self.slots.append(self.allocator, .{ .param = owned, .m = m, .v = v, .scaling = scaling, .norms = norms, .seed = seed });
-    }
-
-    /// Force a param onto the AdamW fallback path (e.g. embeddings, heads).
-    pub fn addFallbackParam(self: *Apollo, t: anytype) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        try self.addOwnedFallback(param);
-    }
-
-    /// `addFallbackParam` plus a checkpoint name (borrowed; see `Param.name`).
-    pub fn addFallbackParamNamed(self: *Apollo, t: anytype, name: []const u8) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        param.name = name;
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        try self.addOwnedFallback(param);
-    }
-
-    fn addOwnedFallback(self: *Apollo, param: Param) !void {
-        var owned = param;
-        try owned.ensureMaster(self.allocator);
-        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
-        const n = owned.len();
-        const m = try self.allocator.alloc(f32, n);
-        errdefer self.allocator.free(m);
-        const v = try self.allocator.alloc(f32, n);
-        errdefer self.allocator.free(v);
-        @memset(m, 0);
-        @memset(v, 0);
-        try self.fallback_slots.append(self.allocator, .{ .param = owned, .m = m, .v = v });
+        const seed = config.seed +% (index + 1);
+        return .{ .m = m, .v = v, .scaling = scaling, .norms = norms, .seed = seed };
     }
 
     fn compressedLen(param: *const Param, rank: usize) usize {
@@ -232,73 +135,38 @@ pub const Apollo = struct {
         return if (param.rows >= param.cols) param.rows * rank else rank * param.cols;
     }
 
-    pub fn step(self: *Apollo, ctx: *ExecContext) !void {
-        for (self.slots.items) |*slot| {
-            var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
-            defer grad.deinit();
-            try self.apolloUpdate(ctx, slot, &grad);
-            slot.param.publish();
-        }
-        for (self.fallback_slots.items) |*slot| {
-            var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
-            defer grad.deinit();
-            slot.step += 1;
-            hfAdamwUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.m, slot.v, slot.step);
-            slot.param.publish();
-        }
+    /// The projection is a pure function of (seed, step/gap); force
+    /// regeneration on the next step after a load.
+    pub fn afterLoad(state: *State) void {
+        state.proj_chunk = std.math.maxInt(u64);
     }
 
-    pub fn zeroGrad(self: *Apollo) void {
-        for (self.slots.items) |*slot| slot.param.grad_state.zeroGrad();
-        for (self.fallback_slots.items) |*slot| slot.param.grad_state.zeroGrad();
-    }
-
-    pub fn gradSquaredNorm(self: *Apollo, ctx: *ExecContext) !f64 {
-        var total: f64 = 0;
-        for (self.slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
-        for (self.fallback_slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
-        return total;
-    }
-
-    pub fn scaleGradients(self: *Apollo, ctx: *ExecContext, factor: f32) !void {
-        for (self.slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
-        for (self.fallback_slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
-    }
-
-    /// L2 global-norm clip over rank-path AND fallback params together. Note
-    /// the APOLLO recipes disable global clipping (the norm-growth limiter
-    /// replaces it) — provided for completeness and mixed setups.
-    pub fn clipGradNorm(self: *Apollo, ctx: *ExecContext, max_norm: f32) !f32 {
-        return clipByGlobalNorm(ctx, self, max_norm);
-    }
-
-    fn apolloUpdate(self: *Apollo, ctx: *ExecContext, slot: *Slot, grad: *RawTensor) !void {
-        const config = self.config;
-        const rows = slot.param.rows;
-        const cols = slot.param.cols;
+    pub fn update(ctx: *ExecContext, config: ApolloConfig, param: *Param, state: *State, grad: *const RawTensor) !void {
+        const rows = param.rows;
+        const cols = param.cols;
         const tall = rows >= cols;
         const rank = config.rank;
 
         // Projection regeneration uses the PRE-increment step counter:
         // chunks are [0,T), [T,2T), ... States are NOT reset on regeneration.
-        const chunk = slot.step / config.update_proj_gap;
-        if (slot.proj == null or slot.proj_chunk != chunk) {
-            try self.regenerateProjection(ctx, slot, chunk, tall);
+        const chunk = state.step / config.update_proj_gap;
+        if (state.proj == null or state.proj_chunk != chunk) {
+            try regenerateProjection(ctx, config, param, state, chunk, tall);
         }
 
         var r_t = if (tall)
-            try ctx.matmul(.f32, .trans_b, grad, &slot.proj.?) // (rows, rank)
+            try ctx.matmul(.f32, .trans_b, grad, &state.proj.?) // (rows, rank)
         else
-            try ctx.matmul(.f32, .trans_a, &slot.proj.?, grad); // (rank, cols)
+            try ctx.matmul(.f32, .trans_a, &state.proj.?, grad); // (rank, cols)
         defer r_t.deinit();
         const r_data = r_t.dataConst();
 
-        slot.step += 1;
-        const t: f64 = @floatFromInt(slot.step);
+        state.step += 1;
+        const t: f64 = @floatFromInt(state.step);
 
         parallelMap(ctx, r_data.len, MomentMapContext{
-            .m = slot.m,
-            .v = slot.v,
+            .m = state.m,
+            .v = state.v,
             .r = r_data,
             .beta1 = config.beta1,
             .beta2 = config.beta2,
@@ -315,17 +183,17 @@ pub const Apollo = struct {
 
         // Scaling factors from the UN-bias-corrected R~ = m/(sqrt(v)+eps),
         // norms taken along the rank axis; +1e-8 guards the division.
-        const scaling = slot.scaling;
+        const scaling = state.scaling;
         switch (config.scale_type) {
             .channel => {
                 const channels = scaling.len;
-                const sum_opt = slot.norms[0..channels];
-                const sum_raw = slot.norms[channels..];
+                const sum_opt = state.norms[0..channels];
+                const sum_raw = state.norms[channels..];
                 @memset(sum_opt, 0);
                 @memset(sum_raw, 0);
                 if (tall) {
                     // R is (rows=channels, rank): channel = row index.
-                    for (slot.m, slot.v, r_data, 0..) |mi, vi, ri, i| {
+                    for (state.m, state.v, r_data, 0..) |mi, vi, ri, i| {
                         const channel = i / rank;
                         const opt = mi / (@sqrt(vi) + config.eps);
                         sum_opt[channel] += @as(f64, opt) * opt;
@@ -333,7 +201,7 @@ pub const Apollo = struct {
                     }
                 } else {
                     // R is (rank, cols=channels): channel = column index.
-                    for (slot.m, slot.v, r_data, 0..) |mi, vi, ri, i| {
+                    for (state.m, state.v, r_data, 0..) |mi, vi, ri, i| {
                         const channel = i % cols;
                         const opt = mi / (@sqrt(vi) + config.eps);
                         sum_opt[channel] += @as(f64, opt) * opt;
@@ -347,7 +215,7 @@ pub const Apollo = struct {
             .tensor => {
                 var sum_opt: f64 = 0;
                 var sum_raw: f64 = 0;
-                for (slot.m, slot.v, r_data) |mi, vi, ri| {
+                for (state.m, state.v, r_data) |mi, vi, ri| {
                     const opt = mi / (@sqrt(vi) + config.eps);
                     sum_opt += @as(f64, opt) * opt;
                     sum_raw += @as(f64, ri) * ri;
@@ -359,9 +227,9 @@ pub const Apollo = struct {
         // U = G (elementwise) scaled per channel (rows for tall, cols for
         // wide); the optional front sqrt(scale) is fused (same per-element op
         // order as the reference's separate pass).
-        var update = try ctx.empty(.f32, .{ rows, cols });
-        defer update.deinit();
-        const ud = update.data();
+        var update_buf = try ctx.empty(.f32, .{ rows, cols });
+        defer update_buf.deinit();
+        const ud = update_buf.data();
         const sqrt_scale = @sqrt(config.scale);
         parallelMap(ctx, ud.len, BuildMapContext{
             .u = ud,
@@ -383,18 +251,18 @@ pub const Apollo = struct {
         var limiter: f32 = 1;
         if (!config.disable_norm_growth_limiter) {
             const cur: f32 = @floatCast(@sqrt(try sumSquares(ctx, ud)));
-            if (slot.prev_norm >= 0) {
-                limiter = @max(cur / (slot.prev_norm + 1e-8), 1.01) / 1.01;
-                slot.prev_norm = cur / limiter;
+            if (state.prev_norm >= 0) {
+                limiter = @max(cur / (state.prev_norm + 1e-8), 1.01) / 1.01;
+                state.prev_norm = cur / limiter;
             } else {
-                slot.prev_norm = cur;
+                state.prev_norm = cur;
             }
         }
 
         // Scaled-SGD step, then decoupled decay AFTER the step with the raw lr
         // (reference order; differs from AdamW/Muon).
-        parallelMap(ctx, slot.param.len(), ApplyMapContext{
-            .p = slot.param.data(),
+        parallelMap(ctx, param.len(), ApplyMapContext{
+            .p = param.data(),
             .u = ud,
             .limiter = limiter,
             .back_scale = if (!config.scale_front and config.scale != 1) sqrt_scale else 1,
@@ -403,205 +271,128 @@ pub const Apollo = struct {
         }, applyMapRange);
     }
 
-    const MomentMapContext = struct {
-        m: []f32,
-        v: []f32,
-        r: []const f32,
-        beta1: f32,
-        beta2: f32,
-        one_minus_b1: f32,
-        one_minus_b2: f32,
-    };
-
-    fn momentMapRange(c: MomentMapContext, start: usize, end: usize) void {
-        for (c.m[start..end], c.v[start..end], c.r[start..end]) |*mi, *vi, ri| {
-            mi.* = c.beta1 * mi.* + c.one_minus_b1 * ri;
-            vi.* = c.beta2 * vi.* + c.one_minus_b2 * ri * ri;
-        }
-    }
-
-    const BuildKind = enum { channel_tall, channel_wide, tensor };
-
-    const BuildMapContext = struct {
-        u: []f32,
-        g: []const f32,
-        scaling: []const f32,
-        cols: usize,
-        kind: BuildKind,
-        front_scale: f32,
-    };
-
-    fn buildMapRange(c: BuildMapContext, start: usize, end: usize) void {
-        switch (c.kind) {
-            .channel_tall => for (c.u[start..end], c.g[start..end], start..) |*ui, gi, i| {
-                ui.* = gi * c.scaling[i / c.cols] * c.front_scale;
-            },
-            .channel_wide => for (c.u[start..end], c.g[start..end], start..) |*ui, gi, i| {
-                ui.* = gi * c.scaling[i % c.cols] * c.front_scale;
-            },
-            .tensor => for (c.u[start..end], c.g[start..end]) |*ui, gi| {
-                ui.* = gi * c.scaling[0] * c.front_scale;
-            },
-        }
-    }
-
-    const ApplyMapContext = struct {
-        p: []f32,
-        u: []const f32,
-        limiter: f32,
-        back_scale: f32,
-        step_size: f32,
-        decay_alpha: f32,
-    };
-
-    fn applyMapRange(c: ApplyMapContext, start: usize, end: usize) void {
-        for (c.p[start..end], c.u[start..end]) |*pi, ui| {
-            const adjusted = ui / c.limiter * c.back_scale;
-            // Decay AFTER the step, in the reference's additive form
-            // `p.add_(p, alpha=-lr*wd)`.
-            const stepped = pi.* - c.step_size * adjusted;
-            pi.* = stepped + c.decay_alpha * stepped;
-        }
-    }
-
     /// P entries are i.i.d. N(0, 1/rank): standard normal draws divided by
     /// sqrt(rank). Deterministic in (seed, chunk), so checkpoints don't need to
     /// store P. Tall params project the column space: P is (rank, cols); wide
     /// params project the row space: P is (rows, rank).
-    fn regenerateProjection(self: *Apollo, ctx: *ExecContext, slot: *Slot, chunk: u64, tall: bool) !void {
-        const config = self.config;
+    fn regenerateProjection(ctx: *ExecContext, config: ApolloConfig, param: *const Param, state: *State, chunk: u64, tall: bool) !void {
         const shape: [2]usize = if (tall)
-            .{ config.rank, slot.param.cols }
+            .{ config.rank, param.cols }
         else
-            .{ slot.param.rows, config.rank };
-        if (slot.proj == null) {
-            slot.proj = try ctx.empty(.f32, shape);
+            .{ param.rows, config.rank };
+        if (state.proj == null) {
+            state.proj = try ctx.empty(.f32, shape);
         }
         const inv_sqrt_rank = 1.0 / @sqrt(@as(f32, @floatFromInt(config.rank)));
-        gaussianFill(slot.seed +% chunk *% 0x9E3779B97F4A7C15, slot.proj.?.data(), inv_sqrt_rank);
-        slot.proj_chunk = chunk;
-    }
-
-    pub fn saveState(self: *const Apollo, writer: *std.Io.Writer) !void {
-        try validateSlotNames(self.slots.items);
-        try validateSlotNames(self.fallback_slots.items);
-        const version: FrameVersion = if (slotsCarryMasters(self.slots.items) or slotsCarryMasters(self.fallback_slots.items)) .v5 else .v3;
-        try writer.writeAll(switch (version) {
-            .v5 => "FZP5",
-            else => "FZP3",
-        });
-        try writer.writeInt(u64, @intCast(self.config.rank), .little);
-        try writer.writeInt(u64, self.config.update_proj_gap, .little);
-        try writer.writeInt(u32, @bitCast(self.config.scale), .little);
-        try writer.writeInt(u8, @intFromEnum(self.config.scale_type), .little);
-        try writer.writeInt(u8, @intFromBool(self.config.correct_bias), .little);
-        try writer.writeInt(u8, @intFromBool(self.config.scale_front), .little);
-        try writer.writeInt(u8, @intFromBool(self.config.disable_norm_growth_limiter), .little);
-        try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
-        for (self.slots.items, 0..) |*slot, i| {
-            try writeSlotName(writer, &slot.param, i);
-            try writeSlotDims(writer, &slot.param);
-            try writer.writeInt(u64, slot.step, .little);
-            try writer.writeInt(u64, slot.seed, .little);
-            try writer.writeInt(u32, @bitCast(slot.prev_norm), .little);
-            try writeF32Slice(writer, slot.m);
-            try writeF32Slice(writer, slot.v);
-            try writeSlotMaster(writer, version, &slot.param);
-        }
-        try writer.writeInt(u32, @intCast(self.fallback_slots.items.len), .little);
-        for (self.fallback_slots.items, 0..) |*slot, i| {
-            try writeSlotName(writer, &slot.param, i);
-            try writeSlotDims(writer, &slot.param);
-            try writer.writeInt(u64, slot.step, .little);
-            try writeF32Slice(writer, slot.m);
-            try writeF32Slice(writer, slot.v);
-            try writeSlotMaster(writer, version, &slot.param);
-        }
-    }
-
-    pub fn loadState(self: *Apollo, reader: *std.Io.Reader) !void {
-        var magic: [4]u8 = undefined;
-        try reader.readSliceAll(&magic);
-        const version: FrameVersion = if (std.mem.eql(u8, &magic, "FZP5"))
-            .v5
-        else if (std.mem.eql(u8, &magic, "FZP3"))
-            .v3
-        else
-            return OptimError.CheckpointMagicMismatch;
-        if (try reader.takeInt(u64, .little) != self.config.rank) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u64, .little) != self.config.update_proj_gap) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.scale))) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u8, .little) != @intFromEnum(self.config.scale_type)) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u8, .little) != @intFromBool(self.config.correct_bias)) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u8, .little) != @intFromBool(self.config.scale_front)) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u8, .little) != @intFromBool(self.config.disable_norm_growth_limiter)) return OptimError.CheckpointConfigMismatch;
-        const count = try reader.takeInt(u32, .little);
-        var main_matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
-        defer main_matcher.deinit(self.allocator);
-        var staged_main = try std.ArrayList(StagedSlot).initCapacity(self.allocator, count);
-        defer freeStaged(self.allocator, &staged_main);
-        for (0..count) |_| {
-            const idx = try main_matcher.match(reader, self.slots.items);
-            const slot = &self.slots.items[idx];
-            try expectSlotDims(reader, &slot.param);
-            const step_val = try reader.takeInt(u64, .little);
-            const seed = try reader.takeInt(u64, .little);
-            const prev_norm: f32 = @bitCast(try reader.takeInt(u32, .little));
-            const data = try self.allocator.alloc(u8, 4 * (slot.m.len + slot.v.len));
-            errdefer self.allocator.free(data);
-            try reader.readSliceAll(data);
-            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
-            errdefer if (master.len != 0) self.allocator.free(master);
-            try staged_main.append(self.allocator, .{ .idx = idx, .step = step_val, .seed = seed, .prev_norm = prev_norm, .data = data, .master = master });
-        }
-        try main_matcher.requireAllFilled();
-
-        const fallback_count = try reader.takeInt(u32, .little);
-        var fb_matcher = try SlotMatcher.init(self.allocator, self.fallback_slots.items.len);
-        defer fb_matcher.deinit(self.allocator);
-        var staged_fb = try std.ArrayList(StagedSlot).initCapacity(self.allocator, fallback_count);
-        defer freeStaged(self.allocator, &staged_fb);
-        for (0..fallback_count) |_| {
-            const idx = try fb_matcher.match(reader, self.fallback_slots.items);
-            const slot = &self.fallback_slots.items[idx];
-            try expectSlotDims(reader, &slot.param);
-            const step_val = try reader.takeInt(u64, .little);
-            const data = try self.allocator.alloc(u8, 4 * (slot.m.len + slot.v.len));
-            errdefer self.allocator.free(data);
-            try reader.readSliceAll(data);
-            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
-            errdefer if (master.len != 0) self.allocator.free(master);
-            try staged_fb.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
-        }
-        try fb_matcher.requireAllFilled();
-
-        // Commit — both slot sets fully validated; no failure points remain.
-        for (staged_main.items) |s| {
-            const slot = &self.slots.items[s.idx];
-            slot.step = s.step;
-            slot.seed = s.seed;
-            slot.prev_norm = s.prev_norm;
-            @memcpy(std.mem.sliceAsBytes(slot.m), s.data[0 .. 4 * slot.m.len]);
-            @memcpy(std.mem.sliceAsBytes(slot.v), s.data[4 * slot.m.len ..]);
-            commitSlotMaster(&slot.param, s.master);
-            // The projection is a pure function of (seed, step/gap); force
-            // regeneration on the next step.
-            slot.proj_chunk = std.math.maxInt(u64);
-        }
-        for (staged_fb.items) |s| {
-            const slot = &self.fallback_slots.items[s.idx];
-            slot.step = s.step;
-            @memcpy(std.mem.sliceAsBytes(slot.m), s.data[0 .. 4 * slot.m.len]);
-            @memcpy(std.mem.sliceAsBytes(slot.v), s.data[4 * slot.m.len ..]);
-            commitSlotMaster(&slot.param, s.master);
-        }
+        gaussianFill(state.seed +% chunk *% 0x9E3779B97F4A7C15, state.proj.?.data(), inv_sqrt_rank);
+        state.proj_chunk = chunk;
     }
 };
+
+pub const Apollo = Optimizer(ApolloKernel);
+
+const MomentMapContext = struct {
+    m: []f32,
+    v: []f32,
+    r: []const f32,
+    beta1: f32,
+    beta2: f32,
+    one_minus_b1: f32,
+    one_minus_b2: f32,
+};
+
+fn momentMapRange(c: MomentMapContext, start: usize, end: usize) void {
+    for (c.m[start..end], c.v[start..end], c.r[start..end]) |*mi, *vi, ri| {
+        mi.* = c.beta1 * mi.* + c.one_minus_b1 * ri;
+        vi.* = c.beta2 * vi.* + c.one_minus_b2 * ri * ri;
+    }
+}
+
+const BuildKind = enum { channel_tall, channel_wide, tensor };
+
+const BuildMapContext = struct {
+    u: []f32,
+    g: []const f32,
+    scaling: []const f32,
+    cols: usize,
+    kind: BuildKind,
+    front_scale: f32,
+};
+
+fn buildMapRange(c: BuildMapContext, start: usize, end: usize) void {
+    switch (c.kind) {
+        .channel_tall => for (c.u[start..end], c.g[start..end], start..) |*ui, gi, i| {
+            ui.* = gi * c.scaling[i / c.cols] * c.front_scale;
+        },
+        .channel_wide => for (c.u[start..end], c.g[start..end], start..) |*ui, gi, i| {
+            ui.* = gi * c.scaling[i % c.cols] * c.front_scale;
+        },
+        .tensor => for (c.u[start..end], c.g[start..end]) |*ui, gi| {
+            ui.* = gi * c.scaling[0] * c.front_scale;
+        },
+    }
+}
+
+const ApplyMapContext = struct {
+    p: []f32,
+    u: []const f32,
+    limiter: f32,
+    back_scale: f32,
+    step_size: f32,
+    decay_alpha: f32,
+};
+
+fn applyMapRange(c: ApplyMapContext, start: usize, end: usize) void {
+    for (c.p[start..end], c.u[start..end]) |*pi, ui| {
+        const adjusted = ui / c.limiter * c.back_scale;
+        // Decay AFTER the step, in the reference's additive form
+        // `p.add_(p, alpha=-lr*wd)`.
+        const stepped = pi.* - c.step_size * adjusted;
+        pi.* = stepped + c.decay_alpha * stepped;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The fallback path: the reference's legacy-HF AdamW.
+// ---------------------------------------------------------------------------
 
 /// The APOLLO reference's fallback AdamW is the legacy HF formulation, NOT
 /// PyTorch AdamW: `denom = sqrt(v) + eps` (eps outside the bias correction),
 /// the bias correction folded into a scalar `lr*sqrt(bc2)/bc1`, and decoupled
-/// decay applied AFTER the step to the already-updated parameter.
+/// decay applied AFTER the step to the already-updated parameter. Its slots
+/// only ever frame inline within Apollo's, so the kernel carries no magics.
+const HfAdamwKernel = struct {
+    pub const Config = ApolloConfig;
+    pub const record = [_][]const u8{ "step", "m", "v" };
+
+    pub const State = struct {
+        m: []f32,
+        v: []f32,
+        step: u64 = 0,
+
+        pub fn deinit(self: *State, allocator: Allocator) void {
+            allocator.free(self.m);
+            allocator.free(self.v);
+            self.* = undefined;
+        }
+    };
+
+    pub fn initState(allocator: Allocator, _: ApolloConfig, param: *const Param, _: usize) !State {
+        const n = param.len();
+        const m = try allocator.alloc(f32, n);
+        errdefer allocator.free(m);
+        const v = try allocator.alloc(f32, n);
+        @memset(m, 0);
+        @memset(v, 0);
+        return .{ .m = m, .v = v };
+    }
+
+    pub fn update(ctx: *ExecContext, config: ApolloConfig, param: *Param, state: *State, grad: *const RawTensor) !void {
+        state.step += 1;
+        hfAdamwUpdate(ctx, config, param.data(), grad.dataConst(), state.m, state.v, state.step);
+    }
+};
+
 const HfAdamwMapContext = struct {
     p: []f32,
     g: []const f32,

@@ -5,11 +5,11 @@
 const std = @import("std");
 const common = @import("common.zig");
 const frame = @import("frame.zig");
+const optimizer = @import("optimizer.zig");
 
 const Allocator = std.mem.Allocator;
+const RawTensor = common.RawTensor;
 const ExecContext = common.ExecContext;
-const GradState = common.GradState;
-const OptimError = common.OptimError;
 const StateDType = common.StateDType;
 const StateSlice = common.StateSlice;
 const StateBuf = common.StateBuf;
@@ -21,28 +21,8 @@ const stateVecLoad = common.stateVecLoad;
 const stateVecStore = common.stateVecStore;
 const Param = common.Param;
 const parallelMap = common.parallelMap;
-const takeGrad = common.takeGrad;
-const paramGradSqNorm = common.paramGradSqNorm;
-const scaleParamGrad = common.scaleParamGrad;
-const clipByGlobalNorm = common.clipByGlobalNorm;
-const GradStateSet = common.GradStateSet;
-const gradStatesCollide = common.gradStatesCollide;
-const insertGradStates = common.insertGradStates;
-const StagedSlot = frame.StagedSlot;
-const freeStaged = frame.freeStaged;
-const SlotMatcher = frame.SlotMatcher;
-const FrameVersion = frame.FrameVersion;
-const slotsCarryMasters = frame.slotsCarryMasters;
-const expectMagicVersion = frame.expectMagicVersion;
-const validateSlotNames = frame.validateSlotNames;
-const writeSlotName = frame.writeSlotName;
-const writeSlotDims = frame.writeSlotDims;
-const expectSlotDims = frame.expectSlotDims;
-const writeStateSlice = frame.writeStateSlice;
-const readStateSlice = frame.readStateSlice;
-const writeSlotMaster = frame.writeSlotMaster;
-const readSlotMaster = frame.readSlotMaster;
-const commitSlotMaster = frame.commitSlotMaster;
+const Optimizer = optimizer.Optimizer;
+const Magics = frame.Magics;
 
 // ---------------------------------------------------------------------------
 // SGD — PyTorch torch.optim.SGD single-tensor semantics.
@@ -64,162 +44,49 @@ pub const SgdConfig = struct {
     state_dtype: StateDType = .f32,
 };
 
-pub const SGD = struct {
-    allocator: Allocator,
-    config: SgdConfig,
-    slots: std.ArrayList(Slot) = .empty,
+const SgdKernel = struct {
+    pub const Config = SgdConfig;
+    pub const magics: Magics = .{ .v3 = "FZS3", .v4 = "FZS4", .v5 = "FZS5" };
+    pub const pinned_config_fields = [_][]const u8{ "momentum", "dampening", "nesterov" };
+    pub const record = [_][]const u8{ "step", "buf" };
 
-    const Slot = struct {
-        param: Param,
+    pub const State = struct {
         /// Momentum buffer; empty (f32-tagged, so the frame stays v3) when
         /// momentum == 0. PyTorch initializes it to a CLONE OF THE FIRST
         /// (decayed) GRADIENT, not zeros — `step` tracks whether that has
         /// happened.
         buf: StateBuf,
         step: u64 = 0,
+
+        pub fn deinit(self: *State, allocator: Allocator) void {
+            self.buf.deinit(allocator);
+            self.* = undefined;
+        }
     };
 
-    pub fn init(allocator: Allocator, config: SgdConfig) SGD {
-        // PyTorch constructor rule, enforced in every build mode (a debug
-        // assert would vanish exactly where training runs: ReleaseFast).
+    /// PyTorch constructor rule, enforced in every build mode (a debug
+    /// assert would vanish exactly where training runs: ReleaseFast).
+    pub fn checkConfig(config: SgdConfig) void {
         if (config.nesterov and (config.momentum == 0 or config.dampening != 0)) {
             @panic("SGD: nesterov requires momentum > 0 and dampening == 0");
         }
-        return .{ .allocator = allocator, .config = config };
     }
 
-    pub fn deinit(self: *SGD) void {
-        for (self.slots.items) |*slot| {
-            slot.buf.deinit(self.allocator);
-            slot.param.deinit(self.allocator);
-        }
-        self.slots.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    pub fn collectGradStates(self: *const SGD, set: *GradStateSet, allocator: Allocator) !void {
-        if (gradStatesCollide(set, self.slots.items)) return OptimError.DuplicateParam;
-        try insertGradStates(set, allocator, self.slots.items);
-    }
-
-    fn containsGradState(self: *const SGD, state: *const GradState) bool {
-        for (self.slots.items) |*slot| {
-            if (slot.param.grad_state == state) return true;
-        }
-        return false;
-    }
-
-    pub fn addParam(self: *SGD, t: anytype) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        try self.addOwnedParam(param);
-    }
-
-    /// `addParam` plus a checkpoint name (borrowed; see `Param.name`).
-    pub fn addParamNamed(self: *SGD, t: anytype, name: []const u8) !void {
-        var param = try Param.of(t);
-        errdefer param.deinit(self.allocator);
-        param.name = name;
-        try self.addOwnedParam(param);
-    }
-
-    fn addOwnedParam(self: *SGD, param: Param) !void {
-        if (self.containsGradState(param.grad_state)) return OptimError.DuplicateParam;
-        var owned = param;
-        try owned.ensureMaster(self.allocator);
-        errdefer if (owned.master.len != 0) self.allocator.free(owned.master);
-        const buf: StateBuf = if (self.config.momentum != 0)
-            try StateBuf.alloc(self.allocator, self.config.state_dtype, owned.len())
+    pub fn initState(allocator: Allocator, config: SgdConfig, param: *const Param, _: usize) !State {
+        const buf: StateBuf = if (config.momentum != 0)
+            try StateBuf.alloc(allocator, config.state_dtype, param.len())
         else
             .{ .f32 = &.{} };
-        errdefer buf.deinit(self.allocator);
-        try self.slots.append(self.allocator, .{ .param = owned, .buf = buf });
+        return .{ .buf = buf };
     }
 
-    pub fn step(self: *SGD, ctx: *ExecContext) !void {
-        for (self.slots.items) |*slot| {
-            var grad = (try takeGrad(ctx, &slot.param)) orelse continue;
-            defer grad.deinit();
-            slot.step += 1;
-            sgdUpdate(ctx, self.config, slot.param.data(), grad.dataConst(), slot.buf, slot.step == 1);
-            slot.param.publish();
-        }
-    }
-
-    pub fn zeroGrad(self: *SGD) void {
-        for (self.slots.items) |*slot| slot.param.grad_state.zeroGrad();
-    }
-
-    pub fn gradSquaredNorm(self: *SGD, ctx: *ExecContext) !f64 {
-        var total: f64 = 0;
-        for (self.slots.items) |*slot| total += try paramGradSqNorm(ctx, &slot.param);
-        return total;
-    }
-
-    pub fn scaleGradients(self: *SGD, ctx: *ExecContext, factor: f32) !void {
-        for (self.slots.items) |*slot| try scaleParamGrad(ctx, &slot.param, factor);
-    }
-
-    pub fn clipGradNorm(self: *SGD, ctx: *ExecContext, max_norm: f32) !f32 {
-        return clipByGlobalNorm(ctx, self, max_norm);
-    }
-
-    pub fn saveState(self: *const SGD, writer: *std.Io.Writer) !void {
-        try validateSlotNames(self.slots.items);
-        var version: FrameVersion = .v3;
-        for (self.slots.items) |*slot| {
-            if (slot.buf != .f32) version = .v4;
-        }
-        if (slotsCarryMasters(self.slots.items)) version = .v5;
-        try writer.writeAll(switch (version) {
-            .v3 => "FZS3",
-            .v4 => "FZS4",
-            .v5 => "FZS5",
-        });
-        try writer.writeInt(u32, @bitCast(self.config.momentum), .little);
-        try writer.writeInt(u32, @bitCast(self.config.dampening), .little);
-        try writer.writeInt(u8, @intFromBool(self.config.nesterov), .little);
-        try writer.writeInt(u32, @intCast(self.slots.items.len), .little);
-        for (self.slots.items, 0..) |*slot, i| {
-            try writeSlotName(writer, &slot.param, i);
-            try writeSlotDims(writer, &slot.param);
-            try writer.writeInt(u64, slot.step, .little);
-            try writeStateSlice(writer, version, slot.buf);
-            try writeSlotMaster(writer, version, &slot.param);
-        }
-    }
-
-    pub fn loadState(self: *SGD, reader: *std.Io.Reader) !void {
-        const version = try expectMagicVersion(reader, "FZS3", "FZS4", "FZS5");
-        if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.momentum))) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u32, .little) != @as(u32, @bitCast(self.config.dampening))) return OptimError.CheckpointConfigMismatch;
-        if (try reader.takeInt(u8, .little) != @intFromBool(self.config.nesterov)) return OptimError.CheckpointConfigMismatch;
-        const count = try reader.takeInt(u32, .little);
-        var matcher = try SlotMatcher.init(self.allocator, self.slots.items.len);
-        defer matcher.deinit(self.allocator);
-        var staged = try std.ArrayList(StagedSlot).initCapacity(self.allocator, count);
-        defer freeStaged(self.allocator, &staged);
-        for (0..count) |_| {
-            const idx = try matcher.match(reader, self.slots.items);
-            const slot = &self.slots.items[idx];
-            try expectSlotDims(reader, &slot.param);
-            const step_val = try reader.takeInt(u64, .little);
-            const data = try self.allocator.alloc(u8, slot.buf.byteLen());
-            errdefer self.allocator.free(data);
-            try readStateSlice(reader, version, slot.buf, data);
-            const master = try readSlotMaster(self.allocator, reader, version, &slot.param);
-            errdefer if (master.len != 0) self.allocator.free(master);
-            try staged.append(self.allocator, .{ .idx = idx, .step = step_val, .data = data, .master = master });
-        }
-        try matcher.requireAllFilled();
-        for (staged.items) |s| {
-            const slot = &self.slots.items[s.idx];
-            slot.step = s.step;
-            @memcpy(slot.buf.bytes(), s.data);
-            commitSlotMaster(&slot.param, s.master);
-        }
+    pub fn update(ctx: *ExecContext, config: SgdConfig, param: *Param, state: *State, grad: *const RawTensor) !void {
+        state.step += 1;
+        sgdUpdate(ctx, config, param.data(), grad.dataConst(), state.buf, state.step == 1);
     }
 };
+
+pub const SGD = Optimizer(SgdKernel);
 
 /// The exact PyTorch SGD step. With weight decay the L2 term joins the
 /// gradient BEFORE the momentum buffer sees it; on the very first step the

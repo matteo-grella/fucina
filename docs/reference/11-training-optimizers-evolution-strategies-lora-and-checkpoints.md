@@ -77,8 +77,11 @@ its normalization arms, and its determinism contract are
 
 `src/optim.zig` is the facade (every `fucina.optim.*` name below); the
 bodies live in `src/optim/` — `common` (the shared substrate: `Param`,
-state-buffer dtypes, the deterministic norm reduction, clipping), `frame`
-(checkpoint frames, [§11.5](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#115-optimizer-state-persistence-fzt1-snapshots-vs-named-state-dicts-srcoptimzig)), `moment_pair` (Adam/AdamW), `muon`, `apollo`,
+state-buffer dtypes, the deterministic norm reduction, clipping),
+`optimizer` (the one `Optimizer(Kernel)` body every optimizer below is an
+instance of: registration, the fallback route, `step`, and the frame walk;
+a kernel supplies its config, per-slot state, update, and record layout),
+`frame` (checkpoint frame wire helpers, [§11.5](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#115-optimizer-state-persistence-fzt1-snapshots-vs-named-state-dicts-srcoptimzig)), `moment_pair` (Adam/AdamW), `muon`, `apollo`,
 `sgd`, `schedule` ([§11.4](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#114-gradient-clipping-and-lr-schedules-srcoptimzig)), and `set` ([§11.3](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md#113-param-groups-optimizerset-srcoptimzig)).
 
 Each optimizer is a faithful port of a reference implementation, pinned by
@@ -93,14 +96,16 @@ Jordan's muon.py, apollo_torch — `src/optim_tests.zig`):
 | `optim.Muon` | `MuonConfig` | Keller Jordan reference + Moonlight scale | 4 B momentum (2 B bf16) + embedded AdamW fallback |
 | `optim.Apollo` | `ApolloConfig` | apollo_torch (arXiv 2412.05270) | ~`8·rank·max(dim)` B moments + `4·rank·min(dim)` B resident projection per matrix (always f32) |
 
-All five share one surface (`Muon`/`Apollo` add the fallback registrars):
+All five share one surface (on `Muon`/`Apollo` the fallback registrars
+route to the embedded fallback; on the others they are `addParam`, so
+generic registration code may call them unconditionally):
 
 ```zig
 pub fn init(allocator: Allocator, config: Config) Self      // SGD panics here on bad nesterov
 pub fn deinit(self: *Self) void                             // frees slots + state; params stay caller-owned
 pub fn addParam(self: *Self, t: anytype) !void              // t: pointer to an f32/f16/bf16 autograd variable
 pub fn addParamNamed(self: *Self, t: anytype, name: []const u8) !void
-pub fn addFallbackParam(self: *Self, t: anytype) !void      // Muon/Apollo only
+pub fn addFallbackParam(self: *Self, t: anytype) !void      // fallback path (Muon/Apollo); addParam otherwise
 pub fn addFallbackParamNamed(self: *Self, t: anytype, name: []const u8) !void
 pub fn step(self: *Self, ctx: *ExecContext) !void
 pub fn zeroGrad(self: *Self) void

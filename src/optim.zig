@@ -65,8 +65,9 @@
 //! (seed, step / update_proj_gap) and is regenerated on the next step.
 //!
 //! Layout: this file is the facade; the bodies live in `optim/`
-//! (`common` substrate, `frame` checkpoint helpers, `moment_pair`
-//! Adam/AdamW, `muon`, `apollo`, `sgd`, `schedule`, `set`).
+//! (`common` substrate, `frame` checkpoint wire helpers, `optimizer` the
+//! one `Optimizer(Kernel)` body, and the kernels `moment_pair` Adam/AdamW,
+//! `muon`, `apollo`, `sgd`; `schedule`, `set`).
 
 const common = @import("optim/common.zig");
 const frame = @import("optim/frame.zig");

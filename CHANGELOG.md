@@ -25,6 +25,13 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `optim`: `addFallbackParam`/`addFallbackParamNamed` exist on every
+  optimizer type, not only `Muon`/`Apollo`. Without an embedded fallback
+  (SGD/Adam/AdamW) they are `addParam`/`addParamNamed` — the one path is
+  exactly where a fallback-routed param lands — so a generic registration
+  function may call them unconditionally; existing
+  `@hasDecl(T, "addFallbackParam")` guards keep compiling, with both
+  branches now equivalent on the fallback-less optimizers.
 - `state_dict.loadStateDictFromFile` (re-exported as
   `optim.loadStateDictFromFile`) and `ParamRegistry.loadStateDictFromFile`:
   the named state-dict load over a parsed `safetensors.File`, copying out of

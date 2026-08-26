@@ -1,8 +1,10 @@
-//! Optimizer checkpoint frames: the transactional staged-load helpers,
-//! the v3/v4/v5 frame-version rules, per-slot name/dims/master/state
-//! records, the name-matching `SlotMatcher`, and the positional f32
-//! `saveTensors`/`loadTensors` (FZT1) parameter format. Wire bytes are
-//! pinned by the checkpoint goldens in optim_tests.zig.
+//! Optimizer checkpoint frames: the frame magics and their version map,
+//! the type-directed wire form of header/record scalars and state
+//! buffers, per-slot name/dims/master records, the name-indexed
+//! `SlotIndex`/`SlotMatcher`, and the positional f32 `saveTensors`/
+//! `loadTensors` (FZT1) parameter format. The frame walk itself (version
+//! rule, header, staged transactional load) is `common.Optimizer`. Wire
+//! bytes are pinned by the checkpoint goldens in optim_tests.zig.
 
 const std = @import("std");
 const common = @import("common.zig");
@@ -13,66 +15,88 @@ const StateDType = common.StateDType;
 const StateBuf = common.StateBuf;
 const Param = common.Param;
 
-// ---------------------------------------------------------------------------
-// Checkpoint helpers.
-// ---------------------------------------------------------------------------
-//
-// Transactional load contract: every `loadState` / `loadTensors` here is
-// all-or-nothing. Each record is decoded into freshly-allocated scratch and the
-// WHOLE stream is validated (magic, config, names, dims, lengths, slot match)
-// BEFORE any live parameter/optimizer buffer is written. A truncated, short, or
-// otherwise-invalid stream therefore leaves every destination byte-unchanged —
-// a half-applied checkpoint can silently corrupt training, so we never produce
-// one. (`OptimizerSet.loadState` is transactional per member optimizer.)
-
-/// One decoded-but-not-yet-committed slot record for a transactional `loadState`:
-/// the destination slot index, the scalar fields, and a freshly-allocated RAW-BYTE
-/// scratch holding the slot's contiguous state buffers (e.g. m then v, or a lone
-/// momentum/buf) in their storage dtype — dtype validation already happened at
-/// read time, so the commit is a plain byte copy for every `StateDType`.
-/// `seed`/`prev_norm` are only meaningful for APOLLO main slots.
-pub const StagedSlot = struct {
-    idx: usize,
-    data: []u8,
-    step: u64 = 0,
-    seed: u64 = 0,
-    prev_norm: f32 = 0,
-    /// Staged v5 f32 master weights (empty when the frame carried none).
-    master: []f32 = &.{},
-};
-
-pub fn freeStaged(allocator: Allocator, staged: *std.ArrayList(StagedSlot)) void {
-    for (staged.items) |s| {
-        allocator.free(s.data);
-        if (s.master.len != 0) allocator.free(s.master);
-    }
-    staged.deinit(allocator);
-}
-
 /// Optimizer state frame revision. v3 is the pre-`StateDType` format: state
 /// buffers are raw f32 bytes with no tag. v4 prefixes every state buffer with
-/// one u8 `StateDType` tag. Writers emit v3 whenever every buffer is f32 (so
-/// the bytes stay identical to pre-bf16 builds) and v4 otherwise; readers
-/// accept both and require the stored dtype to match the live buffer's.
-pub const FrameVersion = enum { v3, v4, v5 };
+/// one u8 `StateDType` tag. v5 adds the per-slot f32 master record. Writers
+/// emit the lowest version the slots need (`common.Optimizer.frameVersion`),
+/// so all-f32 frames stay byte-identical to pre-bf16 builds; readers accept
+/// every version and require the stored dtype to match the live buffer's.
+pub const FrameVersion = enum(u8) { v3, v4, v5 };
 
-/// The frame version for the common `{ m, v }` moment-pair slot layout
-/// (Adam/AdamW): v3 iff every buffer of every slot is f32.
-pub fn momentSlotsFrameVersion(slots: anytype) FrameVersion {
-    for (slots) |*slot| {
-        if (slot.m != .f32 or slot.v != .f32) return .v4;
+/// The 4-byte magics of one optimizer's frame, one per version. A kernel
+/// whose state is never dtype-tagged (Apollo: raw f32 moments) has no v4
+/// magic; its frames go straight from v3 to v5.
+pub const Magics = struct {
+    v3: *const [4]u8,
+    v4: ?*const [4]u8 = null,
+    v5: *const [4]u8,
+
+    pub fn of(self: Magics, version: FrameVersion) *const [4]u8 {
+        return switch (version) {
+            .v3 => self.v3,
+            .v4 => self.v4.?,
+            .v5 => self.v5,
+        };
     }
-    return .v3;
+
+    /// Read a 4-byte magic and map it to the frame version it names.
+    pub fn expect(self: Magics, reader: *std.Io.Reader) !FrameVersion {
+        var buf: [4]u8 = undefined;
+        try reader.readSliceAll(&buf);
+        if (std.mem.eql(u8, &buf, self.v3)) return .v3;
+        if (self.v4) |v4| if (std.mem.eql(u8, &buf, v4)) return .v4;
+        if (std.mem.eql(u8, &buf, self.v5)) return .v5;
+        return OptimError.CheckpointMagicMismatch;
+    }
+};
+
+/// Wire form of one header or record scalar, chosen by its type: f32 as
+/// its IEEE bits (u32), bool and enum as one u8, u32 as u32, u64 and usize
+/// as u64; all little-endian. The pinned config fields and the per-slot
+/// counters go through here, so a kernel names a field and the encoding
+/// follows from its type.
+pub fn writeScalar(writer: *std.Io.Writer, value: anytype) !void {
+    const T = @TypeOf(value);
+    switch (T) {
+        f32 => try writer.writeInt(u32, @bitCast(value), .little),
+        bool => try writer.writeInt(u8, @intFromBool(value), .little),
+        u32 => try writer.writeInt(u32, value, .little),
+        u64 => try writer.writeInt(u64, value, .little),
+        usize => try writer.writeInt(u64, @intCast(value), .little),
+        else => switch (@typeInfo(T)) {
+            .@"enum" => try writer.writeInt(u8, @intFromEnum(value), .little),
+            else => @compileError("optim frame: no wire form for " ++ @typeName(T)),
+        },
+    }
 }
 
-/// Read a 4-byte magic and map it to the frame version it names.
-pub fn expectMagicVersion(reader: *std.Io.Reader, comptime v3_magic: *const [4]u8, comptime v4_magic: *const [4]u8, comptime v5_magic: *const [4]u8) !FrameVersion {
-    var buf: [4]u8 = undefined;
-    try reader.readSliceAll(&buf);
-    if (std.mem.eql(u8, &buf, v3_magic)) return .v3;
-    if (std.mem.eql(u8, &buf, v4_magic)) return .v4;
-    if (std.mem.eql(u8, &buf, v5_magic)) return .v5;
-    return OptimError.CheckpointMagicMismatch;
+/// Decode one record scalar written by `writeScalar` (the per-slot
+/// counters: u64 and f32 only).
+pub fn readScalar(reader: *std.Io.Reader, comptime T: type) !T {
+    return switch (T) {
+        f32 => @bitCast(try reader.takeInt(u32, .little)),
+        u64 => try reader.takeInt(u64, .little),
+        else => @compileError("optim frame: no record scalar of type " ++ @typeName(T)),
+    };
+}
+
+/// Read one header scalar and require it to equal the live `value` (a
+/// pinned structural config field), compared in wire form: f32 as bits,
+/// enum as its tag, so a tag the enum does not name is a plain mismatch.
+pub fn expectScalar(reader: *std.Io.Reader, value: anytype) !void {
+    const T = @TypeOf(value);
+    const same = switch (T) {
+        f32 => try reader.takeInt(u32, .little) == @as(u32, @bitCast(value)),
+        bool => try reader.takeInt(u8, .little) == @intFromBool(value),
+        u32 => try reader.takeInt(u32, .little) == value,
+        u64 => try reader.takeInt(u64, .little) == value,
+        usize => try reader.takeInt(u64, .little) == value,
+        else => switch (@typeInfo(T)) {
+            .@"enum" => try reader.takeInt(u8, .little) == @intFromEnum(value),
+            else => @compileError("optim frame: no wire form for " ++ @typeName(T)),
+        },
+    };
+    if (!same) return OptimError.CheckpointConfigMismatch;
 }
 
 /// v5 frames exist to persist f32 MASTER weights for 16-bit params: resuming
@@ -141,6 +165,29 @@ pub fn readStateSlice(reader: *std.Io.Reader, version: FrameVersion, buf: StateB
     };
     if (stored != @as(StateDType, buf)) return OptimError.CheckpointDtypeMismatch;
     try reader.readSliceAll(dest);
+}
+
+/// Storage bytes of one record field: `StateBuf`s and raw `[]f32`s carry
+/// their buffer bytes (the v4/v5 dtype tag is not counted); scalars are
+/// decoded into the staged State copy instead and contribute nothing.
+pub fn recordFieldBytes(value: anytype) usize {
+    return switch (@TypeOf(value)) {
+        StateBuf => value.byteLen(),
+        []f32 => 4 * value.len,
+        else => 0,
+    };
+}
+
+/// Write one per-slot record field by its type: a `StateBuf` as a
+/// version-tagged state record, a raw `[]f32` as untagged f32 bytes
+/// (Apollo's always-f32 moments, in every version), anything else through
+/// `writeScalar`.
+pub fn writeRecordField(writer: *std.Io.Writer, version: FrameVersion, value: anytype) !void {
+    switch (@TypeOf(value)) {
+        StateBuf => try writeStateSlice(writer, version, value),
+        []f32 => try writeF32Slice(writer, value),
+        else => try writeScalar(writer, value),
+    }
 }
 
 /// Serialize parameter values (shapes + f32 data, little-endian). `tensors` is
@@ -216,21 +263,39 @@ fn validateName(name: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(name)) return OptimError.CheckpointInvalidName;
 }
 
-/// Validate the effective names of one name-matched slot list before saving:
-/// well-formed and collision-free (an explicit name can also collide with an
-/// auto-name). O(n^2) compares — checkpoint-time only, allocation-free.
-pub fn validateSlotNames(slots: anytype) !void {
-    for (slots, 0..) |*a, i| {
-        var buf_a: [auto_name_buf_len]u8 = undefined;
-        const name_a = slotName(&a.param, i, &buf_a);
-        try validateName(name_a);
-        for (slots[i + 1 ..], i + 1..) |*b, j| {
-            var buf_b: [auto_name_buf_len]u8 = undefined;
-            if (std.mem.eql(u8, name_a, slotName(&b.param, j, &buf_b))) {
-                return OptimError.CheckpointDuplicateName;
-            }
+/// The name -> slot-index map of one slot list, built once per save or
+/// load. Building it validates every effective name: well-formed
+/// (`validateName`) and collision-free, an explicit name colliding with an
+/// unnamed slot's auto-name included. Auto-names are formatted into the
+/// arena; explicit names are borrowed (they outlive the optimizer).
+pub const SlotIndex = struct {
+    arena: std.heap.ArenaAllocator,
+    map: std.StringHashMapUnmanaged(usize) = .empty,
+
+    pub fn build(allocator: Allocator, slots: anytype) !SlotIndex {
+        var self: SlotIndex = .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+        errdefer self.deinit();
+        const arena = self.arena.allocator();
+        for (slots, 0..) |*slot, i| {
+            const name = slot.param.name orelse try std.fmt.allocPrint(arena, "param{d}", .{i});
+            try validateName(name);
+            const entry = try self.map.getOrPut(arena, name);
+            if (entry.found_existing) return OptimError.CheckpointDuplicateName;
+            entry.value_ptr.* = i;
         }
+        return self;
     }
+
+    pub fn deinit(self: *SlotIndex) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Validate one slot list's names before a save (see `SlotIndex.build`).
+pub fn validateSlotNames(allocator: Allocator, slots: anytype) !void {
+    var index = try SlotIndex.build(allocator, slots);
+    index.deinit();
 }
 
 pub fn writeSlotName(writer: *std.Io.Writer, param: *const Param, index: usize) !void {
@@ -240,41 +305,41 @@ pub fn writeSlotName(writer: *std.Io.Writer, param: *const Param, index: usize) 
     try writer.writeAll(name);
 }
 
-/// Name-matches v3/v4 optimizer slot records to registered slots, enforcing the
-/// fill-exactly-once contract: an unknown record name, a record matching an
-/// already-filled slot, and a slot left unfilled at the end all error.
+/// Name-matches optimizer slot records to registered slots through a
+/// `SlotIndex`, enforcing the fill-exactly-once contract: an unknown record
+/// name, a record matching an already-filled slot, and a slot left unfilled
+/// at the end all error. A slot list whose own names collide is rejected
+/// at `init`, before any record is read.
 pub const SlotMatcher = struct {
+    index: SlotIndex,
     filled: []bool,
     name_buf: []u8,
 
-    pub fn init(allocator: Allocator, slot_count: usize) !SlotMatcher {
-        const filled = try allocator.alloc(bool, slot_count);
-        errdefer allocator.free(filled);
+    pub fn init(allocator: Allocator, slots: anytype) !SlotMatcher {
+        var index = try SlotIndex.build(allocator, slots);
+        errdefer index.deinit();
+        const arena = index.arena.allocator();
+        const filled = try arena.alloc(bool, slots.len);
         @memset(filled, false);
-        const name_buf = try allocator.alloc(u8, max_name_len);
-        return .{ .filled = filled, .name_buf = name_buf };
+        const name_buf = try arena.alloc(u8, max_name_len);
+        return .{ .index = index, .filled = filled, .name_buf = name_buf };
     }
 
-    pub fn deinit(self: *SlotMatcher, allocator: Allocator) void {
-        allocator.free(self.filled);
-        allocator.free(self.name_buf);
+    pub fn deinit(self: *SlotMatcher) void {
+        self.index.deinit();
         self.* = undefined;
     }
 
     /// Read one record's name and resolve it to a not-yet-filled slot index.
-    pub fn match(self: *SlotMatcher, reader: *std.Io.Reader, slots: anytype) !usize {
+    pub fn match(self: *SlotMatcher, reader: *std.Io.Reader) !usize {
         const name_len = try reader.takeInt(u16, .little);
         if (name_len == 0) return OptimError.CheckpointInvalidName;
         const name = self.name_buf[0..name_len];
         try reader.readSliceAll(name);
-        for (slots, 0..) |*slot, i| {
-            var buf: [auto_name_buf_len]u8 = undefined;
-            if (!std.mem.eql(u8, name, slotName(&slot.param, i, &buf))) continue;
-            if (self.filled[i]) return OptimError.CheckpointDuplicateName;
-            self.filled[i] = true;
-            return i;
-        }
-        return OptimError.CheckpointUnknownName;
+        const i = self.index.map.get(name) orelse return OptimError.CheckpointUnknownName;
+        if (self.filled[i]) return OptimError.CheckpointDuplicateName;
+        self.filled[i] = true;
+        return i;
     }
 
     pub fn requireAllFilled(self: *const SlotMatcher) !void {
