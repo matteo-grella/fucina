@@ -15,7 +15,6 @@ const backward_elementwise = @import("../backward/elementwise.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const DType = tensor_mod.DType;
-const TensorError = tensor_mod.TensorError;
 const ExecContext = exec_mod.ExecContext;
 const GatedOp = exec_mod.GatedOp;
 const GradState = core.GradState;
@@ -25,19 +24,8 @@ const normalizeTags = tags_mod.normalizeTags;
 const rawRank = tags_mod.rawRank;
 const removeTags = tags_mod.removeTags;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const dotResultTags = tags_mod.dotResultTags;
 const tagsEqual = tags_mod.tagsEqual;
-const dotLeftOrder = tags_mod.dotLeftOrder;
-const dotRightOrder = tags_mod.dotRightOrder;
-const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
-const dotBatchTags = tags_mod.dotBatchTags;
-const dotLeftFreeTags = tags_mod.dotLeftFreeTags;
-const dotRightFreeTags = tags_mod.dotRightFreeTags;
-const alignTensorTo = tag_ops.alignTensorTo;
-const contiguousForReshape = tag_ops.contiguousForReshape;
-const dotResultShape = tag_ops.dotResultShape;
 const pointwiseShape = tag_ops.pointwiseShape;
-const productRange = tag_ops.productRange;
 const validateTensorRank = tag_ops.validateTensorRank;
 const PointwiseOp = backward_common.PointwiseOp;
 const PointwiseBackward = backward_elementwise.PointwiseBackward;
@@ -403,174 +391,6 @@ pub fn Mod(comptime ag_tensor: type) type {
             }
 
             return source.viewWithStrides(shape[0..], strides[0..]);
-        }
-
-        pub fn typedDotRaw(
-            comptime tensor_dtype: DType,
-            comptime left_tags: anytype,
-            left: *const tensor_mod.TensorOf(tensor_dtype),
-            ctx: *ExecContext,
-            comptime right_tags: anytype,
-            right: *const tensor_mod.TensorOf(tensor_dtype),
-            comptime contract_tag: Tag,
-        ) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
-            const result_shape = try dotResultShape(tensor_dtype, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
-            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
-            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
-
-            const left_order = dotLeftOrder(left_tags, right_tags, contract_tag);
-            var left_aligned = try alignTensorTo(tensor_dtype, left_tags, left, left_order);
-            defer left_aligned.deinit();
-
-            const right_order = dotRightOrder(left_tags, right_tags, contract_tag);
-            var right_aligned = try alignTensorTo(tensor_dtype, right_tags, right, right_order);
-            defer right_aligned.deinit();
-
-            const m = productRange(tensor_dtype, &left_aligned, batch_rank, left_free_rank);
-            const k = left_aligned.shape.at(batch_rank + left_free_rank);
-            const n = productRange(tensor_dtype, &right_aligned, batch_rank + 1, right_free_rank);
-
-            var left_ready = try contiguousForReshape(tensor_dtype, ctx, &left_aligned);
-            defer left_ready.deinit();
-            var right_ready = try contiguousForReshape(tensor_dtype, ctx, &right_aligned);
-            defer right_ready.deinit();
-
-            if (comptime batch_rank == 0 and left_free_rank == 0 and right_free_rank == 0) {
-                var left_vector = try left_ready.reshape(&.{k});
-                defer left_vector.deinit();
-                var right_vector = try right_ready.reshape(&.{k});
-                defer right_vector.deinit();
-                return ctx.dot(tensor_dtype, &left_vector, &right_vector);
-            }
-
-            if (comptime batch_rank != 0) {
-                const num_batches = productRange(tensor_dtype, &left_aligned, 0, batch_rank);
-                var left_batched = try left_ready.reshape(&.{ num_batches, m, k });
-                defer left_batched.deinit();
-                var right_batched = try right_ready.reshape(&.{ num_batches, k, n });
-                defer right_batched.deinit();
-                var product = try ctx.bmm(tensor_dtype, .plain, &left_batched, &right_batched);
-                errdefer product.deinit();
-                if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) return product;
-                const reshaped = try product.reshape(result_shape[0..]);
-                product.deinit();
-                return reshaped;
-            }
-
-            var left_matrix = try left_ready.reshape(&.{ m, k });
-            defer left_matrix.deinit();
-            var right_matrix = try right_ready.reshape(&.{ k, n });
-            defer right_matrix.deinit();
-            var matmul = try ctx.matmul(tensor_dtype, .plain, &left_matrix, &right_matrix);
-            errdefer matmul.deinit();
-
-            if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
-            const reshaped = try matmul.reshape(result_shape[0..]);
-            matmul.deinit();
-            return reshaped;
-        }
-
-        pub fn quantizedRhsDotRaw(
-            comptime rhs_dtype: DType,
-            comptime left_tags: anytype,
-            left: *const RawTensor,
-            ctx: *ExecContext,
-            comptime right_tags: anytype,
-            right: *const tensor_mod.TensorOf(rhs_dtype),
-            comptime contract_tag: Tag,
-            allow_gpu: bool,
-        ) !RawTensor {
-            comptime if (!dtype_mod.isBlockQuantized(rhs_dtype)) @compileError("quantizedRhsDotRaw requires a block-quantized RHS dtype");
-            comptime if (!dtype_mod.supportsQuantizedMatmulRhs(rhs_dtype)) @compileError("RHS dtype does not support quantized matmul");
-
-            const result_shape = try dotResultShape(.f32, rhs_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
-            if (comptime batch_rank != 0) @compileError("quantized RHS dot does not support shared batch tags yet");
-
-            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
-            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
-            if (comptime right_free_rank != 1) @compileError("quantized RHS dot requires one RHS free axis");
-
-            const expected_right_order = dotRightTransBOrder(left_tags, right_tags, contract_tag);
-            comptime if (!tagsEqual(right_tags, expected_right_order)) {
-                @compileError("quantized RHS dot requires RHS storage order [free, contract], e.g. weight tags {.out, .in}");
-            };
-
-            const left_order = dotLeftOrder(left_tags, right_tags, contract_tag);
-            var left_aligned = try alignTensorTo(.f32, left_tags, left, left_order);
-            defer left_aligned.deinit();
-
-            const m = productRange(.f32, &left_aligned, batch_rank, left_free_rank);
-            const k = left_aligned.shape.at(batch_rank + left_free_rank);
-            if (right.shape.at(1) != k) return TensorError.ShapeMismatch;
-
-            var left_ready = try contiguousForReshape(.f32, ctx, &left_aligned);
-            defer left_ready.deinit();
-
-            var left_matrix = try left_ready.reshape(&.{ m, k });
-            defer left_matrix.deinit();
-            var matmul = try ctx.matmul2DWithQuantizedTensorRhs(rhs_dtype, &left_matrix, right, .{ .allow_gpu = allow_gpu });
-            errdefer matmul.deinit();
-
-            if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
-            const reshaped = try matmul.reshape(result_shape[0..]);
-            matmul.deinit();
-            return reshaped;
-        }
-
-        /// The f16/bf16 constant-RHS lowering `dot` shares with the quantized
-        /// arms: the NT fast path runs the half-precision TransB kernel when the
-        /// contraction is a plain 2-D `[m,k]x[n,k]` (no batch axes, one right
-        /// free axis, right already in TransB order); everything else widens the
-        /// RHS to f32 once and takes the typed dot.
-        pub fn halfRhsDotRaw(
-            comptime rhs_dtype: DType,
-            comptime left_tags: anytype,
-            left: *const RawTensor,
-            ctx: *ExecContext,
-            comptime right_tags: anytype,
-            right: *const tensor_mod.TensorOf(rhs_dtype),
-            comptime contract_tag: Tag,
-        ) !RawTensor {
-            comptime std.debug.assert(rhs_dtype == .f16 or rhs_dtype == .bf16);
-            const result_shape = try dotResultShape(.f32, rhs_dtype, left_tags, left, right_tags, right, contract_tag);
-            const batch_rank = comptime dotBatchTags(left_tags, right_tags, contract_tag).len;
-            const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
-            const right_free_rank = comptime dotRightFreeTags(left_tags, right_tags, contract_tag).len;
-
-            const expected_right_order = dotRightTransBOrder(left_tags, right_tags, contract_tag);
-            if (comptime batch_rank == 0 and right_free_rank == 1 and tagsEqual(right_tags, expected_right_order)) {
-                const left_order = dotLeftOrder(left_tags, right_tags, contract_tag);
-                var left_aligned = try alignTensorTo(.f32, left_tags, left, left_order);
-                defer left_aligned.deinit();
-
-                const m = productRange(.f32, &left_aligned, batch_rank, left_free_rank);
-                const k = left_aligned.shape.at(batch_rank + left_free_rank);
-                if (right.shape.at(1) != k) return TensorError.ShapeMismatch;
-
-                var left_ready = try contiguousForReshape(.f32, ctx, &left_aligned);
-                defer left_ready.deinit();
-                var right_ready = try contiguousForReshape(rhs_dtype, ctx, right);
-                defer right_ready.deinit();
-
-                var left_matrix = try left_ready.reshape(&.{ m, k });
-                defer left_matrix.deinit();
-                var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), k });
-                defer right_matrix.deinit();
-
-                var matmul = try ctx.matmulHalfRhs(rhs_dtype, &left_matrix, &right_matrix);
-                errdefer matmul.deinit();
-
-                if (std.mem.eql(usize, matmul.shape.slice(), result_shape[0..])) return matmul;
-                const reshaped = try matmul.reshape(result_shape[0..]);
-                matmul.deinit();
-                return reshaped;
-            }
-
-            var right_f32 = try ctx.cast(rhs_dtype, .f32, right);
-            defer right_f32.deinit();
-            return typedDotRaw(.f32, left_tags, left, ctx, right_tags, &right_f32, contract_tag);
         }
 
         pub fn TensorObject(comptime T: type) type {

@@ -241,10 +241,10 @@ test "public non-f32 float Tensor dot supports multi-free and batch tags" {
     }, batched_product.asRawTensor().dataConst());
 }
 
-/// The batched typed dot (`plumbing.typedDotRaw`, batch tags shared by
-/// both operands) against a per-batch loop of the 2-D typed GEMM
-/// (`ctx.matmul(dtype, .plain, ...)`), compared BITWISE: the batched arm
-/// must be a layout change, not a numerics change.
+/// The batched typed dot (the `.typed` arm of `tag_ops.contract`, batch
+/// tags shared by both operands) against a per-batch loop of the 2-D
+/// typed GEMM (`ctx.matmul(dtype, .plain, ...)`), compared BITWISE: the
+/// batched arm must be a layout change, not a numerics change.
 fn expectTypedBatchedDotMatchesPerBatchGemm(
     comptime float_dtype: DType,
     ctx: *ExecContext,
@@ -302,6 +302,58 @@ test "typed dot batched arm is bitwise the per-batch typed GEMM (f16, bf16)" {
         try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 3, 5, 8, 2);
         try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 2, 16, 16, 16);
         try expectTypedBatchedDotMatchesPerBatchGemm(float_dtype, &ctx, 2, 24, 40, 32);
+    }
+}
+
+/// The unbatched typed dot through the unified `tag_ops.contract` lowering
+/// against the 2-D typed GEMM called directly, compared BITWISE for every
+/// typed float dtype (f64 has no batched arm — `ctx.bmm` compute is
+/// f32/f16/bf16): routing dot through the shared einsum classification
+/// must not change a single bit.
+fn expectTypedDotMatchesDirectGemm(
+    comptime float_dtype: DType,
+    ctx: *ExecContext,
+    m: usize,
+    k: usize,
+    n: usize,
+) !void {
+    const allocator = ctx.allocator;
+    const left_values = try allocator.alloc(f32, m * k);
+    defer allocator.free(left_values);
+    for (left_values, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.7 + 0.3) * 0.5;
+    const right_values = try allocator.alloc(f32, k * n);
+    defer allocator.free(right_values);
+    for (right_values, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.4 + 0.9) * 0.5;
+
+    var left32 = try Tensor(.{ .m, .k }).fromSlice(ctx, .{ m, k }, left_values);
+    defer left32.deinit();
+    var left = try left32.to(ctx, float_dtype);
+    defer left.deinit();
+    var right32 = try Tensor(.{ .k, .n }).fromSlice(ctx, .{ k, n }, right_values);
+    defer right32.deinit();
+    var right = try right32.to(ctx, float_dtype);
+    defer right.deinit();
+
+    var product = try left.dot(ctx, &right, .k);
+    defer product.deinit();
+    try std.testing.expectEqualSlices(usize, &.{ m, n }, product.asRawTensor().shape.slice());
+
+    var reference = try ctx.matmul(float_dtype, .plain, left.asRawTensor(), right.asRawTensor());
+    defer reference.deinit();
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(reference.dataConst()), std.mem.sliceAsBytes(product.asRawTensor().dataConst()));
+}
+
+test "typed dot through the unified contract lowering is bitwise the direct typed GEMM (f16, bf16, f64)" {
+    inline for (.{ DType.f16, DType.bf16, DType.f64 }) |float_dtype| {
+        var gpa = std.heap.DebugAllocator(.{}){};
+        defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+        var ctx: ExecContext = undefined;
+        ctx.init(gpa.allocator());
+        defer ctx.deinit();
+
+        try expectTypedDotMatchesDirectGemm(float_dtype, &ctx, 3, 4, 5);
+        try expectTypedDotMatchesDirectGemm(float_dtype, &ctx, 16, 16, 16);
+        try expectTypedDotMatchesDirectGemm(float_dtype, &ctx, 24, 40, 32);
     }
 }
 

@@ -63,8 +63,6 @@ pub fn Ops(comptime Self: type) type {
         const differentiable = dtype == .f32;
         const matmul_dtype = dtype_mod.outputDType(.matmul, dtype);
         const finishNoGrad = plumbing.finishNoGrad;
-        const quantizedRhsDotRaw = plumbing.quantizedRhsDotRaw;
-        const halfRhsDotRaw = plumbing.halfRhsDotRaw;
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
@@ -145,7 +143,7 @@ pub fn Ops(comptime Self: type) type {
                 // kernels through the context's disable scope, keeping
                 // the recompute bitwise against pass 1.
                 const allow_gpu = ctx.quantDotGpuEnabled();
-                var value = try quantizedRhsDotRaw(Other.dtype, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag, allow_gpu);
+                var value = try tag_ops.contract(.{ .quant_rhs = Other.dtype }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{ .allow_gpu = allow_gpu });
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
                 const Record = ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag);
@@ -162,7 +160,7 @@ pub fn Ops(comptime Self: type) type {
                 });
             }
             if (comptime Other.dtype == .f16) {
-                var value = try halfRhsDotRaw(.f16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+                var value = try tag_ops.contract(.{ .half_rhs = .f16 }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
                 const Record = ConstRhsDotBackward(.f16, tags, other_tags, contract_tag);
@@ -179,7 +177,7 @@ pub fn Ops(comptime Self: type) type {
                 });
             }
             if (comptime Other.dtype == .bf16) {
-                var value = try halfRhsDotRaw(.bf16, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+                var value = try tag_ops.contract(.{ .half_rhs = .bf16 }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
                 const Record = ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag);
@@ -195,7 +193,7 @@ pub fn Ops(comptime Self: type) type {
                     .left_value = saved_left,
                 });
             }
-            var value = try tag_ops.taggedDot(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), contract_tag);
+            var value = try tag_ops.contract(.f32, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
             const Record = DotBackward(tags, other_tags, contract_tag);

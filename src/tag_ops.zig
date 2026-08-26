@@ -34,6 +34,10 @@ const reduceAxesDescending = tags_mod.reduceAxesDescending;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
 const dotResultTags = tags_mod.dotResultTags;
 const dotBatchTags = tags_mod.dotBatchTags;
+const dotLeftOrder = tags_mod.dotLeftOrder;
+const dotLeftFreeTags = tags_mod.dotLeftFreeTags;
+const dotRightFreeTags = tags_mod.dotRightFreeTags;
+const dotRightTransBOrder = tags_mod.dotRightTransBOrder;
 const splitTags = tags_mod.splitTags;
 const mergeTags = tags_mod.mergeTags;
 const mergeStartAxis = tags_mod.mergeStartAxis;
@@ -150,7 +154,7 @@ pub fn taggedEinsum(
     right: *const tensor_mod.TensorOf(tensor_dtype),
     comptime out_tags: anytype,
 ) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
-    if (comptime tensor_dtype == .f32) return taggedEinsumF32(left_tags, left, ctx, right_tags, right, out_tags);
+    if (comptime tensor_dtype == .f32) return einsumLower(.f32, .probe_orientation, left_tags, left, ctx, right_tags, right, out_tags);
     // The f32 lowering behind the `.widened` policy: both operands widen
     // once, the result narrows once (the matmul output dtype).
     const compute = comptime ExecContext.widenedCompute(tensor_dtype, "einsum");
@@ -158,38 +162,226 @@ pub fn taggedEinsum(
     defer ll.deinit();
     var rr = try ctx.prepareAs(tensor_dtype, compute, right);
     defer rr.deinit();
-    var value = try taggedEinsumF32(left_tags, ll.tensor(), ctx, right_tags, rr.tensor(), out_tags);
+    var value = try einsumLower(.f32, .probe_orientation, left_tags, ll.tensor(), ctx, right_tags, rr.tensor(), out_tags);
     errdefer value.deinit();
     return ctx.storeAs(compute, comptime dtype_mod.outputDType(.matmul, tensor_dtype), value);
 }
 
-fn taggedEinsumF32(
+/// The operand kind of a tagged contraction: which RHS representation the
+/// lowering contracts against, and which GEMM family that arm calls. ONE
+/// lowering (`contract`) owns the tag algebra, operand alignment, kernel
+/// ordering and batch collapse for every kind; the kinds differ in the
+/// kernel call and in which equations they accept (the non-f32 kinds take
+/// the canonical dot equation: one contraction tag, no summed-away
+/// operand-private axes, result order batch ++ left free ++ right free).
+pub const ContractKind = union(enum) {
+    /// Both operands f32: the full einsum lowering — pre-summed private
+    /// axes, plain/transA/transB orientation probing by contiguity,
+    /// interleaved output orders, batch collapse onto one bmm axis.
+    f32,
+    /// Both operands one typed dtype on the native typed GEMM family
+    /// (`ctx.dot`/`ctx.matmul`/`ctx.bmm` at the stored dtype), plain
+    /// orientation only. f16/bf16 do NOT widen through the f32 path
+    /// here: native numerics and speed are the typed dot's contract.
+    typed: DType,
+    /// f32 LHS against a constant f16/bf16 RHS stored `[free, contract]`:
+    /// the half-precision TransB kernel on the NT fast path; anything
+    /// else widens the RHS to f32 once and takes the `.typed = .f32` arm.
+    half_rhs: DType,
+    /// f32 LHS against a block-quantized RHS stored `[free, contract]`:
+    /// the fused quantized TransB GEMM (batchless, one RHS free axis).
+    quant_rhs: DType,
+};
+
+pub fn contractLhsDType(comptime kind: ContractKind) DType {
+    return switch (kind) {
+        .typed => |tensor_dtype| tensor_dtype,
+        else => .f32,
+    };
+}
+
+pub fn contractRhsDType(comptime kind: ContractKind) DType {
+    return switch (kind) {
+        .f32 => .f32,
+        .typed, .half_rhs, .quant_rhs => |tensor_dtype| tensor_dtype,
+    };
+}
+
+pub fn contractOutDType(comptime kind: ContractKind) DType {
+    return switch (kind) {
+        .typed => |tensor_dtype| dtype_mod.outputDType(.matmul, tensor_dtype),
+        else => .f32,
+    };
+}
+
+/// Runtime options of `contract`: today only the quantized arm's GPU gate.
+pub const ContractOptions = struct {
+    allow_gpu: bool = false,
+};
+
+/// The one tagged-contraction lowering, parameterized by operand kind.
+/// `out_tags` is the whole einsum equation; the facade `dot`/`einsum`
+/// entries are thin equation builders over this. The `.f32` kind accepts
+/// any equation; `.typed` runs the same engine at the stored dtype with
+/// the plain-orientation policy; `.half_rhs`/`.quant_rhs` are the
+/// TransB-layout constant-weight kernels over the shared LHS preparation.
+pub fn contract(
+    comptime kind: ContractKind,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(contractLhsDType(kind)),
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const RawTensor,
+    right: *const tensor_mod.TensorOf(contractRhsDType(kind)),
     comptime out_tags: anytype,
+    opts: ContractOptions,
+) !tensor_mod.TensorOf(contractOutDType(kind)) {
+    switch (comptime kind) {
+        .f32 => return einsumLower(.f32, .probe_orientation, left_tags, left, ctx, right_tags, right, out_tags),
+        .typed => |tensor_dtype| {
+            _ = comptime dotContractTag(left_tags, right_tags, out_tags);
+            return einsumLower(tensor_dtype, .plain_only, left_tags, left, ctx, right_tags, right, out_tags);
+        },
+        .quant_rhs => |tensor_dtype| {
+            comptime if (!dtype_mod.isBlockQuantized(tensor_dtype)) @compileError("quantized RHS contraction requires a block-quantized RHS dtype");
+            comptime if (!dtype_mod.supportsQuantizedMatmulRhs(tensor_dtype)) @compileError("RHS dtype does not support quantized matmul");
+            const contract_tag = comptime dotContractTag(left_tags, right_tags, out_tags);
+            comptime if (dotBatchTags(left_tags, right_tags, contract_tag).len != 0) @compileError("quantized RHS dot does not support shared batch tags yet");
+            comptime if (dotRightFreeTags(left_tags, right_tags, contract_tag).len != 1) @compileError("quantized RHS dot requires one RHS free axis");
+            comptime if (!tagsEqual(right_tags, dotRightTransBOrder(left_tags, right_tags, contract_tag))) {
+                @compileError("quantized RHS dot requires RHS storage order [free, contract], e.g. weight tags {.out, .in}");
+            };
+
+            const result_shape = try dotResultShape(.f32, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
+            var left_matrix = try dotLhsMatrix(left_tags, right_tags, contract_tag, left, ctx, right.shape.at(1));
+            defer left_matrix.deinit();
+            const product = try ctx.matmul2DWithQuantizedTensorRhs(tensor_dtype, &left_matrix, right, .{ .allow_gpu = opts.allow_gpu });
+            return contractFinish(.f32, product, result_shape[0..]);
+        },
+        .half_rhs => |tensor_dtype| {
+            comptime std.debug.assert(tensor_dtype == .f16 or tensor_dtype == .bf16);
+            const contract_tag = comptime dotContractTag(left_tags, right_tags, out_tags);
+            // The NT fast path runs the half-precision TransB kernel when
+            // the contraction is a plain 2-D `[m,k]x[n,k]` (no batch axes,
+            // one right free axis, right already in TransB order);
+            // everything else widens the RHS to f32 once and takes the
+            // typed arm.
+            const nt_layout = comptime dotBatchTags(left_tags, right_tags, contract_tag).len == 0 and
+                dotRightFreeTags(left_tags, right_tags, contract_tag).len == 1 and
+                tagsEqual(right_tags, dotRightTransBOrder(left_tags, right_tags, contract_tag));
+            if (comptime nt_layout) {
+                const result_shape = try dotResultShape(.f32, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
+                var left_matrix = try dotLhsMatrix(left_tags, right_tags, contract_tag, left, ctx, right.shape.at(1));
+                defer left_matrix.deinit();
+                var right_ready = try contiguousForReshape(tensor_dtype, ctx, right);
+                defer right_ready.deinit();
+                var right_matrix = try right_ready.reshape(&.{ right.shape.at(0), right.shape.at(1) });
+                defer right_matrix.deinit();
+                const product = try ctx.matmulHalfRhs(tensor_dtype, &left_matrix, &right_matrix);
+                return contractFinish(.f32, product, result_shape[0..]);
+            }
+            var right_f32 = try ctx.cast(tensor_dtype, .f32, right);
+            defer right_f32.deinit();
+            return contract(.{ .typed = .f32 }, left_tags, left, ctx, right_tags, &right_f32, out_tags, .{});
+        },
+    }
+}
+
+/// The single contraction tag of a canonical dot equation, derived from
+/// the einsum equation (the shared tags dropped from `out_tags`). The
+/// non-f32 contraction kinds accept exactly this shape.
+fn dotContractTag(comptime left_tags: anytype, comptime right_tags: anytype, comptime out_tags: anytype) Tag {
+    comptime {
+        const norm_out = normalizeTags(out_tags);
+        einsumValidate(left_tags, right_tags, norm_out);
+        const contract_tags = einsumPartTags(left_tags, right_tags, norm_out, .contract);
+        if (contract_tags.len != 1)
+            @compileError("the typed/half/quantized contraction arms take exactly one contraction tag (the dot equation); use the f32 einsum for anything else");
+        if (einsumPartTags(left_tags, right_tags, norm_out, .left_summed).len != 0 or
+            einsumPartTags(left_tags, right_tags, norm_out, .right_summed).len != 0)
+            @compileError("the typed/half/quantized contraction arms do not sum away operand-private axes; use the f32 einsum");
+        if (!tagsEqual(norm_out, dotResultTags(left_tags, right_tags, contract_tags[0])))
+            @compileError("the typed/half/quantized contraction arms produce the canonical dot order (batch ++ left free ++ right free)");
+        return contract_tags[0];
+    }
+}
+
+/// The LHS of a batchless TransB-style contraction as the kernel's
+/// `[m, k]` matrix: aligned to the canonical dot order, materialized when
+/// the aligned view is not contiguous, and flattened. Checks the RHS
+/// contract dim against k. The caller owns (deinits) the returned matrix.
+fn dotLhsMatrix(
+    comptime left_tags: anytype,
+    comptime right_tags: anytype,
+    comptime contract_tag: Tag,
+    left: *const RawTensor,
+    ctx: *ExecContext,
+    rhs_contract_dim: usize,
 ) !RawTensor {
+    const left_free_rank = comptime dotLeftFreeTags(left_tags, right_tags, contract_tag).len;
+    var left_aligned = try alignTensorTo(.f32, left_tags, left, dotLeftOrder(left_tags, right_tags, contract_tag));
+    defer left_aligned.deinit();
+    const m = productRange(.f32, &left_aligned, 0, left_free_rank);
+    const k = left_aligned.shape.at(left_free_rank);
+    if (rhs_contract_dim != k) return TensorError.ShapeMismatch;
+    var left_ready = try contiguousForReshape(.f32, ctx, &left_aligned);
+    defer left_ready.deinit();
+    return left_ready.reshape(&.{ m, k });
+}
+
+/// The shared epilogue: the kernel product reshaped (metadata only) to the
+/// per-axis result shape when they differ.
+fn contractFinish(
+    comptime tensor_dtype: DType,
+    product: tensor_mod.TensorOf(tensor_dtype),
+    result_shape: []const usize,
+) !tensor_mod.TensorOf(tensor_dtype) {
+    var owned = product;
+    errdefer owned.deinit();
+    if (std.mem.eql(usize, owned.shape.slice(), result_shape)) return owned;
+    const reshaped = try owned.reshape(result_shape);
+    owned.deinit();
+    return reshaped;
+}
+
+/// The GEMM orientation policy of `einsumLower`: the f32 kind probes
+/// operand contiguity and picks plain/transA/transB (a transposed GEMM is
+/// free while a materialize costs a copy); the typed kind is pinned to
+/// the plain kernels so the typed dot keeps its exact native sequence.
+const GemmPolicy = enum { probe_orientation, plain_only };
+
+fn einsumLower(
+    comptime tensor_dtype: DType,
+    comptime policy: GemmPolicy,
+    comptime left_tags: anytype,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
+    ctx: *ExecContext,
+    comptime right_tags: anytype,
+    right: *const tensor_mod.TensorOf(tensor_dtype),
+    comptime out_tags: anytype,
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
     comptime einsumValidate(left_tags, right_tags, out_tags);
-    try validateTensorRank(.f32, left_tags, left);
-    try validateTensorRank(.f32, right_tags, right);
-    const result_shape = try einsumResultShape(.f32, .f32, left_tags, left, right_tags, right, out_tags);
+    try validateTensorRank(tensor_dtype, left_tags, left);
+    try validateTensorRank(tensor_dtype, right_tags, right);
+    const result_shape = try einsumResultShape(tensor_dtype, tensor_dtype, left_tags, left, right_tags, right, out_tags);
 
     // Operand-private dropped tags are summed away first: cheaper than
     // carrying them through the contraction, and it leaves every remaining
-    // axis with a batch/free/contract role.
+    // axis with a batch/free/contract role. The typed arms have none (the
+    // dot equation), so the pre-sum stays f32-only.
     const left_summed = comptime einsumPartTags(left_tags, right_tags, out_tags, .left_summed);
     const right_summed = comptime einsumPartTags(left_tags, right_tags, out_tags, .right_summed);
+    comptime if (tensor_dtype != .f32 and (left_summed.len != 0 or right_summed.len != 0)) {
+        @compileError("typed contraction does not sum away operand-private axes; use the f32 einsum");
+    };
     const l_tags = comptime removeTags(left_tags, left_summed);
     const r_tags = comptime removeTags(right_tags, right_summed);
 
-    var l_val = try sumManyTensor(left_tags, left, ctx, left_summed);
+    var l_val = if (comptime tensor_dtype == .f32) try sumManyTensor(left_tags, left, ctx, left_summed) else try left.cloneView();
     defer l_val.deinit();
-    var r_val = try sumManyTensor(right_tags, right, ctx, right_summed);
+    var r_val = if (comptime tensor_dtype == .f32) try sumManyTensor(right_tags, right, ctx, right_summed) else try right.cloneView();
     defer r_val.deinit();
 
-    var value = try einsumContract(l_tags, &l_val, ctx, r_tags, &r_val, out_tags);
+    var value = try einsumContract(tensor_dtype, policy, l_tags, &l_val, ctx, r_tags, &r_val, out_tags);
     errdefer value.deinit();
     if (out_tags.len != 0 and !std.mem.eql(usize, value.shape.slice(), result_shape[0..])) {
         const reshaped = try value.reshape(result_shape[0..]);
@@ -540,39 +732,42 @@ pub fn validateTensorRank(comptime tensor_dtype: DType, comptime tags: anytype, 
 
 /// Post-pre-sum einsum core: operands carry only batch/free/contract axes.
 fn einsumContract(
+    comptime tensor_dtype: DType,
+    comptime policy: GemmPolicy,
     comptime l_tags: anytype,
-    l: *const RawTensor,
+    l: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime r_tags: anytype,
-    r: *const RawTensor,
+    r: *const tensor_mod.TensorOf(tensor_dtype),
     comptime out_tags: anytype,
-) !RawTensor {
-    if (comptime out_tags.len == 0) return einsumFullDot(l_tags, l, ctx, r_tags, r);
-    return einsumGeneric(l_tags, l, ctx, r_tags, r, out_tags);
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
+    if (comptime out_tags.len == 0) return einsumFullDot(tensor_dtype, l_tags, l, ctx, r_tags, r);
+    return einsumGeneric(tensor_dtype, policy, l_tags, l, ctx, r_tags, r, out_tags);
 }
 
 /// Full contraction to a scalar: flatten both operands (right aligned to the
 /// left's axis order) and run the rank-1 dot kernel.
 fn einsumFullDot(
+    comptime tensor_dtype: DType,
     comptime l_tags: anytype,
-    l: *const RawTensor,
+    l: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime r_tags: anytype,
-    r: *const RawTensor,
-) !RawTensor {
-    var l_ready = try contiguousForReshape(.f32, ctx, l);
+    r: *const tensor_mod.TensorOf(tensor_dtype),
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
+    var l_ready = try contiguousForReshape(tensor_dtype, ctx, l);
     defer l_ready.deinit();
     var l_vec = try l_ready.reshape(&.{l_ready.len()});
     defer l_vec.deinit();
 
-    var r_aligned = try alignTensorTo(.f32, r_tags, r, l_tags);
+    var r_aligned = try alignTensorTo(tensor_dtype, r_tags, r, l_tags);
     defer r_aligned.deinit();
-    var r_ready = try contiguousForReshape(.f32, ctx, &r_aligned);
+    var r_ready = try contiguousForReshape(tensor_dtype, ctx, &r_aligned);
     defer r_ready.deinit();
     var r_vec = try r_ready.reshape(&.{r_ready.len()});
     defer r_vec.deinit();
 
-    return ctx.dot(.f32, &l_vec, &r_vec);
+    return ctx.dot(tensor_dtype, &l_vec, &r_vec);
 }
 
 /// Generic einsum lowering: align both operands to a group-nested order
@@ -582,15 +777,17 @@ fn einsumFullDot(
 /// Interleaved output orders contract in canonical order and pay one output
 /// materialization.
 fn einsumGeneric(
+    comptime tensor_dtype: DType,
+    comptime policy: GemmPolicy,
     comptime l_tags: anytype,
-    l: *const RawTensor,
+    l: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime r_tags: anytype,
-    r: *const RawTensor,
+    r: *const tensor_mod.TensorOf(tensor_dtype),
     comptime out_tags: anytype,
-) !RawTensor {
+) !tensor_mod.TensorOf(tensor_dtype) {
     const batch = comptime einsumPartTags(l_tags, r_tags, out_tags, .batch);
-    const contract = comptime einsumPartTags(l_tags, r_tags, out_tags, .contract);
+    const contracted = comptime einsumPartTags(l_tags, r_tags, out_tags, .contract);
     const lf = comptime einsumPartTags(l_tags, r_tags, out_tags, .left_free);
     const rf = comptime einsumPartTags(l_tags, r_tags, out_tags, .right_free);
     const batch_out = comptime intersectTags(out_tags, batch);
@@ -598,93 +795,100 @@ fn einsumGeneric(
     const rf_out = comptime intersectTags(out_tags, rf);
 
     if (comptime tagsEqual(batch_out ++ lf_out ++ rf_out, out_tags)) {
-        return einsumGenericGemm(l_tags, l, ctx, r_tags, r, batch_out, lf_out, rf_out, comptime intersectTags(l_tags, contract));
+        return einsumGenericGemm(tensor_dtype, policy, l_tags, l, ctx, r_tags, r, batch_out, lf_out, rf_out, comptime intersectTags(l_tags, contracted));
     }
     if (comptime tagsEqual(batch_out ++ rf_out ++ lf_out, out_tags)) {
-        return einsumGenericGemm(r_tags, r, ctx, l_tags, l, batch_out, rf_out, lf_out, comptime intersectTags(r_tags, contract));
+        return einsumGenericGemm(tensor_dtype, policy, r_tags, r, ctx, l_tags, l, batch_out, rf_out, lf_out, comptime intersectTags(r_tags, contracted));
     }
 
     const batch_phys = comptime intersectTags(l_tags, batch);
     const canon = comptime batch_phys ++ lf ++ rf;
-    var value = try einsumGenericGemm(l_tags, l, ctx, r_tags, r, batch_phys, lf, rf, comptime intersectTags(l_tags, contract));
+    var value = try einsumGenericGemm(tensor_dtype, policy, l_tags, l, ctx, r_tags, r, batch_phys, lf, rf, comptime intersectTags(l_tags, contracted));
     defer value.deinit();
-    var perm = try permuteTensorTo(canon, &value, out_tags);
+    comptime validateSameTagSet(canon, out_tags);
+    var perm = try alignTensorTo(tensor_dtype, canon, &value, out_tags);
     defer perm.deinit();
-    return ctx.materialize(.f32, &perm);
+    return ctx.materialize(tensor_dtype, &perm);
 }
 
 /// One aligned GEMM/BMM pass: `x` as kernel-left with free axes `m_ord`, `y`
-/// as kernel-right with free axes `n_ord`, contracting `k_ord`. Each operand
-/// picks its kernel layout (plain or transposed) at runtime: a transposed
-/// GEMM is free while materializing a permuted view costs a copy pass, so
-/// the orientation whose aligned view is already contiguous wins. At most
-/// one of transA/transB is available per call — when both operands prefer
-/// transposed, the larger one keeps it and the smaller is materialized.
+/// as kernel-right with free axes `n_ord`, contracting `k_ord`. Under the
+/// `.probe_orientation` policy each operand picks its kernel layout (plain
+/// or transposed) at runtime: a transposed GEMM is free while materializing
+/// a permuted view costs a copy pass, so the orientation whose aligned view
+/// is already contiguous wins. At most one of transA/transB is available
+/// per call — when both operands prefer transposed, the larger one keeps it
+/// and the smaller is materialized. Under `.plain_only` (the typed kinds)
+/// both operands take the plain layout, materializing when not contiguous.
 /// Returns the result shaped per-axis as batch_ord ++ m_ord ++ n_ord.
 fn einsumGenericGemm(
+    comptime tensor_dtype: DType,
+    comptime policy: GemmPolicy,
     comptime x_tags: anytype,
-    x: *const RawTensor,
+    x: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime y_tags: anytype,
-    y: *const RawTensor,
+    y: *const tensor_mod.TensorOf(tensor_dtype),
     comptime batch_ord: anytype,
     comptime m_ord: anytype,
     comptime n_ord: anytype,
     comptime k_ord: anytype,
-) !RawTensor {
+) !tensor_mod.TensorOf(tensor_dtype) {
     const x_plain_target = comptime batch_ord ++ m_ord ++ k_ord;
     const x_trans_target = comptime batch_ord ++ k_ord ++ m_ord;
     const y_plain_target = comptime batch_ord ++ k_ord ++ n_ord;
     const y_trans_target = comptime batch_ord ++ n_ord ++ k_ord;
 
-    var trans_a = false;
-    var trans_b = false;
-    {
-        var x_probe = try alignTensorTo(.f32, x_tags, x, x_plain_target);
+    const can_trans = comptime policy == .probe_orientation;
+    const orientation: struct { a: bool, b: bool } = blk: {
+        if (comptime !can_trans) break :blk .{ .a = false, .b = false };
+        var x_probe = try alignTensorTo(tensor_dtype, x_tags, x, x_plain_target);
         defer x_probe.deinit();
-        var y_probe = try alignTensorTo(.f32, y_tags, y, y_plain_target);
+        var y_probe = try alignTensorTo(tensor_dtype, y_tags, y, y_plain_target);
         defer y_probe.deinit();
         const x_plain_ok = x_probe.isContiguous();
         const y_plain_ok = y_probe.isContiguous();
         if (!x_plain_ok or !y_plain_ok) {
-            var x_trans_probe = try alignTensorTo(.f32, x_tags, x, x_trans_target);
+            var x_trans_probe = try alignTensorTo(tensor_dtype, x_tags, x, x_trans_target);
             defer x_trans_probe.deinit();
-            var y_trans_probe = try alignTensorTo(.f32, y_tags, y, y_trans_target);
+            var y_trans_probe = try alignTensorTo(tensor_dtype, y_tags, y, y_trans_target);
             defer y_trans_probe.deinit();
             const x_wants = !x_plain_ok and x_trans_probe.isContiguous();
             const y_wants = !y_plain_ok and y_trans_probe.isContiguous();
             if (x_wants and y_wants) {
-                if (x.len() >= y.len()) trans_a = true else trans_b = true;
-            } else {
-                trans_a = x_wants;
-                trans_b = y_wants;
+                if (x.len() >= y.len()) break :blk .{ .a = true, .b = false };
+                break :blk .{ .a = false, .b = true };
             }
+            break :blk .{ .a = x_wants, .b = y_wants };
         }
-    }
+        break :blk .{ .a = false, .b = false };
+    };
+    const trans_a = orientation.a;
+    const trans_b = orientation.b;
 
-    var x_aligned = if (trans_a) try alignTensorTo(.f32, x_tags, x, x_trans_target) else try alignTensorTo(.f32, x_tags, x, x_plain_target);
+    var x_aligned = if (trans_a) try alignTensorTo(tensor_dtype, x_tags, x, x_trans_target) else try alignTensorTo(tensor_dtype, x_tags, x, x_plain_target);
     defer x_aligned.deinit();
-    var y_aligned = if (trans_b) try alignTensorTo(.f32, y_tags, y, y_trans_target) else try alignTensorTo(.f32, y_tags, y, y_plain_target);
+    var y_aligned = if (trans_b) try alignTensorTo(tensor_dtype, y_tags, y, y_trans_target) else try alignTensorTo(tensor_dtype, y_tags, y, y_plain_target);
     defer y_aligned.deinit();
-    var x_ready = try contiguousForReshape(.f32, ctx, &x_aligned);
+    var x_ready = try contiguousForReshape(tensor_dtype, ctx, &x_aligned);
     defer x_ready.deinit();
-    var y_ready = try contiguousForReshape(.f32, ctx, &y_aligned);
+    var y_ready = try contiguousForReshape(tensor_dtype, ctx, &y_aligned);
     defer y_ready.deinit();
 
     const x_m_off: usize = if (trans_a) batch_ord.len + k_ord.len else batch_ord.len;
     const y_n_off: usize = if (trans_b) batch_ord.len else batch_ord.len + k_ord.len;
     const m = if (trans_a)
-        productRange(.f32, &x_ready, batch_ord.len + k_ord.len, m_ord.len)
+        productRange(tensor_dtype, &x_ready, batch_ord.len + k_ord.len, m_ord.len)
     else
-        productRange(.f32, &x_ready, batch_ord.len, m_ord.len);
+        productRange(tensor_dtype, &x_ready, batch_ord.len, m_ord.len);
     const k = if (trans_a)
-        productRange(.f32, &x_ready, batch_ord.len, k_ord.len)
+        productRange(tensor_dtype, &x_ready, batch_ord.len, k_ord.len)
     else
-        productRange(.f32, &x_ready, batch_ord.len + m_ord.len, k_ord.len);
+        productRange(tensor_dtype, &x_ready, batch_ord.len + m_ord.len, k_ord.len);
     const n = if (trans_b)
-        productRange(.f32, &y_ready, batch_ord.len, n_ord.len)
+        productRange(tensor_dtype, &y_ready, batch_ord.len, n_ord.len)
     else
-        productRange(.f32, &y_ready, batch_ord.len + k_ord.len, n_ord.len);
+        productRange(tensor_dtype, &y_ready, batch_ord.len + k_ord.len, n_ord.len);
 
     var value = blk: {
         if (comptime batch_ord.len == 0) {
@@ -692,9 +896,11 @@ fn einsumGenericGemm(
             defer xm.deinit();
             var ym = if (trans_b) try y_ready.reshape(&.{ n, k }) else try y_ready.reshape(&.{ k, n });
             defer ym.deinit();
-            if (trans_a) break :blk try ctx.matmul(.f32, .trans_a, &xm, &ym);
-            if (trans_b) break :blk try ctx.matmul(.f32, .trans_b, &xm, &ym);
-            break :blk try ctx.matmul(.f32, .plain, &xm, &ym);
+            if (comptime can_trans) {
+                if (trans_a) break :blk try ctx.matmul(tensor_dtype, .trans_a, &xm, &ym);
+                if (trans_b) break :blk try ctx.matmul(tensor_dtype, .trans_b, &xm, &ym);
+            }
+            break :blk try ctx.matmul(tensor_dtype, .plain, &xm, &ym);
         }
         // The batch group collapses into ONE bmm axis, so any batch count
         // the operands can represent is lowerable (no rank-cap on batch).
@@ -704,9 +910,11 @@ fn einsumGenericGemm(
         defer xb.deinit();
         var yb = try y_ready.reshape(&.{ batches, if (trans_b) n else k, if (trans_b) k else n });
         defer yb.deinit();
-        if (trans_a) break :blk try ctx.bmm(.f32, .trans_a, &xb, &yb);
-        if (trans_b) break :blk try ctx.bmm(.f32, .trans_b, &xb, &yb);
-        break :blk try ctx.bmm(.f32, .plain, &xb, &yb);
+        if (comptime can_trans) {
+            if (trans_a) break :blk try ctx.bmm(tensor_dtype, .trans_a, &xb, &yb);
+            if (trans_b) break :blk try ctx.bmm(tensor_dtype, .trans_b, &xb, &yb);
+        }
+        break :blk try ctx.bmm(tensor_dtype, .plain, &xb, &yb);
     };
     errdefer value.deinit();
 

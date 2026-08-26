@@ -84,9 +84,10 @@ pub fn Ops(comptime Self: type) type {
             return plumbing.finishTyped(ReducedOut(.{}), ctx, value);
         }
 
-        /// Same-dtype contraction over one tag (the typed lowering in
-        /// `plumbing.typedDotRaw`); the result dtype follows the matmul
-        /// policy (docs/reference/08, §8.3).
+        /// Same-dtype contraction over one tag (the `.typed` arm of the
+        /// unified `tag_ops.contract` lowering: the native typed GEMM
+        /// family, never widened through the f32 path); the result dtype
+        /// follows the matmul policy (docs/reference/08, §8.3).
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, dtype), .tags = dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag) }) {
             try requireNoGrad(self);
             try requireNoGrad(other);
@@ -94,7 +95,7 @@ pub fn Ops(comptime Self: type) type {
             comptime if (Other.dtype != dtype) @compileError("typed dot requires matching dtypes; cast explicitly");
             const result_tags = dotResultTags(tags, Other.axis_tags, contract_tag);
             const right = tensorObjectPtrFrom(@TypeOf(other), &other);
-            var value = try plumbing.typedDotRaw(dtype, tags, self.asRawTensor(), ctx, Other.axis_tags, right.asRawTensor(), contract_tag);
+            var value = try tag_ops.contract(.{ .typed = dtype }, tags, self.asRawTensor(), ctx, Other.axis_tags, right.asRawTensor(), result_tags, .{});
             errdefer value.deinit();
             return plumbing.finishTyped(Tensor(.{ .dtype = dtype_mod.outputDType(.matmul, dtype), .tags = result_tags }), ctx, value);
         }

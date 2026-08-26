@@ -574,8 +574,8 @@ test "tagged autograd bf16 RHS dot fallback path stays correct and differentiabl
     var x = try Tensor(.{ .batch, .in }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
     defer x.deinit();
     // RHS stored [contract, free] misses the TransB fast path and exercises
-    // the cast-to-f32 + typedDotRaw fallback. Same weights as the fast-path
-    // test, transposed.
+    // the cast-to-f32 + `.typed = .f32` contract fallback. Same weights as
+    // the fast-path test, transposed.
     const W = Tensor(.{ .dtype = .bf16, .tags = .{ .in, .out } });
     var w = try W.fromSlice(&ctx, .{ 3, 2 }, &.{
         dtype_mod.Bf16.fromF32(0.5),
