@@ -18,19 +18,19 @@ Plus one honest paragraph about the GPU offload seam, and a look at `lmserve`, t
 
 Everything in this chapter is a transformation of one loop, so the loop's shape has to be stated precisely first. Fucina states it as an invariant, documented on the speculative decoder's `step` and enforced at runtime (`src/models/text/speculative/core.zig:573-590`):
 
-> `history` holds every committed token (prompt + generated) and its LAST element is the token just committed but not yet in `kv`, i.e. `history.items.len == kv.len + 1`.
+> `history` holds every committed token (prompt + generated) and its LAST element is the token just committed but not yet in `kv`, i.e. `history.items.len == kv.len() + 1`.
 
 A violated invariant is not a debug assert but a real error, `error.InvalidDecodeState` — because "an empty or kv-desynced history would index out of bounds / corrupt the cache in ReleaseFast" (core.zig:583-586). Every trick below must preserve this invariant through every path, including error unwinds.
 
-The second foundation is that the KV cache can **rewind**. Chapter 12 built the cache as per-position K/V rows; because every position occupies whole per-(position, kv-head) rows and every reader addresses rows strictly below `len`, dropping positions is one integer store. From the machine-verified snippet in `docs/reference/13-the-model-stack-fucina_models.md` §13.4:
+The second foundation is that the KV cache can **rewind**. Chapter 12 built the cache as per-position K/V rows; because every position occupies whole per-(position, kv-head) rows and every reader addresses rows strictly below `count`, dropping positions is one integer store. From the machine-verified snippet in `docs/reference/13-the-model-stack-fucina_models.md` §13.4:
 
 ```zig
 try cache.appendLayer(&ctx, 0, &k, &v); // writes at offset len, does not advance
 cache.advance(3); // once per step, after all layers
-try std.testing.expectEqual(@as(usize, 3), cache.len);
+try std.testing.expectEqual(@as(usize, 3), cache.len());
 
 cache.truncate(1); // speculative rewind: drop rejected positions
-try std.testing.expectEqual(@as(usize, 1), cache.len);
+try std.testing.expectEqual(@as(usize, 1), cache.len());
 ```
 
 `truncate(keep_len)` "rewinds to the first `keep_len` positions (a value at or above `len` is a no-op)" and is verified bitwise against a fresh cache by a truncate + re-append test (`docs/SPECULATIVE.md` §1, `src/models/text/kv_cache_tests.zig`). This one primitive is what makes speculation, cross-request reuse, and turn trimming possible. It is also why one model family sits this chapter out: qwen35's Gated-DeltaNet keeps *recurrent* state, and "Gated-DeltaNet's recurrent state cannot rewind: rejecting a draft would require restoring conv/delta-scan state at an arbitrary earlier position, which the recurrence does not support" (`docs/SPECULATIVE.md` §11). Speculation there is out of scope structurally, not by omission.
@@ -224,7 +224,7 @@ pub fn step(
 
 (`history` must be allocated with `ctx.allocator` — the decoder appends committed tokens to it; each committed token streams out through `sink`, a tiny two-field vtable any stdout writer or SSE sink can satisfy.) `forwardStepAllLogits` is the verify entry: same KV semantics as `forwardStep`, but it returns `[len, vocab]` logits for *every* appended position — "one batched pass scores all draft positions for ~one step's weight traffic" (`docs/reference/14-model-families-and-example-applications.md` §14). The verify row loop (core.zig:676-717) is recognizably the toy's loop plus real sampling, top-k feedback capture, and stats. And one line the toy also mirrors deserves its own note:
 
-> **Zig note** — `errdefer` as transactional invariant restoration. The batched forward advances `kv` (to `pos0 + 1 + draft_len`) *before* its own fallible tail ops, and the row loop appends to `history` as it commits — so a failure anywhere in between would leave cache and history desynced. One line fixes every path: `errdefer kv.truncate(history.items.len - 1);` (core.zig:666). `history.items.len` is read *at unwind time*, so the truncate always restores `history.len == kv.len + 1` no matter where the error struck, and also drops unverified draft rows from the cache. Error unwinding as a correctness mechanism, not just cleanup.
+> **Zig note** — `errdefer` as transactional invariant restoration. The batched forward advances `kv` (to `pos0 + 1 + draft_len`) *before* its own fallible tail ops, and the row loop appends to `history` as it commits — so a failure anywhere in between would leave cache and history desynced. One line fixes every path: `errdefer kv.truncate(history.items.len - 1);` (core.zig:683). `history.items.len` is read *at unwind time*, so the truncate always restores `history.len == kv.len() + 1` no matter where the error struck, and also drops unverified draft rows from the cache. Error unwinding as a correctness mechanism, not just cleanup.
 
 ### The DraftSource seam
 
@@ -522,7 +522,7 @@ pub fn appendRange(io: std.Io, allocator: Allocator, path: []const u8,
 pub fn load(io: std.Io, allocator: Allocator, path: []const u8, kv: *KvCache) !?Loaded
 ```
 
-The layout stores per position one `u32` token plus each layer's K and V row bytes (f16 or q8_0 — the record size is a pure function of the cache geometry); a geometry guard in the header makes a foreign model's or dtype's file ignored *wholesale*. Ordering rules are enforced, not documented-and-hoped: `load` asserts the cache is empty (`std.debug.assert(kv.len == 0)`, kv_persist.zig:261) and returns caller-owned token history — a `Loaded` also carrying `prefix_rows`, the row count of a token-less preloaded prefix (a trained cartridge, `docs/CARTRIDGES.md`; 0 for classic conversations) — or null when nothing is usable, stopping early at a torn tail so "the prefix stays usable"; `appendRange` requires the caller to have resumed from (or reset) the file, so "appending onto a foreign prefix must be impossible" (kv_persist.zig:191-194). On the CLI this is `--kv-save` for `--chat`/`--repl` — "essential below 1 tok/s" on the big streamed models of §13.8 (`docs/RUNNING-MODELS.md`).
+The layout stores per position one `u32` token plus each layer's K and V row bytes (f16 or q8_0 — the record size is a pure function of the cache geometry); a geometry guard in the header makes a foreign model's or dtype's file ignored *wholesale*. Ordering rules are enforced, not documented-and-hoped: `load` asserts the cache is empty (`std.debug.assert(kv.len() == 0)`, kv_persist.zig:261) and returns caller-owned token history — a `Loaded` also carrying `prefix_rows`, the row count of a token-less preloaded prefix (a trained cartridge, `docs/CARTRIDGES.md`; 0 for classic conversations) — or null when nothing is usable, stopping early at a torn tail so "the prefix stays usable"; `appendRange` requires the caller to have resumed from (or reset) the file, so "appending onto a foreign prefix must be impossible" (kv_persist.zig:191-194). On the CLI this is `--kv-save` for `--chat`/`--repl` — "essential below 1 tok/s" on the big streamed models of §13.8 (`docs/RUNNING-MODELS.md`).
 
 > **Zig note** — the sidecar is a lesson in explicit binary I/O. Every integer is written with `std.mem.writeInt(u64, bytes[at..][0..8], nrec, .little)` — the endianness is a *parameter*, not an assumption, so the file format is identical on every host. And the crash-safety is pure write ordering: records first, the `nrec` counter last, positional writes throughout (`writePositionalAll`); a crash between the two leaves the old counter and the file remains a consistent prefix. No journal, no fsync dance in the hot path — just an ordering argument you can verify by reading 40 lines.
 
