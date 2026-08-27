@@ -321,9 +321,6 @@ pub const ExecContext = struct {
     pub const preluChannelsBackwardAlpha = exec_elementwise.preluChannelsBackwardAlpha;
     pub const channelAffine = exec_elementwise.channelAffine;
     pub const unary = exec_elementwise.unary;
-    pub const snakeRows = exec_elementwise.snakeRows;
-    pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
-    pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
     pub const leakyRelu = exec_elementwise.leakyRelu;
     pub const softcap = exec_elementwise.softcap;
     pub const clamp = exec_elementwise.clamp;
@@ -398,7 +395,6 @@ pub const ExecContext = struct {
     // ----------------------------------------------------------------------
     // gather/scatter: indexing, embedding lookups, strided views (exec/gather_scatter.zig)
     // ----------------------------------------------------------------------
-    pub const relposShift = exec_gather_scatter.relposShift;
     pub const narrowAxis = exec_gather_scatter.narrowAxis;
     pub const concatAxis = exec_gather_scatter.concatAxis;
     pub const concatQuantizedRows = exec_gather_scatter.concatQuantizedRows;
@@ -424,7 +420,6 @@ pub const ExecContext = struct {
     pub const minMasked = exec_stats.minMasked;
     pub const varAxis = exec_stats.varAxis;
     pub const standardize = exec_stats.standardize;
-    pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
     pub const standardizeBackward = exec_stats.standardizeBackward;
     pub const topK = exec_stats.topK;
     pub const sort = exec_stats.sort;
@@ -461,8 +456,6 @@ pub const ExecContext = struct {
     pub const crossEntropyLoss = exec_loss.crossEntropyLoss;
     pub const crossEntropyBackward = exec_loss.crossEntropyBackward;
     pub const linearCrossEntropyBackwardUpstream = exec_loss.linearCrossEntropyBackwardUpstream;
-    pub const linearDistillLossStats = exec_loss.linearDistillLossStats;
-    pub const linearDistillBackwardUpstream = exec_loss.linearDistillBackwardUpstream;
     pub const mseLoss = exec_loss.mseLoss;
     pub const mseBackwardUpstream = exec_loss.mseBackwardUpstream;
     pub const huberLoss = exec_loss.huberLoss;
@@ -537,6 +530,31 @@ pub const ExecContext = struct {
     pub const carveMoeDecodeChainScratch = exec_moe.carveMoeDecodeChainScratch;
     pub const moeExpertFfn = exec_moe.moeExpertFfn;
     pub const moeExpertFfnBatch = exec_moe.moeExpertFfnBatch;
+
+    // ----------------------------------------------------------------------
+    // model-serving ops: general in shape, present for named model families.
+    // Each is reached through a public `Tensor` facade method, and the ag
+    // mixins hosting those facades cannot import the models band (that
+    // import would invert the layer stack), so the bodies live in exec/
+    // beside the generic machinery they share (`standardizeImpl`, the
+    // linear-loss row tasks, the elementwise kernel seam). This group is
+    // the inventory; the body sites carry the same mark.
+    // ----------------------------------------------------------------------
+    /// Snake activation rows (audio codec decoders: qwen3tts codec,
+    /// omnivoice DAC, via `Tensor.snake`).
+    pub const snakeRows = exec_elementwise.snakeRows;
+    pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
+    pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
+    /// Transformer-XL relative-shift skew (parakeet encoder + streaming,
+    /// via `Tensor.relposShift`).
+    pub const relposShift = exec_gather_scatter.relposShift;
+    /// Standardize over a valid prefix (parakeet NeMo frontend, via
+    /// `Tensor.standardizeAxis` `.valid_len`).
+    pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
+    /// Fused linear + sparse-soft-target distillation (qwen3 cartridge
+    /// distillation, via `Tensor.linearDistill`).
+    pub const linearDistillLossStats = exec_loss.linearDistillLossStats;
+    pub const linearDistillBackwardUpstream = exec_loss.linearDistillBackwardUpstream;
 };
 
 test {

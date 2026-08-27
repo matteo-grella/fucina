@@ -302,7 +302,7 @@ test "NANOCHAT_PARITY: d6 param grads match grad oracle" {
     defer grad_file.deinit();
 
     const scope = ctx.openExecScope();
-    const mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
+    var mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
     try mean.backward(&ctx);
     ctx.closeExecScope(scope);
 
@@ -450,7 +450,7 @@ test "d2 finite-difference gradcheck proves autograd wiring" {
     // Analytic grads from one combined backward.
     {
         const scope = ctx.openExecScope();
-        const mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
+        var mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
         try mean.backward(&ctx);
         ctx.closeExecScope(scope);
     }

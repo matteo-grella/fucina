@@ -363,7 +363,7 @@ fn runOptstep(
     for (0..n_steps) |step| {
         {
             const scope = ctx.openExecScope();
-            const mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
+            var mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
             try mean.backward(&ctx);
             ctx.closeExecScope(scope);
         }
@@ -520,7 +520,7 @@ test "NANOCHAT_PARITY: optimizer state round-trips through save/load" {
     // One step so the state buffers are non-trivial.
     {
         const scope = ctx.openExecScope();
-        const mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
+        var mean = try buildMeanLoss(&ctx, &model, &batch, allocator);
         try mean.backward(&ctx);
         ctx.closeExecScope(scope);
     }

@@ -85,7 +85,7 @@ test "one optimizer step reduces the segment loss" {
     for (0..12) |step_index| {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try model.segmentLoss(&ctx, &window, &target);
+        var loss = try model.segmentLoss(&ctx, &window, &target);
         const value = try loss.item();
         if (step_index == 0) first_loss = value;
         last_loss = value;
@@ -197,7 +197,7 @@ test "A2 WaveNet snapshot owns updated recursive condition DSP weights" {
         defer ctx.closeExecScope(scope);
         const input = [_]f32{ 0.2, -0.1, 0.4, 0.7 };
         const target = [_]f32{ -0.3, 0.25 };
-        const loss = try model.segmentLoss(&ctx, &input, &target);
+        var loss = try model.segmentLoss(&ctx, &input, &target);
         try loss.backward(&ctx);
     }
     try opt.step(&ctx);
@@ -240,7 +240,7 @@ test "A2 training spec initializes, steps, extracts, and renders through shared 
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try model.segmentLoss(&ctx, &window, &target);
+        var loss = try model.segmentLoss(&ctx, &window, &target);
         try std.testing.expect(std.math.isFinite(try loss.item()));
         try loss.backward(&ctx);
         try opt.step(&ctx);
@@ -318,7 +318,7 @@ test "MRSTFT loss is finite and differentiable through public Tensor ops" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try mrstftLoss(&ctx, &pred, &target, .{ .resolutions = &resolutions });
+        var loss = try mrstftLoss(&ctx, &pred, &target, .{ .resolutions = &resolutions });
         const value = try loss.item();
         try std.testing.expect(std.math.isFinite(value));
         try std.testing.expectApproxEqAbs(expected_loss, value, 5e-6);
@@ -437,7 +437,7 @@ test "MRSTFT loss matches torch centered short-window STFT" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try mrstftLoss(&ctx, &pred, &target, .{ .resolutions = &resolutions });
+        var loss = try mrstftLoss(&ctx, &pred, &target, .{ .resolutions = &resolutions });
         try std.testing.expectApproxEqAbs(@as(f32, 0.594567775726), try loss.item(), 5e-6);
         try loss.backward(&ctx);
     }
@@ -502,7 +502,7 @@ test "packed WaveNet spec sums submodel losses and extracts slimmable snapshots"
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try model.segmentLossWithOptions(&ctx, &window, &target, .{
+        var loss = try model.segmentLossWithOptions(&ctx, &window, &target, .{
             .mrstft_weight = 0.001,
             .mrstft = .{ .resolutions = &resolutions },
         });

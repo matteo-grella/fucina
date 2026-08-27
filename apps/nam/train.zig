@@ -2239,7 +2239,7 @@ test "A2 trainable backward matches finite difference through grouped conv and F
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const pred = try model.forward(&ctx, &input);
-        const loss = try pred.sumAll(&ctx);
+        var loss = try pred.sumAll(&ctx);
         try loss.backward(&ctx);
 
         var conv_grad = (try model.arrays[0].layers[0].conv.weight.grad(&ctx)).?;

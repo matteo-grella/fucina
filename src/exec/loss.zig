@@ -544,7 +544,11 @@ pub fn linearCrossEntropyBackwardUpstream(
     return .{ .dx = dx, .dweight = dweight };
 }
 
-// --- Fused linear + sparse-soft-target distillation loss --------------------
+// --- model-serving: fused linear + sparse-soft-target distillation loss -----
+// Single consumer: qwen3 cartridge distillation (`models/qwen3/train.zig`),
+// through the `Tensor.linearDistill` facade. Lives here because it shares
+// the linear-loss row-task machinery with `linearCrossEntropy*` above (see
+// the model-serving group in exec.zig).
 //
 // loss = reduce_i  probs[i] * (LSE(logits[rows[i]]) - logits[rows[i], classes[i]])
 // with logits = x·Wᵀ — cross-entropy against a SPARSE soft target

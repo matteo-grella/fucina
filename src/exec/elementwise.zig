@@ -1289,6 +1289,12 @@ pub fn leakyRelu(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tens
     return ctx.storeAs(compute, dtype, out);
 }
 
+// --- model-serving: snake (audio codec decoders) ----------------------------
+// Single consumers: the qwen3tts codec and omnivoice DAC decoders, through
+// the `Tensor.snake` facade. Lives here because the facade's ag mixin cannot
+// import the models band, and the kernels ride the same elementwise seam as
+// every other row op (see the model-serving group in exec.zig).
+
 /// Per-channel Snake activation over `[rows, cols]` rows (the DAC codec op):
 /// `y[t,c] = x[t,c] + inv_b[c] * sin(alpha[c] * x[t,c])^2`. The caller
 /// precomputes `inv_b = 1/(alpha + 1e-9)` at weight-load time (the reference's
