@@ -207,7 +207,7 @@ pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor
 }
 
 fn rmsNormPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, residual: ?*const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (residual) |r| try tensor.requireSameShape(x, r);
 
@@ -272,7 +272,7 @@ fn rmsNormPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, resid
 }
 
 fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -355,7 +355,7 @@ fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight:
 }
 
 fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, residual);
 
@@ -451,7 +451,7 @@ fn rmsNormBackwardInputWeighted(
     comptime axis: usize,
     eps: f32,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
 
@@ -548,7 +548,7 @@ fn rmsNormBackwardWeight(
     comptime axis: usize,
     eps: f32,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
 
@@ -677,7 +677,7 @@ pub fn rmsNormMulRopeWithTable(
     table: *const RopeTable,
     comptime mode: RopeMode,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (position_axis >= rank or feature_axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -843,7 +843,7 @@ pub fn rmsNormMulRopeWithTable(
 }
 
 fn rmsNormBackwardInputPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
 
@@ -999,7 +999,7 @@ fn layerNormDispatchAxisRank(
     comptime axis: usize,
     eps: f32,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -1188,7 +1188,7 @@ fn layerNormBackwardDispatchAxisRank(
     need_weight: bool,
     need_bias: bool,
 ) !AffineBackwardResult {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
 

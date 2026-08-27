@@ -73,7 +73,7 @@ pub const ParamRegistry = struct {
             .bytes = std.mem.sliceAsBytes(retained.data()),
             .grad_state = grad_state,
             .retained = retained,
-            .release = makeRelease(Raw),
+            .release = tensor_mod.makeRetainedRelease(Raw),
         });
     }
 
@@ -309,17 +309,6 @@ const ParamEntry = struct {
         self.* = undefined;
     }
 };
-
-/// Build the dtype-specific releaser for a retained `*TensorOf(dtype)` handle.
-fn makeRelease(comptime Raw: type) *const fn (*anyopaque, Allocator) void {
-    return struct {
-        fn release(ptr: *anyopaque, allocator: Allocator) void {
-            const v: *Raw = @ptrCast(@alignCast(ptr));
-            v.deinit();
-            allocator.destroy(v);
-        }
-    }.release;
-}
 
 /// The dtypes a ParamRegistry entry can hold (matches the safetensors state-dict codec).
 /// Dtypes the reflective `collect` registers. Deliberately floats-only: a

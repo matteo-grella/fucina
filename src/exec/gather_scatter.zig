@@ -73,7 +73,7 @@ pub fn narrowAxis(
     length: usize,
 ) !tensor.TensorOf(dtype) {
     _ = ctx;
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (length == 0) return tensor.TensorError.InvalidShape;
 
@@ -93,7 +93,7 @@ pub fn concatAxis(
     inputs: []const *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (inputs.len == 0) return tensor.TensorError.InvalidShape;
 
@@ -209,7 +209,7 @@ pub fn pad(
     after: usize,
     fill: f32,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (comptime !dtype_mod.supportsForwardFloatMath(dtype)) @compileError("pad: float dtypes only");
 
@@ -245,7 +245,7 @@ pub fn gatherAxis(
     comptime axis: usize,
     indices: []const usize,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
 
@@ -382,7 +382,7 @@ pub fn takeAlong(
     indices: []const usize,
     out_axis_len: usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (out_axis_len == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
@@ -464,7 +464,7 @@ fn scatterAlongImpl(
     indices: []const usize,
     comptime mode: ScatterMode,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const dest = try base.rankView(rank);
     const sv = try src.rankView(rank);
@@ -549,7 +549,7 @@ fn runScatterAlongTask(comptime mode: ScatterMode) fn (*const ScatterAlongTask(m
 }
 
 pub fn zeroSlice(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (length == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
@@ -569,7 +569,7 @@ pub fn zeroSlice(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comp
 }
 
 pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
@@ -610,7 +610,7 @@ pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
 }
 
 pub fn sliceGradient(ctx: *ExecContext, comptime rank: usize, grad: *const Tensor, source_shape: [rank]usize, comptime axis: usize, start: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     _ = try tensor.elementCountArray(rank, source_shape);
     const gv = try grad.rankView(rank);
@@ -690,7 +690,7 @@ pub fn scatterAdd(
     comptime axis: usize,
     indices: []const usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
     const source_len = try tensor.elementCountArray(rank, source_shape);

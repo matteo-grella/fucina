@@ -112,8 +112,6 @@ pub fn Ops(comptime Self: type) type {
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
-        /// `cond ? self : other` elementwise (`cond[i] != 0` selects `self`).
-        /// Differentiable in `self` and `other`; `cond` is a non-grad mask.
         /// `cond ? self : other` elementwise. `cond` is a same-tagged
         /// `.bool` mask (the `compare` output) or a float tensor read by
         /// truthiness (`!= 0`; NaN truthy); it receives no gradient.

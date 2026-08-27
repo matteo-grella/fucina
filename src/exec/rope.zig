@@ -93,6 +93,69 @@ pub const RopeTable = struct {
 /// Where a table's positions come from. Both arms feed one arithmetic body,
 /// so a run expressed as a range and the same run expressed as an array
 /// produce bitwise identical tables.
+/// A contiguous run of ABSOLUTE indices along one axis: `[origin, origin + len)`.
+///
+/// This is Fortran's array lower bound as a value. A tensor axis here is
+/// 0-origin like NumPy's: `Shape` records how long an axis is, never where it
+/// starts, so a view that narrows a positional axis forgets its absolute
+/// position and every consumer that needs it takes it through a side channel.
+/// The visible cost is the arithmetic-sequence array: a caller that wants
+/// "the `n` positions starting at `p0`" allocates `n` integers, fills them
+/// with `p0 + i`, passes them down, and frees them, purely to say `p0`.
+///
+/// `AxisRange` says `p0` instead. It carries no data and owns nothing, so it
+/// costs two words wherever an origin needs to travel with a length.
+///
+/// The default `origin = 0` reproduces the ordinary 0-origin axis, so
+/// `.{ .len = n }` is the plain case.
+pub const AxisRange = struct {
+    /// Absolute index of the axis's first element.
+    origin: i64 = 0,
+    /// Number of elements the axis spans.
+    len: usize,
+
+    /// Absolute index of element `i`. Unchecked: `i < len` is the caller's.
+    pub fn at(self: AxisRange, i: usize) i64 {
+        return self.origin + @as(i64, @intCast(i));
+    }
+
+    /// One past the last absolute index.
+    pub fn end(self: AxisRange) i64 {
+        return self.origin + @as(i64, @intCast(self.len));
+    }
+
+    /// The same run of elements relabelled to start at `new_origin` — what a
+    /// zero-copy narrow of a positional axis should do to its origin.
+    pub fn rebased(self: AxisRange, new_origin: i64) AxisRange {
+        return .{ .origin = new_origin, .len = self.len };
+    }
+
+    /// Slide the whole run by `delta` absolute positions.
+    pub fn shifted(self: AxisRange, delta: i64) AxisRange {
+        return .{ .origin = self.origin + delta, .len = self.len };
+    }
+
+    /// The sub-run `[start, start + count)` in LOCAL indices, carrying the
+    /// absolute origin forward — the operation a narrow performs and the one
+    /// a plain 0-origin axis cannot express.
+    pub fn narrowed(self: AxisRange, start: usize, count: usize) AxisRange {
+        return .{ .origin = self.at(start), .len = count };
+    }
+
+    pub fn contains(self: AxisRange, absolute: i64) bool {
+        return absolute >= self.origin and absolute < self.end();
+    }
+
+    /// Fill `out` with the absolute indices. The materialization this type
+    /// exists to avoid, kept for the interop boundaries that genuinely need a
+    /// per-element array (a ragged multi-stream batch, where the positions are
+    /// not one run).
+    pub fn writeInto(self: AxisRange, out: []i32) !void {
+        if (out.len != self.len) return tensor.TensorError.InvalidDataLength;
+        for (out, 0..) |*slot, i| slot.* = @intCast(self.at(i));
+    }
+};
+
 pub const RopePositions = union(enum) {
     /// One position per rotated row, any values: ragged batches (several
     /// runs), context shifts (negative deltas).
@@ -100,7 +163,7 @@ pub const RopePositions = union(enum) {
     /// One contiguous run `[origin, origin + len)`: a prefill covers `0..n`,
     /// a decode step `pos0..pos0+n`. Names the run by its origin instead of
     /// materializing it.
-    range: tensor.AxisRange,
+    range: AxisRange,
 
     fn len(self: RopePositions) usize {
         return switch (self) {
@@ -350,7 +413,7 @@ fn ropeWithTableDirection(
     comptime mode: RopeMode,
     comptime inverse: bool,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (position_axis >= rank or feature_axis >= rank) @compileError("axis out of bounds");
     if (position_axis == feature_axis) @compileError("position and feature axes must differ");
 

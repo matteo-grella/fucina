@@ -165,7 +165,7 @@ pub fn crossEntropyLoss(
     labels: []const usize,
     options: CrossEntropyOptions,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const row_stats = options.row_stats;
 
@@ -325,7 +325,7 @@ fn crossEntropyBackwardScaled(
     scale_value: f32,
     per_row_scale: ?[]const f32,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const row_stats: ?[]const f32 = options.row_stats;
 

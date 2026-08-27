@@ -72,7 +72,7 @@ pub fn logsumexp(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize,
 }
 
 fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -137,7 +137,7 @@ pub fn logSoftmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize
 }
 
 fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -195,7 +195,7 @@ pub fn softmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
 }
 
 fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -244,7 +244,7 @@ fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 }
 
 pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, options: SoftmaxExtOptions) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -338,7 +338,7 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
 /// Softmax VJP along `axis`: `scale_value` folds the forward's logit
 /// scaling into the same pass (`1` for the plain softmax).
 pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize, scale_value: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(y, gy);
 

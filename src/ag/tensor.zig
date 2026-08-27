@@ -106,7 +106,7 @@ pub fn Tensor(comptime spec: anytype) type {
 
 fn validateSpecTags(comptime tags: anytype) void {
     validateUniqueTags(tags);
-    if (tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+    if (tags.len > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
 }
 
 // ---------------------------------------------------------------------------

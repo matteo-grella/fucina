@@ -254,7 +254,7 @@ pub const VarianceOptions = ag.VarianceOptions;
 /// — Fortran's array lower bound as a value. Tensor axes here are 0-origin, so
 /// this is how a positional axis's origin travels alongside its length instead
 /// of being materialized into an arithmetic array (see `prepareRopeTableRange`).
-pub const AxisRange = tensor.AxisRange;
+pub const AxisRange = exec.AxisRange;
 /// Conv weights pre-transformed at load for the streaming conv kernels.
 pub const PreparedConvWeights = exec.ExecContext.PreparedConvWeights;
 // Backend identity + capability constants (species 4 of the membership
@@ -267,8 +267,6 @@ pub const active_backend_kind = backend.active_kind;
 pub const native_blas_kind = backend.native_blas_kind;
 /// True when a CBLAS provider is linked into the native backend.
 pub const native_uses_blas = backend.native_uses_blas;
-/// True when the linked BLAS is Apple Accelerate.
-pub const native_uses_accelerate = backend.native_uses_accelerate;
 /// Thread count requested from an explicit BLAS provider (0 = provider default).
 pub const native_blas_threads = backend.native_blas_threads;
 /// The eager execution runtime: owns allocation (buffer pool), validation,

@@ -54,6 +54,7 @@ pub const CompareOp = backend_ops.CompareOp;
 /// re-exported here for the autograd VJP params (`ag/*` name `exec.RopeTable`).
 pub const RopeMode = exec_rope.RopeMode;
 pub const RopeTable = exec_rope.RopeTable;
+pub const AxisRange = exec_rope.AxisRange;
 pub const RopeTableSpec = exec_rope.RopeTableSpec;
 pub const RopePositions = exec_rope.RopePositions;
 pub const RopeFreqs = exec_rope.RopeFreqs;

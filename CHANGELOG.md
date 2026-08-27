@@ -184,6 +184,9 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- `fucina.native_uses_accelerate`: derivable from the facts that remain.
+  Rewrite: `fucina.native_blas_kind == .accelerate`.
+
 - Single-family ops leave the public `ExecContext` for the models band
   (`fucina_models`), each next to its one consumer. Rewrites:
   `ExecContext.moe_gu` / `ctx.moeGuDecodePacked` / `ctx.moeGuBatchPacked` /
@@ -312,6 +315,9 @@ this point; earlier history is `git log`.
   users: `backend.scalar_impl.kernels.X(pc, ...)` becomes the twin
   `backend.vector_impl.<domain>.scalar.X(...)` (no `pc`);
   `backend.native_impl` is unchanged.
+- `AxisRange` is declared in the exec band (`exec/rope.zig`, beside its one
+  consumer, the rope table builders); `fucina.AxisRange` is unchanged. The
+  raw layer's `tensor.AxisRange` spelling is gone. Internal.
 - Optimizer construction is fallible: `Optimizer(Kernel).init` (every
   `optim.SGD`/`Adam`/`AdamW`/`Muon`/`MuonH`/`Apollo` constructor) returns
   `!Self`, and an invalid config is `error.InvalidOptimizerConfig` instead

@@ -68,7 +68,6 @@ pub const BackendKind = backend.Kind;                   // enum { scalar, native
 pub const active_backend_kind = backend.active_kind;
 pub const native_blas_kind = backend.native_blas_kind;  // the -Dblas enum value
 pub const native_uses_blas = backend.native_uses_blas;  // blas_kind != .none
-pub const native_uses_accelerate = backend.native_uses_accelerate;
 pub const native_blas_threads = backend.native_blas_threads;
 pub const supports_q4_k_mmla = backend.supports_q4_k_mmla;
 ```
@@ -90,7 +89,7 @@ test "backend build facts" {
     } else {
         try std.testing.expect(fucina.native_blas_kind == .none);
     }
-    if (fucina.native_uses_accelerate)
+    if (fucina.native_blas_kind == .accelerate)
         try std.testing.expect(fucina.native_uses_blas);
     // -Dblas-threads pin (0 = provider default) and the aarch64+i8mm
     // Q4_K smmla capability, both comptime constants.

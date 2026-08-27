@@ -188,7 +188,7 @@ pub fn sumAxis(
     comptime ensureForwardFloatMath(dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
 
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -230,7 +230,7 @@ fn intSumAxis(
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(.i64) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -263,7 +263,7 @@ fn intSumAxis(
 }
 
 fn sumAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -387,7 +387,7 @@ inline fn scanShiftDown(comptime op: ScanOp, comptime k: usize, v: ScanVec) Scan
 ///     differs from the serial default (the sum-SIMD-lanes rounding
 ///     class; exact for integer-valued data).
 fn scanAxisRankDirected(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ScanOp, comptime reverse: bool) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -512,7 +512,7 @@ fn scanRowVec(comptime op: ScanOp, comptime reverse: bool, row_in: []const f32, 
 /// would reassociate `a·h + b` and change rounding, so no gated variant
 /// exists (unlike cumsum's last-axis prefix scan).
 pub fn linearRecurrence(ctx: *ExecContext, comptime rank: usize, b: *const Tensor, a: *const Tensor, comptime axis: usize, initial: ?*const Tensor) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try b.rankView(rank);
@@ -609,7 +609,7 @@ pub fn linearRecurrenceBackward(
     want_da: bool,
     want_dinitial: bool,
 ) !LinearRecurrenceGrads {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try gy.rankView(rank);
@@ -781,7 +781,7 @@ pub fn prod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *
 }
 
 fn prodF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -970,7 +970,7 @@ fn maskedReduce(
     counts_out: *?Tensor,
     comptime want_mean: bool,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -1109,7 +1109,7 @@ pub fn segmentSum(
     comptime axis: usize,
     offsets: []const usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const source = try x.rankView(rank);
     if (offsets.len < 2) return tensor.TensorError.InvalidShape;
@@ -1156,7 +1156,7 @@ pub fn segmentBroadcast(
     offsets: []const usize,
     n: usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const source = try gy.rankView(rank);
     if (offsets.len < 2) return tensor.TensorError.InvalidShape;

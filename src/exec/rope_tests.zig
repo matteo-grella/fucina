@@ -67,7 +67,7 @@ test "a rope table built from an AxisRange is bitwise equal to the array form" {
 }
 
 test "AxisRange carries an origin the way a Fortran lower bound does" {
-    const AxisRange = tensor.AxisRange;
+    const AxisRange = exec.AxisRange;
 
     // The plain 0-origin axis is the default, so `.{ .len = n }` is the
     // ordinary case and costs nothing to write.

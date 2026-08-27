@@ -591,7 +591,7 @@ pub fn splitGated(
 }
 
 fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const Task = switch (op) {
         .swiglu => SplitSwiGluTask,
@@ -663,7 +663,7 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
 }
 
 pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -731,7 +731,7 @@ pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Te
 }
 
 pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -1108,7 +1108,7 @@ pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tenso
 /// `target[..., i] += row_vector[i]` along the last axis `axis`, then `op`
 /// when given (a fused bias + activation), in `target`'s storage.
 pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-    if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
+    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const view = try target.rankView(rank);

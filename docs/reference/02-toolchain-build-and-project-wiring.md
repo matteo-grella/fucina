@@ -63,7 +63,7 @@ machine that will run the binary, or pin `-Dcpu` to match it.
 
 The resolved configuration is visible on the `fucina` module root as
 comptime constants (`active_backend_kind`, `native_blas_kind`,
-`native_uses_blas`, `native_uses_accelerate`, `native_blas_threads`,
+`native_uses_blas`, `native_blas_threads`,
 `parallel.vector_max_threads`):
 
 ```zig

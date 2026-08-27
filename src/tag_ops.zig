@@ -561,7 +561,7 @@ pub fn alignTensorTo(
 ) !tensor_mod.TensorOf(tensor_dtype) {
     comptime {
         validateUniqueTags(target_tags);
-        if (target_tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (target_tags.len > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         for (source_tags) |tag| {
             if (tagIndex(target_tags, tag) == null) @compileError("target tags must include all source tags");
         }

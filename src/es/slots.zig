@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
+const tensor_mod = @import("../tensor.zig");
 
 const Allocator = std.mem.Allocator;
 const DType = dtype_mod.DType;
@@ -95,15 +96,9 @@ pub const UpdateCacheView = struct {
     regions: []const CacheRegion,
 };
 
-pub fn makeRelease(comptime Raw: type) *const fn (*anyopaque, Allocator) void {
-    return struct {
-        fn release(ptr: *anyopaque, allocator: Allocator) void {
-            const v: *Raw = @ptrCast(@alignCast(ptr));
-            v.deinit();
-            allocator.destroy(v);
-        }
-    }.release;
-}
+/// The shared registry releaser (`tensor.makeRetainedRelease`), exported
+/// here because this module owns the ES registration surface.
+pub const makeRelease = tensor_mod.makeRetainedRelease;
 
 pub fn validateFacadePtr(comptime P: type) type {
     const info = @typeInfo(P);

@@ -142,12 +142,12 @@ pub fn rankFromSpec(comptime rank_spec: anytype) usize {
     }
 
     const rank: usize = @intCast(rank_spec);
-    if (rank > tensor_mod.max_rank) @compileError("too many tensor tags");
+    if (rank > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
     return rank;
 }
 
 pub fn autoTags(comptime rank: usize) [rank]Tag {
-    if (rank > tensor_mod.max_rank) @compileError("too many tensor tags");
+    if (rank > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
     const generated = .{ ._0, ._1, ._2, ._3, ._4, ._5, ._6, ._7 };
     if (tensor_mod.max_rank != generated.len) @compileError("autoTags generated tag count must match tensor.max_rank");
     var out: [rank]Tag = undefined;
@@ -334,7 +334,7 @@ pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_ta
                 out_i += 1;
             }
         }
-        if (out_i > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (out_i > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         const final = out[0..out_i].*;
         return &final;
     }
@@ -347,7 +347,7 @@ pub inline fn dotResultTags(comptime left_tags: anytype, comptime right_tags: an
         const batch = dotBatchTags(left_tags, right_tags, contract_tag);
         const left_free = dotLeftFreeTags(left_tags, right_tags, contract_tag);
         const right_free = dotRightFreeTags(left_tags, right_tags, contract_tag);
-        if (batch.len + left_free.len + right_free.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (batch.len + left_free.len + right_free.len > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         var out: [batch.len + left_free.len + right_free.len]Tag = undefined;
         var out_i: usize = 0;
         for (batch) |tag| {
@@ -415,7 +415,7 @@ pub inline fn dotRightFreeTags(comptime left_tags: anytype, comptime right_tags:
 }
 
 pub fn insertTagAt(comptime tags: anytype, comptime tag: Tag, comptime axis_index: usize) [tags.len + 1]Tag {
-    if (tags.len + 1 > tensor_mod.max_rank) @compileError("too many tensor tags");
+    if (tags.len + 1 > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
     if (axis_index > tags.len) @compileError("insert axis out of bounds");
     if (comptime tagIndex(tags, tag) != null) @compileError("inserted tensor tag already exists");
     var out: [tags.len + 1]Tag = undefined;
@@ -477,7 +477,7 @@ pub fn einsumValidate(comptime left_tags: anytype, comptime right_tags: anytype,
         validateUniqueTags(left_tags);
         validateUniqueTags(right_tags);
         validateUniqueTags(out_tags);
-        if (out_tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (out_tags.len > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         for (out_tags) |tag| {
             if (tagIndex(left_tags, tag) == null and tagIndex(right_tags, tag) == null)
                 @compileError("einsum output tag not found in any operand");
@@ -488,7 +488,7 @@ pub fn einsumValidate(comptime left_tags: anytype, comptime right_tags: anytype,
 pub fn splitTags(comptime tags: anytype, comptime tag: Tag, comptime split_tags: anytype) [tags.len + split_tags.len - 1]Tag {
     const axis_index = tagIndexOrCompileError(tags, tag);
     if (split_tags.len == 0) @compileError("split requires at least one output tag");
-    if (tags.len + split_tags.len - 1 > tensor_mod.max_rank) @compileError("too many tensor tags");
+    if (tags.len + split_tags.len - 1 > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
     validateUniqueTags(split_tags);
     inline for (split_tags) |split_tag| {
         if (comptime (!tagEqual(split_tag, tag) and tagIndex(tags, split_tag) != null)) @compileError("split output tag already exists");

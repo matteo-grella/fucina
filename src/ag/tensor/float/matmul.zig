@@ -119,12 +119,6 @@ pub fn Ops(comptime Self: type) type {
             });
         }
 
-        // --- Axis bias-add + scaled residual-add (no-grad) -------------------
-        // `axis_tag` must name the LAST axis (the per-feature axis); `bias` is a
-        // `[axis_dim]` row vector. These are inference helpers and reject
-        // trainable inputs; for a differentiable bias use `add` with a broadcast
-        // operand.
-
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag)) {
             const Other = TensorObject(@TypeOf(other));
             const other_tags = Other.axis_tags;
