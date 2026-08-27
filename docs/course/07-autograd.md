@@ -1095,7 +1095,7 @@ const ScaledSquare = struct {
     pub const Output = fucina.Tensor(.{.d});
 
     pub fn forward(ctx: *fucina.ExecContext, extra: f32, inputs: []const *const RawTensor) !RawTensor {
-        var sq = try ctx.mul(.f32, 1, inputs[0], inputs[0]);
+        var sq = try ctx.elementwise(.f32, .mul, inputs[0], inputs[0]);
         defer sq.deinit();
         return ctx.scale(.f32, &sq, extra); // y = extra * x^2
     }
@@ -1113,7 +1113,7 @@ const ScaledSquare = struct {
         if (needs_grad[0]) {
             var slope = try ctx.scale(.f32, inputs[0], 2 * extra); // dy/dx = 2*extra*x
             defer slope.deinit();
-            out[0] = try ctx.mul(.f32, 1, gy, &slope); // engine consumes out[0]
+            out[0] = try ctx.elementwise(.f32, .mul, gy, &slope); // engine consumes out[0]
         }
     }
 };

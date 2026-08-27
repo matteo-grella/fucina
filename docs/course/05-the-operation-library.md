@@ -169,11 +169,7 @@ pub fn pointwise(
     var right_view = try broadcastTensorTo(right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
-    return switch (op) {
-        .add => ctx.add(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        .sub => ctx.sub(.f32, rawRank(result_tags.len), &left_view, &right_view),
-        // ... abridged: .mul, .div, .max, .min follow the same shape
-    };
+    return ctx.elementwise(tensor_dtype, comptime elementwiseOp(op), &left_view, &right_view);
 }
 ```
 
