@@ -14,9 +14,10 @@ corrupting the math. At the end, the payoff: `examples/spirals/main.zig`, a
 complete trainable model in under 500 lines, which you will run and watch
 learn.
 
-Everything here lives in one file pair you can actually read:
-`src/optim.zig` (the optimizers, schedules, clipping, persistence — about
-2,900 lines) and `docs/TRAINING.md` (the manual this chapter follows and
+Everything here lives in one small band you can actually read:
+`src/optim.zig` plus its concern files under `src/optim/` (the optimizers,
+schedules, clipping, persistence — about 2,800 lines all told) and
+`docs/TRAINING.md` (the manual this chapter follows and
 quotes). No trainer framework, no callback hierarchy, no `Trainer` god
 object. A training loop in Fucina is a `for` loop you write yourself, and
 every line of it does something you can point at.
@@ -71,7 +72,7 @@ Read it as six stages, in an order that is not negotiable:
    updates the parameters (§8.4–8.6).
 6. **`zeroGrad()`** — clear the accumulators, ending the step.
 
-`docs/REFERENCE.md` §11 calls this the canonical step order:
+`docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11 calls this the canonical step order:
 "`backward` → `clipGradNorm` → `step` → `zeroGrad`", and the repo pins it
 with tests. Everything else in this chapter — schedules, groups, mixed
 precision, checkpointing — is machinery that makes one of these six stages
@@ -218,7 +219,7 @@ dirty secret is how far the simplest possible update goes.
 > the first element *by pointer* (`*p`, so we can mutate it) and the second
 > by value. This multi-slice `for` with mixed captures is the idiomatic Zig
 > replacement for an indexed loop, and the real optimizer kernels in
-> `src/optim.zig` use it with four slices at once.
+> `src/optim/` use it with four slices at once.
 
 The first upgrade is **momentum**: keep a velocity buffer that remembers the
 recent direction of travel, and step along the smoothed direction instead of
@@ -242,10 +243,10 @@ fn momentumStep(params: []f32, grads: []const f32, velocity: []f32, lr: f32, mom
 > analogy in the name is exact: a heavy ball rolling downhill doesn't
 > reverse direction at every pebble.
 
-Now meet the real thing. `optim.SGD` (`src/optim.zig`) is not "an SGD-like
+Now meet the real thing. `optim.SGD` (`src/optim/sgd.zig`) is not "an SGD-like
 optimizer"; it is a port of `torch.optim.SGD`, quirks included. Its config
 struct is the whole hyperparameter story — one field per knob, defaults
-visible in the source (`src/optim.zig:2038`):
+visible in the source (`src/optim/sgd.zig:31`):
 
 ```zig
 pub const SgdConfig = struct {
@@ -266,7 +267,7 @@ Two quirks are worth pausing on, because each teaches something:
 
 **The first-step clone.** PyTorch initializes the momentum buffer not to
 zeros but to a clone of the first (decayed) gradient, and so does this port
-(the comment at `src/optim.zig:2059-2067` spells it out). Getting this wrong
+(the comment at `src/optim/sgd.zig:53-58` spells it out). Getting this wrong
 would still converge — it would just diverge *numerically* from the
 reference, and this repo's bar for an optimizer is a golden parity test
 against the actual reference implementation ("PyTorch 2.12 / Keller
@@ -274,16 +275,18 @@ Jordan's muon.py / apollo_torch", docs/TRAINING.md §3; the goldens live in
 `src/optim_tests.zig`). An optimizer that is "basically Adam" is a bug you
 cannot see until your training run mysteriously underperforms a paper.
 
-**The constructor panic.** From `src/optim.zig:2069-2076`:
+**The constructor rule.** From `src/optim/sgd.zig:67-74` (run by
+`Optimizer(Kernel).init`, `src/optim/optimizer.zig:103`, so
+`optim.SGD.init` is `try`-fallible):
 
 ```zig
-pub fn init(allocator: Allocator, config: SgdConfig) !SGD {
-    // PyTorch constructor rule, enforced in every build mode (a debug
-    // assert would vanish exactly where training runs: ReleaseFast).
+/// PyTorch constructor rule, enforced in every build mode (a debug
+/// assert would vanish exactly where training runs: ReleaseFast):
+/// nesterov requires momentum > 0 and dampening == 0.
+pub fn checkConfig(config: SgdConfig) !void {
     if (config.nesterov and (config.momentum == 0 or config.dampening != 0)) {
         return error.InvalidOptimizerConfig;
     }
-    return .{ .allocator = allocator, .config = config };
 }
 ```
 
@@ -325,7 +328,7 @@ the module doc of `src/optim.zig:5-8` states both variants:
 > Hutter, 2017).
 
 Here is the whole per-element AdamW update as it actually ships, verbatim
-from `src/optim.zig:756-767` — twelve lines:
+from `src/optim/moment_pair.zig:147-158` — twelve lines:
 
 ```zig
 fn runScalar(c: @This(), start: usize, end: usize) void {
@@ -346,7 +349,7 @@ Walk it: `decayed` is the decoupled decay (`keep = 1 − lr·wd`); `m1`/`v1`
 are the two EMAs (the `stateLoad`/`stateStore` indirection is mixed
 precision for the *optimizer state*, §8.10); the last line is the
 bias-corrected step. The scalars arrive pre-computed, and where they come
-from matters (`src/optim.zig:776-799`, trimmed):
+from matters (`src/optim/moment_pair.zig:167-191`, trimmed):
 
 ```zig
 fn adamwUpdate(ctx: *ExecContext, config: AdamWConfig, p: []f32, g: []const f32, m: StateBuf, v: StateBuf, step_count: u64) void {
@@ -369,7 +372,7 @@ fn adamwUpdate(ctx: *ExecContext, config: AdamWConfig, p: []f32, g: []const f32,
 
 Two things to notice. First, the bias corrections `bc1`/`bc2_sqrt` are
 computed **once per step, in f64**, then rounded to f32 — matching, per
-`docs/REFERENCE.md` §11, "torch's Python-float scalars to within a few f32
+`docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11, "torch's Python-float scalars to within a few f32
 ulps". Early in training, `1 − β₂ᵗ` is a tiny number computed by subtracting
 two nearly-equal ones; doing that in f32 per element would both waste time
 and lose precision. Second, the nested `switch` on the two state-dtype
@@ -414,14 +417,14 @@ const CourseAdamW = struct {
 };
 ```
 
-The real `AdamWConfig` (`src/optim.zig:526`) reads like the course struct
+The real `AdamWConfig` (`src/optim/moment_pair.zig:32`) reads like the course struct
 plus the two state-dtype knobs: `lr: f32 = 1e-3, beta1: f32 = 0.9, beta2:
 f32 = 0.999, eps: f32 = 1e-8, weight_decay: f32 = 0.01, state_dtype:
 StateDType = .f32, second_moment_dtype: StateDType = .f32`.
 
 One more piece of the shared surface deserves a look: how a parameter gets
 *into* an optimizer. `addParam(&w)` accepts any variable tensor via
-`anytype` and builds a `Param` handle (`src/optim.zig:403`): a refcounted
+`anytype` and builds a `Param` handle (`src/optim/common.zig:311`): a refcounted
 view of the storage, a raw `*GradState` pointer, and a rows/cols flattening
 for the matrix-aware optimizers. Two ownership rules follow directly and
 are documented in the module header (`src/optim.zig:22-28`): parameters
@@ -433,7 +436,7 @@ shows how `OptimizerSet` closes that gap).
 
 Finally, determinism — the property §8.9 will cash in. The update loops
 parallelize across the worker pool, and the comment at
-`src/optim.zig:85-91` explains why that costs nothing in reproducibility:
+`src/optim/common.zig:24-30` explains why that costs nothing in reproducibility:
 
 ```zig
 /// Elementwise update loops chunk across the worker pool above this length.
@@ -465,7 +468,7 @@ replace it with the nearest orthogonal matrix (approximately — via
 Newton-Schulz iteration), and step along that. The update has balanced
 singular values, so no direction in parameter space dominates. The
 orthogonalization kernel is 30 lines and worth reading whole — verbatim
-from `src/optim.zig:1386-1416`:
+from `src/optim/muon.zig:214-244`:
 
 ```zig
 pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTensor {
@@ -482,10 +485,10 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
     for (0..steps) |_| {
         var gram = try ctx.matmul(.f32, .trans_b, &x, &x);
         defer gram.deinit();
-        var quad = try ctx.matmul2D(&gram, &gram);
+        var quad = try ctx.matmul(.f32, .plain, &gram, &gram);
         defer quad.deinit();
         for (quad.data(), gram.dataConst()) |*qi, gi| qi.* = ns_coeff_b * gi + ns_coeff_c * qi.*;
-        var bx = try ctx.matmul2D(&quad, &x);
+        var bx = try ctx.matmul(.f32, .plain, &quad, &x);
         errdefer bx.deinit();
         for (bx.data(), x.dataConst()) |*oi, xi| oi.* = ns_coeff_a * xi + oi.*;
         x.deinit();
@@ -505,12 +508,12 @@ Normalize the matrix, then iterate a fixed odd polynomial in `X·Xᵀ` five
 times: each pass pushes the singular values toward 1 while leaving the
 singular *vectors* alone. The transpose trick keeps the Gram matrix at the
 smaller of the two dimensions. And note the doc comment right above it
-(`src/optim.zig:1384-1385`): "The result approximates U*V^T with singular
+(`src/optim/muon.zig:212-213`): "The result approximates U*V^T with singular
 values in roughly (0.5, 1.5) — by design, not a bug." Approximate
 orthogonality is all the optimizer needs, and exact SVD would cost far
 more.
 
-`MuonConfig` (`src/optim.zig:1074`; defaults per `docs/REFERENCE.md` §11):
+`MuonConfig` (`src/optim/muon.zig:47`; defaults per `docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11):
 `lr: f32 = 0.02, momentum: f32 = 0.95, nesterov: bool = true, ns_steps:
 u32 = 5, weight_decay: f32 = 0, scale: MuonScale = .spectral, state_dtype:
 StateDType = .f32, fallback: AdamWConfig = .{ .lr = 3e-4, .beta1 = 0.9,
@@ -539,7 +542,7 @@ APOLLO (arXiv 2412.05270) attacks the other end: AdamW's state costs
 projects each gradient matrix through a *random low-rank projection*,
 keeps the Adam moments in that compressed space, and derives per-channel
 (or per-tensor) scaling factors for a scaled-SGD update. `ApolloConfig`
-(`src/optim.zig:1432`; defaults per `docs/REFERENCE.md` §11): `lr: f32 =
+(`src/optim/apollo.zig:35`; defaults per `docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11): `lr: f32 =
 0.01, beta1: f32 = 0.9, beta2: f32 = 0.999, eps: f32 = 1e-6, weight_decay:
 f32 = 0, rank: usize = 128, update_proj_gap: u64 = 200, scale: f32 = 1.0,
 scale_type: ApolloScaleType = .channel, correct_bias: bool = true, …,
@@ -602,7 +605,7 @@ try set.add(&no_decay);
 Mixing optimizer *types* in one set works — Muon for the trunk, AdamW for
 an adapter — because the set is type-erased through `AnyOptimizer`.
 
-> **Zig note** — `AnyOptimizer` (`src/optim.zig:2426`) is dynamic dispatch
+> **Zig note** — `AnyOptimizer` (`src/optim/set.zig:26`) is dynamic dispatch
 > without inheritance: a hand-rolled vtable. It stores a type-punned
 > `ptr: *anyopaque` plus a `vtable: *const VTable` of function pointers
 > (`step`, `zeroGrad`, `gradSquaredNorm`, `scaleGradients`, `saveState`,
@@ -617,7 +620,7 @@ an adapter — because the set is type-erased through `AnyOptimizer`.
 the member's `collectGradStates` to check every parameter against all
 previously-added members, so registering one variable into two groups
 returns `error.DuplicateParam` instead of silently stepping it twice
-(`docs/REFERENCE.md` §11.3).
+(`docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11.3).
 
 ### Clipping
 
@@ -643,7 +646,7 @@ try sched.attach(&opt.config.lr);   // captures the current lr as the base
 sched.apply(optim.warmupCosineFactor(step_i, total_steps, warmup, 0.1));
 ```
 
-The one built-in factor function, whole, from `src/optim.zig:2406-2415`:
+The one built-in factor function, whole, from `src/optim/schedule.zig:63-72`:
 
 ```zig
 pub fn warmupCosineFactor(step: u64, total_steps: u64, warmup_steps: u64, min_factor: f64) f64 {
@@ -663,7 +666,7 @@ Linear ramp from `1/warmup_steps` to 1, then a half-cosine down to
 purity is not a style point — it is what makes *resume* trivial: "Because
 the factor is a pure function of the step, resuming from a checkpoint just
 re-applies it — this is why lr is deliberately NOT a validated field of
-optimizer checkpoints" (`docs/REFERENCE.md` §11.4). The checkpoint
+optimizer checkpoints" (`docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11.4). The checkpoint
 validates structural config (a changed APOLLO rank is
 `error.CheckpointConfigMismatch`) but not lr, because schedules
 legitimately change lr every step.
@@ -691,7 +694,7 @@ One rule has no workaround: **each backward needs a fresh graph**. A second
 `error.BackwardAlreadyRun` (Chapter 7); accumulation is one backward per
 freshly-built forward, which the recommended shape — one exec scope per
 micro-batch — gives you naturally. Here is the real accumulation window
-from `examples/finetune/main.zig:340-374` (trimmed; comments original):
+from `apps/finetune/main.zig:373-407` (trimmed; comments original):
 
 ```zig
 // Exact token-weighted normalization: the samples differ in
@@ -799,7 +802,7 @@ checkpoint/
 
 The JSON sentinel is written **last**, so "a directory with a parseable
 `trainer_state.json` is a complete, committed checkpoint; a crash mid-save
-leaves a sentinel-less directory" (docs/REFERENCE.md §11) that a loader
+leaves a sentinel-less directory" (`docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11) that a loader
 can recognize as uncommitted. Individual files are written atomically
 (`writeFileAtomic`). This is a database commit protocol in three files —
 no fsync heroics, just careful ordering.
@@ -841,13 +844,13 @@ and the entire apparatus evaporates.
 The second half of the contract handles the *update*: an lr-sized nudge is
 often smaller than a bf16 parameter can represent, so stepping 16-bit
 storage directly would round most updates away. Fucina's answer is the
-standard one, implemented in `Param` (`src/optim.zig:463-499`): 16-bit
+standard one, implemented in `Param` (`src/optim/common.zig:371-407`): 16-bit
 params step through an **f32 master copy** the optimizer owns —
 
 ```zig
 /// The f32 buffer the update kernels step: the param storage itself for
 /// f32 params, the master for 16-bit params.
-fn data(self: *Param) []f32 {
+pub fn data(self: *Param) []f32 {
     return switch (self.value) {
         .f32 => |*t| t.data(),
         else => self.master,
@@ -856,11 +859,11 @@ fn data(self: *Param) []f32 {
 // … ensureMaster / refreshMasterFromValue elided …
 /// Narrow the stepped master back into the 16-bit param storage (no-op
 /// for f32 params).
-fn publish(self: *Param) void {
+pub fn publish(self: *Param) void {
     switch (self.value) {
         .f32 => {},
-        .f16 => |*t| exec_convert.castF32ToF16(t.data(), self.master),
-        .bf16 => |*t| exec_convert.castF32ToBf16(t.data(), self.master),
+        .f16 => |*t| backend_kernels.castF32ToF16(t.data(), self.master),
+        .bf16 => |*t| backend_kernels.castF32ToBf16(t.data(), self.master),
     }
 }
 ```
@@ -897,15 +900,15 @@ small adapters" (docs/TRAINING.md §3).
 > `stateLoad`/`stateStore` widen/narrow at the boundary. And because "LLVM
 > does NOT auto-vectorize these fused sqrt/div update loops on aarch64"
 > (docs/TRAINING.md §11), the bf16 arms are hand-vectorized with
-> `@Vector` (`state_vec_len`, `src/optim.zig`) — the portable-SIMD story
+> `@Vector` (`state_vec_len`, `src/optim/common.zig:255`) — the portable-SIMD story
 > from [Chapter 6](06-going-fast-on-cpus.md) paying off in the optimizer.
 > Also note the comptime environment check guarding all of this
-> persistence: `src/optim.zig:387-391` refuses to compile optimizer
+> persistence: `src/optim/common.zig:296-298` refuses to compile optimizer
 > checkpoints on a big-endian target at all.
 
 ## 8.11 The payoff: spirals, end to end
 
-Time to collect. `examples/spirals/main.zig` (494 lines) is the whole chapter
+Time to collect. `examples/spirals/main.zig` (502 lines) is the whole chapter
 in one runnable file: a typed model struct, a forward pass, cross-entropy,
 five optimizers, param groups with a schedule and clipping, checkpointing
 halfway, and a resume that must be — literally, or the program errors —
@@ -926,18 +929,18 @@ const Model = struct {
     b3: Tensor(.{.class}),
 ```
 
-*(from `examples/spirals/main.zig:29-35`)* — a model is a plain struct of typed
+*(from `examples/spirals/main.zig:37-43`)* — a model is a plain struct of typed
 tensors. No `nn.Module`, no parameter registration ceremony; the tags from
 [Chapter 4](04-axes-with-names.md) document the architecture in the types:
 `w1` maps `.in` (2 coordinates) to `.h1` (64 hidden units), `w2` maps
 `.h1` to `.h2`, `w3` maps `.h2` to `.class` (2 classes). Misconnect the
 layers and it will not compile.
 
-`Model.initRandom` (`examples/spirals/main.zig:38-67`) fills the weights with
+`Model.initRandom` (`examples/spirals/main.zig:46-75`) fills the weights with
 scaled uniform noise, and builds the six tensors with an `errdefer` after
 each — if the fourth allocation fails, the first three are freed, a
 pattern you will now recognize everywhere in the repo. `initConstZero`
-(`:70-90`) builds the *same struct* out of gradient-free constants — the
+(`:78-98`) builds the *same struct* out of gradient-free constants — the
 inference target for a finished checkpoint: same forward code, no autograd
 overhead.
 
@@ -958,7 +961,7 @@ fn registerParams(opt: anytype, model: *Model) !void {
 }
 ```
 
-*(from `examples/spirals/main.zig:116-127`)* — one function registers the model
+*(from `examples/spirals/main.zig:124-135`)* — one function registers the model
 with *any* optimizer, using comptime duck typing: if the optimizer type
 declares `addFallbackParam` (Muon, APOLLO), the classifier head `w3` routes
 to the fallback (§8.6 — heads must not be orthogonalized); otherwise it is
@@ -966,7 +969,7 @@ an ordinary param. Biases auto-route by rank. `@hasDecl` is resolved at
 compile time, so the branch not taken never exists in the binary.
 
 The forward and the step are the payoff for §8.2 — read the comment first,
-it is the whole lifetime story (from `examples/spirals/main.zig:129-153`):
+it is the whole lifetime story (from `examples/spirals/main.zig:137-161`):
 
 ```zig
 /// Forward pass inside an exec scope (ExecContext.openExecScope): every op result
@@ -1004,22 +1007,22 @@ counts matches — the same-forward-infers-and-trains property, live.
 
 ### Data and checkpointing
 
-`makeSpirals` (`examples/spirals/main.zig:169-187`) generates the dataset: 200
+`makeSpirals` (`examples/spirals/main.zig:177-195`) generates the dataset: 200
 points per arm, radius growing with angle over ~1.75 turns, class 1 being
 class 0 rotated by π, plus a whisper of Gaussian noise. Four hundred
 points, two floats each — the whole dataset is a stack array.
 
-`saveCheckpoint` / `loadCheckpoint` (`:189-229`) implement §8.9's directory
+`saveCheckpoint` / `loadCheckpoint` (`:197-237`) implement §8.9's directory
 protocol with the real API: `beginSave`, `writeFileAtomic` for
 `model.safetensors` (via `ParamRegistry.collect` — the reflective walk that
-names tensors by field name, `:231-247`) and `optimizer.fucina` (via
+names tensors by field name, `:239-255`) and `optimizer.fucina` (via
 `opt.saveState`), then `saveTrainerState` writing the JSON sentinel last.
 Note the `comptime @TypeOf(opt) != @TypeOf(null)` guard: the same function
 serves phase 3, which loads weights with no optimizer at all.
 
 ### The three-phase gauntlet
 
-The `demo` driver (`examples/spirals/main.zig:261-326`) runs each optimizer
+The `demo` driver (`examples/spirals/main.zig:269-334`) runs each optimizer
 through three phases:
 
 1. **Train** 2000 full-batch steps, checkpointing model + optimizer at
@@ -1036,7 +1039,7 @@ through three phases:
    if (max_diff != 0) return error.ResumeNotBitExact;
    ```
 
-   *(from `examples/spirals/main.zig:310-315`)* — not a tolerance check. `!= 0`.
+   *(from `examples/spirals/main.zig:318-323`)* — not a tolerance check. `!= 0`.
    One flipped bit anywhere in a thousand replayed steps — a stored moment
    rounded differently, a thread-order-dependent reduction, an lr factor
    applied off by one step — and the example *fails its build*. This is
@@ -1064,7 +1067,7 @@ var gpa = std.heap.DebugAllocator(.{}){};
 defer if (gpa.deinit() == .leak) @panic("leak");
 ```
 
-*(from `examples/spirals/main.zig:329-330`)* — the example *panics if it leaks a
+*(from `examples/spirals/main.zig:337-338`)* — the example *panics if it leaks a
 single allocation*. TRAINING.md §11's advice: train in ReleaseFast,
 validate in Debug — the DebugAllocator catches lifetime mistakes.
 
@@ -1077,7 +1080,7 @@ zig build spirals -Doptimize=ReleaseFast
 You will see one header, then three lines per optimizer (the groups demo
 prints two), in this format
 (these are the actual `print` format strings from
-`examples/spirals/main.zig:292-322,348` — the numbers are for your machine to
+`examples/spirals/main.zig:300-330,356` — the numbers are for your machine to
 fill in):
 
 ```text
@@ -1162,15 +1165,16 @@ and the lr trajectory differs). Either way, watch the gate catch you.
   now, it will all be familiar.
 - `docs/TRAINING.md` — the manual this chapter quotes; §12 is a pitfalls
   checklist worth keeping open while you write your first loop.
-- `src/optim.zig` — all five optimizers, schedules, clipping, persistence;
-  start at the module doc comment, then `adamwUpdate` and
-  `newtonSchulz5`.
+- `src/optim.zig` and the `src/optim/` concern files — all five
+  optimizers, schedules, clipping, persistence; start at the facade's
+  module doc comment, then `moment_pair.zig`'s `adamwUpdate` and
+  `muon.zig`'s `newtonSchulz5`.
 - `src/optim_tests.zig` — the golden parity tests against
   PyTorch/muon.py/apollo_torch; how "faithful port" is enforced.
 - `src/param_registry.zig` and `src/training_checkpoint.zig` — reflective
-  parameter naming and the checkpoint directory protocol, ~370 and ~290
+  parameter naming and the checkpoint directory protocol, ~385 and ~170
   lines respectively.
-- `examples/finetune/main.zig` — the same machinery at LLM scale: accumulation
+- `apps/finetune/main.zig` — the same machinery at LLM scale: accumulation
   windows, OptimizerSet, periodic checkpoint directories.
 
 ## Exercises
