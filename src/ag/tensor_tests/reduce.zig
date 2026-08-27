@@ -449,3 +449,38 @@ test "masked reductions gradcheck against finite differences" {
     const mean_result = try gradcheck_mod.gradcheck(&ctx, maskedMeanGradcheckLoss, .{&x}, .{});
     try std.testing.expectEqual(@as(usize, 8), mean_result.checked);
 }
+
+test "tagged autograd mean backward scales at the reduced shape bitwise" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    // Odd axis length: 1/7 is inexact in f32, so any change to the
+    // gradient arithmetic (g/n instead of g*(1/n), or a differently
+    // rounded pass) breaks the exact-equality assertion below. Pins that
+    // scale-at-reduced-shape-then-broadcast produces the exact bytes the
+    // historical expand-then-scale order did.
+    const rows = 3;
+    const cols = 7;
+    var x_values: [rows * cols]f32 = undefined;
+    var prng = std.Random.DefaultPrng.init(11);
+    for (&x_values) |*value| value.* = prng.random().float(f32) * 4 - 2;
+    var x = try Tensor(.{ .row, .col }).variableFromSlice(&ctx, .{ rows, cols }, &x_values);
+    defer x.deinit();
+    var m = try x.mean(&ctx, .col, .{});
+    defer m.deinit();
+
+    const seed_values = [_]f32{ 0.3, -1.25, 2.5 };
+    var seed = try Tensor(.{.row}).fromSlice(&ctx, .{rows}, &seed_values);
+    defer seed.deinit();
+    try m.backwardWithGrad(&ctx, &seed);
+
+    var g = (try x.grad(&ctx)).?;
+    defer g.deinit();
+    const inv = 1 / @as(f32, @floatFromInt(cols));
+    for (try g.dataConst(), 0..) |value, i| {
+        try std.testing.expectEqual(seed_values[i / cols] * inv, value);
+    }
+}

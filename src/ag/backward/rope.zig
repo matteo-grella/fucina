@@ -11,9 +11,6 @@ const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
 const rawRank = tags_mod.rawRank;
 
-const common = @import("common.zig");
-const cloneInverseRopeTable = common.cloneInverseRopeTable;
-
 pub fn RopeBackward(
     comptime tags: anytype,
     comptime position_axis: usize,
@@ -40,10 +37,12 @@ pub fn RopeBackward(
     };
 }
 
-/// Backward for table-prepared RoPE (full or partial rotation). Clones the
-/// forward table with negated sin instead of rebuilding from positions/theta,
-/// so tables built with `freq_factors` (Llama-3 long-context, Gemma global
-/// layers) get the exact inverse rotation in the VJP.
+/// Backward for table-prepared RoPE (full or partial rotation). RETAINS the
+/// forward table (refcounted handle, no positions/values copy) and applies
+/// `ropeWithTableInverse`, which negates sin at apply time — bitwise
+/// identical to applying a negated-table clone, and tables built with
+/// `freq_factors` (Llama-3 long-context, Gemma global layers) keep the
+/// exact inverse rotation in the VJP.
 pub fn RopeTableBackward(
     comptime tags: anytype,
     comptime position_axis: usize,
@@ -52,7 +51,7 @@ pub fn RopeTableBackward(
 ) type {
     return struct {
         parents: [1]?*GradState,
-        inverse_table: exec_mod.RopeTable,
+        table: exec_mod.RopeTable,
 
         const Self = @This();
 
@@ -60,12 +59,12 @@ pub fn RopeTableBackward(
             if (!core.needs(self, 0)) return;
             // Mirrors the forward: the partial entry self-falls-back to the
             // full kernel when the table spans the whole feature axis.
-            out[0] = try ctx.ropeWithTable(rawRank(tags.len), gy, position_axis, feature_axis, &self.inverse_table, mode);
+            out[0] = try ctx.ropeWithTableInverse(rawRank(tags.len), gy, position_axis, feature_axis, &self.table, mode);
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
-            self.inverse_table.deinit();
+            self.table.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);

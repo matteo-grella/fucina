@@ -36,7 +36,6 @@ pub fn Ops(comptime Self: type) type {
         const finishNoGrad = plumbing.finishNoGrad;
         const rawShapeArray = plumbing.rawShapeArray;
         const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
@@ -184,14 +183,12 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_input.deinit();
             var saved_weight = try weight.asRawTensor().cloneView();
             errdefer saved_weight.deinit();
-            var owned_table = try cloneInverseRopeTable(ctx.allocator, table);
-            errdefer owned_table.deinit();
             return finishOp(tags, ctx, value, Record{
                 .parents = .{ self.grad_state, weight.grad_state },
                 .input = saved_input,
                 .weight = saved_weight,
                 .eps = eps,
-                .inverse_table = owned_table,
+                .table = table.retain(),
             });
         }
 

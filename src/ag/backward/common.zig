@@ -165,12 +165,20 @@ pub fn axisGeometry(comptime rank: usize, shape: [rank]usize, comptime axis: usi
 
 /// Owned copy of a RoPE table with the sin half negated: applying the forward
 /// rotation kernel with this table is the exact inverse (transpose) rotation,
-/// i.e. the RoPE VJP. Cloning the table (instead of rebuilding from positions
-/// and theta) preserves `freq_factors` scaling baked into the angles.
+/// i.e. the RoPE VJP. The production VJP records no longer materialize this —
+/// they `retain` the forward table and apply `ctx.ropeWithTableInverse`,
+/// which negates sin at apply time (`-s` is the same f32 either way, so both
+/// routes are bitwise identical; the rope backward test pins it). Kept as
+/// the oracle for that test and for callers wanting a standalone inverse
+/// table; like the retained route it preserves `freq_factors` scaling baked
+/// into the angles.
 pub fn cloneInverseRopeTable(allocator: std.mem.Allocator, table: *const exec_mod.RopeTable) !exec_mod.RopeTable {
     const positions = try allocator.dupe(i32, table.positions);
     errdefer allocator.free(positions);
     const values = try allocator.dupe(f32, table.values);
+    errdefer allocator.free(values);
+    const refs = try allocator.create(std.atomic.Value(usize));
+    refs.* = .init(1);
     const angle_count = table.positions.len * table.pair_count;
     for (values[0..angle_count]) |*value| value.* = -value.*;
     return .{
@@ -179,5 +187,6 @@ pub fn cloneInverseRopeTable(allocator: std.mem.Allocator, table: *const exec_mo
         .feature_dim = table.feature_dim,
         .pair_count = table.pair_count,
         .values = values,
+        .refs = refs,
     };
 }

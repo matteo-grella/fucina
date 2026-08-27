@@ -12,9 +12,6 @@ const ExecContext = exec_mod.ExecContext;
 const GradState = core.GradState;
 const rawRank = tags_mod.rawRank;
 
-const common = @import("common.zig");
-const cloneInverseRopeTable = common.cloneInverseRopeTable;
-
 pub fn RmsNormBackward(comptime tags: anytype, comptime axis: usize) type {
     return struct {
         parents: [1]?*GradState,
@@ -161,7 +158,7 @@ pub fn RmsNormMulRopeBackward(
         input: RawTensor,
         weight: RawTensor,
         eps: f32,
-        inverse_table: exec_mod.RopeTable,
+        table: exec_mod.RopeTable,
 
         const Self = @This();
 
@@ -171,7 +168,7 @@ pub fn RmsNormMulRopeBackward(
             if (!need_input and !need_weight) return;
 
             const rank = comptime rawRank(tags.len);
-            var unrotated = try ctx.ropeWithTable(rank, gy, position_axis, feature_axis, &self.inverse_table, mode);
+            var unrotated = try ctx.ropeWithTableInverse(rank, gy, position_axis, feature_axis, &self.table, mode);
             defer unrotated.deinit();
             const result = try ctx.rmsNormBackward(rank, &self.input, &unrotated, feature_axis, self.eps, .{ .weight = &self.weight, .need_input = need_input, .need_weight = need_weight });
             out[0] = result.input;
@@ -182,7 +179,7 @@ pub fn RmsNormMulRopeBackward(
             _ = allocator;
             self.input.deinit();
             self.weight.deinit();
-            self.inverse_table.deinit();
+            self.table.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);

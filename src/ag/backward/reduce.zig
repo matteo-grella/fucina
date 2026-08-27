@@ -45,9 +45,14 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var expanded = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
-            defer expanded.deinit();
-            out[0] = try ctx.scale(.f32, &expanded, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
+            // Scale at the REDUCED shape, then broadcast (the
+            // MaskedMeanBackward order): each output element is the same
+            // `g * (1/n)` product either way — bitwise identical, pinned by
+            // a tensor test — for one reduced-size pass instead of a
+            // full-size pass and its allocation.
+            var scaled = try ctx.scale(.f32, gy, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
+            defer scaled.deinit();
+            out[0] = try expandGradientToTags(result_tags, source_tags, ctx, &scaled, self.source_shape);
         }
 
         pub const vtable = core.recordVTable(Self);

@@ -16,6 +16,7 @@ const GradState = core.GradState;
 const Tensor = ag_tensor.Tensor;
 const RawTensor = @import("../../tensor.zig").Tensor;
 
+const backward_common = @import("../backward/common.zig");
 const util = @import("util.zig");
 const expectCloseSlices = util.expectCloseSlices;
 
@@ -343,4 +344,53 @@ fn preparedRopeFactorsLoss(ctx: *ExecContext, x_values: []const f32, table: *con
     var loss = try y.sumAll(ctx);
     defer loss.deinit();
     return loss.item();
+}
+
+test "rope table backward inverse apply matches the negated-table clone bitwise" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    // pair_count 16 exercises the 8-lane vectorized rotate plus its tail;
+    // freq factors pin that the retained table keeps the baked-in scaling.
+    const seq = 3;
+    const d = 32;
+    var freq_factors: [d / 2]f32 = undefined;
+    for (&freq_factors, 0..) |*factor, i| factor.* = 1.0 + 0.05 * @as(f32, @floatFromInt(i));
+    const positions = [_]i32{ 0, 2, 5 };
+    var table = try ctx.prepareRopeTable(.{ .positions = .{ .explicit = &positions }, .feature_dim = d, .freqs = .{ .theta = .{ .base = 10000.0, .factors = &freq_factors } } });
+    defer table.deinit();
+
+    var x_values: [seq * d]f32 = undefined;
+    var seed_values: [seq * d]f32 = undefined;
+    var prng = std.Random.DefaultPrng.init(23);
+    for (&x_values) |*value| value.* = prng.random().float(f32) * 2 - 1;
+    for (&seed_values) |*value| value.* = prng.random().float(f32) * 2 - 1;
+
+    inline for (.{ exec_mod.RopeMode.half, exec_mod.RopeMode.interleaved }) |mode| {
+        var x = try Tensor(.{ .seq, .d }).variableFromSlice(&ctx, .{ seq, d }, &x_values);
+        defer x.deinit();
+        var y = try x.rope(&ctx, .seq, .d, &table, mode);
+        defer y.deinit();
+        var seed = try Tensor(.{ .seq, .d }).fromSlice(&ctx, .{ seq, d }, &seed_values);
+        defer seed.deinit();
+        try y.backwardWithGrad(&ctx, &seed);
+        var g = (try x.grad(&ctx)).?;
+        defer g.deinit();
+
+        // Oracle: the historical route, an owned negated-sin table clone
+        // applied with the plain forward kernel. 0 - s and -s are the same
+        // f32, so the retained-table inverse apply (the VJP route) must
+        // reproduce it bit for bit.
+        var inverse_table = try backward_common.cloneInverseRopeTable(allocator, &table);
+        defer inverse_table.deinit();
+        var seed_raw = try ctx.fromSlice(.f32, &.{ seq, d }, &seed_values);
+        defer seed_raw.deinit();
+        var expected = try ctx.ropeWithTable(2, &seed_raw, 0, 1, &inverse_table, mode);
+        defer expected.deinit();
+        try std.testing.expectEqualSlices(f32, expected.dataConst(), try g.dataConst());
+    }
 }

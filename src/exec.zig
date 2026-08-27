@@ -478,6 +478,7 @@ pub const ExecContext = struct {
     pub const rope = exec_rope.rope;
     pub const prepareRopeTable = exec_rope.prepareRopeTable;
     pub const ropeWithTable = exec_rope.ropeWithTable;
+    pub const ropeWithTableInverse = exec_rope.ropeWithTableInverse;
 
     // ----------------------------------------------------------------------
     // attention: the fused forward/backward kernels (exec/attention.zig)

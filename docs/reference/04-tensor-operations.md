@@ -1296,8 +1296,11 @@ at comptime (a closed set; anything else is a compile error):
   is the **authoritative rotary span**: equal to `dim(feature_tag)` rotates
   fully; smaller rotates the leading `feature_dim` features (`.half`,
   `.interleaved`) or the trailing ones (`.interleaved_tail`) and passes the
-  rest through unchanged (partial RoPE). `RopeTable` owns its buffers;
-  `table.deinit()` releases them.
+  rest through unchanged (partial RoPE). `RopeTable` owns its buffers
+  through a shared owner count: `table.deinit()` releases one handle (the
+  buffers go with the last), and `table.retain()` returns another owning
+  handle of the same buffers — how the RoPE VJP records keep the forward
+  table alive without copying it.
 - `exec.RopeTheta` / `.{ .positions = p, .theta_base = t }` — on-the-fly
   factors (`positions: []const i32`), full rotation only. Pair `i` at
   position `p` rotates by `p / theta_base^(2i/d)`.

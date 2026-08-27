@@ -1,11 +1,14 @@
 //! Rotary position embedding (RoPE) for the eager runtime.
 //!
 //! Home of `RopeTable`/`RopeMode`/`RopeTableSpec` (re-exported through
-//! `exec.zig` for the autograd VJP params and the facade) plus the two
-//! forward entries: `prepareRopeTable(spec)` builds a table over any
+//! `exec.zig` for the autograd VJP params and the facade) plus the
+//! application entries: `prepareRopeTable(spec)` builds a table over any
 //! positions source and angle schedule, `ropeWithTable` applies it over a
-//! full or partial rotary span. `sinValues`/`cosValues` are `pub` so
-//! `norm.zig`'s fused rms-norm+rope kernel can read them cross-module.
+//! full or partial rotary span, and `ropeWithTableInverse` applies the
+//! exact inverse rotation (sin negated at apply time; the VJP route —
+//! records `retain` the forward table instead of cloning it).
+//! `sinValues`/`cosValues` are `pub` so `norm.zig`'s fused rms-norm+rope
+//! kernel can read them cross-module.
 //!
 //! `ropeWithTable` splits its vectors across the work pool above the
 //! fused-norm sibling's length gate; every vector owns disjoint output
@@ -52,11 +55,28 @@ pub const RopeTable = struct {
     feature_dim: usize,
     pair_count: usize,
     values: []f32,
+    /// Shared owner count of `positions`/`values`: the prepared original
+    /// and every `retain`ed handle each call `deinit` once; the buffers are
+    /// freed by the last. Atomic so a graph handed to another thread stays
+    /// safe (the tensor-storage refcount convention).
+    refs: *std.atomic.Value(usize),
 
     pub fn deinit(self: *RopeTable) void {
-        self.allocator.free(self.values);
-        self.allocator.free(self.positions);
+        if (self.refs.fetchSub(1, .acq_rel) == 1) {
+            self.allocator.free(self.values);
+            self.allocator.free(self.positions);
+            self.allocator.destroy(self.refs);
+        }
         self.* = undefined;
+    }
+
+    /// A new owning handle of the SAME buffers (owner count +1). The RoPE
+    /// VJP records retain the forward table this way instead of duplicating
+    /// positions and values per record (~1 MB per layer at 2k context) and
+    /// apply the inversion at rotation time (`ropeWithTableInverse`).
+    pub fn retain(self: *const RopeTable) RopeTable {
+        _ = self.refs.fetchAdd(1, .monotonic);
+        return self.*;
     }
 
     pub fn sinValues(self: *const RopeTable) []const f32 {
@@ -167,6 +187,9 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
     errdefer ctx.allocator.free(values);
     const positions_copy = try ctx.allocator.alloc(i32, position_count);
     errdefer ctx.allocator.free(positions_copy);
+    const refs = try ctx.allocator.create(std.atomic.Value(usize));
+    errdefer ctx.allocator.destroy(refs);
+    refs.* = .init(1);
     for (positions_copy, 0..) |*slot, i| slot.* = spec.positions.at(i);
 
     const sin_values = values[0..angle_count];
@@ -214,6 +237,7 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
         .feature_dim = spec.feature_dim,
         .pair_count = pair_count,
         .values = values,
+        .refs = refs,
     };
 }
 
@@ -225,14 +249,18 @@ const RopeVec = @Vector(rope_vec_width, f32);
 /// Rotate one position's pairs when the two features of each pair sit in
 /// separate contiguous halves (`.half` pairing): straight vector loads on
 /// both halves and on the sin/cos table rows. Same per-element expressions
-/// as the scalar loop, so the output is bitwise identical.
-fn rotatePairsHalf(output: []f32, input: []const f32, first_base: usize, second_base: usize, sin_row: []const f32, cos_row: []const f32) void {
+/// as the scalar loop, so the output is bitwise identical. `inverse`
+/// negates each sin lane at load: `-s` is the exact f32 a sign-flipped
+/// table would hold, so the un-rotation is bitwise identical to applying a
+/// negated table.
+fn rotatePairsHalf(comptime inverse: bool, output: []f32, input: []const f32, first_base: usize, second_base: usize, sin_row: []const f32, cos_row: []const f32) void {
     const pair_count = sin_row.len;
     var pair_i: usize = 0;
     while (pair_i + rope_vec_width <= pair_count) : (pair_i += rope_vec_width) {
         const first: RopeVec = input[first_base + pair_i ..][0..rope_vec_width].*;
         const second: RopeVec = input[second_base + pair_i ..][0..rope_vec_width].*;
-        const sin_vec: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const sin_loaded: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const sin_vec = if (inverse) -sin_loaded else sin_loaded;
         const cos_vec: RopeVec = cos_row[pair_i..][0..rope_vec_width].*;
         output[first_base + pair_i ..][0..rope_vec_width].* = first * cos_vec - second * sin_vec;
         output[second_base + pair_i ..][0..rope_vec_width].* = first * sin_vec + second * cos_vec;
@@ -240,8 +268,9 @@ fn rotatePairsHalf(output: []f32, input: []const f32, first_base: usize, second_
     while (pair_i < pair_count) : (pair_i += 1) {
         const first = input[first_base + pair_i];
         const second = input[second_base + pair_i];
-        output[first_base + pair_i] = first * cos_row[pair_i] - second * sin_row[pair_i];
-        output[second_base + pair_i] = first * sin_row[pair_i] + second * cos_row[pair_i];
+        const sin_value = if (inverse) -sin_row[pair_i] else sin_row[pair_i];
+        output[first_base + pair_i] = first * cos_row[pair_i] - second * sin_value;
+        output[second_base + pair_i] = first * sin_value + second * cos_row[pair_i];
     }
 }
 
@@ -250,7 +279,7 @@ fn rotatePairsHalf(output: []f32, input: []const f32, first_base: usize, second_
 /// deinterleave/reinterleave with `@shuffle` (the ld2/st2 shape on NEON).
 /// Bitwise identical to the scalar loop. Negative shuffle indices select
 /// from the second operand (`~i` picks lane `i`).
-fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_row: []const f32, cos_row: []const f32) void {
+fn rotatePairsInterleaved(comptime inverse: bool, output: []f32, input: []const f32, base: usize, sin_row: []const f32, cos_row: []const f32) void {
     const pair_count = sin_row.len;
     var pair_i: usize = 0;
     while (pair_i + rope_vec_width <= pair_count) : (pair_i += rope_vec_width) {
@@ -258,7 +287,8 @@ fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_ro
         const hi: RopeVec = input[base + 2 * pair_i + rope_vec_width ..][0..rope_vec_width].*;
         const first = @shuffle(f32, lo, hi, [rope_vec_width]i32{ 0, 2, 4, 6, -1, -3, -5, -7 });
         const second = @shuffle(f32, lo, hi, [rope_vec_width]i32{ 1, 3, 5, 7, -2, -4, -6, -8 });
-        const sin_vec: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const sin_loaded: RopeVec = sin_row[pair_i..][0..rope_vec_width].*;
+        const sin_vec = if (inverse) -sin_loaded else sin_loaded;
         const cos_vec: RopeVec = cos_row[pair_i..][0..rope_vec_width].*;
         const rotated_first = first * cos_vec - second * sin_vec;
         const rotated_second = first * sin_vec + second * cos_vec;
@@ -269,8 +299,9 @@ fn rotatePairsInterleaved(output: []f32, input: []const f32, base: usize, sin_ro
         const first_offset = base + 2 * pair_i;
         const first = input[first_offset];
         const second = input[first_offset + 1];
-        output[first_offset] = first * cos_row[pair_i] - second * sin_row[pair_i];
-        output[first_offset + 1] = first * sin_row[pair_i] + second * cos_row[pair_i];
+        const sin_value = if (inverse) -sin_row[pair_i] else sin_row[pair_i];
+        output[first_offset] = first * cos_row[pair_i] - second * sin_value;
+        output[first_offset + 1] = first * sin_value + second * cos_row[pair_i];
     }
 }
 
@@ -288,6 +319,37 @@ pub fn ropeWithTable(
     table: *const RopeTable,
     comptime mode: RopeMode,
 ) !Tensor {
+    return ropeWithTableDirection(ctx, rank, x, position_axis, feature_axis, table, mode, false);
+}
+
+/// Apply `table` as the exact inverse (transpose) rotation: every sin is
+/// negated AT APPLY TIME instead of materializing a sign-flipped table copy
+/// (`-s` is the exact f32 such a table would hold, so the output is bitwise
+/// identical to `ropeWithTable` over a negated table — `rope_tests.zig`
+/// pins it). The RoPE VJPs retain the forward table and route here, which
+/// preserves `freq_factors`/NTK scaling baked into the angles.
+pub fn ropeWithTableInverse(
+    ctx: *ExecContext,
+    comptime rank: usize,
+    x: *const Tensor,
+    comptime position_axis: usize,
+    comptime feature_axis: usize,
+    table: *const RopeTable,
+    comptime mode: RopeMode,
+) !Tensor {
+    return ropeWithTableDirection(ctx, rank, x, position_axis, feature_axis, table, mode, true);
+}
+
+fn ropeWithTableDirection(
+    ctx: *ExecContext,
+    comptime rank: usize,
+    x: *const Tensor,
+    comptime position_axis: usize,
+    comptime feature_axis: usize,
+    table: *const RopeTable,
+    comptime mode: RopeMode,
+    comptime inverse: bool,
+) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (position_axis >= rank or feature_axis >= rank) @compileError("axis out of bounds");
     if (position_axis == feature_axis) @compileError("position and feature axes must differ");
@@ -299,8 +361,8 @@ pub fn ropeWithTable(
     if (table.positions.len != source.shape[position_axis]) return tensor.TensorError.InvalidDataLength;
     // One body, instantiated per span: the full-span loop carries no
     // pass-through copy and no offset arithmetic.
-    if (rotary_dim == feature_dim) return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .full);
-    return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .partial);
+    if (rotary_dim == feature_dim) return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .full, inverse);
+    return applyRope(ctx, rank, x, position_axis, feature_axis, table, mode, .partial, inverse);
 }
 
 const RotarySpan = enum { full, partial };
@@ -314,6 +376,7 @@ fn applyRope(
     table: *const RopeTable,
     comptime mode: RopeMode,
     comptime span: RotarySpan,
+    comptime inverse: bool,
 ) !Tensor {
     const source = try x.rankView(rank);
     const feature_dim = source.shape[feature_axis];
@@ -349,7 +412,7 @@ fn applyRope(
         },
     };
 
-    const Task = RopeVectorsTask(rank, position_axis, feature_axis, mode);
+    const Task = RopeVectorsTask(rank, position_axis, feature_axis, mode, inverse);
     const task: Task = .{
         .input = input,
         .output = output,
@@ -384,6 +447,7 @@ fn RopeVectorsTask(
     comptime position_axis: usize,
     comptime feature_axis: usize,
     comptime mode: RopeMode,
+    comptime inverse: bool,
 ) type {
     return struct {
         input: []const f32,
@@ -426,15 +490,15 @@ fn RopeVectorsTask(
                     const sin_row = sin_values[position_coord * pair_count ..][0..pair_count];
                     const cos_row = cos_values[position_coord * pair_count ..][0..pair_count];
                     switch (mode) {
-                        .interleaved, .interleaved_tail => rotatePairsInterleaved(output, input, base_offset + rotary_offset, sin_row, cos_row),
-                        .half => rotatePairsHalf(output, input, base_offset + rotary_offset, base_offset + rotary_offset + pair_count, sin_row, cos_row),
+                        .interleaved, .interleaved_tail => rotatePairsInterleaved(inverse, output, input, base_offset + rotary_offset, sin_row, cos_row),
+                        .half => rotatePairsHalf(inverse, output, input, base_offset + rotary_offset, base_offset + rotary_offset + pair_count, sin_row, cos_row),
                     }
                     continue;
                 }
 
                 for (0..pair_count) |pair_i| {
                     const angle_i = position_coord * pair_count + pair_i;
-                    const sin_value = sin_values[angle_i];
+                    const sin_value = if (inverse) -sin_values[angle_i] else sin_values[angle_i];
                     const cos_value = cos_values[angle_i];
 
                     const first_feature = rotary_offset + switch (mode) {

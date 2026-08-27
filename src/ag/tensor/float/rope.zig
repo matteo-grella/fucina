@@ -25,7 +25,6 @@ pub fn Ops(comptime Self: type) type {
         const finishNoGrad = plumbing.finishNoGrad;
         const rawShapeArray = plumbing.rawShapeArray;
         const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         /// Rotary position embedding over (`position_tag`, `feature_tag`).
@@ -59,14 +58,13 @@ pub fn Ops(comptime Self: type) type {
             const info = @typeInfo(SourceT);
             if (comptime (info == .pointer and info.pointer.size == .one and info.pointer.child == exec_mod.RopeTable)) {
                 // The table's feature_dim is the rotary span (full or
-                // partial); the backward mirrors it with the inverse table.
+                // partial); the backward retains the table and applies the
+                // inverse rotation (sin negated at apply time).
                 var value = try ctx.ropeWithTable(tag_rank, self.asRawTensor(), position_axis, feature_axis, source, mode);
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
                 const Record = RopeTableBackward(tags, position_axis, feature_axis, mode);
-                var owned_table = try cloneInverseRopeTable(ctx.allocator, source);
-                errdefer owned_table.deinit();
-                return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .inverse_table = owned_table });
+                return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .table = source.retain() });
             }
             if (comptime info == .@"struct") {
                 comptime {

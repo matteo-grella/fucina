@@ -404,12 +404,15 @@ pub fn buildRope2dTable(allocator: Allocator, gh: usize, gw: usize, head_dim: us
         }
     }
 
+    const refs = try allocator.create(std.atomic.Value(usize));
+    refs.* = .init(1);
     return .{
         .allocator = allocator,
         .positions = positions,
         .feature_dim = head_dim,
         .pair_count = pair_count,
         .values = values,
+        .refs = refs,
     };
 }
 
