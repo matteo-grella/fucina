@@ -80,12 +80,12 @@ a counter draining to zero on a bounded pool, no blocked workers. As far as
 I know, mainstream stacks route backward through a central engine. Here, the
 live tensors are the graph.
 **Visual:** Split screen: toy `Value` (chapter code) beside `GradState` at
-`src/ag/core.zig:100-115`, matching fields connected by lines
+`src/ag/core.zig:205-220`, matching fields connected by lines
 (`grad`↔`grad`, `rule`↔`grad_fn`, `pending`↔`pending_grads`); then a brief
-cut to the drain at `src/ag/core.zig:273-277`
+cut to the drain at `src/ag/core.zig:406-410`
 (`fetchSub(1, .acq_rel)` … `return old == 1;`), then the Origins paragraph
-at `README.md:274-286` with "(AFAIK) Mainstream stacks…" visibly on screen.
-**Overlay:** `src/ag/core.zig — 733 lines incl. two in-file tests (wc -l,
+at `README.md:367-382` with "(AFAIK) Mainstream stacks…" visibly on screen.
+**Overlay:** `src/ag/core.zig — 780 lines incl. two in-file tests (wc -l,
 as counted today)` · `(AFAIK)` kept on screen with the mainstream contrast
 
 ### [2:10–2:38] The same forward trains
@@ -97,11 +97,11 @@ no-op, and the whole graph stays alive until backward. There is no training
 engine — every differentiable op ends in finishOp, and training is literally
 one branch.
 **Visual:** Code shot: the exec-scope snippet with its explanatory comment
-at `README.md:43-53`; then `finishOp` at `src/ag/tensor.zig:6291-6308` with
-the first line (`if (!wants_grad or !control.isGradEnabled()) return
-finishNoGrad(...)`) highlighted.
+at `README.md:61-72`; then the op-tail gate `recordsGrad` at
+`src/ag/tensor/plumbing.zig:58-60` (`return wants_grad and
+control.isGradEnabled();`) highlighted.
 **Overlay:** `"training and inference produce identical values" —
-docs/REFERENCE.md`
+docs/reference/05-automatic-differentiation.md`
 
 ### [2:38–3:00] Verified, not trusted
 **VO:** And gradients are verified, not trusted. gradcheck nudges every
@@ -125,11 +125,11 @@ with "Full chapter: `docs/course/07-autograd.md`".
   - `docs/course/07-autograd.md:1167-1185` — `squareLoss` +
     `test "customVjp validated by gradcheck"`.
 - **Repo code shots**:
-  - `src/ag/core.zig:100-115` — `GradState` struct.
-  - `src/ag/core.zig:273-277` — `finishGradContributionReady` drain.
+  - `src/ag/core.zig:205-220` — `GradState` struct.
+  - `src/ag/core.zig:406-410` — `finishGradContributionReady` drain.
   - `src/ag/tensor.zig:6291-6308` — `finishOp`.
-  - `README.md:43-53` — exec-scope snippet with comment.
-  - `README.md:274-286` — Origins paragraph (keep "(AFAIK)" visible).
+  - `README.md:61-72` — exec-scope snippet with comment.
+  - `README.md:367-382` — Origins paragraph (keep "(AFAIK)" visible).
 - **Terminal recording**: assemble `scalar_autograd.zig` in a scratch
   directory by concatenating, verbatim, the chapter's fixed-engine block
   (`docs/course/07-autograd.md:230-294`) and the two passing tests
@@ -158,16 +158,16 @@ with "Full chapter: `docs/course/07-autograd.md`".
     the README quote, not decoration.
   - "~60 lines" refers to the chapter's **course code**, not repo code; the
     overlay at 0:30 carries "compiles & passes under zig test (Zig 0.16.0)".
-  - The "733 lines" overlay keeps its framing: "incl. two in-file tests,
+  - The "780 lines" overlay keeps its framing: "incl. two in-file tests,
     wc -l, as counted today".
   - No state-of-the-art or production-readiness claims anywhere.
 - **If the cut runs long, trim in this order**: (1) the optional
   naive-version terminal beat; (2) shorten the Origins on-screen dwell to an
-  overlay quote (the hedge must survive the trim); (3) the 733-lines
-  overlay; (4) the `finishOp` cut at 2:10 (keep the REFERENCE.md quote
+  overlay quote (the hedge must survive the trim); (3) the 780-lines
+  overlay; (4) the `recordsGrad` cut at 2:10 (keep the reference-quote
   overlay).
 - **Do not change**: the 6-vs-9 trace numbers (they are the chapter's worked
-  example); the "verified, not trusted" framing; the REFERENCE.md quote
+  example); the "verified, not trusted" framing; the reference quote
   "training and inference produce identical values" (quote it exactly or
   drop it); the spaGO attribution (goroutine-per-node → atomic counter is
   the lineage story, not a footnote).

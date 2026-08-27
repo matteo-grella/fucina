@@ -265,8 +265,10 @@ close: "measured 2 vs 32 distinct buffers on a 32-op 1 MiB chain"
 (docs/MEMORY-MODEL.md §5). For pure inference, deinit-ASAP with no scope is
 the discipline.
 
-Four ownership gotchas, all documented, all worth memorizing now
-(docs/REFERENCE.md §4.1, §6.3):
+Four ownership rules, all documented, all worth memorizing now
+(`docs/reference/04-tensor-operations.md` §4.1,
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md`
+§6.3):
 
 - **Scope borrows die at close** — use one after `closeExecScope` and it is
   use-after-free.
@@ -274,19 +276,21 @@ Four ownership gotchas, all documented, all worth memorizing now
   i64 index outputs, explicit constructors, fetched gradients. The classic
   trap is `topK` under a scope — `values` is a scope borrow, `indices` is
   caller-owned.
-- **Composed ops require a scope under gradients** (`nllLoss`,
-  `l2Normalize`, `cosineSimilarity`, `stack`, `einsumMany`, …): they build
-  function-local graph nodes only a scope can own —
-  `error.ActiveExecScopeRequired` otherwise; no-grad use works unscoped.
+- **Composed ops own themselves** (`nllLoss`, `l2Normalize`,
+  `cosineSimilarity`, `stack`, `einsumMany`, …): they release their
+  function-local intermediates on return and differentiate scoped or
+  unscoped alike; the consumer records keep the released graph nodes
+  alive.
 - **The two consuming ops refuse borrows**: consuming a scope borrow would
   double-free at close — `error.ActiveExecScopeUnsupported`.
 
-One layering remark to file away for Chapter 7: the exec layer "deliberately
-knows nothing about autograd types; the ag facade stores its backward nodes
-in that payload. The user scopes the execution; that, in turn, is what
-enables autograd on top" (comment in `src/exec.zig:150-153`). A scope holds a
-type-erased `*anyopaque` plus a destructor pointer per adopted value — exec
-owns things it cannot name.
+One layering remark to file away for Chapter 7: an exec scope is "an arena
+of borrowed EXECUTION artifacts. An entry is one reference (a value buffer
+of any dtype, or a type-erased graph node) plus the call that drops it;
+exec knows nothing about autograd types, the ag facade packages its nodes
+as entries" (comment in `src/exec.zig:216-221`). A scope holds a type-erased
+pointer plus a release call per adopted entry — exec owns things it cannot
+name.
 
 ## 5.4 Pointwise ops and broadcasting: the ground floor
 
@@ -1141,11 +1145,12 @@ material.
 
 ## Explore the source
 
-- `src/exec.zig` — `ExecContext`: the facade, `LayoutClass`, the scope
-  machinery, and the ~300-entry raw op surface with its naming grammar
+- `src/exec.zig` — `ExecContext`: the facade, the scope machinery, and the
+  ~300-entry raw op surface with its naming grammar
   (`*Rank`, `*AxisRank`, `*Typed`, `*Backward*`).
-- `src/ag/tensor.zig` — the tagged op facade: read `add`, then `scale`, then
-  `finishOp`/`finishNoGrad`, and you have read the whole library's skeleton.
+- `src/ag/tensor.zig` and its mixins under `src/ag/tensor/` — the tagged op
+  facade: read `add`, then `scale`, then `finishOp`/`finishNoGrad`
+  (`tensor/plumbing.zig`), and you have read the whole library's skeleton.
 - `src/tag_ops.zig` — the lowering tier: `pointwise` is the 25-line
   crystallization of "validate once, view, dispatch".
 - `src/exec/softmax.zig`, `src/exec/loss.zig`, `src/exec/topk.zig`,

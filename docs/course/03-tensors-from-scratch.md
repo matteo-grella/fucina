@@ -569,7 +569,7 @@ Two entries deserve a pause.
 
 **`Scalar(.bf16) == u16`.** bfloat16 is stored and passed as *raw bits*, not
 a float type. Why that is sane becomes clear from the conversion functions,
-which are a small gem — `src/dtype.zig:765-778`, complete:
+which are a small gem — `src/dtype.zig:806-819`, complete:
 
 ```zig
 pub fn bf16ToF32(bits: u16) f32 {
@@ -597,15 +597,15 @@ round-to-nearest-even (`+ 0x7fff + lsb` — add just under half, plus one more
 when the kept LSB is odd, so ties go to even), and the first branch quiets
 NaNs (`| 64` sets a mantissa bit so a NaN payload never truncates to
 infinity — ggml-compatible, pinned by `src/dtype_tests.zig`). Even the
-constant `one(.bf16) == 0x3f80` (src/dtype.zig:626-632) makes sense now:
+constant `one(.bf16) == 0x3f80` (src/dtype.zig:543-550) makes sense now:
 it is the top half of f32's `0x3f80_0000`, which is 1.0. Compare f16, which
 spends its 16 bits on more mantissa and less exponent: more precision,
 much smaller range.
 
 **The block structs are wire formats.** Each block dtype maps to an
 `extern struct` — C layout, no padding games — and a `comptime` block pins
-every one of their sizes at build time (struct at src/dtype.zig:81-84,
-comments added; sizes pinned at :228-256, abridged):
+every one of their sizes at build time (struct at src/dtype.zig:93-96,
+comments added; sizes pinned at :240-268, abridged):
 
 ```zig
 pub const BlockQ8_0 = extern struct {
