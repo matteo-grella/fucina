@@ -106,9 +106,9 @@ test "exec huberLoss matches torch F.huber_loss (quadratic/linear arms) and vali
     try expectSliceClose(&.{ -0.5, 1.5, -1.5, 0 }, gt.dataConst());
 
     // delta must be positive and finite.
-    try std.testing.expectError(TensorError.InvalidShape, ctx.huberLoss(&input, &target, .{ .delta = 0 }));
-    try std.testing.expectError(TensorError.InvalidShape, ctx.huberLoss(&input, &target, .{ .delta = -1 }));
-    try std.testing.expectError(TensorError.InvalidShape, ctx.huberBackwardUpstream(&input, &target, .{ .delta = 0 }, &gy, .input));
+    try std.testing.expectError(TensorError.InvalidArgument, ctx.huberLoss(&input, &target, .{ .delta = 0 }));
+    try std.testing.expectError(TensorError.InvalidArgument, ctx.huberLoss(&input, &target, .{ .delta = -1 }));
+    try std.testing.expectError(TensorError.InvalidArgument, ctx.huberBackwardUpstream(&input, &target, .{ .delta = 0 }, &gy, .input));
 }
 
 test "exec bceLoss from_logits matches torch F.binary_cross_entropy_with_logits" {

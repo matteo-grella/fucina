@@ -461,10 +461,10 @@ test "exec dropout applies the counter-based mask with exact inverted scaling" {
         try std.testing.expectEqualSlices(f32, y.dataConst(), gy.dataConst());
     }
 
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.dropoutForward(&x, 1.0, seed));
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.dropoutForward(&x, 1.5, seed));
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.dropoutForward(&x, -0.1, seed));
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.dropoutForward(&x, std.math.nan(f32), seed));
+    try std.testing.expectError(tensor.TensorError.InvalidArgument, ctx.dropoutForward(&x, 1.0, seed));
+    try std.testing.expectError(tensor.TensorError.InvalidArgument, ctx.dropoutForward(&x, 1.5, seed));
+    try std.testing.expectError(tensor.TensorError.InvalidArgument, ctx.dropoutForward(&x, -0.1, seed));
+    try std.testing.expectError(tensor.TensorError.InvalidArgument, ctx.dropoutForward(&x, std.math.nan(f32), seed));
 }
 
 test "exec dropout parallel path is bitwise identical across the threshold" {

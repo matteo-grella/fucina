@@ -529,7 +529,7 @@ test "exec context cross entropy ex handles ignored labels and validation" {
     try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 5, 1 }, .{}));
     try std.testing.expectError(tensor.TensorError.IndexOutOfBounds, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 9, 1 }, .{ .ignore_index = 7 }, .{ .scale = 1 }));
     // label_smoothing must be in [0, 1).
-    try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
+    try std.testing.expectError(tensor.TensorError.InvalidArgument, ctx.crossEntropyLoss(2, &logits, 1, &.{ 0, 1, 2 }, .{ .label_smoothing = 1 }));
     // .none requires a per-row upstream of matching length; mean/sum forbid it.
     try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 1, 2 }, .{ .reduction = .none }, .{ .scale = 1 }));
     try std.testing.expectError(tensor.TensorError.InvalidDataLength, ctx.crossEntropyBackward(2, &logits, 1, &.{ 0, 1, 2 }, .{}, .{ .rows = .{ .per_row = &.{ 1, 1, 1 } } }));

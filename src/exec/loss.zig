@@ -138,7 +138,7 @@ pub const bce_eps: f32 = 1e-7;
 /// counts the non-ignored positions for the `.mean` denominator.
 fn validateCrossEntropyLabels(labels: []const usize, position_count: usize, class_count: usize, options: CrossEntropyOptions) !usize {
     if (labels.len != position_count) return tensor.TensorError.InvalidDataLength;
-    if (!(options.label_smoothing >= 0 and options.label_smoothing < 1)) return tensor.TensorError.InvalidShape;
+    if (!(options.label_smoothing >= 0 and options.label_smoothing < 1)) return tensor.TensorError.InvalidArgument;
     var valid_count: usize = 0;
     for (labels) |label| {
         if (options.ignore_index) |ignore_index| {
@@ -970,7 +970,7 @@ fn stableSigmoid(value: f32) f32 {
 }
 
 fn validateHuberOptions(options: HuberOptions) !void {
-    if (!(std.math.isFinite(options.delta) and options.delta > 0)) return tensor.TensorError.InvalidShape;
+    if (!(std.math.isFinite(options.delta) and options.delta > 0)) return tensor.TensorError.InvalidArgument;
 }
 
 /// Mean-squared-error forward over same-shaped input/target (torch
@@ -987,7 +987,7 @@ pub fn mseBackwardUpstream(ctx: *ExecContext, input: *const Tensor, target: *con
 }
 
 /// Huber forward over same-shaped input/target (torch F.huber_loss): see
-/// `HuberOptions`. Errors with `InvalidShape` unless `delta` is positive
+/// `HuberOptions`. Errors with `InvalidArgument` unless `delta` is positive
 /// and finite.
 pub fn huberLoss(ctx: *ExecContext, input: *const Tensor, target: *const Tensor, options: HuberOptions) !Tensor {
     try validateHuberOptions(options);

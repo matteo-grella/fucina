@@ -99,10 +99,11 @@ pub fn Ops(comptime Self: type) type {
         /// excluding `end` (torch.arange with float semantics): element i
         /// is `start + i·step` (not accumulated). `step` must move from
         /// `start` toward `end` — an empty range is `InvalidShape`
-        /// (zero-size tensors are not representable), as is `step == 0`.
+        /// (zero-size tensors are not representable); `step == 0` is
+        /// `InvalidArgument`.
         pub fn arange(ctx: *ExecContext, start: f32, end: f32, step: f32) !Self {
             comptime if (tag_count != 1) @compileError("arange builds a rank-1 tensor; use a single-tag Tensor type");
-            if (step == 0) return TensorError.InvalidShape;
+            if (step == 0) return TensorError.InvalidArgument;
             const span = (end - start) / step;
             if (!(span > 0)) return TensorError.InvalidShape;
             const count: usize = @intFromFloat(@ceil(span));
@@ -190,9 +191,9 @@ pub fn Ops(comptime Self: type) type {
         /// No-grad 0/1 tensor of Bernoulli draws (torch.bernoulli with a
         /// scalar probability): element i is 1.0 iff the `[0, 1)` uniform
         /// stream at `(seed, i)` (see `rand`) draws below `p`. `p` outside
-        /// `[0, 1]` is `InvalidShape`.
+        /// `[0, 1]` is `InvalidArgument`.
         pub fn bernoulli(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, p: f32) !Self {
-            if (!(p >= 0 and p <= 1)) return TensorError.InvalidShape;
+            if (!(p >= 0 and p <= 1)) return TensorError.InvalidArgument;
             var value = try ctx.empty(.f32, &raw_shape);
             errdefer value.deinit();
             const out = value.data();

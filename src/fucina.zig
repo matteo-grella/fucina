@@ -128,6 +128,34 @@ pub const gradcheck = ag.gradcheck;
 pub const GradcheckOptions = ag.GradcheckOptions;
 /// Per-parameter outcome of a `gradcheck` run.
 pub const GradcheckResult = ag.GradcheckResult;
+/// The shape/data error domain every tensor-producing call draws from:
+/// `ShapeMismatch`, `InvalidShape`, `InvalidArgument` (non-shape argument
+/// validity), `InvalidDataLength`, `IndexOutOfBounds`, `UnsupportedView`,
+/// `EmptySelection`, `DivisionByZero`.
+pub const TensorError = tensor.TensorError;
+/// The public error vocabulary: the merge of the domain sets a facade call
+/// can surface. Every fallible `Tensor`/`ExecContext` method keeps its
+/// precise inferred error set (a call site handles only what its op can
+/// actually raise); this named merge is for wrappers that thread any
+/// fucina error upward. Three domains:
+///
+///   - `TensorError`: shape, layout, and argument validity;
+///   - graph control: `UnsupportedGradient` (a no-grad-only op touched a
+///     grad-requiring tensor; families with a more specific reason name it,
+///     see docs/reference/04 §4.1), `MutableDataRequiresNoGrad`,
+///     `NoGradientGraph` (backward without a recorded graph),
+///     `ActiveExecScopeUnsupported` (an op that must own its result was
+///     called under an exec scope), and the backward engine's `AgError`
+///     (`MissingOutputGradient`, `MissingBackwardGradient`,
+///     `BackwardAlreadyRun`);
+///   - `OutOfMemory`: allocation failure anywhere.
+pub const Error = TensorError || ag.AgError || error{
+    UnsupportedGradient,
+    MutableDataRequiresNoGrad,
+    NoGradientGraph,
+    ActiveExecScopeUnsupported,
+    OutOfMemory,
+};
 /// Element dtype enum (f32/f16/bf16/int/bool + every quantized block
 /// format); the block-format registry lives in `quant`/`dtype`.
 pub const DType = dtype.DType;

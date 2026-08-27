@@ -210,9 +210,9 @@ Semantics:
   scope-owned. The typed scalar/float branches get `emptyLike`/`zerosLike`/
   `onesLike` (matching their static set, which has no `full`).
 - `arange` is torch.arange with float semantics: element i is
-  `start + i·step` (not accumulated), the end exclusive; `step == 0` or an
-  empty range errors `InvalidShape` (zero-size tensors are not
-  representable). `linspace` is torch.linspace: `steps` evenly spaced
+  `start + i·step` (not accumulated), the end exclusive; `step == 0`
+  errors `InvalidArgument`, an empty range `InvalidShape` (zero-size
+  tensors are not representable). `linspace` is torch.linspace: `steps` evenly spaced
   values, end INCLUSIVE and pinned exactly (`steps == 1` yields
   `{start}`; `steps == 0` is `InvalidShape`). `oneHot` builds the f32
   `[indices.len, depth]` one-hot matrix (torch F.one_hot with an explicit
@@ -228,7 +228,7 @@ Semantics:
   onto `[lo, hi)` (`uniformFill`); `randn`/`normal` are Box-Muller
   (`gaussianFill`/`normalFill`); `bernoulli` is 1.0 iff the `[0, 1)` draw
   at `(seed, i)` falls below `p` (`p` outside `[0, 1]` is
-  `InvalidShape`); `gumbel` is standard Gumbel(0, 1) noise
+  `InvalidArgument`); `gumbel` is standard Gumbel(0, 1) noise
   `-ln(-ln(u))` over a strictly open uniform (`gumbelFill` — every draw
   finite), the gumbel-max / gumbel-softmax building block: add to logits
   and `argmax` for a categorical sample, or `softmax` at a temperature
@@ -237,7 +237,7 @@ Semantics:
 - The typed **i64** branch adds two seed-stream constructors of its own
   (the repo-wide index dtype; [§3.10](03-tensors-types-construction-and-data-access.md#310-facade-surface-index)): `randint(ctx, raw_shape, seed, low, high)`
   — uniform integers over `[low, high)` via the widening multiply-shift
-  map (`randintFill`; `low >= high` is `InvalidShape`) — and
+  map (`randintFill`; `low >= high` is `InvalidArgument`) — and
   `randperm(ctx, n, seed)` — a rank-1 Fisher–Yates permutation of
   `{0, …, n-1}` (`randpermFill`; single-tag types only). The `.bool`
   branch adds the `bandMask` attention-mask constructor ([§4.6](04-tensor-operations.md#46-masks-comparisons-and-conditionals-srcagtensorzig)).
@@ -717,7 +717,7 @@ pub fn scatter(self, ctx, comptime tag, indices, src: *const Self) !Self
   of `self` with the range `[start, start+len)` / the given rows along
   `tag` overwritten by `update`; the originals are untouched. Gradients
   flow to both `self` (masked) and `update`. `setRows` requires unique
-  in-range indices (`IndexOutOfBounds` / `InvalidShape` on duplicates), and
+  in-range indices (`IndexOutOfBounds` / `InvalidArgument` on duplicates), and
   `update` must match `self` except along `tag`, where it must have
   `indices.len` rows. `zeroSlice`/`zeroRows` are the fill-with-zero variants
   (no `update` operand).

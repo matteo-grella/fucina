@@ -262,8 +262,8 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
     } else if (options.causal_source_offset != 0) {
         return tensor.TensorError.InvalidShape;
     }
-    if (options.max_bias > 0 and options.head_axis == null) return tensor.TensorError.InvalidShape;
-    if (options.max_bias > 0 and options.mask == null) return tensor.TensorError.InvalidShape;
+    if (options.max_bias > 0 and options.head_axis == null) return tensor.TensorError.InvalidArgument;
+    if (options.max_bias > 0 and options.mask == null) return tensor.TensorError.InvalidArgument;
 
     const head_count = if (options.head_axis) |head_axis| source.shape[head_axis] else 1;
     if (options.sinks) |sinks| {

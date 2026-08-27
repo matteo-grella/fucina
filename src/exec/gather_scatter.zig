@@ -875,7 +875,7 @@ fn validateUniqueIndices(ctx: *ExecContext, indices: []const usize, limit: usize
     @memset(seen, false);
     for (indices) |index| {
         if (index >= limit) return tensor.TensorError.IndexOutOfBounds;
-        if (seen[index]) return tensor.TensorError.InvalidShape;
+        if (seen[index]) return tensor.TensorError.InvalidArgument;
         seen[index] = true;
     }
 }

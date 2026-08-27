@@ -180,7 +180,7 @@ test "public Tensor arange linspace oneHot constructors" {
     var c = try V.arange(&ctx, 3, 0, -1); // negative step
     defer c.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 2, 1 }, try c.dataConst());
-    try std.testing.expectError(error.InvalidShape, V.arange(&ctx, 0, 5, 0));
+    try std.testing.expectError(error.InvalidArgument, V.arange(&ctx, 0, 5, 0));
     try std.testing.expectError(error.InvalidShape, V.arange(&ctx, 5, 0, 1)); // empty range
 
     var l = try V.linspace(&ctx, 0, 1, 5);
@@ -250,7 +250,7 @@ test "public Tensor rand randn uniform normal bernoulli ride the seed stream" {
     for (try bern.dataConst(), expected) |got, draw| {
         try std.testing.expectEqual(@as(f32, if (draw < 0.4) 1 else 0), got);
     }
-    try std.testing.expectError(error.InvalidShape, M.bernoulli(&ctx, .{ 4, 8 }, 1, 1.5));
+    try std.testing.expectError(error.InvalidArgument, M.bernoulli(&ctx, .{ 4, 8 }, 1, 1.5));
 }
 
 test "public Tensor gumbel and eye constructors" {
@@ -298,7 +298,7 @@ test "public Tensor randint randperm ride the seed stream" {
     try std.testing.expectEqualSlices(i64, &expected, try r.dataConst());
     for (try r.dataConst()) |v| try std.testing.expect(v >= -3 and v < 5);
     try std.testing.expect(!r.requiresGrad());
-    try std.testing.expectError(error.InvalidShape, I.randint(&ctx, .{ 4, 8 }, 1, 5, 5));
+    try std.testing.expectError(error.InvalidArgument, I.randint(&ctx, .{ 4, 8 }, 1, 5, 5));
 
     // randperm: a permutation of 0..n-1, deterministic per seed.
     const P = Tensor(.{ .dtype = .i64, .tags = .{.idx} });

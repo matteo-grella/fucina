@@ -83,10 +83,10 @@ pub fn Ops(comptime Self: type) type {
         /// `seed` (see docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md): element i is a pure function of `(seed, i)` via
         /// the widening multiply-shift map (`fucina.rng.randintFill`).
         /// i64-only (the repo-wide index dtype); cast with `to` for
-        /// narrower integers. `low >= high` is `InvalidShape`.
+        /// narrower integers. `low >= high` is `InvalidArgument`.
         pub fn randint(ctx: *ExecContext, raw_shape: [tensor_rank]usize, seed: u64, low: i64, high: i64) !Self {
             comptime if (dtype != .i64) @compileError("randint is i64-only (the repo-wide index dtype); cast the result with to()");
-            if (low >= high) return TensorError.InvalidShape;
+            if (low >= high) return TensorError.InvalidArgument;
             var value = try ctx.empty(dtype, raw_shape);
             errdefer value.deinit();
             rng.randintFill(seed, value.data(), low, high);

@@ -1229,7 +1229,7 @@ pub fn dropoutBackward(ctx: *ExecContext, gy: *const Tensor, p: f32, seed: u64) 
 }
 
 fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor {
-    if (!(p >= 0 and p < 1)) return tensor.TensorError.InvalidShape;
+    if (!(p >= 0 and p < 1)) return tensor.TensorError.InvalidArgument;
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
@@ -1394,7 +1394,7 @@ pub fn snakeRowsBackwardParams(ctx: *ExecContext, x: *const Tensor, gy: *const T
 /// nanochat GPT's). One f32 kernel; 16-bit inputs follow the `.widened`
 /// policy.
 pub fn softcap(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), cap: f32) !tensor.TensorOf(dtype) {
-    if (!(cap > 0)) return tensor.TensorError.InvalidShape;
+    if (!(cap > 0)) return tensor.TensorError.InvalidArgument;
     const compute = comptime ExecContext.widenedCompute(dtype, "softcap");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
@@ -1408,7 +1408,7 @@ pub fn softcap(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tensor
 }
 
 pub fn clamp(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype), min_value: f32, max_value: f32) !tensor.TensorOf(dtype) {
-    if (min_value > max_value) return tensor.TensorError.InvalidShape;
+    if (min_value > max_value) return tensor.TensorError.InvalidArgument;
     const compute = comptime ExecContext.widenedCompute(dtype, "clamp");
 
     var xx = try ctx.prepareAs(dtype, compute, x);

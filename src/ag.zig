@@ -15,6 +15,9 @@ const tags = @import("tags.zig");
 const tensor = @import("ag/tensor.zig");
 
 pub const Tensor = tensor.Tensor;
+/// The backward engine's error domain (`MissingOutputGradient`,
+/// `MissingBackwardGradient`, `BackwardAlreadyRun`).
+pub const AgError = core.AgError;
 pub const PackedRhs = tensor.PackedRhs;
 pub const SliceRange = tensor.SliceRange;
 pub const einsumMany = tensor.einsumMany;

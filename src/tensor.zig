@@ -17,6 +17,11 @@ pub const max_rank = 8;
 pub const TensorError = error{
     ShapeMismatch,
     InvalidShape,
+    /// A non-shape argument fails its own validity check: a probability
+    /// outside its interval, a non-positive cap, `min > max`, a zero step,
+    /// duplicate scatter indices, an option combination that names no
+    /// target. Shape and layout problems stay `InvalidShape`/`ShapeMismatch`.
+    InvalidArgument,
     InvalidDataLength,
     IndexOutOfBounds,
     UnsupportedView,

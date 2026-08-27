@@ -661,8 +661,8 @@ test "tagged autograd dropout regenerates the mask and matches mul-by-mask gradi
         x.zeroGrad();
     }
 
-    try std.testing.expectError(error.InvalidShape, x.dropout(&ctx, 1.0, seed));
-    try std.testing.expectError(error.InvalidShape, x.dropout(&ctx, -0.5, seed));
+    try std.testing.expectError(error.InvalidArgument, x.dropout(&ctx, 1.0, seed));
+    try std.testing.expectError(error.InvalidArgument, x.dropout(&ctx, -0.5, seed));
 }
 
 test "public Tensor biasAdd / addAxisVectorInPlace / addScaledInPlace" {

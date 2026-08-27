@@ -535,7 +535,7 @@ fn standardizeAccum(
 ) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
-    if (!(options.eps >= 0)) return tensor.TensorError.InvalidShape;
+    if (!(options.eps >= 0)) return tensor.TensorError.InvalidArgument;
 
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
@@ -645,7 +645,7 @@ fn standardizeBackwardAccum(
 ) !Tensor {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
-    if (!(options.eps >= 0)) return tensor.TensorError.InvalidShape;
+    if (!(options.eps >= 0)) return tensor.TensorError.InvalidArgument;
 
     const source = try x.rankView(rank);
     const grad_view = try gy.rankView(rank);
@@ -760,7 +760,7 @@ fn standardizeBackwardAccum(
 pub fn topK(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
     if (rank == 0 or rank > tensor.max_rank) @compileError("invalid tensor rank");
     if (axis >= rank) @compileError("axis out of bounds");
-    if (k == 0) return tensor.TensorError.InvalidShape;
+    if (k == 0) return tensor.TensorError.InvalidArgument;
 
     const source = try x.rankView(rank);
     if (k > source.shape[axis]) return tensor.TensorError.IndexOutOfBounds;

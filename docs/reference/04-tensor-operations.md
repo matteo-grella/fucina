@@ -21,10 +21,21 @@ Every operation below shares one contract, implemented by the shared tails
   not carry is a **compile error**, never a runtime error. Shape problems the
   type system cannot see (mismatched dims, bad lengths) are recoverable
   `TensorError`s (`ShapeMismatch`, `InvalidShape`, `InvalidDataLength`,
-  `IndexOutOfBounds`, integer division's `DivisionByZero`); the
-  data-dependent no-match outcome of
+  `IndexOutOfBounds`, integer division's `DivisionByZero`); a non-shape
+  argument failing its own validity check (a dropout `p` outside `[0, 1)`,
+  a non-positive `softcap` cap, `clamp` with `min > max`, a Huber `delta`
+  that is not positive and finite, a negative standardize `eps`, `topk`
+  with `k == 0`, an ALiBi/sinks softmax option combination naming no
+  target) is `InvalidArgument`; the data-dependent no-match outcome of
   `maskedSelect`/`maskedScatter` gets the dedicated `EmptySelection` so it
-  stays catchable apart from those.
+  stays catchable apart from those. This is the whole recoverable
+  vocabulary of the op surface: `fucina.Error` names the merge
+  (`fucina.TensorError`, the graph-control names `UnsupportedGradient`,
+  `MutableDataRequiresNoGrad`, `NoGradientGraph`,
+  `ActiveExecScopeUnsupported`, the backward engine's
+  `MissingOutputGradient`/`MissingBackwardGradient`/`BackwardAlreadyRun`,
+  and `OutOfMemory`) for wrappers that thread any fucina error upward;
+  each method still exposes its precise inferred error set.
 - **Ownership.** Each op allocates and returns a **new owned tensor**; the
   caller `deinit`s it. Operands are borrowed via `*const` and never consumed
   (the two `take*` ops in [§4.3](04-tensor-operations.md#43-scalar-variants-and-in-placeno-grad-helpers-srcagtensorzig) are the documented exception). While an exec
@@ -1121,7 +1132,7 @@ pre-softmax logit is `x·scale + slope·mask`:
 - `.max_bias = b` with `.head_tag` — ALiBi: a per-head slope multiplies the
   mask, following the ggml slope schedule (powers of `2^(−b/h)` with `h` the
   head count rounded down to a power of two; `src/exec/shape.zig`
-  `alibiSlope`). Requires `.mask` and `.head_tag` (`InvalidShape`
+  `alibiSlope`). Requires `.mask` and `.head_tag` (`InvalidArgument`
   otherwise).
 - `.sinks = slice` — per-head attention sinks: one extra logit per head that
   joins the running max and the denominator only, so row probabilities sum

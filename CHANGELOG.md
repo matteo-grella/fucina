@@ -25,6 +25,17 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `fucina.Error` and `fucina.TensorError`: the public error vocabulary at
+  the root. `TensorError` re-exports the shape/data domain set and gains
+  `InvalidArgument` (a non-shape argument failing its own validity check);
+  `Error` is the merge of `TensorError`, the graph-control names
+  (`UnsupportedGradient`, `MutableDataRequiresNoGrad`, `NoGradientGraph`,
+  `ActiveExecScopeUnsupported`), the backward engine's domain
+  (`MissingOutputGradient`, `MissingBackwardGradient`,
+  `BackwardAlreadyRun`), and `OutOfMemory`, for wrappers that
+  thread any fucina error upward. Facade methods keep their precise
+  inferred error sets; docs/reference/04 §4.1 documents the vocabulary.
+
 - `ExecContext.matmulQuant` / `matmulQuantInto` (`exec.QuantMatmul`,
   `exec.QuantMatmulLhs`): the one quantized matmul request. `prologue`
   names the fused activation (`.split_swiglu`/`.rms_norm_mul`/
@@ -301,6 +312,18 @@ this point; earlier history is `git log`.
   users: `backend.scalar_impl.kernels.X(pc, ...)` becomes the twin
   `backend.vector_impl.<domain>.scalar.X(...)` (no `pc`);
   `backend.native_impl` is unchanged.
+- Argument-validity failures error with the new `error.InvalidArgument`
+  instead of `error.InvalidShape`: dropout `p` outside `[0, 1)`, `softcap`
+  cap not positive, `clamp` with `min > max`, cross-entropy
+  `label_smoothing` outside `[0, 1)`, Huber `delta` not positive and
+  finite, `standardize` negative `eps`, `topk` with `k == 0`, softmax
+  `.max_bias` without `.head_tag`/`.mask`, `setRows`/`indexCopy` duplicate
+  indices, `arange` with `step == 0`, `bernoulli` `p` outside `[0, 1]`,
+  and `randint` with `low >= high`. Shape and layout failures keep
+  `InvalidShape`/`ShapeMismatch`. Rewrite: catch or expect
+  `error.InvalidArgument` at those call sites; inferred error sets absorb
+  the change everywhere else.
+
 - The public bf16/f8 tensor branches speak VALUE types instead of raw bit
   patterns: `item`/`data`/`dataConst`/`copyTo`/`fromSlice`/
   `fromBorrowedConstSlice`/`variableFromSlice` on a `.bf16` tensor now take
