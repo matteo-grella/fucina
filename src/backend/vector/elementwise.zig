@@ -6,6 +6,7 @@
 //! `../ops.zig`.
 
 const std = @import("std");
+const isa = @import("../isa.zig");
 const ops = @import("../ops.zig");
 const dtype_mod = @import("../../dtype.zig");
 const parallel = @import("../../parallel.zig");
@@ -38,6 +39,7 @@ pub fn addContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.addContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -58,6 +60,7 @@ pub fn subContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.subContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -78,6 +81,7 @@ pub fn mulContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.mulContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -92,6 +96,7 @@ pub fn divContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.divContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -106,6 +111,7 @@ pub fn maximumContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.maximumContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -120,6 +126,7 @@ pub fn minimumContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.minimumContiguousIntoUnchecked(out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -137,6 +144,7 @@ pub fn elementwiseContiguousIntoTyped(
     len: usize,
 ) void {
     _ = pc;
+    if (comptime isa.reference) return scalar.elementwiseContiguousIntoTyped(dtype, op, out, a, b, len);
     const x = common.contiguousDataConstOf(dtype, a, len);
     const y = common.contiguousDataConstOf(dtype, b, len);
     const z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
@@ -152,6 +160,7 @@ pub fn elementwiseContiguousIntoTyped(
 }
 
 pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
+    if (comptime isa.reference) return scalar.scaleInto(out, a, scalar_value);
     try tensor.requireSameShape(out, a);
     const x = a.dataConst();
     const z = out.data();
@@ -160,12 +169,14 @@ pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_valu
 }
 
 pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
+    if (comptime isa.reference) return scalar.addScaledSlice(z, x, scalar_value);
     primitives.vecAddScaled(z, x, scalar_value);
 }
 
 /// `z[row] += row_vector` for every row, then `op` (a fused bias + activation
 /// when given).
 pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
+    if (comptime isa.reference) return scalar.addRowVectorSlice(op, z, row_vector, rows, cols);
     std.debug.assert(z.len >= rows * cols);
     std.debug.assert(row_vector.len == cols);
     for (0..rows) |row_i| {
@@ -233,6 +244,7 @@ fn runPreluChannelsTask(task: *const RowChanTask) void {
 
 /// PReLU with a per-channel slope: `z[r,c] = x > 0 ? x : α[c]·x`.
 pub fn preluChannelsInto(pc: ParallelConfig, z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+    if (comptime isa.reference) return scalar.preluChannelsInto(z, x, alpha, rows, cols);
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
     if (maybeParallelRowChan(pc, runPreluChannelsTask, z, x, alpha, null, rows, cols)) return;
@@ -266,6 +278,7 @@ fn runChannelAffineTask(task: *const RowChanTask) void {
 /// a null `shift` degrades to the per-channel scale `z = x·scale[c]` (the
 /// affine's own input-VJP).
 pub fn channelAffineInto(pc: ParallelConfig, z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize) void {
+    if (comptime isa.reference) return scalar.channelAffineInto(z, x, scale, shift, rows, cols);
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(scale.len == cols and (shift == null or shift.?.len == cols));
     if (maybeParallelRowChan(pc, runChannelAffineTask, z, x, scale, shift, rows, cols)) return;
@@ -301,6 +314,7 @@ fn channelAffineRows(z: []f32, x: []const f32, scale: []const f32, shift: ?[]con
 /// PReLU input-VJP: `gx[r,c] = x > 0 ? gy : α[c]·gy` (subgradient 0 at the
 /// kink follows the forward's `>` test, matching the composed relu VJP).
 pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+    if (comptime isa.reference) return scalar.preluChannelsBackwardInputInto(gx, gy, x, alpha, rows, cols);
     std.debug.assert(gx.len >= rows * cols and gy.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
     _ = pc;
@@ -326,6 +340,7 @@ pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const
 /// PReLU slope-VJP: `gα[c] = Σ_rows gy·min(x, 0)` — serial row accumulation
 /// (deterministic order; the slope vector is small).
 pub fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
+    if (comptime isa.reference) return scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
     std.debug.assert(galpha.len == cols);
     std.debug.assert(gy.len >= rows * cols and x.len >= rows * cols);
     _ = pc;
@@ -347,6 +362,7 @@ pub fn unaryContiguousIntoUnchecked(
     a: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.unaryContiguousIntoUnchecked(op, out, a, len);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     if (maybeParallelUnary(pc, op, z, x)) return;
@@ -360,6 +376,7 @@ pub fn leakyReluContiguousIntoUnchecked(
     len: usize,
     negative_slope: f32,
 ) void {
+    if (comptime isa.reference) return scalar.leakyReluContiguousIntoUnchecked(out, a, len, negative_slope);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     if (maybeParallelLeakyRelu(pc, z, x, negative_slope)) return;
@@ -373,6 +390,7 @@ pub fn softcapContiguousIntoUnchecked(
     len: usize,
     cap: f32,
 ) void {
+    if (comptime isa.reference) return scalar.softcapContiguousIntoUnchecked(out, a, len, cap);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     if (maybeParallelSoftcap(pc, z, x, cap)) return;
@@ -387,6 +405,7 @@ pub fn clampContiguousIntoUnchecked(
     min_value: f32,
     max_value: f32,
 ) void {
+    if (comptime isa.reference) return scalar.clampContiguousIntoUnchecked(out, a, len, min_value, max_value);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
     if (maybeParallelClamp(pc, z, x, min_value, max_value)) return;
@@ -401,6 +420,7 @@ pub fn gatedContiguousIntoUnchecked(
     b: *const Tensor,
     len: usize,
 ) void {
+    if (comptime isa.reference) return scalar.gatedContiguousIntoUnchecked(op, out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
@@ -409,20 +429,24 @@ pub fn gatedContiguousIntoUnchecked(
 }
 
 pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+    if (comptime isa.reference) return scalar.sumInto(out, a);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = parallelVecSum(pc, a.dataConst()) orelse primitives.vecSum(a.dataConst());
 }
 
 pub fn sumSlice(values: []const f32) f32 {
+    if (comptime isa.reference) return scalar.sumSlice(values);
     return primitives.vecSum(values);
 }
 
 pub fn prodInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+    if (comptime isa.reference) return scalar.prodInto(out, a);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = parallelVecProd(pc, a.dataConst()) orelse primitives.vecProd(a.dataConst());
 }
 
 pub fn prodSlice(values: []const f32) f32 {
+    if (comptime isa.reference) return scalar.prodSlice(values);
     return primitives.vecProd(values);
 }
 
@@ -432,6 +456,7 @@ pub fn sumSliceTyped(
     values: []const dtype_mod.Scalar(dtype),
 ) dtype_mod.Scalar(dtype_mod.outputDType(.reduction, dtype)) {
     _ = pc;
+    if (comptime isa.reference) return sumSliceTypedScalar(dtype, values);
     if (comptime dtype == .f64) {
         return primitives.vecSumF64(values);
     } else if (comptime dtype == .f16) {
@@ -443,6 +468,7 @@ pub fn sumSliceTyped(
 }
 
 pub fn dotInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+    if (comptime isa.reference) return scalar.dot(.f32, out, a, b);
     try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = parallelVecDot(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDot(a.dataConst(), b.dataConst());
@@ -455,6 +481,7 @@ pub fn dotIntoTyped(
     a: *const tensor.TensorOf(dtype),
     b: *const tensor.TensorOf(dtype),
 ) !void {
+    if (comptime isa.reference) return scalar.dot(dtype, out, a, b);
     try tensor.requireSameShapeOf(dtype, a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = if (comptime dtype == .f64)
@@ -594,7 +621,7 @@ fn maybeParallelBinary(
     return true;
 }
 
-fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar: f32) bool {
+fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar_value: f32) bool {
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
@@ -603,7 +630,7 @@ fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar: f32)
     for (0..thread_count) |ti| {
         const start = ti * z.len / thread_count;
         const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .scalar = scalar, .start = start, .end = end };
+        tasks[ti] = .{ .z = z, .x = x, .scalar = scalar_value, .start = start, .end = end };
     }
     pool.parallelChunks(ScaleTask, tasks[0..thread_count], runScaleTask);
     return true;
@@ -913,6 +940,19 @@ fn dotSliceTypedScalar(
     return dtype_mod.castFloat(compute_dtype, output_dtype, acc);
 }
 
+// Single-row slice kernels for fused per-row activation math (the exact
+// same vector cores the unfused elementwise ops apply; the scalar arm is
+// the plain per-element loop).
+pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
+    if (comptime isa.reference) return scalar.unaryRowSlice(op, z, x);
+    primitives.vecUnary(op, z, x);
+}
+
+pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
+    if (comptime isa.reference) return scalar.mulRowSlice(z, x, y);
+    primitives.vecMul(z, x, y);
+}
+
 // ---------------- Snake activation (per-channel, DAC) ----------------
 
 /// Per-channel Snake activation over contiguous `[rows, cols]` rows:
@@ -929,6 +969,7 @@ pub fn snakeInto(
     rows: usize,
     cols: usize,
 ) void {
+    if (comptime isa.reference) return scalar.snakeInto(out, x, alpha, inv_b, rows, cols);
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
     if (maybeParallelSnake(pc, output, input, alpha, inv_b, rows, cols)) return;
@@ -1026,6 +1067,7 @@ pub fn groupNormInto(
     groups: usize,
     eps: f32,
 ) void {
+    if (comptime isa.reference) return scalar.groupNormInto(out, x, weight, bias, rows, cols, groups, eps);
     const input = contiguousDataConst(x, rows * cols);
     const output = contiguousData(out, rows * cols);
     if (maybeParallelGroupNorm(pc, output, input, weight, bias, rows, cols, groups, eps)) return;
@@ -1158,6 +1200,7 @@ pub fn snakeBackwardInputInto(
     rows: usize,
     cols: usize,
 ) void {
+    if (comptime isa.reference) return scalar.snakeBackwardInputInto(out, x, gy, alpha, inv_b, rows, cols);
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const output = contiguousData(out, rows * cols);
@@ -1260,6 +1303,7 @@ pub fn snakeBackwardParamsInto(
     rows: usize,
     cols: usize,
 ) void {
+    if (comptime isa.reference) return scalar.snakeBackwardParamsInto(galpha, ginv_b, x, gy, alpha, inv_b, rows, cols);
     const ga = contiguousData(galpha, cols);
     const gib = contiguousData(ginv_b, cols);
     const input = contiguousDataConst(x, rows * cols);
@@ -1394,6 +1438,7 @@ pub fn groupNormBackwardInto(
     groups: usize,
     eps: f32,
 ) void {
+    if (comptime isa.reference) return scalar.groupNormBackwardInto(gx, gw, gb, x, gy, weight, rows, cols, groups, eps);
     const input = contiguousDataConst(x, rows * cols);
     const grad = contiguousDataConst(gy, rows * cols);
     const gx_data: ?[]f32 = if (gx) |t| contiguousData(t, rows * cols) else null;
@@ -1590,3 +1635,383 @@ fn groupNormBackwardGroupRange(
 test {
     _ = @import("elementwise_tests.zig");
 }
+
+// ---------------- The scalar reference arms ----------------
+
+/// The scalar reference twins of this file's kernel entries: plain serial
+/// loops, no SIMD, no pool. On `-Dbackend=scalar` builds (`isa.reference`)
+/// every entry above dispatches here, so this namespace is the executable
+/// specification; on native builds the twins stay reachable for
+/// `backend/parity_test.zig` and `bench/backend.zig`, which hold entry and
+/// twin to the same answer.
+pub const scalar = struct {
+    pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = xv + yv;
+    }
+
+    pub fn subContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = xv - yv;
+    }
+
+    pub fn mulContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = xv * yv;
+    }
+
+    pub fn divContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = xv / yv;
+    }
+
+    pub fn maximumContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @max(xv, yv);
+    }
+
+    pub fn minimumContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @min(xv, yv);
+    }
+
+    pub fn elementwiseContiguousIntoTyped(
+        comptime dtype: DType,
+        comptime op: ops.ElementwiseOp,
+        out: *tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)),
+        a: *const tensor.TensorOf(dtype),
+        b: *const tensor.TensorOf(dtype),
+        len: usize,
+    ) void {
+        const x = common.contiguousDataConstOf(dtype, a, len);
+        const y = common.contiguousDataConstOf(dtype, b, len);
+        const z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
+        elementwiseSlicesTyped(dtype, op, z, x, y);
+    }
+
+    pub fn scaleInto(out: *Tensor, a: *const Tensor, scalar_value: f32) !void {
+        try tensor.requireSameShape(out, a);
+        const x = a.dataConst();
+        const z = out.data();
+        for (z, x) |*dst, xv| dst.* = xv * scalar_value;
+    }
+
+    pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
+        for (z, x) |*dst, xv| dst.* += xv * scalar_value;
+    }
+
+    pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []const f32, rows: usize, cols: usize) void {
+        std.debug.assert(z.len >= rows * cols);
+        std.debug.assert(row_vector.len == cols);
+        for (0..rows) |row_i| {
+            const row = z[row_i * cols ..][0..cols];
+            if (comptime op) |actual_op| {
+                for (row, row_vector) |*dst, value| dst.* = ops.unaryScalar(actual_op, dst.* + value);
+            } else {
+                for (row, row_vector) |*dst, value| dst.* += value;
+            }
+        }
+    }
+
+    pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
+        for (z, x) |*dst, value| dst.* = ops.unaryScalar(op, value);
+    }
+
+    pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
+        for (z, x, y) |*dst, a, b| dst.* = a * b;
+    }
+
+    pub fn preluChannelsInto(z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const i = r * cols + c;
+                z[i] = if (x[i] > 0) x[i] else x[i] * alpha[c];
+            }
+        }
+    }
+
+    pub fn channelAffineInto(z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize) void {
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const i = r * cols + c;
+                z[i] = if (shift) |t| x[i] * scale[c] + t[c] else x[i] * scale[c];
+            }
+        }
+    }
+
+    pub fn preluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const i = r * cols + c;
+                gx[i] = if (x[i] > 0) gy[i] else gy[i] * alpha[c];
+            }
+        }
+    }
+
+    pub fn preluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
+        @memset(galpha, 0);
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const i = r * cols + c;
+                if (x[i] <= 0) galpha[c] += gy[i] * x[i];
+            }
+        }
+    }
+
+    pub fn unaryContiguousIntoUnchecked(comptime op: ops.UnaryOp, out: *Tensor, a: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const z = contiguousData(out, len);
+        for (z, x) |*dst, value| dst.* = ops.unaryScalar(op, value);
+    }
+
+    pub fn leakyReluContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, len: usize, negative_slope: f32) void {
+        const x = contiguousDataConst(a, len);
+        const z = contiguousData(out, len);
+        for (z, x) |*dst, value| dst.* = if (value >= 0) value else value * negative_slope;
+    }
+
+    /// `cap * tanh(x / cap)`: the logit softcap.
+    pub fn softcapContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, len: usize, cap: f32) void {
+        const x = contiguousDataConst(a, len);
+        const z = contiguousData(out, len);
+        const inv = 1.0 / cap;
+        for (z, x) |*dst, value| dst.* = cap * std.math.tanh(value * inv);
+    }
+
+    pub fn clampContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, len: usize, min_value: f32, max_value: f32) void {
+        const x = contiguousDataConst(a, len);
+        const z = contiguousData(out, len);
+        for (z, x) |*dst, value| dst.* = @min(@max(value, min_value), max_value);
+    }
+
+    pub fn gatedContiguousIntoUnchecked(comptime op: ops.GatedOp, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        const x = contiguousDataConst(a, len);
+        const y = contiguousDataConst(b, len);
+        const z = contiguousData(out, len);
+        for (z, x, y) |*dst, left, gate| dst.* = ops.gatedPairScalar(op, gate, left);
+    }
+
+    pub fn sumInto(out: *Tensor, a: *const Tensor) !void {
+        if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
+        out.data()[0] = scalar.sumSlice(a.dataConst());
+    }
+
+    pub fn sumSlice(values: []const f32) f32 {
+        var acc: f32 = 0;
+        for (values) |v| acc += v;
+        return acc;
+    }
+
+    pub fn prodInto(out: *Tensor, a: *const Tensor) !void {
+        if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
+        out.data()[0] = scalar.prodSlice(a.dataConst());
+    }
+
+    pub fn prodSlice(values: []const f32) f32 {
+        var acc: f32 = 1;
+        for (values) |v| acc *= v;
+        return acc;
+    }
+
+    /// Full dot product into the scalar `out`, accumulated serially in the
+    /// dtype's matmul compute dtype (f32 included; the reference arm of both
+    /// `dotInto` and `dotIntoTyped`).
+    pub fn dot(
+        comptime dtype: DType,
+        out: *tensor.TensorOf(dtype_mod.outputDType(.matmul, dtype)),
+        a: *const tensor.TensorOf(dtype),
+        b: *const tensor.TensorOf(dtype),
+    ) !void {
+        try tensor.requireSameShapeOf(dtype, a, b);
+        if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
+        out.data()[0] = dotSliceTypedScalar(dtype, a.dataConst(), b.dataConst());
+    }
+
+    pub fn snakeInto(out: *Tensor, x: *const Tensor, alpha: []const f32, inv_b: []const f32, rows: usize, cols: usize) void {
+        const input = contiguousDataConst(x, rows * cols);
+        const output = contiguousData(out, rows * cols);
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const v = input[r * cols + c];
+                const sn = @sin(alpha[c] * v);
+                output[r * cols + c] = v + inv_b[c] * sn * sn;
+            }
+        }
+    }
+
+    pub fn groupNormInto(
+        out: *Tensor,
+        x: *const Tensor,
+        weight: ?[]const f32,
+        bias: ?[]const f32,
+        rows: usize,
+        cols: usize,
+        groups: usize,
+        eps: f32,
+    ) void {
+        const input = contiguousDataConst(x, rows * cols);
+        const output = contiguousData(out, rows * cols);
+        const cols_per_group = cols / groups;
+        const count: f64 = @floatFromInt(rows * cols_per_group);
+        for (0..groups) |g| {
+            const col_start = g * cols_per_group;
+            var sum: f64 = 0;
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    sum += input[r * cols + col_start + local_c];
+                }
+            }
+            const mean: f32 = @floatCast(sum / count);
+            var sum2: f64 = 0;
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    const centered = input[r * cols + col_start + local_c] - mean;
+                    sum2 += @as(f64, centered) * @as(f64, centered);
+                }
+            }
+            const scale_v: f32 = 1.0 / @sqrt(@as(f32, @floatCast(sum2 / count + eps)));
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    const c = col_start + local_c;
+                    var value = (input[r * cols + c] - mean) * scale_v;
+                    if (weight) |w| value *= w[c];
+                    if (bias) |b| value += b[c];
+                    output[r * cols + c] = value;
+                }
+            }
+        }
+    }
+
+    pub fn snakeBackwardInputInto(out: *Tensor, x: *const Tensor, gy: *const Tensor, alpha: []const f32, inv_b: []const f32, rows: usize, cols: usize) void {
+        const input = contiguousDataConst(x, rows * cols);
+        const grad = contiguousDataConst(gy, rows * cols);
+        const output = contiguousData(out, rows * cols);
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const v = input[r * cols + c];
+                const s2 = @sin(2 * alpha[c] * v);
+                output[r * cols + c] = grad[r * cols + c] * (1 + inv_b[c] * alpha[c] * s2);
+            }
+        }
+    }
+
+    pub fn snakeBackwardParamsInto(
+        galpha: *Tensor,
+        ginv_b: *Tensor,
+        x: *const Tensor,
+        gy: *const Tensor,
+        alpha: []const f32,
+        inv_b: []const f32,
+        rows: usize,
+        cols: usize,
+    ) void {
+        const ga = contiguousData(galpha, cols);
+        const gib = contiguousData(ginv_b, cols);
+        const input = contiguousDataConst(x, rows * cols);
+        const grad = contiguousDataConst(gy, rows * cols);
+        for (0..cols) |c| {
+            ga[c] = 0;
+            gib[c] = 0;
+        }
+        for (0..rows) |r| {
+            for (0..cols) |c| {
+                const v = input[r * cols + c];
+                const gv = grad[r * cols + c];
+                const sn = @sin(alpha[c] * v);
+                const s2 = @sin(2 * alpha[c] * v);
+                ga[c] += gv * inv_b[c] * v * s2;
+                gib[c] += gv * sn * sn;
+            }
+        }
+    }
+
+    pub fn groupNormBackwardInto(
+        gx: ?*Tensor,
+        gw: ?*Tensor,
+        gb: ?*Tensor,
+        x: *const Tensor,
+        gy: *const Tensor,
+        weight: ?[]const f32,
+        rows: usize,
+        cols: usize,
+        groups: usize,
+        eps: f32,
+    ) void {
+        const input = contiguousDataConst(x, rows * cols);
+        const grad = contiguousDataConst(gy, rows * cols);
+        const gx_data: ?[]f32 = if (gx) |t| contiguousData(t, rows * cols) else null;
+        const gw_data: ?[]f32 = if (gw) |t| contiguousData(t, cols) else null;
+        const gb_data: ?[]f32 = if (gb) |t| contiguousData(t, cols) else null;
+        const cols_per_group = cols / groups;
+        const count: f64 = @floatFromInt(rows * cols_per_group);
+        for (0..groups) |g| {
+            const col_start = g * cols_per_group;
+            var sum: f64 = 0;
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| sum += input[r * cols + col_start + local_c];
+            }
+            const mean: f32 = @floatCast(sum / count);
+            var sum2: f64 = 0;
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    const centered = input[r * cols + col_start + local_c] - mean;
+                    sum2 += @as(f64, centered) * @as(f64, centered);
+                }
+            }
+            const scale_v: f32 = 1.0 / @sqrt(@as(f32, @floatCast(sum2 / count + eps)));
+
+            if (gw_data != null or gb_data != null) {
+                for (0..cols_per_group) |local_c| {
+                    const c = col_start + local_c;
+                    var acc_w: f32 = 0;
+                    var acc_b: f32 = 0;
+                    for (0..rows) |r| {
+                        const v = input[r * cols + c];
+                        const gv = grad[r * cols + c];
+                        acc_w += gv * (v - mean) * scale_v;
+                        acc_b += gv;
+                    }
+                    if (gw_data) |dst| dst[c] = acc_w;
+                    if (gb_data) |dst| dst[c] = acc_b;
+                }
+            }
+
+            const dx = gx_data orelse continue;
+            var sum_g: f64 = 0;
+            var sum_gx: f64 = 0;
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    const c = col_start + local_c;
+                    const wv: f32 = if (weight) |w| w[c] else 1.0;
+                    const gh = grad[r * cols + c] * wv;
+                    const xh = (input[r * cols + c] - mean) * scale_v;
+                    sum_g += gh;
+                    sum_gx += @as(f64, gh) * @as(f64, xh);
+                }
+            }
+            const mean_g: f32 = @floatCast(sum_g / count);
+            const mean_gx: f32 = @floatCast(sum_gx / count);
+            for (0..rows) |r| {
+                for (0..cols_per_group) |local_c| {
+                    const c = col_start + local_c;
+                    const wv: f32 = if (weight) |w| w[c] else 1.0;
+                    const gh = grad[r * cols + c] * wv;
+                    const xh = (input[r * cols + c] - mean) * scale_v;
+                    dx[r * cols + c] = scale_v * (gh - mean_g - xh * mean_gx);
+                }
+            }
+        }
+    }
+};

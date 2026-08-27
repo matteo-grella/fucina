@@ -2,9 +2,11 @@
 
 A backend is the layer that owns numeric kernels and nothing else. `ExecContext`
 ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)) validates shapes, allocates outputs, and dispatches; the backend fills
-caller-supplied buffers. There are exactly two backends — a scalar reference
-and the production `native` backend — selected at build time, plus two optional
-accelerator tiers layered *inside* the native backend: platform BLAS for large
+caller-supplied buffers. There is one CPU kernel provider
+(`src/backend/native.zig`); `-Dbackend=scalar` builds the reference leg by
+setting `backend/isa.zig`'s `reference` flag, under which every kernel entry
+selects its scalar reference arm at comptime ([§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-reference-arms-and-the-parity-contract-srcbackendvector-srcbackendparity_testzig)). Two optional
+accelerator tiers layer *inside* the provider: platform BLAS for large
 f32 GEMM and a GPU GEMM provider (Metal or CUDA). Nothing about backend choice
 is visible in tensor types or the public API surface beyond a handful of
 comptime constants.
@@ -14,26 +16,23 @@ comptime constants.
 ```zig
 pub const Kind = enum { scalar, native };
 
+/// Build identity, not a provider choice: `.scalar` means the reference
+/// build (`isa.reference`), whose kernels are the scalar arms inside the
+/// one provider.
 pub const active_kind: Kind = switch (build_options.backend_kind) {
-    .scalar, .cpu => .scalar,
+    .scalar => .scalar,
     .native => .native,
 };
 
-const active = switch (build_options.backend_kind) {
-    .scalar, .cpu => scalar_impl,   // src/backend/cpu.zig
-    .native => native_impl,         // src/backend/native.zig
-};
-
-pub const ParallelConfig = active.ParallelConfig;
-pub const kernels = active.kernels;   // the selected kernel set (§9.2)
+pub const ParallelConfig = native_impl.ParallelConfig;
+pub const kernels = native_impl.kernels;   // the one provider's kernel set (§9.2)
 ```
 
-Selection is a comptime `switch` over `build_options.backend_kind`
-(`-Dbackend=native|scalar`).
-The inactive implementation is never dispatched to — `backend.kernels` is
-the active module's `kernels` namespace and the other module's code paths
-are dead — and the switches are exhaustive, so adding a backend variant
-forces edits at every dispatch site rather than silently falling through. The same pattern selects
+`-Dbackend=native|scalar` is a build identity, not a module swap:
+`backend.kernels` is always `native.zig`'s `kernels` namespace, and on
+`-Dbackend=scalar` builds `backend/isa.zig` resolves `reference = true`, so
+each entry's comptime dispatch selects its scalar reference arm and the
+SIMD/BLAS/GPU/lane-pack arms are never analyzed ([§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-reference-arms-and-the-parity-contract-srcbackendvector-srcbackendparity_testzig)). A comptime switch selects
 the GPU provider (`src/backend/gpu.zig`): a comptime switch over
 `build_options.gpu_kind` resolves `gpu_impl` to `metal.zig` or `cuda.zig`, and
 the unselected provider is parsed but never semantically analyzed, so it costs
@@ -111,26 +110,25 @@ pub const generic_names = [_][]const u8{ ... };    // 14: take a comptime dtype,
 pub const pool_free_names = [_][]const u8{ ... };  // 13: take no `pc`
 pub fn conform(comptime Impl: type) void;          // the single comptime check
 
-// src/backend/cpu.zig and src/backend/native.zig
+// src/backend/native.zig
 pub const kernels = struct { ... };                // exactly the names above
 
 // src/backend.zig
-pub const kernels = active.kernels;
+pub const kernels = native_impl.kernels;
 comptime {
-    interface.conform(scalar_impl.kernels);
     interface.conform(native_impl.kernels);
 }
 ```
 
-The two implementations meet at one interface, declared once by name in
+The provider meets one interface, declared once by name in
 `interface.zig`. It is a comptime-checked namespace rather than a struct of
 function pointers because many kernels are generic over a `comptime` dtype
-or op. `conform` verifies, for every name: the implementation declares it;
-a non-generic entry has the native entry's parameter types and return
-payload (fallible kernels return `!T` with an inferred error set, and two
-inferred sets are distinct types by construction, so the payload is what is
-compared); a generic entry has the same parameter count; the `pc` rule below
-holds; and the implementation declares nothing beyond the set.
+or op. `conform` verifies, for every name: the provider declares it;
+a non-generic entry has the reference signature (fallible kernels return
+`!T` with an inferred error set, and two inferred sets are distinct types
+by construction, so the payload is what is compared); a generic entry has
+the same parameter count; the `pc` rule below holds; and the provider
+declares nothing beyond the set.
 
 The signature rule: a kernel that needs the worker pool takes
 `pc: ParallelConfig` as its FIRST parameter; a kernel that does not use the
@@ -190,7 +188,7 @@ generic over a comptime dtype, op, request, or container type):
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
-| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. Both providers additionally export `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
+| quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. The provider additionally exports `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
 
 The counts above are asserted against the lists themselves (the name
 lists are reachable as `fucina.internal.backend_mod.interface`):
@@ -225,7 +223,8 @@ stride_h, stride_w, pad_h, pad_w`), `PoolKind = enum { avg, max, sum }`, and
   tensor outputs. The vector/quant compute leaves (`src/backend/vector/*`,
   the dot kernels in `src/backend/quant/*`) are allocation-free.
 - The quantized-RHS dispatch tier (`matmul2DQuantizedRhs*` in
-  `native.zig`/`cpu.zig`) deliberately takes an allocator for per-call LHS
+  `native.zig`, reference arms in `vector/matmul_quant.zig`) deliberately
+  takes an allocator for per-call LHS
   quantization scratch (f32 activation rows → `Q8_0`/`Q8_1`/`Q8_K` blocks);
   the Q8_0 arms have a 512-block stack fast path
   (`q8_0_lhs_stack_blocks = 512`) so decode-sized calls allocate nothing.
@@ -237,7 +236,7 @@ stride_h, stride_w, pad_h, pad_w`), `PoolKind = enum { avg, max, sum }`, and
   context controls thread-pool ownership — a kernel never creates threads
   and never assumes a pool exists (`.pool = null` runs serially).
 
-`src/backend/ops.zig` defines the shared op vocabulary both backends compile
+`src/backend/ops.zig` defines the shared op vocabulary the kernels compile
 against: `ElementwiseOp` (`add, sub, mul, div, max, min`), `UnaryOp` (`relu,
 exp, sqrt, rsqrt, sigmoid, silu, log, log1p, softplus, neg, abs, sin, cos,
 tanh, fast_tanh, gelu, quick_gelu, gelu_quant, elu,
@@ -261,23 +260,33 @@ VJP lanes use, so forward and backward lanes agree to `vexpf`'s accuracy;
 the lane `tanh` is `(1 - e^(-2|x|)) / (1 + e^(-2|x|))` with an odd Taylor
 series below `|x| = 0.125` (max relative error 5.1e-7 against f64 tanh).
 
-## 9.3 The scalar backend and the parity contract (`src/backend/cpu.zig`, `src/backend/parity_test.zig`)
+## 9.3 The scalar reference arms and the parity contract (`src/backend/vector/*`, `src/backend/parity_test.zig`)
 
-The scalar backend is the numeric reference: plain serial loops, no SIMD, no
-BLAS, no GPU. Its `kernels` namespace has the same signatures as the native
-one (`interface.conform` checks it) and ignores `pc` (every kernel is
-serial). Where a
-kernel is *routing shared by both backends* rather than divergent numerics —
-`im2col`, the Winograd weight/input/output transforms, the conv2d backward
-loops, the pool2d backward scatters — the scalar backend reuses the shared
-correctness-first implementation serially, so the two backends compute
-identical values on those paths by construction; everything with a real SIMD
-counterpart (elementwise, reductions, GEMM, pool2d forward, prelu/affine) is
-an independent scalar implementation.
+The scalar reference is not a second provider: it is the arm the
+`isa.reference` flag selects inside every kernel entry. Each
+`vector/<domain>.zig` carries a `pub const scalar` namespace of plain serial
+twins (no SIMD, no pool, no BLAS, no GPU), and on `-Dbackend=scalar` builds
+each entry dispatches to its twin at comptime; `native.zig`'s quantized GEMM
+entries likewise collapse onto the serial row-form dispatch in
+`vector/matmul_quant.zig`'s `scalar` namespace (the Q2_0 reference row twin,
+the TQ2_0 table-decoded Q8_K row, no BLAS crossover, no x4-LHS lane
+packing), and the quantized accumulate bodies resolve to the `.scalar` tier
+of `backend/isa.zig`. Where a kernel is routing shared by both legs rather
+than divergent numerics (`im2col`/`col2im`, the Winograd
+weight/input/output transforms, the conv2d backward loops, the pool2d
+backward scatters), there is no twin: the shared correctness-first body is
+the reference, run serially on the reference build
+(`vector/common.zig`'s `refSerial`), so both legs compute identical values
+on those paths by construction. Everything with a real SIMD counterpart
+(elementwise, reductions, GEMM, pool2d forward, prelu/affine, the norms,
+the 1-D/2-D convolutions) is an independent scalar arm.
 
-`src/backend/parity_test.zig` imports **both** `cpu.zig` and `native.zig`
-directly (independent of `-Dbackend`), so `zig build test` always runs the
-cross-backend parity suite. What it guarantees:
+`src/backend/parity_test.zig` runs each kernel entry against its scalar
+twin in the same build (independent of `-Dbackend`), so `zig build test`
+always runs the parity suite; on the `-Dbackend=scalar` leg both sides
+resolve to the same arms and the quantized cases carry the load there (they
+pin every entry against a dequantized f32 reference instead of against a
+twin). What it guarantees:
 
 - `addInto`, `subInto`, `mulInto`, `scaleInto` agree within `1e-6` absolute
   over lengths `{1, 3, 7, 8, 15, 16, 17, 31, 64, 128, 257, 1024}` (edge cases
@@ -293,8 +302,8 @@ cross-backend parity suite. What it guarantees:
   remainders), `upsample2xNearestInto`, `preluChannels*`, and
   `channelAffineInto` (with and without shift) agree within `1e-6`.
 
-The suite pins the semantics the native backend must preserve while its
-kernels are rewritten for speed; anything not covered by shared routing or a
+The suite pins the semantics the native arms must preserve while they are
+rewritten for speed; anything not covered by shared routing or a
 parity test is covered by the op-level tests in `backend_tests.zig` and the
 exec-layer suites.
 
@@ -359,7 +368,7 @@ splits is decided by the thread-count gates in `common.zig`
 Parallel splits are deterministic: tasks own disjoint output ranges, so the
 threaded result is bit-identical to the serial path for elementwise, conv,
 pool, and Winograd kernels (reductions and GEMM state their reassociation
-tolerance instead — see [§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-backend-and-the-parity-contract-srcbackendcpuzig-srcbackendparity_testzig)).
+tolerance instead — see [§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-reference-arms-and-the-parity-contract-srcbackendvector-srcbackendparity_testzig)).
 
 Above the backend seam, the exec tier builds streaming inner-lane kernels
 from the same primitives (`src/exec/row_ops.zig`): softmax, logsumexp,

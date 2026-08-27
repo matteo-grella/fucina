@@ -4,16 +4,117 @@ const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
 const Allocator = std.mem.Allocator;
 
-// The native backend is the production Zig backend. It uses portable Zig
-// vector kernels for non-GEMM work and optional platform BLAS for GEMM.
+// The parity gate of the one CPU provider: every case runs a kernel entry
+// (`native.kernels`, the tier the build compiled) against its scalar
+// reference twin (the `scalar` namespaces inside `vector/`) on the same
+// data. On a native build that holds the SIMD/BLAS arms to the serial
+// reference; on the `-Dbackend=scalar` build both sides resolve to the
+// same scalar arms and the quantized cases below carry the load (they pin
+// every entry against a dequantized f32/f64 reference instead).
 const Impl = struct {
-    const cpu_impl = @import("cpu.zig");
     const native_impl = @import("native.zig");
-    const cpu = cpu_impl.kernels;
     const native = native_impl.kernels;
     const ParallelConfig = native_impl.ParallelConfig;
     const ops = @import("ops.zig");
+    const vector_common = @import("vector/common.zig");
+    const elementwise = @import("vector/elementwise.zig");
+    const vector_gemm = @import("vector/gemm.zig");
+    const vector_batched = @import("vector/batched.zig");
+    const vector_mq = @import("vector/matmul_quant.zig");
     const pool = @import("vector/pool.zig");
+
+    // The scalar twin set, spelled with the kernel-entry signatures the
+    // cases below share with `native.kernels` (the twins themselves take no
+    // `pc`; these shims adapt).
+    const cpu = struct {
+        fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+            try tensor_mod.requireSameShape(a, b);
+            try tensor_mod.requireSameShape(out, a);
+            elementwise.scalar.addContiguousIntoUnchecked(out, a, b, a.len());
+        }
+        fn subInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+            try tensor_mod.requireSameShape(a, b);
+            try tensor_mod.requireSameShape(out, a);
+            elementwise.scalar.subContiguousIntoUnchecked(out, a, b, a.len());
+        }
+        fn mulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+            try tensor_mod.requireSameShape(a, b);
+            try tensor_mod.requireSameShape(out, a);
+            elementwise.scalar.mulContiguousIntoUnchecked(out, a, b, a.len());
+        }
+        fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, v: f32) !void {
+            _ = pc;
+            return elementwise.scalar.scaleInto(out, a, v);
+        }
+        fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+            _ = pc;
+            return elementwise.scalar.sumInto(out, a);
+        }
+        fn dot(pc: ParallelConfig, comptime dtype: DType, out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+            _ = pc;
+            return elementwise.scalar.dot(dtype, out, a, b);
+        }
+        fn gemm(pc: ParallelConfig, comptime g: ops.Gemm, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize) void {
+            _ = pc;
+            vector_gemm.scalar.gemm(
+                g,
+                vector_common.contiguousData(out, m * n),
+                vector_common.contiguousDataConst(a, m * k),
+                vector_common.contiguousDataConst(b, k * n),
+                m,
+                n,
+                k,
+            );
+        }
+        fn gemmBatched(pc: ParallelConfig, comptime kind: ops.MatmulKind, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize, stride_a: usize, stride_b: usize, stride_c: usize) void {
+            _ = pc;
+            vector_batched.scalar.gemmBatched(
+                kind,
+                vector_common.contiguousData(out, out.buffer.data.len - out.offset),
+                vector_common.contiguousDataConst(a, a.buffer.data.len - a.offset),
+                vector_common.contiguousDataConst(b, b.buffer.data.len - b.offset),
+                m,
+                n,
+                k,
+                batch_count,
+                stride_a,
+                stride_b,
+                stride_c,
+            );
+        }
+        fn pool2dInto(pc: ParallelConfig, comptime kind: pool.PoolKind, out: *Tensor, input: *const Tensor, d: pool.Pool2dDims) void {
+            _ = pc;
+            pool.scalar.pool2dInto(kind, out, input, d);
+        }
+        fn upsample2xNearestInto(pc: ParallelConfig, out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
+            _ = pc;
+            pool.scalar.upsample2xNearestInto(out, input, h, w, c);
+        }
+        fn preluChannelsInto(pc: ParallelConfig, z: []f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+            _ = pc;
+            elementwise.scalar.preluChannelsInto(z, x, alpha, rows, cols);
+        }
+        fn channelAffineInto(pc: ParallelConfig, z: []f32, x: []const f32, scale: []const f32, shift: ?[]const f32, rows: usize, cols: usize) void {
+            _ = pc;
+            elementwise.scalar.channelAffineInto(z, x, scale, shift, rows, cols);
+        }
+        fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+            _ = pc;
+            elementwise.scalar.preluChannelsBackwardInputInto(gx, gy, x, alpha, rows, cols);
+        }
+        fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
+            _ = pc;
+            elementwise.scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
+        }
+        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: Allocator, out: *Tensor, a: *const Tensor, rhs: qm.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
+            _ = pc;
+            return vector_mq.scalar.matmul2DQuantizedRhs(allocator, out, a, rhs, m, n, k);
+        }
+        fn matmulPacked(pc: ParallelConfig, allocator: Allocator, out: anytype, a: anytype, rhs: anytype, m: usize, n: usize, k: usize) !void {
+            _ = pc;
+            return vector_mq.scalar.matmulPacked(allocator, out, a, rhs, m, n, k);
+        }
+    };
 
     const elementwise_tolerance: f32 = 1e-6;
     const matmul_tolerance_scale: f32 = 1e-5;

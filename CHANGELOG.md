@@ -270,6 +270,18 @@ this point; earlier history is `git log`.
   `rhs_lifetime: fucina.RhsLifetime` (`.stable_process` = provider-owned
   bytes), so stack consumers pass the lifetime through instead of
   respelling the bool.
+- One CPU kernel provider: `backend/cpu.zig` is gone, and
+  `-Dbackend=scalar` no longer swaps provider modules. Each kernel entry
+  selects its scalar reference arm internally on the reference build
+  (`backend/isa.zig` `reference`): the independent scalar bodies live in
+  `pub const scalar` namespaces inside `backend/vector/{elementwise,conv,
+  pool,gemm,batched,matmul_quant}.zig`, the shared-core routes (im2col/
+  col2im, conv2d backwards, pool2d backwards, the Winograd transforms) run
+  serially there via `vector/common.zig` `refSerial`, and
+  `backend.kernels` is always `native.zig`'s set. Rewrite for provider-name
+  users: `backend.scalar_impl.kernels.X(pc, ...)` becomes the twin
+  `backend.vector_impl.<domain>.scalar.X(...)` (no `pc`);
+  `backend.native_impl` is unchanged.
 - The public bf16/f8 tensor branches speak VALUE types instead of raw bit
   patterns: `item`/`data`/`dataConst`/`copyTo`/`fromSlice`/
   `fromBorrowedConstSlice`/`variableFromSlice` on a `.bf16` tensor now take

@@ -14,6 +14,7 @@
 //! forward and backward-weight are axpy accumulations, backward-input is a
 //! contiguous dot.
 
+const isa = @import("../isa.zig");
 const parallel = @import("../../parallel.zig");
 const std = @import("std");
 const tensor = @import("../../tensor.zig");
@@ -35,6 +36,7 @@ pub fn causalDepthwiseConv1dInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalDepthwiseConv1dInto(out, input, kernel, state, seq, channels, taps, dilation);
     const output = common.contiguousData(out, seq * channels);
     const input_data = common.contiguousDataConst(input, seq * channels);
     const kernel_data = common.contiguousDataConst(kernel, channels * taps);
@@ -52,6 +54,7 @@ pub fn causalDepthwiseConv1dBackwardInputInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalDepthwiseConv1dBackwardInputInto(out, gy, kernel, seq, channels, taps, dilation);
     const output = common.contiguousData(out, seq * channels);
     const gy_data = common.contiguousDataConst(gy, seq * channels);
     const kernel_data = common.contiguousDataConst(kernel, channels * taps);
@@ -70,6 +73,7 @@ pub fn causalDepthwiseConv1dBackwardKernelInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalDepthwiseConv1dBackwardKernelInto(out, input, gy, state, seq, channels, taps, dilation);
     const output = common.contiguousData(out, channels * taps);
     const input_data = common.contiguousDataConst(input, seq * channels);
     const gy_data = common.contiguousDataConst(gy, seq * channels);
@@ -255,6 +259,7 @@ pub fn causalConv1dInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalConv1dInto(out, input, weight, state, seq, in_channels, out_channels, taps, dilation);
     const output = common.contiguousData(out, seq * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
@@ -273,6 +278,7 @@ pub fn causalConv1dBackwardInputInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalConv1dBackwardInputInto(out, gy, weight, seq, in_channels, out_channels, taps, dilation);
     const output = common.contiguousData(out, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
@@ -292,6 +298,7 @@ pub fn causalConv1dBackwardWeightInto(
     taps: usize,
     dilation: usize,
 ) void {
+    if (comptime isa.reference) return scalar.causalConv1dBackwardWeightInto(out, input, gy, state, seq, in_channels, out_channels, taps, dilation);
     const output = common.contiguousData(out, taps * in_channels * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
@@ -313,6 +320,7 @@ pub fn groupedCausalConv1dInto(
     dilation: usize,
     groups: usize,
 ) void {
+    if (comptime isa.reference) return scalar.groupedCausalConv1dInto(out, input, weight, state, seq, in_channels, out_channels, taps, dilation, groups);
     const output = common.contiguousData(out, seq * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const in_per_group = in_channels / groups;
@@ -333,6 +341,7 @@ pub fn groupedCausalConv1dBackwardInputInto(
     dilation: usize,
     groups: usize,
 ) void {
+    if (comptime isa.reference) return scalar.groupedCausalConv1dBackwardInputInto(out, gy, weight, seq, in_channels, out_channels, taps, dilation, groups);
     const output = common.contiguousData(out, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const in_per_group = in_channels / groups;
@@ -354,6 +363,7 @@ pub fn groupedCausalConv1dBackwardWeightInto(
     dilation: usize,
     groups: usize,
 ) void {
+    if (comptime isa.reference) return scalar.groupedCausalConv1dBackwardWeightInto(out, input, gy, state, seq, in_channels, out_channels, taps, dilation, groups);
     const in_per_group = in_channels / groups;
     const output = common.contiguousData(out, taps * in_per_group * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
@@ -948,15 +958,15 @@ fn generalBackwardWeight1x1Range(
     }
 }
 
-inline fn axpyRow(acc: []f32, scalar: f32, row: []const f32) void {
-    const sv: Vf32 = @splat(scalar);
+inline fn axpyRow(acc: []f32, scalar_value: f32, row: []const f32) void {
+    const sv: Vf32 = @splat(scalar_value);
     var o: usize = 0;
     while (o + vector_len <= acc.len) : (o += vector_len) {
         const cur: Vf32 = acc[o..][0..vector_len].*;
         const rv: Vf32 = row[o..][0..vector_len].*;
         acc[o..][0..vector_len].* = cur + sv * rv;
     }
-    while (o < acc.len) : (o += 1) acc[o] += scalar * row[o];
+    while (o < acc.len) : (o += 1) acc[o] += scalar_value * row[o];
 }
 
 /// Vector-chunked `acc += row` (axpyRow without the multiply).
@@ -970,14 +980,14 @@ inline fn addRow(acc: []f32, row: []const f32) void {
     while (o < acc.len) : (o += 1) acc[o] += row[o];
 }
 
-inline fn scaleRow(out: []f32, scalar: f32, row: []const f32) void {
-    const sv: Vf32 = @splat(scalar);
+inline fn scaleRow(out: []f32, scalar_value: f32, row: []const f32) void {
+    const sv: Vf32 = @splat(scalar_value);
     var o: usize = 0;
     while (o + vector_len <= out.len) : (o += vector_len) {
         const rv: Vf32 = row[o..][0..vector_len].*;
         out[o..][0..vector_len].* = sv * rv;
     }
-    while (o < out.len) : (o += 1) out[o] = scalar * row[o];
+    while (o < out.len) : (o += 1) out[o] = scalar_value * row[o];
 }
 
 inline fn dotRow(a: []const f32, b: []const f32) f32 {
@@ -1067,6 +1077,7 @@ pub fn conv2dInto(
     bias: ?[]const f32,
     d: Conv2dDims,
 ) void {
+    if (comptime isa.reference) return scalar.conv2dInto(out, input, weight, bias, d);
     const o = out.data();
     const in = input.dataConst();
     const wt = weight.dataConst();
@@ -1118,7 +1129,7 @@ fn runIm2colTask(task: *const Im2colTask) void {
 pub fn im2colInto(pc: ParallelConfig, col: *Tensor, input: *const Tensor, d: Conv2dDims) void {
     const cd = col.data();
     const in = input.dataConst();
-    if (pc.pool) |pool| {
+    if (common.refSerial(pc).pool) |pool| {
         const work = d.oh * d.ow * d.kh * d.kw * d.cin;
         const tc = common.generalConvThreadCount(d.oh, work);
         if (tc > 1) {
@@ -1286,7 +1297,7 @@ pub fn conv2dBackwardInputInto(pc: ParallelConfig, out: *Tensor, gy: *const Tens
     const gx = out.data();
     const gyd = gy.dataConst();
     const wt = weight.dataConst();
-    if (maybeParallelConv2dGrad(pc, runConv2dBackwardInputTask, d.h, gx, gyd, wt, d)) return;
+    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardInputTask, d.h, gx, gyd, wt, d)) return;
     conv2dBackwardInputRangeRows(gx, gyd, wt, d, 0, d.h);
 }
 
@@ -1342,7 +1353,7 @@ pub fn conv2dBackwardWeightInto(pc: ParallelConfig, out: *Tensor, input: *const 
     const gw = out.data();
     const ind = input.dataConst();
     const gyd = gy.dataConst();
-    if (maybeParallelConv2dGrad(pc, runConv2dBackwardWeightTask, d.cout, gw, ind, gyd, d)) return;
+    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardWeightTask, d.cout, gw, ind, gyd, d)) return;
     conv2dBackwardWeightRangeCout(gw, ind, gyd, d, 0, d.cout);
 }
 
@@ -1414,7 +1425,7 @@ fn runCol2imTask(task: *const Col2imTask) void {
 pub fn col2imInto(pc: ParallelConfig, out: *Tensor, col: *const Tensor, d: Conv2dDims) void {
     const o = out.data();
     const cd = col.dataConst();
-    if (pc.pool) |pool| {
+    if (common.refSerial(pc).pool) |pool| {
         // Each input element gathers at most (kh/stride_h + 1)*(kw/stride_w + 1)
         // col rows.
         const work = parallel.saturatedMul3(d.h * d.w, d.cin, (d.kh / d.stride_h + 1) * (d.kw / d.stride_w + 1));
@@ -1485,6 +1496,7 @@ pub fn conv1dInto(
     weight: *const Tensor,
     d: Conv1dDims,
 ) void {
+    if (comptime isa.reference) return scalar.conv1dInto(out, input, weight, d);
     const output = common.contiguousData(out, d.out_len * d.out_channels);
     const input_data = common.contiguousDataConst(input, d.seq * d.in_channels);
     const in_per_group = d.in_channels / d.groups;
@@ -1602,6 +1614,7 @@ pub fn col2im1dInto(
     stride: usize,
     pad: usize,
 ) void {
+    if (comptime isa.reference) return scalar.col2im1dInto(out, col, t_in, out_len, out_channels, taps, stride, pad);
     const output = common.contiguousData(out, out_len * out_channels);
     const col_data = common.contiguousDataConst(col, t_in * taps * out_channels);
     if (maybeParallelCol2im1d(pc, output, col_data, t_in, out_len, out_channels, taps, stride, pad)) return;
@@ -1718,6 +1731,7 @@ pub fn conv1dBackwardInputInto(
     weight: *const Tensor,
     d: Conv1dDims,
 ) void {
+    if (comptime isa.reference) return scalar.conv1dBackwardInputInto(out, gy, weight, d);
     const output = common.contiguousData(out, d.seq * d.in_channels);
     const gy_data = common.contiguousDataConst(gy, d.out_len * d.out_channels);
     const in_per_group = d.in_channels / d.groups;
@@ -1738,6 +1752,7 @@ pub fn conv1dBackwardWeightInto(
     gy: *const Tensor,
     d: Conv1dDims,
 ) void {
+    if (comptime isa.reference) return scalar.conv1dBackwardWeightInto(out, input, gy, d);
     const in_per_group = d.in_channels / d.groups;
     const output = common.contiguousData(out, d.taps * in_per_group * d.out_channels);
     const input_data = common.contiguousDataConst(input, d.seq * d.in_channels);
@@ -1890,6 +1905,7 @@ pub fn col2im1dBackwardInto(
     stride: usize,
     pad: usize,
 ) void {
+    if (comptime isa.reference) return scalar.col2im1dBackwardInto(out, gy, t_in, gy_len, out_channels, taps, stride, pad);
     const output = common.contiguousData(out, t_in * taps * out_channels);
     const gy_data = common.contiguousDataConst(gy, gy_len * out_channels);
     const t_conv = (t_in - 1) * stride + taps - 2 * pad;
@@ -1982,3 +1998,549 @@ fn col2im1dBackwardRange(
 test {
     _ = @import("conv_tests.zig");
 }
+
+// ---------------- The scalar reference arms ----------------
+
+/// The scalar reference twins of this file's kernel entries: plain serial
+/// loops, no SIMD, no pool. On `-Dbackend=scalar` builds (`isa.reference`)
+/// the entries above dispatch here; on native builds the twins stay
+/// reachable for `backend/parity_test.zig` and the ag conv tests. The
+/// shared-core routes (im2col/col2im, the conv2d backward gathers, the
+/// Winograd transforms) have no twin: their vector body IS the reference,
+/// run serially on the reference build via `common.refSerial`.
+pub const scalar = struct {
+    pub fn causalDepthwiseConv1dInto(
+        out: *Tensor,
+        input: *const Tensor,
+        kernel: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        causalDepthwiseConv1dRange(out.data(), input.dataConst(), kernel.dataConst(), state, seq, channels, taps, dilation, 0, channels);
+    }
+
+    pub fn causalDepthwiseConv1dBackwardInputInto(
+        out: *Tensor,
+        gy: *const Tensor,
+        kernel: *const Tensor,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        causalDepthwiseConv1dBackwardInputRange(out.data(), gy.dataConst(), kernel.dataConst(), seq, channels, taps, dilation, 0, channels);
+    }
+
+    pub fn causalDepthwiseConv1dBackwardKernelInto(
+        out: *Tensor,
+        input: *const Tensor,
+        gy: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        causalDepthwiseConv1dBackwardKernelRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, channels, taps, dilation, 0, channels);
+    }
+
+    pub fn causalConv1dInto(
+        out: *Tensor,
+        input: *const Tensor,
+        weight: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, 1, 0, seq);
+    }
+
+    pub fn causalConv1dBackwardInputInto(
+        out: *Tensor,
+        gy: *const Tensor,
+        weight: *const Tensor,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        groupedCausalConv1dBackwardInputRange(out.data(), gy.dataConst(), weight.dataConst(), seq, in_channels, out_channels, taps, dilation, 1, 0, seq);
+    }
+
+    pub fn causalConv1dBackwardWeightInto(
+        out: *Tensor,
+        input: *const Tensor,
+        gy: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+    ) void {
+        groupedCausalConv1dBackwardWeightRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, in_channels, out_channels, taps, dilation, 1, 0, taps * in_channels);
+    }
+
+    pub fn groupedCausalConv1dInto(
+        out: *Tensor,
+        input: *const Tensor,
+        weight: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+    ) void {
+        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, groups, 0, seq);
+    }
+
+    pub fn groupedCausalConv1dBackwardInputInto(
+        out: *Tensor,
+        gy: *const Tensor,
+        weight: *const Tensor,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+    ) void {
+        groupedCausalConv1dBackwardInputRange(out.data(), gy.dataConst(), weight.dataConst(), seq, in_channels, out_channels, taps, dilation, groups, 0, seq);
+    }
+
+    pub fn groupedCausalConv1dBackwardWeightInto(
+        out: *Tensor,
+        input: *const Tensor,
+        gy: *const Tensor,
+        state: ?[]const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+    ) void {
+        const in_per_group = in_channels / groups;
+        groupedCausalConv1dBackwardWeightRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, in_channels, out_channels, taps, dilation, groups, 0, taps * in_per_group);
+    }
+
+    /// Scalar reference conv2d (channel-last [H,W,Cin] -> [OH,OW,Cout] with
+    /// stride, explicit zero pad, grouped/depthwise; see `Conv2dDims`).
+    pub fn conv2dInto(
+        out: *Tensor,
+        input: *const Tensor,
+        weight: *const Tensor,
+        bias: ?[]const f32,
+        d: Conv2dDims,
+    ) void {
+        const o = out.data();
+        const in = input.dataConst();
+        const w = weight.dataConst();
+        const cin_pg = d.cin / d.groups;
+        const cout_pg = d.cout / d.groups;
+        for (0..d.oh) |oh| {
+            for (0..d.ow) |ow| {
+                for (0..d.cout) |oc| {
+                    const g = oc / cout_pg;
+                    var acc: f32 = if (bias) |b| b[oc] else 0;
+                    for (0..d.kh) |kh| {
+                        const ih_i = @as(isize, @intCast(oh * d.stride_h + kh)) - @as(isize, @intCast(d.pad_h));
+                        if (ih_i < 0 or ih_i >= @as(isize, @intCast(d.h))) continue;
+                        for (0..d.kw) |kw| {
+                            const iw_i = @as(isize, @intCast(ow * d.stride_w + kw)) - @as(isize, @intCast(d.pad_w));
+                            if (iw_i < 0 or iw_i >= @as(isize, @intCast(d.w))) continue;
+                            const ih: usize = @intCast(ih_i);
+                            const iw: usize = @intCast(iw_i);
+                            for (0..cin_pg) |ic| {
+                                const iv = in[(ih * d.w + iw) * d.cin + g * cin_pg + ic];
+                                const wv = w[((oc * d.kh + kh) * d.kw + kw) * cin_pg + ic];
+                                acc += iv * wv;
+                            }
+                        }
+                    }
+                    o[(oh * d.ow + ow) * d.cout + oc] = acc;
+                }
+            }
+        }
+    }
+
+    /// Scalar reference conv1d (general non-causal, symmetric zero pad,
+    /// stride, dilation, groups; see `Conv1dDims`).
+    pub fn conv1dInto(
+        out: *Tensor,
+        input: *const Tensor,
+        weight: *const Tensor,
+        d: Conv1dDims,
+    ) void {
+        const o = out.data();
+        const in = input.dataConst();
+        const w = weight.dataConst();
+        const in_per_group = d.in_channels / d.groups;
+        const out_per_group = d.out_channels / d.groups;
+        for (0..d.out_len) |t| {
+            for (0..d.out_channels) |oc| {
+                const g = oc / out_per_group;
+                var acc: f32 = 0;
+                for (0..d.taps) |k| {
+                    const pos = t * d.stride + k * d.dilation;
+                    if (pos < d.pad) continue;
+                    const src = pos - d.pad;
+                    if (src >= d.seq) continue;
+                    for (0..in_per_group) |local_i| {
+                        const iv = in[src * d.in_channels + g * in_per_group + local_i];
+                        const wv = w[(k * in_per_group + local_i) * d.out_channels + oc];
+                        acc += iv * wv;
+                    }
+                }
+                o[t * d.out_channels + oc] = acc;
+            }
+        }
+    }
+
+    /// Scalar reference col2im1d gather (layout contract on the entry above).
+    pub fn col2im1dInto(
+        out: *Tensor,
+        col: *const Tensor,
+        t_in: usize,
+        out_len: usize,
+        out_channels: usize,
+        taps: usize,
+        stride: usize,
+        pad: usize,
+    ) void {
+        const o = out.data();
+        const c = col.dataConst();
+        const t_conv = (t_in - 1) * stride + taps - 2 * pad;
+        for (0..out_len) |t_out| {
+            if (t_out >= t_conv) {
+                for (0..out_channels) |oc| o[t_out * out_channels + oc] = 0;
+                continue;
+            }
+            const t_abs = t_out + pad;
+            const t_in_min: usize = if (t_abs + 1 > taps) (t_abs + 1 - taps + stride - 1) / stride else 0;
+            const t_in_max: usize = @min(t_in - 1, t_abs / stride);
+            for (0..out_channels) |oc| {
+                var acc: f32 = 0;
+                var ti = t_in_min;
+                while (ti <= t_in_max) : (ti += 1) {
+                    const k = t_abs - ti * stride;
+                    std.debug.assert(k < taps);
+                    acc += c[ti * (taps * out_channels) + oc * taps + k];
+                }
+                o[t_out * out_channels + oc] = acc;
+            }
+        }
+    }
+
+    /// Scalar reference conv1d backward-input (formula on the entry above).
+    pub fn conv1dBackwardInputInto(
+        out: *Tensor,
+        gy: *const Tensor,
+        weight: *const Tensor,
+        d: Conv1dDims,
+    ) void {
+        const o = out.data();
+        const g = gy.dataConst();
+        const w = weight.dataConst();
+        const in_per_group = d.in_channels / d.groups;
+        const out_per_group = d.out_channels / d.groups;
+        for (0..d.seq) |ti| {
+            for (0..d.in_channels) |ic| {
+                const group = ic / in_per_group;
+                const local_i = ic % in_per_group;
+                var acc: f32 = 0;
+                for (0..d.taps) |k| {
+                    const shifted = k * d.dilation;
+                    if (shifted > ti + d.pad) continue;
+                    const n = ti + d.pad - shifted;
+                    if (n % d.stride != 0) continue;
+                    const t = n / d.stride;
+                    if (t >= d.out_len) continue;
+                    for (0..out_per_group) |local_o| {
+                        const oc = group * out_per_group + local_o;
+                        acc += g[t * d.out_channels + oc] * w[(k * in_per_group + local_i) * d.out_channels + oc];
+                    }
+                }
+                o[ti * d.in_channels + ic] = acc;
+            }
+        }
+    }
+
+    /// Scalar reference conv1d backward-weight (formula on the entry above).
+    pub fn conv1dBackwardWeightInto(
+        out: *Tensor,
+        input: *const Tensor,
+        gy: *const Tensor,
+        d: Conv1dDims,
+    ) void {
+        const o = out.data();
+        const in = input.dataConst();
+        const g = gy.dataConst();
+        const in_per_group = d.in_channels / d.groups;
+        const out_per_group = d.out_channels / d.groups;
+        for (0..d.taps) |k| {
+            for (0..in_per_group) |local_i| {
+                for (0..d.out_channels) |oc| {
+                    const group = oc / out_per_group;
+                    var acc: f32 = 0;
+                    for (0..d.out_len) |t| {
+                        const pos = t * d.stride + k * d.dilation;
+                        if (pos < d.pad) continue;
+                        const src = pos - d.pad;
+                        if (src >= d.seq) continue;
+                        acc += g[t * d.out_channels + oc] * in[src * d.in_channels + group * in_per_group + local_i];
+                    }
+                    o[(k * in_per_group + local_i) * d.out_channels + oc] = acc;
+                }
+            }
+        }
+    }
+
+    /// Scalar reference col2im1d backward (formula on the entry above).
+    pub fn col2im1dBackwardInto(
+        out: *Tensor,
+        gy: *const Tensor,
+        t_in: usize,
+        gy_len: usize,
+        out_channels: usize,
+        taps: usize,
+        stride: usize,
+        pad: usize,
+    ) void {
+        const o = out.data();
+        const g = gy.dataConst();
+        const t_conv = (t_in - 1) * stride + taps - 2 * pad;
+        std.debug.assert(gy_len >= t_conv);
+        const row_stride = taps * out_channels;
+        for (0..t_in) |ti| {
+            for (0..out_channels) |oc| {
+                for (0..taps) |k| {
+                    const pos = ti * stride + k;
+                    var value: f32 = 0;
+                    if (pos >= pad) {
+                        const t_out = pos - pad;
+                        if (t_out < t_conv) value = g[t_out * out_channels + oc];
+                    }
+                    o[ti * row_stride + oc * taps + k] = value;
+                }
+            }
+        }
+    }
+
+    fn causalDepthwiseConv1dRange(
+        out: []f32,
+        input: []const f32,
+        kernel: []const f32,
+        state: ?[]const f32,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+        channel_start: usize,
+        channel_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        for (0..seq) |t| {
+            for (channel_start..channel_end) |c| {
+                var acc: f32 = 0;
+                for (0..taps) |k| {
+                    acc += causalDepthwiseInputValue(input, state, seq, channels, pad, dilation, t, c, k) * kernel[c * taps + k];
+                }
+                out[t * channels + c] = acc;
+            }
+        }
+    }
+
+    fn causalDepthwiseConv1dBackwardInputRange(
+        out: []f32,
+        gy: []const f32,
+        kernel: []const f32,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+        channel_start: usize,
+        channel_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        for (0..seq) |p| {
+            for (channel_start..channel_end) |c| {
+                var acc: f32 = 0;
+                for (0..taps) |k| {
+                    const t_base = p + pad;
+                    if (k * dilation > t_base) continue;
+                    const t = t_base - k * dilation;
+                    if (t < seq) acc += gy[t * channels + c] * kernel[c * taps + k];
+                }
+                out[p * channels + c] = acc;
+            }
+        }
+    }
+
+    fn causalDepthwiseConv1dBackwardKernelRange(
+        out: []f32,
+        input: []const f32,
+        gy: []const f32,
+        state: ?[]const f32,
+        seq: usize,
+        channels: usize,
+        taps: usize,
+        dilation: usize,
+        channel_start: usize,
+        channel_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        for (channel_start..channel_end) |c| {
+            for (0..taps) |k| {
+                var acc: f32 = 0;
+                for (0..seq) |t| {
+                    acc += gy[t * channels + c] * causalDepthwiseInputValue(input, state, seq, channels, pad, dilation, t, c, k);
+                }
+                out[c * taps + k] = acc;
+            }
+        }
+    }
+
+    fn groupedCausalConv1dRange(
+        out: []f32,
+        input: []const f32,
+        weight: []const f32,
+        state: ?[]const f32,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+        t_start: usize,
+        t_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        const in_per_group = in_channels / groups;
+        const out_per_group = out_channels / groups;
+        for (t_start..t_end) |t| {
+            for (0..out_channels) |o| {
+                const group = o / out_per_group;
+                const input_start = group * in_per_group;
+                var acc: f32 = 0;
+                for (0..taps) |k| {
+                    for (0..in_per_group) |local_i| {
+                        const i = input_start + local_i;
+                        acc += causalConvInputValue(input, state, in_channels, pad, t, i, k, dilation) * weight[(k * in_per_group + local_i) * out_channels + o];
+                    }
+                }
+                out[t * out_channels + o] = acc;
+            }
+        }
+    }
+
+    fn groupedCausalConv1dBackwardInputRange(
+        out: []f32,
+        gy: []const f32,
+        weight: []const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+        p_start: usize,
+        p_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        const in_per_group = in_channels / groups;
+        const out_per_group = out_channels / groups;
+        for (p_start..p_end) |p| {
+            for (0..in_channels) |i| {
+                const group = i / in_per_group;
+                const local_i = i - group * in_per_group;
+                const out_start = group * out_per_group;
+                var acc: f32 = 0;
+                for (0..taps) |k| {
+                    const t = p + pad - k * dilation;
+                    if (t >= seq) continue;
+                    for (out_start..out_start + out_per_group) |o| {
+                        acc += gy[t * out_channels + o] * weight[(k * in_per_group + local_i) * out_channels + o];
+                    }
+                }
+                out[p * in_channels + i] = acc;
+            }
+        }
+    }
+
+    fn groupedCausalConv1dBackwardWeightRange(
+        out: []f32,
+        input: []const f32,
+        gy: []const f32,
+        state: ?[]const f32,
+        seq: usize,
+        in_channels: usize,
+        out_channels: usize,
+        taps: usize,
+        dilation: usize,
+        groups: usize,
+        row_start: usize,
+        row_end: usize,
+    ) void {
+        const pad = dilation * (taps - 1);
+        const in_per_group = in_channels / groups;
+        const out_per_group = out_channels / groups;
+        for (row_start..row_end) |row| {
+            const k = row / in_per_group;
+            const local_i = row % in_per_group;
+            for (0..out_channels) |o| {
+                const group = o / out_per_group;
+                const i = group * in_per_group + local_i;
+                var acc: f32 = 0;
+                for (0..seq) |t| {
+                    acc += gy[t * out_channels + o] * causalConvInputValue(input, state, in_channels, pad, t, i, k, dilation);
+                }
+                out[row * out_channels + o] = acc;
+            }
+        }
+    }
+
+    fn causalConvInputValue(
+        input: []const f32,
+        state: ?[]const f32,
+        in_channels: usize,
+        pad: usize,
+        t: usize,
+        i: usize,
+        k: usize,
+        dilation: usize,
+    ) f32 {
+        const shifted = t + k * dilation;
+        if (shifted >= pad) return input[(shifted - pad) * in_channels + i];
+        const st = state orelse return 0;
+        return st[shifted * in_channels + i];
+    }
+
+    fn causalDepthwiseInputValue(
+        input: []const f32,
+        state: ?[]const f32,
+        seq: usize,
+        channels: usize,
+        pad: usize,
+        dilation: usize,
+        t: usize,
+        c: usize,
+        k: usize,
+    ) f32 {
+        _ = seq;
+        const u = t + k * dilation;
+        if (u >= pad) {
+            return input[(u - pad) * channels + c];
+        }
+        const st = state orelse return 0;
+        return st[u * channels + c];
+    }
+};

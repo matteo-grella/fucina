@@ -1,13 +1,17 @@
-//! Native backend: the `kernels` namespace below is the kernel set
-//! `backend/interface.zig` names. Elementwise, reduction, conv, pool and
+//! The one CPU kernel provider: the `kernels` namespace below is the kernel
+//! set `backend/interface.zig` names. Elementwise, reduction, conv, pool and
 //! Winograd entries forward to the portable `@Vector` leaves in `vector/`;
 //! the dense and quantized GEMM family is defined in this file and routes
 //! each call across the GPU provider (`-Dgpu`), a CBLAS provider (`-Dblas`)
 //! and the vector kernels. Every pool-taking kernel takes `pc:
-//! ParallelConfig` first; `cpu.zig` is the scalar reference with the same
-//! signatures. Layer stack: docs/ARCHITECTURE.md.
+//! ParallelConfig` first. On `-Dbackend=scalar` builds (`isa.reference`)
+//! the same entries select their scalar reference arms (the `scalar`
+//! namespaces inside the `vector/` files) and the GPU/BLAS/lane-pack
+//! dispatch below compiles out, so the reference leg is this provider too.
+//! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
+const isa = @import("isa.zig");
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
@@ -228,8 +232,8 @@ pub const kernels = struct {
     pub const matmul2DPackedQ8_0x4LhsRhs = native.matmul2DPackedQ8_0x4LhsRhs;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
     pub const matmulPackedSlice = native.matmulPackedSlice;
-    pub const unaryRowSlice = native.unaryRowSlice;
-    pub const mulRowSlice = native.mulRowSlice;
+    pub const unaryRowSlice = vector.elementwise.unaryRowSlice;
+    pub const mulRowSlice = vector.elementwise.mulRowSlice;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32
@@ -273,7 +277,7 @@ pub fn gemm(
     n: usize,
     k: usize,
 ) void {
-    if (comptime g.isF32()) {
+    if (comptime g.isF32() and !isa.reference) {
         if (comptime build_options.use_gpu and !g.accumulate) {
             if (gpu.shouldUseGpuForRhs(b, m, n, k)) {
                 if (gpu.gemmF32Async(g.kind, a, b, out, m, n, k)) return;
@@ -298,13 +302,13 @@ pub fn gemm(
             }
         }
     } else if (comptime g.kind == .trans_b and g.a == .f16 and g.b == .f16 and g.out == .f32) {
-        if (comptime build_options.use_gpu) {
+        if (comptime build_options.use_gpu and !isa.reference) {
             if (gpu.shouldUseGpuF16ForRhs(b, m, n, k)) {
                 if (gpu.gemmF16NtAsync(a, b, out, m, n, k)) return;
             }
         }
     } else if (comptime g.kind == .trans_b and g.a == .f32 and g.b == .bf16 and g.out == .f32) {
-        if (comptime build_options.use_gpu) {
+        if (comptime build_options.use_gpu and !isa.reference) {
             if (gpu.shouldUseGpuBf16ForRhs(b, m, n, k)) {
                 if (gpu.gemmBf16NtAsync(a, b, out, m, n, k)) return;
             }
@@ -347,6 +351,8 @@ fn matmulPackedDense(
     k: usize,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    // The reference arm: the scalar panel walk beside the pack constructor.
+    if (comptime isa.reference) return packed_matmul.matmulDenseScalar(contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m);
     if (comptime build_options.use_gpu) {
         if (gpu.shouldUseGpuForRhs(&rhs.rhs, m, n, k)) {
             if (gpu.gemmF32Async(.trans_b, a, &rhs.rhs, out, m, n, k)) return;
@@ -413,6 +419,9 @@ pub fn matmul2DQuantizedRhs(
     n: usize,
     k: usize,
 ) !void {
+    // The reference arm: the serial row-form dispatch with the two bespoke
+    // reference kernels (Q2_0 ref twin, TQ2_0 table row).
+    if (comptime isa.reference) return vector.matmul_quant.scalar.matmul2DQuantizedRhs(allocator, out, a, rhs, m, n, k);
     return switch (rhs) {
         .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8(pc, allocator, out, a, qrhs, m, n, k),
         // Q2_0 keeps its BLAS dequant-crossover arm.
@@ -479,6 +488,7 @@ fn matmulQuantRows(
     n: usize,
     k: usize,
 ) !void {
+    if (comptime isa.reference) return vector.matmul_quant.scalar.matmulQuantRows(g, allocator, out, a, rhs, m, n, k);
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     if (comptime build_options.use_blas and tableBlasFormat(g.weight)) {
         if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
@@ -597,6 +607,7 @@ pub fn matmul2DQuantizedRhsQ2_0(
     n: usize,
     k: usize,
 ) !void {
+    if (comptime isa.reference) return vector.matmul_quant.scalar.matmul2DQuantizedRhsQ2_0(allocator, out, a, rhs, m, n, k);
     if (comptime build_options.use_blas) {
         if (m >= q2_0_blas_min_m) {
             return matmul2DQuantizedRhsQ2_0Blas(pc, allocator, out, a, rhs, m, n, k);
@@ -753,16 +764,6 @@ pub fn matmulPackedSlice(pc: ParallelConfig, out: []f32, lhs_blocks: anytype, rh
     vector.matmul_quant.gemm2D(pc, comptime .{ .weight = Rhs.dtype, .rhs = Rhs.pack, .lhs = if (x4_lhs) .q8_kx4 else .q8_k }, out, lhs_blocks, rhs, m, n, k);
 }
 
-// Single-row slice kernels for fused per-row activation math (exact same
-// vector kernels the unfused elementwise ops apply).
-pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
-    vector.primitives.vecUnary(op, z, x);
-}
-
-pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
-    vector.primitives.vecMul(z, x, y);
-}
-
 /// f32 [m, k] x a plain (compact `.rows`) quantized RHS [n, k] -> f32
 /// [m, n] for a comptime weight dtype: the `QuantGemm.rowsFor(dt)`
 /// selection (one LHS quantization, then the format's row kernel).
@@ -798,6 +799,11 @@ pub fn matmulPacked(
     const Rhs = @TypeOf(rhs.*);
     if (comptime Rhs == packed_matmul.PackedDenseRhs)
         return matmulPackedDense(pc, out, a, rhs, m, n, k);
+    // The reference arm: every quantized lane pack maps back onto its
+    // row-form request, serial (the lane-packed-LHS dispatch below is a
+    // native-tier layout choice, not part of the reference semantics).
+    if (comptime isa.reference)
+        return vector.matmul_quant.scalar.matmulPacked(allocator, out, a, rhs, m, n, k);
     if (comptime Rhs.pack == .x4 and Rhs.dtype == .q8_0)
         return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs.pack == .x4 and (Rhs.dtype == .q4_k or Rhs.dtype == .q6_k))
@@ -1066,12 +1072,12 @@ pub fn gemmBatched(
     stride_c: usize,
 ) void {
     if (batch_count == 0) return;
-    if (comptime build_options.use_gpu) {
+    if (comptime build_options.use_gpu and !isa.reference) {
         if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
             if (gpuBatched(kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
-    if (comptime build_options.use_blas) {
+    if (comptime build_options.use_blas and !isa.reference) {
         if (shouldUseBatchedBlas(m, n, k, batch_count)) {
             blasBatched(cblasTrans(kind == .trans_a), cblasTrans(kind == .trans_b), out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, ldA(kind, m, k), ldB(kind, n, k));
             return;

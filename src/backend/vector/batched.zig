@@ -5,6 +5,7 @@
 //! batchedThreadCount come from `common.zig`.
 
 const std = @import("std");
+const isa = @import("../isa.zig");
 const ops = @import("../ops.zig");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
@@ -31,6 +32,7 @@ pub fn gemmBatched(
     stride_c: usize,
 ) void {
     if (batch_count == 0) return;
+    if (comptime isa.reference) return scalar.gemmBatched(kind, c_base, a_base, b_base, m, n, k, batch_count, stride_a, stride_b, stride_c);
     if (maybeParallelBatched(kind, pc, c_base, a_base, b_base, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
     for (0..batch_count) |bi| {
         batchGemm(kind, c_base, a_base, b_base, m, n, k, stride_a, stride_b, stride_c, bi);
@@ -122,3 +124,48 @@ fn BatchedRun(comptime kind: MatmulKind) type {
         }
     };
 }
+
+// ---------------- The scalar reference arm ----------------
+
+/// The scalar reference twin of the batched GEMM entry: a serial triple
+/// loop per batch. On `-Dbackend=scalar` builds the entry above dispatches
+/// here; on native builds the twin stays reachable for
+/// `backend/parity_test.zig` and `bench/backend.zig`.
+pub const scalar = struct {
+    pub fn gemmBatched(
+        comptime kind: MatmulKind,
+        c_base: []f32,
+        a_base: []const f32,
+        b_base: []const f32,
+        m: usize,
+        n: usize,
+        k: usize,
+        batch_count: usize,
+        stride_a: usize,
+        stride_b: usize,
+        stride_c: usize,
+    ) void {
+        for (0..batch_count) |bi| {
+            const ai = a_base[bi * stride_a .. bi * stride_a + m * k];
+            const bs = b_base[bi * stride_b .. bi * stride_b + k * n];
+            const ci = c_base[bi * stride_c .. bi * stride_c + m * n];
+            for (0..m) |i| {
+                for (0..n) |j| {
+                    var acc: f32 = 0;
+                    for (0..k) |p| {
+                        const av = switch (kind) {
+                            .plain, .trans_b => ai[i * k + p],
+                            .trans_a => ai[p * m + i],
+                        };
+                        const bv = switch (kind) {
+                            .plain, .trans_a => bs[p * n + j],
+                            .trans_b => bs[j * k + p],
+                        };
+                        acc += av * bv;
+                    }
+                    ci[i * n + j] = acc;
+                }
+            }
+        }
+    }
+};

@@ -5,6 +5,7 @@
 //! kernel module.
 
 const std = @import("std");
+const isa = @import("../isa.zig");
 const dtype_mod = @import("../../dtype.zig");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
@@ -16,6 +17,15 @@ const Tensor = tensor.Tensor;
 pub const ParallelConfig = struct {
     pool: ?*thread.Pool = null,
 };
+
+/// The reference build never threads: kernels whose reference arm IS the
+/// shared vector body (pure data movement and independent-output gathers,
+/// bit-equal under any split) run that body serially on `-Dbackend=scalar`
+/// by dropping the pool here. Kernels with an independent scalar arm are
+/// serial by construction and do not need this.
+pub fn refSerial(pc: ParallelConfig) ParallelConfig {
+    return if (comptime isa.reference) .{} else pc;
+}
 
 // Architecture-appropriate vector width. Falls back to 4 (a safe minimum on
 // any SIMD-capable target) if the compiler can't infer a better one.

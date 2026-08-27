@@ -1,12 +1,14 @@
-//! Backend selection facade: picks the kernel provider at build time
-//! (`-Dbackend=native|scalar`, `-Dgpu=metal|cuda`) and re-exports the
-//! shared kernel vocabulary (ops, the quantized and packed RHS container
-//! types, `PackedRhsFor`). `kernels` is the selected provider's kernel set,
-//! the namespace `backend/interface.zig` names and checks on both providers
-//! at comptime;
-//! every pool-taking kernel takes `pc: ParallelConfig` first. The fused op
-//! kernels beside their orchestration in `exec/` (attention, row_ops,
-//! fakequant) are backend-independent. Layer stack: docs/ARCHITECTURE.md.
+//! Backend facade: re-exports the shared kernel vocabulary (ops, the
+//! quantized and packed RHS container types, `PackedRhsFor`) and the one
+//! CPU kernel provider. `kernels` is `native.zig`'s kernel set, the
+//! namespace `backend/interface.zig` names and checks at comptime; every
+//! pool-taking kernel takes `pc: ParallelConfig` first. `-Dbackend=scalar`
+//! does not select a second provider: it sets `backend/isa.zig`'s
+//! `reference` flag, and every kernel entry then selects its scalar
+//! reference arm internally (the `scalar` namespaces in `vector/` and the
+//! `.scalar` tier in `quant/`). The fused op kernels beside their
+//! orchestration in `exec/` (attention, row_ops, fakequant) are
+//! backend-independent. Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");
@@ -74,11 +76,10 @@ pub fn PackedRhsFor(comptime dt: DType) type {
 pub const Tensor = tensor.Tensor;
 pub const TensorOf = tensor.TensorOf;
 pub const ThreadPool = thread.Pool;
-// The two conformance-checked CPU providers. Microbench/parity escape
-// hatch ONLY (bench/backend.zig compares them side by side; parity_test
-// pins them numerically): production code above this band goes through
-// `kernels`, `blas`, or `simd`, never through a provider by name.
-pub const scalar_impl = @import("backend/cpu.zig");
+// The one conformance-checked CPU provider. Microbench/parity escape hatch
+// ONLY (bench/backend.zig and parity_test.zig hold its entries to the
+// scalar reference arms): production code above this band goes through
+// `kernels`, `blas`, or `simd`, never through the provider by name.
 pub const native_impl = @import("backend/native.zig");
 /// The kernel name lists (`names`, `generic_names`, `pool_free_names`) and
 /// `conform`; exported so the reference can assert its kernel inventory.
@@ -147,6 +148,9 @@ pub const Kind = enum {
     native,
 };
 
+/// Build identity, not a provider choice: `.scalar` means the reference
+/// build (`isa.reference`), whose kernels are the scalar arms inside the
+/// one provider.
 pub const active_kind: Kind = switch (build_options.backend_kind) {
     .scalar => .scalar,
     .native => .native,
@@ -157,19 +161,13 @@ pub const native_uses_blas = build_options.use_blas;
 pub const native_uses_accelerate = build_options.blas_kind == .accelerate;
 pub const native_blas_threads = build_options.blas_threads;
 
-const active = switch (build_options.backend_kind) {
-    .scalar => scalar_impl,
-    .native => native_impl,
-};
+pub const ParallelConfig = native_impl.ParallelConfig;
 
-pub const ParallelConfig = active.ParallelConfig;
-
-/// The selected provider's kernel set; see `backend/interface.zig` for the
-/// names and the `pc`-first signature rule.
-pub const kernels = active.kernels;
+/// The provider's kernel set; see `backend/interface.zig` for the names
+/// and the `pc`-first signature rule.
+pub const kernels = native_impl.kernels;
 
 comptime {
-    interface.conform(scalar_impl.kernels);
     interface.conform(native_impl.kernels);
 }
 

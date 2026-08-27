@@ -173,22 +173,25 @@ Execution runtime:
 
 Backends:
 
-- `src/backend.zig`: build-selected backend facade; `backend.kernels` is
-  the selected provider's kernel set and the shared kernel vocabulary
-  (ops, block and RHS types) is re-exported from here.
+- `src/backend.zig`: backend facade; `backend.kernels` is the one
+  provider's kernel set and the shared kernel vocabulary (ops, block and
+  RHS types) is re-exported from here. `-Dbackend=scalar` is not a
+  provider swap: it sets `backend/isa.zig`'s `reference` flag and the
+  entries select their scalar arms internally.
 - `src/backend/interface.zig`: the kernel set by name (`names`,
   `generic_names`, `pool_free_names`) and `conform`, the comptime check
-  that both providers export exactly that set with matching signatures.
+  that the provider exports exactly that set with matching signatures.
 - `src/backend/offload.zig`: the accelerator seam, the one module above
   the providers that names `gpu_impl`. Capability queries, resident
   storage, tracing, and the offload entries with their decisions built in
   (quantized GEMM, attention, grouped MoE, the ES flat kernels); every band
   above the backend calls it and carries no GPU branch of its own, and on
   `-Dgpu=none` each entry folds to its refusal at comptime.
-- `src/backend/cpu.zig` (scalar reference) and `src/backend/native.zig`
-  (Zig `@Vector` kernels plus optional CBLAS for GEMM), each exporting
-  `pub const kernels`; `src/backend/parity_test.zig` keeps them in
-  agreement numerically.
+- `src/backend/native.zig`: the one CPU kernel provider (Zig `@Vector`
+  kernels plus optional CBLAS for GEMM), exporting `pub const kernels`;
+  each entry carries its scalar reference arm (the `scalar` namespaces in
+  `backend/vector/`), and `src/backend/parity_test.zig` keeps entry and
+  reference arm in numeric agreement.
 - `src/backend/vector.zig` + `src/backend/vector/`: portable SIMD kernels,
   addressed by child module (`vector.gemm.gemm`):
   `primitives.zig`, `gemm.zig`, `gemm_blocked.zig` — the BLIS-style blocked
@@ -482,22 +485,26 @@ or preallocate an entire model execution schedule.
 ## Backend Model
 
 Backend selection is build-time (`-Dbackend=native|scalar`; `native` is
-the default, `scalar` the reference).
-Dispatch is compiled away; adding a variant forces edits through exhaustive
-switches.
+the default, `scalar` the reference). The scalar leg is not a second
+provider: it sets `backend/isa.zig`'s `reference` flag, and every kernel
+entry in the one provider then selects its scalar reference arm at comptime
+(the `scalar` namespaces in `backend/vector/`, the `.scalar` tier in
+`backend/quant/`) while the SIMD/BLAS/GPU/lane-pack arms are never
+analyzed. Dispatch is compiled away; adding a variant forces edits through
+exhaustive switches.
 
-The two providers meet at one interface, `src/backend/interface.zig`: a
+The provider meets one interface, `src/backend/interface.zig`: a
 comptime-checked namespace, not a struct of function pointers, because many
 kernels are generic over a `comptime` dtype or op. It lists every kernel by
 name (`names`), the generic subset (`generic_names`) and the subset that
-takes no pool (`pool_free_names`); `cpu.zig` and `native.zig` each export
+takes no pool (`pool_free_names`); `native.zig` exports
 `pub const kernels = struct { ... }` with exactly that set, and
-`backend.zig` runs `interface.conform` on both at comptime (name, parameter
+`backend.zig` runs `interface.conform` on it at comptime (name, parameter
 types, return payload, parameter count for generics, and the `pc` rule).
-`backend.kernels` is the selected set. The signature rule: a kernel that
+`backend.kernels` is that set. The signature rule: a kernel that
 needs the worker pool takes `pc: ParallelConfig` as its first parameter;
-one that does not use the pool does not take it; the scalar reference
-accepts `pc` wherever the native kernel threads on it and ignores it. Exec
+one that does not use the pool does not take it; the scalar reference arms
+ignore `pc` wherever the native arms thread on it. Exec
 calls `kernels.X(ctx.pc(), ...)`, where `ExecContext.pc()` snapshots the
 published worker team.
 
@@ -540,7 +547,8 @@ The allocation contract, precisely scoped:
   tensor outputs. The vector/quant compute leaves (`backend/vector/*`,
   the dot kernels in `backend/quant/*`) are allocation-free.
 - The quantized-RHS dispatch tier (`matmul2DQuantizedRhs` in
-  `native.zig`/`cpu.zig`) deliberately takes an allocator for per-call LHS
+  `native.zig`, reference arms in `vector/matmul_quant.zig`) deliberately
+  takes an allocator for per-call LHS
   quantization scratch (f32 activations → Q8_0/Q8_1/Q8_K blocks); the Q8_0
   arm has a 512-block stack fast path (`q8_0_lhs_stack_blocks`). RHS pack
   preparation (x4/x8 lane packs) allocates at load time, not per matmul.
@@ -588,7 +596,7 @@ The raw tensor dtype layer owns scalar and block storage. `ExecContext` owns
 validation, materialization, allocation, and dispatch. Backends own numeric
 kernels. `backend/quant.zig` owns block helpers, dequantization, loaded-block
 row access, the interleaved pack layouts and RHS containers, and the
-portable kernels shared by both backends; backend dispatch consumes
+portable kernels every arm shares; backend dispatch consumes
 `AnyQuantizedMatmulRhs` internally. Each tier is addressed by one
 request type. The backend seam is `ops.QuantGemm`, the request
 `{ weight, rhs: RhsPack, lhs: LhsForm, order: LoopOrder }` with

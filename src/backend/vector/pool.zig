@@ -18,6 +18,7 @@
 //! (gradient path only), matching the conv2d backward convention.
 
 const std = @import("std");
+const isa = @import("../isa.zig");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const common = @import("common.zig");
@@ -63,6 +64,7 @@ pub fn pool2dInto(
     input: *const Tensor,
     d: Pool2dDims,
 ) void {
+    if (comptime isa.reference) return scalar.pool2dInto(kind, out, input, d);
     const o = out.data();
     const in = input.dataConst();
     if (pc.pool) |pool| {
@@ -261,6 +263,7 @@ fn runUpsample2xTask(task: *const Upsample2xTask) void {
 /// channel block, then the sibling row is a single row `@memcpy`. Parallel
 /// over input rows (disjoint output ranges — bit-identical to serial).
 pub fn upsample2xNearestInto(pc: common.ParallelConfig, out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
+    if (comptime isa.reference) return scalar.upsample2xNearestInto(out, input, h, w, c);
     const o = out.data();
     const in = input.dataConst();
     if (pc.pool) |pool| {
@@ -301,3 +304,55 @@ fn upsample2xRangeRows(out: []f32, in: []const f32, h: usize, w: usize, c: usize
         @memcpy(out[(2 * ih + 1) * orow_len ..][0..orow_len], orow0);
     }
 }
+
+// ---------------- The scalar reference arms ----------------
+
+/// The scalar reference twins: plain serial loops, no SIMD, no pool. On
+/// `-Dbackend=scalar` builds (`isa.reference`) the forward entries above
+/// dispatch here; the backward scatters are serial scalar loops already and
+/// need no twin.
+pub const scalar = struct {
+    /// Scalar reference pool2d (independent of the vector kernel; layout and
+    /// border semantics stated on `Pool2dDims` above).
+    pub fn pool2dInto(comptime kind: PoolKind, out: *Tensor, input: *const Tensor, d: Pool2dDims) void {
+        const o = out.data();
+        const in = input.dataConst();
+        for (0..d.oh) |oh| {
+            for (0..d.ow) |ow| {
+                for (0..d.c) |c| {
+                    var acc: f32 = if (kind == .max) -std.math.inf(f32) else 0;
+                    var count: usize = 0;
+                    for (0..d.kh) |kh| {
+                        const ih_i = @as(isize, @intCast(oh * d.stride_h + kh)) - @as(isize, @intCast(d.pad_h));
+                        if (ih_i < 0 or ih_i >= @as(isize, @intCast(d.h))) continue;
+                        for (0..d.kw) |kw| {
+                            const iw_i = @as(isize, @intCast(ow * d.stride_w + kw)) - @as(isize, @intCast(d.pad_w));
+                            if (iw_i < 0 or iw_i >= @as(isize, @intCast(d.w))) continue;
+                            const v = in[(@as(usize, @intCast(ih_i)) * d.w + @as(usize, @intCast(iw_i))) * d.c + c];
+                            switch (kind) {
+                                .max => acc = @max(acc, v),
+                                .avg, .sum => acc += v,
+                            }
+                            count += 1;
+                        }
+                    }
+                    if (kind == .avg and count > 0) acc /= @floatFromInt(count);
+                    o[(oh * d.ow + ow) * d.c + c] = acc;
+                }
+            }
+        }
+    }
+
+    /// Scalar reference 2x nearest-neighbour upsample.
+    pub fn upsample2xNearestInto(out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
+        const o = out.data();
+        const in = input.dataConst();
+        for (0..2 * h) |oy| {
+            for (0..2 * w) |ox| {
+                for (0..c) |ci| {
+                    o[(oy * 2 * w + ox) * c + ci] = in[((oy / 2) * w + ox / 2) * c + ci];
+                }
+            }
+        }
+    }
+};

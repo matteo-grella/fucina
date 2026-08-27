@@ -134,19 +134,23 @@ algorithms without accepting that existing checkpoints break.
 
 ### 1.10 Scalar is the specification
 
-The scalar backend (`-Dbackend=scalar`) is the executable reference: native
-and scalar must agree, and `src/backend/parity_test.zig` holds them together.
-The quantized GEMM family selects its plain scalar accumulators on that leg
-through `backend/isa.zig`'s `scalar` tier (formats without a scalar twin
-take their exact-integer portable arm), and `parity_test.zig` checks the
-quantized cases (q8_0/q4_k/q5_k/q6_k/tq2_0 and the packed x4/x8 arms)
-against a dequantized f32 reference on both providers.
+`-Dbackend=scalar` is the executable reference leg. It does not select a
+second provider: it sets `backend/isa.zig`'s `reference` flag, and every
+kernel entry in the one provider (`backend/native.zig`) then selects its
+scalar reference arm at comptime (the `scalar` namespaces inside
+`src/backend/vector/*.zig`; the quantized GEMM family selects its plain
+scalar accumulators through the `scalar` tier, and formats without a
+scalar twin take their exact-integer portable arm). The SIMD, BLAS, GPU
+and lane-pack dispatch arms compile out on that leg.
+`src/backend/parity_test.zig` holds each kernel entry to its scalar twin,
+and checks the quantized cases (q8_0/q4_k/q5_k/q6_k/tq2_0 and the packed
+x4/x8 arms) against a dequantized f32 reference on both legs.
 The scalar leg runs before merge when the change touches `src/backend/` or
-`src/exec/` (once, on the final code — it is slow by design); other changes
-skip it, since `parity_test.zig` already diffs both backends inside every
-native `zig build test`. Everything integer is bit-exact across
-architectures; float tile kernels document association-order tolerance
-instead.
+`src/exec/` (once, on the final code; it is slow by design); other changes
+skip it, since `parity_test.zig` already diffs entry against reference arm
+inside every native `zig build test`. Everything integer is bit-exact
+across architectures; float tile kernels document association-order
+tolerance instead.
 
 ## 2. Check before you build
 
@@ -211,13 +215,14 @@ template (e.g. `softmax` for a row op, `maxPool2d` for a pool op).
    becomes a compile error until handled. One exception is named in step 8.
 2. `src/backend/interface.zig` — add the kernel name to the set (and to
    `generic_names`/`pool_free_names` as applicable). `conform` then forces
-   both providers.
-3. `src/backend/cpu.zig` — the scalar reference implementation. This is
-   the specification (see 1.10; for the quantized GEMM family the
-   reference is the `*Scalar` accumulator in `backend/quant/`, selected
-   by the `scalar` tier of `backend/isa.zig`).
+   the provider.
+3. `src/backend/vector/<domain>.zig`, its `scalar` namespace — the scalar
+   reference arm. This is the specification (see 1.10; for the quantized
+   GEMM family the reference is the `*Scalar` accumulator in
+   `backend/quant/`, selected by the `scalar` tier of `backend/isa.zig`).
 4. `src/backend/native.zig` + `src/backend/vector/<domain>.zig` — the
-   SIMD implementation, `pc`-first signature.
+   SIMD implementation behind the same kernel entry, `pc`-first
+   signature; the entry selects scalar-vs-SIMD on `isa.reference`.
 5. `src/backend/parity_test.zig` or the domain's `vector/*_tests.zig` —
    pin scalar and native to each other.
 6. `src/exec/<domain>.zig` — the op body over `*ExecContext` (validate,
@@ -448,8 +453,8 @@ disabled-build case inverts the guard to assert `error.LlguidanceNotEnabled`
 — so the same test root compiles and passes under any flag combination and
 gains coverage — never failures — when the flag is on.
 Per `CONTRIBUTING.md`, numeric changes must additionally be green under
-`-Dbackend=scalar` and `-Dblas=none` — the scalar backend is the reference,
-and native must agree with it.
+`-Dbackend=scalar` and `-Dblas=none` — the scalar arms are the reference,
+and the native arms must agree with them.
 
 ### 7.2 Doc snippets are tests too
 

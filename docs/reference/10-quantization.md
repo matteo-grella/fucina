@@ -82,7 +82,7 @@ Reading the table:
   matmul kernel at all (`supports_matmul == false`): they exist as the
   *activation* side of the int8 dots and as decodable tensor data.
 - **LHS activation** — the block format the f32 activations are dynamically
-  quantized to before the int8 dot ([§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendcpuzig-srcbackendnativezig)): Q8_0 for the 32-element weight
+  quantized to before the int8 dot ([§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendnativezig)): Q8_0 for the 32-element weight
   families plus `.q1_0`/`.q2_0` (128) and `.nvfp4` (64), Q8_1 for the offset formats
   `.q4_1`/`.q5_1` (the offset term needs the per-block activation sum Q8_1
   carries), Q8_K for all 256-element formats.
@@ -238,7 +238,7 @@ Requirements, all comptime-checked:
 - the LHS may have any number of free axes (they are flattened to `m` rows
   around the contraction).
 
-The runtime path quantizes the LHS activations ([§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendcpuzig-srcbackendnativezig)), runs the format's
+The runtime path quantizes the LHS activations ([§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendnativezig)), runs the format's
 kernel, and reshapes back. Gradients: the quantized weight is a constant
 (it never receives grad); the LHS gradient is supported and flows through
 the **dequantized** weight — the backward node holds a view of the block
@@ -248,7 +248,7 @@ dense-quant GEMM provider (q4_k/q6_k/q8_0 on Metal, plus q5_k on CUDA, [§9](09-
 with or without gradients: the LHS gradient never reads the forward
 kernel's internals (it flows through the dequantized weight), so the GPU
 and CPU forwards share one backward and differ only by the
-activation-quantization gap (the CPU kernels quantize the LHS, [§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendcpuzig-srcbackendnativezig);
+activation-quantization gap (the CPU kernels quantize the LHS, [§10.5](10-quantization.md#105-lhs-activation-quantization-srcbackendquantq8kzig-srcbackendnativezig);
 measured 3.7e-3 max rel at a 512x1024x2048 q8_0 shape, gradient
 bit-identical). Checkpoint blocks pin both of their runs to the CPU
 kernels ([§5.5](05-automatic-differentiation.md#55-activation-checkpointing-srcagcheckpointzig)). Each backend's dispatch gate prices its own memory
@@ -484,7 +484,7 @@ gates calibrated against the actual compact/raw or load-time-packed CPU
 fallback. Decode `m <= 8` remains behind the provider's explicit GEMV opt-in.
 The complete GPU contract is [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md).
 
-## 10.5 LHS activation quantization (`src/backend/quant/q8k.zig`, `src/backend/cpu.zig`, `src/backend/native.zig`)
+## 10.5 LHS activation quantization (`src/backend/quant/q8k.zig`, `src/backend/native.zig`)
 
 Quantized matmuls quantize the f32 activations on the fly, per weight-format
 family (all ggml-parity):

@@ -1,5 +1,6 @@
 // Backend comparison benchmark. Times representative ops under the scalar
-// reference backend and the native production backend.
+// reference arms (the `scalar` namespaces inside `backend/vector/`) and
+// the native kernel entries of the one provider.
 // Run with:
 //   zig build bench-backend -Doptimize=ReleaseFast
 //   zig build bench-backend -Doptimize=ReleaseFast -- --table-only
@@ -13,9 +14,76 @@ const raw_backend = @import("raw_backend");
 
 const Tensor = raw_backend.Tensor;
 const DType = raw_backend.DType;
-const scalar = raw_backend.scalar_impl;
 const dtype = raw_backend.dtype_info;
 const native = raw_backend.native_impl;
+const vector = raw_backend.vector_impl;
+const vcommon = vector.common;
+
+/// The scalar reference twins under the old provider spelling: the bench's
+/// scalar column times the serial reference arms compiled into this build
+/// (their signatures keep the kernel entries' `pc`-first shape so the call
+/// sites below read like the native column).
+const scalar = struct {
+    const ParallelConfig = native.ParallelConfig;
+    const kernels = struct {
+        fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
+            vector.elementwise.scalar.addContiguousIntoUnchecked(out, a, b, a.len());
+        }
+        fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
+            _ = pc;
+            return vector.elementwise.scalar.sumInto(out, a);
+        }
+        fn dot(pc: ParallelConfig, comptime tensor_dtype: DType, out: anytype, a: anytype, b: anytype) !void {
+            _ = pc;
+            return vector.elementwise.scalar.dot(tensor_dtype, out, a, b);
+        }
+        fn elementwiseContiguousIntoTyped(pc: ParallelConfig, comptime tensor_dtype: DType, comptime op: raw_backend.ops.ElementwiseOp, out: anytype, a: anytype, b: anytype, len: usize) void {
+            _ = pc;
+            vector.elementwise.scalar.elementwiseContiguousIntoTyped(tensor_dtype, op, out, a, b, len);
+        }
+        fn gemm(pc: ParallelConfig, comptime g: raw_backend.ops.Gemm, out: anytype, a: anytype, b: anytype, m: usize, n: usize, k: usize) void {
+            _ = pc;
+            vector.gemm.scalar.gemm(
+                g,
+                vcommon.contiguousDataOf(g.out, out, m * n),
+                vcommon.contiguousDataConstOf(g.a, a, m * k),
+                vcommon.contiguousDataConstOf(g.b, b, k * n),
+                m,
+                n,
+                k,
+            );
+        }
+        fn gemmBatched(pc: ParallelConfig, comptime kind: raw_backend.ops.MatmulKind, out: *Tensor, a: *const Tensor, b: *const Tensor, m: usize, n: usize, k: usize, batch_count: usize, stride_a: usize, stride_b: usize, stride_c: usize) void {
+            _ = pc;
+            vector.batched.scalar.gemmBatched(
+                kind,
+                vcommon.contiguousData(out, out.buffer.data.len - out.offset),
+                vcommon.contiguousDataConst(a, a.buffer.data.len - a.offset),
+                vcommon.contiguousDataConst(b, b.buffer.data.len - b.offset),
+                m,
+                n,
+                k,
+                batch_count,
+                stride_a,
+                stride_b,
+                stride_c,
+            );
+        }
+        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, rhs: raw_backend.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
+            _ = pc;
+            return vector.matmul_quant.scalar.matmul2DQuantizedRhs(allocator, out, a, rhs, m, n, k);
+        }
+        fn matmulPacked(pc: ParallelConfig, allocator: std.mem.Allocator, out: anytype, a: anytype, rhs: anytype, m: usize, n: usize, k: usize) !void {
+            _ = pc;
+            const Rhs = @TypeOf(rhs.*);
+            if (comptime Rhs == raw_backend.PackedDenseRhs) {
+                if (rhs.k != k or rhs.n != n) return error.ShapeMismatch;
+                return raw_backend.packed_matmul.matmulDenseScalar(vcommon.contiguousData(out, m * n), vcommon.contiguousDataConst(a, m * k), rhs, m);
+            }
+            return vector.matmul_quant.scalar.matmulPacked(allocator, out, a, rhs, m, n, k);
+        }
+    };
+};
 
 const iterations: usize = 50;
 const warmup: usize = 5;
@@ -951,7 +1019,7 @@ fn benchQuantizedI8MatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmul2DQuantizedRhsI8(.{}, alloc, o, lhs, rhs, rows, cols, inner);
+            try vector.matmul_quant.scalar.matmul2DQuantizedRhsI8(alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
@@ -1029,7 +1097,7 @@ fn benchQuantizedGGMLMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmulQuantizedRhs(.{}, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
+            try vector.matmul_quant.scalar.matmulQuantRows(comptime raw_backend.ops.QuantGemm.rowsFor(tensor_dtype), alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {
@@ -1109,7 +1177,7 @@ fn benchQuantizedGGMLKMatMulTimed(
 
     const ScalarRunner = struct {
         fn run(alloc: std.mem.Allocator, o: *FloatTensor, lhs: *const FloatTensor, rhs: *const QRhs, rows: usize, cols: usize, inner: usize) !void {
-            try scalar.matmulQuantizedRhs(.{}, tensor_dtype, alloc, o, lhs, rhs, rows, cols, inner);
+            try vector.matmul_quant.scalar.matmulQuantRows(comptime raw_backend.ops.QuantGemm.rowsFor(tensor_dtype), alloc, o, lhs, rhs, rows, cols, inner);
         }
     }.run;
     const NativeRunner = struct {

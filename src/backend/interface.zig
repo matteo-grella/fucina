@@ -1,15 +1,14 @@
-//! The backend kernel interface: every kernel a backend provides, by name.
-//! `cpu.zig` and `native.zig` each export `pub const kernels = struct { ... }`
-//! with exactly this set, and `conform` is the single compile-time check that
-//! holds them together. The interface is a comptime-checked namespace, not a
-//! struct of function pointers: many kernels are generic over a `comptime`
-//! dtype or op, and those stay generic across the two implementations.
+//! The backend kernel interface: every kernel the provider exports, by name.
+//! `native.zig` exports `pub const kernels = struct { ... }` with exactly
+//! this set, and `conform` is the single compile-time check that holds it
+//! to the list. The interface is a comptime-checked namespace, not a struct
+//! of function pointers: many kernels are generic over a `comptime` dtype
+//! or op.
 //!
 //! Signature rule: a kernel that needs the worker pool takes
 //! `pc: ParallelConfig` as its FIRST parameter; a kernel that does not use
-//! the pool does not take it. Both implementations follow the same rule for
-//! every name, so an exec caller is backend-agnostic. The scalar reference
-//! ignores `pc` where the native kernel threads on it.
+//! the pool does not take it. The scalar reference arms inside the entries
+//! ignore `pc` where the native arms thread on it.
 const std = @import("std");
 const ParallelConfig = @import("vector/common.zig").ParallelConfig;
 

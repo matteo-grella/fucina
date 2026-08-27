@@ -870,7 +870,7 @@ What is not:
 ## 6.10 The IEEE floating-point environment (`src/fpenv.zig`)
 
 Every numeric contract in this library — the RNG's (seed → values) mapping
-([§6.8](06-the-execution-runtime-execcontext-and-the-memory-model.md#68-determinism-and-the-rng-contract-srcrngzig)), scalar-vs-native backend parity ([§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-backend-and-the-parity-contract-srcbackendcpuzig-srcbackendparity_testzig)), thread-count-invariant
+([§6.8](06-the-execution-runtime-execcontext-and-the-memory-model.md#68-determinism-and-the-rng-contract-srcrngzig)), scalar-vs-native backend parity ([§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-reference-arms-and-the-parity-contract-srcbackendvector-srcbackendparity_testzig)), thread-count-invariant
 kernels ([§9.4](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#94-native-backend-portable-vector-kernels-srcbackendvector)) — is stated under the **default IEEE environment**: round to
 nearest-even, gradual underflow, no trapping. Nothing in the language
 guarantees it. The rounding mode and the flush-to-zero bit live in a

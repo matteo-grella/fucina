@@ -237,14 +237,14 @@ test "conv2d winograd route matches the direct kernel (3x3 s1, pad 0/1, odd shap
         var y = try x.conv2d(&ctx, &wt, &bt, .{ 1, 1 }, .{ p, p }, 1, .{ .h, .w, .c });
         defer y.deinit();
 
-        // Reference: the scalar backend's independent direct kernel.
+        // Reference: the independent scalar reference arm (the conv2d twin).
         var xr = try RawTensor.fromSlice(allocator, &[_]usize{ h, w, cin }, xd);
         defer xr.deinit();
         var wr = try RawTensor.fromSlice(allocator, &[_]usize{ cout, 3, 3, cin }, wd);
         defer wr.deinit();
         var expected = try RawTensor.zeros(allocator, &[_]usize{ oh, ow, cout });
         defer expected.deinit();
-        backend_mod.scalar_impl.kernels.conv2dInto(.{}, &expected, &xr, &wr, bd, .{
+        backend_mod.vector_impl.conv.scalar.conv2dInto(&expected, &xr, &wr, bd, .{
             .h = h,
             .w = w,
             .cin = cin,

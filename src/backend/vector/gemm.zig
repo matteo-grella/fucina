@@ -84,6 +84,7 @@ pub fn gemm(
     n: usize,
     k: usize,
 ) void {
+    if (comptime isa.reference) return scalar.gemm(g, cd, ad, bd, m, n, k);
     if (comptime g.isF32()) {
         switch (comptime g.kind) {
             .plain => {
@@ -2423,3 +2424,43 @@ fn matmul2DIntoTypedScalar(
 test {
     _ = @import("gemm_tests.zig");
 }
+
+// ---------------- The scalar reference arm ----------------
+
+/// The scalar reference twin of the dense GEMM entry: the request as one
+/// serial triple loop. The orientation selects the index formulas, the
+/// operands widen to the matmul compute dtype (f32 for any mixed pair), and
+/// the accumulator narrows once on store. On `-Dbackend=scalar` builds the
+/// `gemm` entry above dispatches here; on native builds the twin stays
+/// reachable for `backend/parity_test.zig` and `bench/backend.zig`.
+pub const scalar = struct {
+    pub fn gemm(
+        comptime g: ops.Gemm,
+        cd: []dtype_mod.Scalar(g.out),
+        ad: []const dtype_mod.Scalar(g.a),
+        bd: []const dtype_mod.Scalar(g.b),
+        m: usize,
+        n: usize,
+        k: usize,
+    ) void {
+        const compute = comptime if (g.a == g.b) dtype_mod.computeDType(.matmul, g.a) else .f32;
+        for (0..m) |i| {
+            for (0..n) |j| {
+                var acc: dtype_mod.Scalar(compute) = 0;
+                for (0..k) |p| {
+                    const av = switch (g.kind) {
+                        .plain, .trans_b => ad[i * k + p],
+                        .trans_a => ad[p * m + i],
+                    };
+                    const bv = switch (g.kind) {
+                        .plain, .trans_a => bd[p * n + j],
+                        .trans_b => bd[j * k + p],
+                    };
+                    acc += dtype_mod.castFloat(g.a, compute, av) * dtype_mod.castFloat(g.b, compute, bv);
+                }
+                const value = dtype_mod.castFloat(compute, g.out, acc);
+                if (g.accumulate) cd[i * n + j] += value else cd[i * n + j] = value;
+            }
+        }
+    }
+};
