@@ -702,7 +702,7 @@ fn runRawDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Result 
     defer packed_rhs.deinit();
 
     for (0..4) |_| {
-        var y = try ctx.matmulPacked(&x, &packed_rhs);
+        var y = try ctx.matmulQuant(.{ .plain = &x }, &packed_rhs, .{});
         y.deinit();
     }
 
@@ -710,7 +710,7 @@ fn runRawDotPackedQ8_0(m: usize, k: usize, n: usize, iterations: usize) !Result 
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.matmulPacked(&x, &packed_rhs);
+        var y = try ctx.matmulQuant(.{ .plain = &x }, &packed_rhs, .{});
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

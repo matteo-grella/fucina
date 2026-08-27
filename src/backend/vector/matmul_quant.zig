@@ -62,20 +62,6 @@ pub fn gemm2D(pc: ParallelConfig, comptime g: ops.QuantGemm, out: []f32, lhs: op
     quant.gemm(g, out, lhs, rhs, ops.Tile.rows(m, n));
 }
 
-/// Deprecated spelling of `gemm2D(.{ .weight = .tq2_0, .lhs = .f32 })`
-/// kept for the autograd fallback caller; new callers state the request.
-pub fn matmul2DTQ2_0F32RhsInto(
-    pc: ParallelConfig,
-    out: []f32,
-    lhs: []const f32,
-    rhs: *const types.QuantizedMatmulRhsTQ2_0,
-    m: usize,
-    n: usize,
-    k: usize,
-) void {
-    gemm2D(pc, .{ .weight = .tq2_0, .lhs = .f32 }, out, lhs, rhs, m, n, k);
-}
-
 /// The padded packed-Q8_0x4 form (masked writes, `m % 4` free).
 fn paddedQ8_0x4(comptime g: ops.QuantGemm) bool {
     return g.weight == .q8_0 and g.rhs == .x4 and g.lhs == .q8_0x4 and g.order == .col_outer;

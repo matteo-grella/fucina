@@ -396,12 +396,13 @@ width 2k, for `.split_swiglu`); `.rms_norm` is `{ x, weight, eps }`;
 entries did, falling back to the CPU kernels on decline;
 `numerics = .rowwise` pins every row to the m == 1 kernels (the
 `pin_rowwise_kernels` semantics, per call; the K-quant fused engine pins
-by forcing its per-row tail kernel instead of looping). The named
-`ExecContext` entries (`matmulPacked`, `matmulPackedInto`,
-`rmsNormMulMatmulPacked`, `splitSwiGluMatmulPacked`,
-`gegluQuantMatmulPacked`, `matmul2DWithQuantizedTensorRhs`,
-`matmul2DWithQuantizedBlocksRhs`) remain as thin wrappers, each naming
-its replacement.
+by forcing its per-row tail kernel instead of looping). RHS containers
+come from `packMatmulRhs`/`packMatmulRhsAs` (owned lane packs),
+`packDenseMatmulRhs` (the dense f32 panel), or the borrowing
+`compactMatmulRhs`/`compactMatmulRhsFromBlocks` (a compact `.rows`
+container over a block-quantized tensor's blocks or a raw block slice,
+any `supportsQuantizedMatmulRhs` dtype; the container borrows the blocks
+and needs no deinit).
 
 One seam sits below it: the backend addresses its quantized kernels by an
 `ops.QuantGemm` request, `{ weight: DType, rhs: RhsPack{rows, x4, x8,
@@ -461,18 +462,10 @@ The enum itself, the address-keyed cacheability rule, and the
 pooled-storage prohibition are [§6.7](06-the-execution-runtime-execcontext-and-the-memory-model.md#67-rhslifetime-address-keyed-caching-of-rhs-operands-srcexecquant_matmulzig); this subsection covers how the flag
 rides through quantized matmul.
 
-```zig
-pub const QuantizedMatmulOptions = struct {
-    allow_gpu: bool = true,
-    rhs_lifetime: RhsLifetime = .transient,
-};
-```
-
-The option rides on the `ExecContext` raw-tensor entry points —
-`matmul2DWithQuantizedTensorRhs` and `matmul2DWithQuantizedBlocksRhs`
-(the blocks-slice variant accepts q8_0/q4_k/q5_k/q6_k only), both taking a
-trailing `QuantizedMatmulOptions`. The facade `dot` always uses the default
-transient/`allow_gpu`-when-not-training options — a `.transient` RHS may
+The lifetime rides on the `QuantMatmul` request
+(`matmulQuant`/`matmulQuantInto`, §10.3) and on the `try*` GPU attempts.
+The facade `dot` always uses the default
+transient/GPU-when-not-training request — a `.transient` RHS may
 still use the provider's blocking GPU path, but no address-keyed wrap survives
 the call and the borrowed bytes cannot be retained by an async command.
 `fucina_models`'s weight wrappers thread `.stable_process` through for resident

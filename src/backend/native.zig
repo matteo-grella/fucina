@@ -407,7 +407,11 @@ pub const kernels = struct {
     pub const pool_free_matmulTableQ8_KRhsTile = true;
     pub const dequantizeRowTQ2_0Into = quantized_matmul.cold.dequantizeRowTQ2_0Into;
     pub const pool_free_dequantizeRowTQ2_0Into = true;
-    pub const matmul2DTQ2_0F32RhsInto = vector.matmul_quant.matmul2DTQ2_0F32RhsInto;
+    /// The one parallel 2-D quantized GEMM entry over an `ops.QuantGemm`
+    /// request (row/column task split, serial full tile otherwise); the
+    /// autograd ternary-STE fallback states `.{ .weight = .tq2_0,
+    /// .lhs = .f32 }` through it.
+    pub const gemm2D = vector.matmul_quant.gemm2D;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32

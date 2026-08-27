@@ -623,10 +623,10 @@ parallel split `gemm2D`, the `AnyQuantizedMatmulRhs` union entry,
 requests instead of names. The exec seam is `QuantMatmul`, the request
 `{ prologue: ?FusedActKind, placement, rhs_lifetime, numerics }` with the
 `Lhs` operand union: `ExecContext.matmulQuant`/`matmulQuantInto` are the
-entries, and the named spellings (`matmulPacked`,
-`rmsNormMulMatmulPacked`, `splitSwiGluMatmulPacked`,
-`gegluQuantMatmulPacked`, the tensor/blocks entries and the `try*` GPU
-attempts) are thin wrappers over them. K-quants and the `IQ*`/`TQ*` formats dot
+entries (containers come from `packMatmulRhs`/`packMatmulRhsAs`,
+`packDenseMatmulRhs`, or the borrowing `compactMatmulRhs`/
+`compactMatmulRhsFromBlocks`), plus the `try*` GPU attempts over raw
+quantized bytes. K-quants and the `IQ*`/`TQ*` formats dot
 against `Q8_K` activation blocks; `IQ4_NL`, `MXFP4`, and `NVFP4` (like the
 legacy formats) use `Q8_0`/`Q8_1` activation blocks. Decode follows GGML
 lookup tables, nonlinear codebooks, and E8M0/UE4M3 FP4 scale rules; every

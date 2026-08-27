@@ -187,7 +187,7 @@ op, request, or container type):
 | dtype cast rows (`vector/elementwise.zig`) | `castF32ToF16`*, `castF16ToF32`*, `castF32ToBf16`*, `castBf16ToF32`* (bit-exact lane twins of the `dtype` scalar converters) |
 | straggler row kernels (`vector/rows.zig`) | `extremumRowValue`*†, `varianceRowsInto`*, `ropeHalfPairsInto`*, `scanRows`*† and `scanColumns`*† (the directed inclusive scans; the `-Dvector-scan` gate lives inside them), `selectRow`*† (the masked-reduce select row) |
 | attention kernels (`vector/attention.zig`; task-carrying, pool-free) | `groupedCausalAttentionHeads`*†, `groupedCausalAttentionHeadPairs`*†, `groupedCausalAttentionQueryTiles`*†, `groupedCausalAttentionMultiUnits`*†, `groupedCausalAttentionBackwardKvHeads`*, `groupedCausalAttentionBackwardTiles`*, `groupedCausalAttentionBackwardBlasTiles`*, `attentionBackwardReduceRows`* (Task payloads, adapters and tile constants: the `backend.attention` seam) |
-| per-format quantized row/pack/tile kernels | the `quant/<fmt>` leaves the MoE streams, the gemma fused-MoE skeleton, the PTQTP/borrowed containers, the expert store and the ternary-LoRA backward consume by name: `quantizeRowQ8_0Into`*, `quantizeRowQ8_0IntoUnchecked`*, `quantizeRowQ8_KInto`*, `quantizeRowQ8_KIntoUnchecked`*, `packRowsQ8_Kx4PaddedInto`*, `dequantizeRowQ8_0Into`*, `matmulQ8_0x4RhsTile`*, `matmulQ8_0RhsTile`*, `splitSwiGluRowInto`*, `quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto`*, `packMatmulRhsQ8_0x4`*, `matmulQ6_Kx4RhsTile`*, `matmulQ6_Kx4RhsPairTile`*, `matmulQ6_KRhsTile`*, `matmulQ6_KRhsCompactColOuter`*, `matmulQ4_KRhsTile`*, `matmulQ4_KRhsCompactColOuter`*, `matmulMXFP4RhsTile`*, `quantizedMatmulRhsTQ2_0FromBorrowedBlocks`*, `quantizedMatmulRhsTQ2_0FromF32Absmean`*, `matmulTQ2_0RhsTile`*, `matmulTQ2_0FoldedX4RhsTile`*, `matmulTQ2_0X4RhsTile`*, `matmulTQ2_0X4RhsTileAcc`*, `packMatmulRhsTQ2_0x4`*, `packMatmulRhsTQ2_0Foldedx4`*, `packMatmulRhsTQ2_0Foldedx4Into`*, `packMatmulRhsTQ2_0FoldedRows`*, `packMatmulRhsTQ2_0FoldedRowsFromX4`*, `matmulTableQ8_KRhsTile`*†, `dequantizeRowTQ2_0Into`*, `matmul2DTQ2_0F32RhsInto` (the parity/quant tests pin these per format; block counts go through `quantized_matmul.blockCountForDType`) |
+| per-format quantized row/pack/tile kernels | the `quant/<fmt>` leaves the MoE streams, the gemma fused-MoE skeleton, the PTQTP/borrowed containers, the expert store and the ternary-LoRA backward consume by name: `quantizeRowQ8_0Into`*, `quantizeRowQ8_0IntoUnchecked`*, `quantizeRowQ8_KInto`*, `quantizeRowQ8_KIntoUnchecked`*, `packRowsQ8_Kx4PaddedInto`*, `dequantizeRowQ8_0Into`*, `matmulQ8_0x4RhsTile`*, `matmulQ8_0RhsTile`*, `splitSwiGluRowInto`*, `quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto`*, `packMatmulRhsQ8_0x4`*, `matmulQ6_Kx4RhsTile`*, `matmulQ6_Kx4RhsPairTile`*, `matmulQ6_KRhsTile`*, `matmulQ6_KRhsCompactColOuter`*, `matmulQ4_KRhsTile`*, `matmulQ4_KRhsCompactColOuter`*, `matmulMXFP4RhsTile`*, `quantizedMatmulRhsTQ2_0FromBorrowedBlocks`*, `quantizedMatmulRhsTQ2_0FromF32Absmean`*, `matmulTQ2_0RhsTile`*, `matmulTQ2_0FoldedX4RhsTile`*, `matmulTQ2_0X4RhsTile`*, `matmulTQ2_0X4RhsTileAcc`*, `packMatmulRhsTQ2_0x4`*, `packMatmulRhsTQ2_0Foldedx4`*, `packMatmulRhsTQ2_0Foldedx4Into`*, `packMatmulRhsTQ2_0FoldedRows`*, `packMatmulRhsTQ2_0FoldedRowsFromX4`*, `matmulTableQ8_KRhsTile`*†, `dequantizeRowTQ2_0Into`*, `gemm2D` (the parallel `ops.QuantGemm` request entry; the autograd ternary-STE fallback states `.{ .weight = .tq2_0, .lhs = .f32 }` through it; the parity/quant tests pin these per format; block counts go through `quantized_matmul.blockCountForDType`) |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. The provider additionally exports `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
@@ -215,7 +215,7 @@ test "kernel interface inventory" {
     }
     try std.testing.expectEqual(@as(usize, 164), kernel_count);
     try std.testing.expectEqual(@as(usize, 101), pool_free_count);
-    try std.testing.expectEqual(@as(usize, 25), generic_count);
+    try std.testing.expectEqual(@as(usize, 26), generic_count);
 }
 ```
 
@@ -799,7 +799,7 @@ attention (`shouldUseGpuAttn`/`attnPrefillF16` return
 (`flatPerturb`/`flatWeightedUpdate`/`flatAnchorDecay` are stubs returning `false` — on unified
 memory the CPU kernels already mutate the shared pages the GPU reads
 zero-copy). Quantized matmuls reached from *trainable* autograd inputs pass
-`allow_gpu = false` (`QuantizedMatmulOptions`), keeping the training path on
+`placement = .cpu` (`QuantMatmul`), keeping the training path on
 CPU unless a gradient-aware GPU policy is added deliberately.
 
 ### 9.9.2 CUDA (`src/backend/cuda.zig`, `-Dgpu=cuda`, Linux)

@@ -116,9 +116,9 @@ pub const MatmulKind = exec_matmul.MatmulKind;
 pub const BmmKind = exec_matmul.BmmKind;
 pub const BmmBatchMode = exec_matmul.BmmBatchMode;
 pub const BmmShape = exec_matmul.BmmShape;
-pub const QuantizedMatmulOptions = exec_quant_matmul.QuantizedMatmulOptions;
 pub const QuantMatmul = exec_quant_matmul.QuantMatmul;
 pub const QuantMatmulLhs = exec_quant_matmul.Lhs;
+pub const CompactRhsFor = exec_quant_matmul.CompactRhsFor;
 
 /// Reusable transient-buffer pool. Defined in the `exec/buffer_pool.zig` leaf;
 /// re-exported here so `exec.BufferPool` stays reachable and the `buffers`
@@ -491,15 +491,10 @@ pub const ExecContext = struct {
     pub const getRowsQuantized = exec_quant_matmul.getRowsQuantized;
     pub const matmulQuant = exec_quant_matmul.matmulQuant;
     pub const matmulQuantInto = exec_quant_matmul.matmulQuantInto;
-    pub const matmul2DWithQuantizedTensorRhs = exec_quant_matmul.matmul2DWithQuantizedTensorRhs;
-    pub const matmul2DWithQuantizedBlocksRhs = exec_quant_matmul.matmul2DWithQuantizedBlocksRhs;
+    pub const compactMatmulRhs = exec_quant_matmul.compactMatmulRhs;
+    pub const compactMatmulRhsFromBlocks = exec_quant_matmul.compactMatmulRhsFromBlocks;
     pub const packMatmulRhs = exec_quant_matmul.packMatmulRhs;
     pub const packMatmulRhsAs = exec_quant_matmul.packMatmulRhsAs;
-    pub const matmulPacked = exec_quant_matmul.matmulPacked;
-    pub const matmulPackedInto = exec_quant_matmul.matmulPackedInto;
-    pub const rmsNormMulMatmulPacked = exec_quant_matmul.rmsNormMulMatmulPacked;
-    pub const splitSwiGluMatmulPacked = exec_quant_matmul.splitSwiGluMatmulPacked;
-    pub const gegluQuantMatmulPacked = exec_quant_matmul.gegluQuantMatmulPacked;
     pub const tryMatmulQuantRhs = exec_quant_matmul.tryMatmulQuantRhs;
     pub const tryMatmulTernaryFolded = exec_quant_matmul.tryMatmulTernaryFolded;
     pub const tryMatmulQuantRhsSharedInput = exec_quant_matmul.tryMatmulQuantRhsSharedInput;

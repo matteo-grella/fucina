@@ -253,7 +253,11 @@ pub fn contract(
             const result_shape = try dotResultShape(.f32, tensor_dtype, left_tags, left, right_tags, right, contract_tag);
             var left_matrix = try dotLhsMatrix(left_tags, right_tags, contract_tag, left, ctx, right.shape.at(1));
             defer left_matrix.deinit();
-            const product = try ctx.matmul2DWithQuantizedTensorRhs(tensor_dtype, &left_matrix, right, .{ .allow_gpu = opts.allow_gpu });
+            const qrhs = try ctx.compactMatmulRhs(tensor_dtype, right);
+            const product = if (opts.allow_gpu)
+                try ctx.matmulQuant(.{ .plain = &left_matrix }, &qrhs, .{})
+            else
+                try ctx.matmulQuant(.{ .plain = &left_matrix }, &qrhs, .{ .placement = .cpu });
             return contractFinish(.f32, product, result_shape[0..]);
         },
         .half_rhs => |tensor_dtype| {

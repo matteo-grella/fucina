@@ -1,8 +1,10 @@
-//! Quantized matmul dispatch: dequantize/getRows, the tensor-RHS and
-//! packed-RHS matmul entries, RHS pack preparation, the fused
-//! activation+quantize+GEMM arms (`splitSwiGlu`/`rmsNormMul`/`geglu` over
-//! the Q8_0x4 and K-quant packs), and the GPU dense-quant entries. Domain
-//! module: every op receives an explicit `*ExecContext`.
+//! Quantized matmul dispatch: dequantize/getRows, the one
+//! `matmulQuant`/`matmulQuantInto` request entry, RHS container
+//! preparation (compact borrows and lane packs), the fused
+//! activation+quantize+GEMM arms (`split_swiglu`/`rms_norm_mul`/
+//! `geglu_quant` over the Q8_0x4 and K-quant packs), and the GPU
+//! dense-quant entries. Domain module: every op receives an explicit
+//! `*ExecContext`.
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const offload = backend_mod.offload;
@@ -50,16 +52,6 @@ pub const RhsLifetime = enum {
     pub fn isCacheable(self: RhsLifetime) bool {
         return self == .stable_process;
     }
-};
-
-pub const QuantizedMatmulOptions = struct {
-    /// Let Exec try backend-specific accelerators before the CPU quant kernels.
-    /// Public autograd callers pass false for trainable inputs so the training
-    /// path stays CPU unless a gradient-aware GPU policy is added deliberately.
-    allow_gpu: bool = true,
-    /// Lifetime guarantee for the quantized RHS bytes. This is about storage
-    /// stability, not whether the operand is a model weight.
-    rhs_lifetime: RhsLifetime = .transient,
 };
 
 pub fn dequantizeTensor(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
@@ -123,8 +115,10 @@ fn rhsClass(comptime Rhs: type) RhsClass {
     @compileError("matmulQuant: not a packed or compact RHS container: " ++ @typeName(Rhs));
 }
 
-/// The compact `.rows` container of a weight dtype (the backend's map).
-fn CompactContainerFor(comptime dt: DType) type {
+/// The compact `.rows` container of a weight dtype (the backend's map):
+/// the RHS type `compactMatmulRhs`/`compactMatmulRhsFromBlocks` build and
+/// `matmulQuant`'s compact arm consumes.
+pub fn CompactRhsFor(comptime dt: DType) type {
     return @typeInfo(backend_mod.ops.RhsOf(backend_mod.ops.QuantGemm.rowsFor(dt))).pointer.child;
 }
 
@@ -386,55 +380,31 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     }
 }
 
-/// Deprecated spelling of `matmulQuant(.{ .plain = a }, &compact, ...)`
-/// over a block-quantized weight TENSOR: wraps the tensor's blocks in the
-/// borrowing compact container and forwards. New callers state the
-/// request.
-pub fn matmul2DWithQuantizedTensorRhs(
-    self: *ExecContext,
-    comptime rhs_dtype: DType,
-    a: *const Tensor,
-    rhs: *const tensor.TensorOf(rhs_dtype),
-    options: QuantizedMatmulOptions,
-) !Tensor {
-    comptime if (!dtype_mod.supportsQuantizedMatmulRhs(rhs_dtype)) @compileError("RHS dtype does not support quantized matmul");
+/// Borrowing compact `.rows` container over a block-quantized weight
+/// TENSOR's blocks, for `matmulQuant`'s compact arm:
+/// `ctx.matmulQuant(.{ .plain = a }, &compact, .{ ... })`. The container
+/// borrows the tensor's blocks (its deinit is not required and must not
+/// outlive them); the tensor must be contiguous `[n, k]`.
+pub fn compactMatmulRhs(self: *ExecContext, comptime dt: DType, rhs: *const tensor.TensorOf(dt)) !CompactRhsFor(dt) {
+    comptime if (!dtype_mod.supportsQuantizedMatmulRhs(dt)) @compileError("RHS dtype does not support quantized matmul");
     const rv = try rhs.rankView(2);
-    const n = rv.dim(0);
-    const k = rv.dim(1);
     if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
-    const blocks = try rhs.dataConstChecked();
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(rhs_dtype, k);
-    const qrhs = compactFromBlocks(CompactContainerFor(rhs_dtype), self.allocator, blocks, n, k, blocks_per_row);
-    return matmulQuantWithOptions(self, .{ .plain = a }, &qrhs, options);
+    return compactMatmulRhsFromBlocks(self, dt, try rhs.dataConstChecked(), rv.dim(0), rv.dim(1));
 }
 
-/// Deprecated spelling of `matmulQuant(.{ .plain = a }, &compact, ...)`
-/// over a raw block slice. New callers state the request.
-pub fn matmul2DWithQuantizedBlocksRhs(
+/// `compactMatmulRhs` over a raw block slice (`[n, k]` row blocks, e.g.
+/// borrowed GGUF bytes). The container borrows `blocks`.
+pub fn compactMatmulRhsFromBlocks(
     self: *ExecContext,
-    comptime rhs_dtype: DType,
-    a: *const Tensor,
-    blocks: []const dtype_mod.Storage(rhs_dtype),
+    comptime dt: DType,
+    blocks: []const dtype_mod.Storage(dt),
     n: usize,
     k: usize,
-    options: QuantizedMatmulOptions,
-) !Tensor {
-    comptime if (!dtype_mod.supportsQuantizedMatmulRhs(rhs_dtype)) @compileError("RHS dtype does not support quantized matmul");
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(rhs_dtype, k);
+) !CompactRhsFor(dt) {
+    comptime if (!dtype_mod.supportsQuantizedMatmulRhs(dt)) @compileError("RHS dtype does not support quantized matmul");
+    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(dt, k);
     if (blocks.len != try checkedTensorProduct(n, blocks_per_row)) return tensor.TensorError.InvalidDataLength;
-    const qrhs = compactFromBlocks(CompactContainerFor(rhs_dtype), self.allocator, blocks, n, k, blocks_per_row);
-    return matmulQuantWithOptions(self, .{ .plain = a }, &qrhs, options);
-}
-
-/// Runtime `QuantizedMatmulOptions` -> the comptime request of the
-/// deprecated wrappers (placement from `allow_gpu`, lifetime preserved on
-/// the GPU-eligible arm).
-fn matmulQuantWithOptions(self: *ExecContext, lhs: Lhs, rhs: anytype, options: QuantizedMatmulOptions) !Tensor {
-    if (!options.allow_gpu) return matmulQuant(self, lhs, rhs, .{ .placement = .cpu });
-    return switch (options.rhs_lifetime) {
-        .transient => matmulQuant(self, lhs, rhs, .{}),
-        .stable_process => matmulQuant(self, lhs, rhs, .{ .rhs_lifetime = .stable_process }),
-    };
+    return compactFromBlocks(CompactRhsFor(dt), self.allocator, blocks, n, k, blocks_per_row);
 }
 
 /// Pack a block-quantized [n, k] weight tensor into the ISA-best packed
@@ -456,49 +426,6 @@ pub fn packMatmulRhsAs(self: *ExecContext, comptime Rhs: type, rhs: *const tenso
     const k = view.dim(1);
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(Rhs.dtype, k);
     return backend_mod.quantized_matmul.packRhsAs(Rhs, self.allocator, rhs.dataConst(), n, k, blocks_per_row);
-}
-
-/// The two packed-RHS arms of `matmulPacked`, selected by the container
-/// type: the f32 output-row panel (`packDenseMatmulRhs`) or a quantized
-/// lane pack (`backend.PackedRhsFor(dt)`, `packMatmulRhs`/`packMatmulRhsAs`).
-const PackedArm = enum { dense, quant };
-
-fn packedArm(comptime RhsContainer: type) PackedArm {
-    if (RhsContainer == backend_mod.PackedDenseRhs) return .dense;
-    if (!@hasDecl(RhsContainer, "dtype")) @compileError("matmulPacked: not a packed RHS container: " ++ @typeName(RhsContainer));
-    if (dtype_mod.isBlockQuantized(RhsContainer.dtype)) return .quant;
-    @compileError("matmulPacked: not a packed RHS container: " ++ @typeName(RhsContainer));
-}
-
-/// The output type of `matmulPacked(a, rhs)`: f32 for both arms, which take
-/// an f32 LHS.
-pub fn MatmulPackedOutput(comptime LhsPtr: type, comptime Rhs: type) type {
-    const lhs_dtype = @typeInfo(LhsPtr).pointer.child.dtype;
-    const RhsContainer = @typeInfo(Rhs).pointer.child;
-    _ = packedArm(RhsContainer);
-    if (lhs_dtype != .f32) @compileError("matmulPacked: " ++ @typeName(RhsContainer) ++ " takes an f32 LHS");
-    return Tensor;
-}
-
-/// Deprecated spelling of `matmulQuant(.{ .plain = a }, rhs, .{})`:
-/// activations [m, k] x a pre-packed RHS -> [m, n] (`MatmulPackedOutput`
-/// names the arms and their LHS/output dtypes). New callers state the
-/// request.
-pub fn matmulPacked(self: *ExecContext, a: anytype, rhs: anytype) !MatmulPackedOutput(@TypeOf(a), @TypeOf(rhs)) {
-    return matmulQuant(self, .{ .plain = a }, rhs, .{});
-}
-
-/// Deprecated spelling of `matmulQuantInto(out, .{ .plain = a }, rhs, .{})`:
-/// `matmulPacked` into caller-supplied contiguous storage. New callers
-/// state the request.
-pub fn matmulPackedInto(self: *ExecContext, out: *Tensor, a: *const Tensor, rhs: *const backend_mod.PackedDenseRhs) !void {
-    return matmulQuantInto(self, out, .{ .plain = a }, rhs, .{});
-}
-
-/// Deprecated spelling of `matmulQuant(.{ .plain = gate_up }, rhs,
-/// .{ .prologue = .split_swiglu })`. New callers state the request.
-pub fn splitSwiGluMatmulPacked(self: *ExecContext, gate_up: *const Tensor, rhs: anytype) !Tensor {
-    return matmulQuant(self, .{ .plain = gate_up }, rhs, .{ .prologue = .split_swiglu });
 }
 
 /// The packed containers with fused activation kernels; every other
@@ -642,20 +569,6 @@ fn fusedKQuantGemm(
         const tail_out = out_data[prefix_rows * n ..][0 .. tail_rows * n];
         kernels.matmulPackedSlice(self.pc(), tail_out, qlhs_rows, rhs, tail_rows, n, k);
     }
-}
-
-/// Deprecated spelling of `matmulQuant(.{ .rms_norm = ... }, rhs,
-/// .{ .prologue = .rms_norm_mul })`. New callers state the request.
-pub fn rmsNormMulMatmulPacked(self: *ExecContext, x: *const Tensor, norm_weights: *const Tensor, eps: f32, rhs: anytype) !Tensor {
-    return matmulQuant(self, .{ .rms_norm = .{ .x = x, .weight = norm_weights, .eps = eps } }, rhs, .{ .prologue = .rms_norm_mul });
-}
-
-/// Deprecated spelling of `matmulQuant(.{ .gate_up = ... }, rhs,
-/// .{ .prologue = .geglu_quant })` (ggml f16-LUT GeGLU semantics,
-/// bit-identical to unary(.gelu_quant) + mul + the packed dot). New
-/// callers state the request.
-pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *const Tensor, rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4) !Tensor {
-    return matmulQuant(self, .{ .gate_up = .{ .gate = gate, .up = up } }, rhs, .{ .prologue = .geglu_quant });
 }
 
 /// The one fused activation + Q8_0x4-quantize + packed GEMM body: the act

@@ -736,7 +736,7 @@ The slab arm makes address reuse routine, so a cached wrap keyed on a pooled
 transient's address would silently read stale data after the slab is
 recycled. Every in-tree `.stable_process` caller wraps device-resident or
 mmap'd weight bytes (`src/weights.zig` threads the flag through the
-quantized-weight loaders via `QuantizedMatmulOptions.rhs_lifetime`). This is
+quantized-weight loaders onto `QuantMatmul.rhs_lifetime`). This is
 about storage stability, not about whether the operand is a model weight.
 
 ## 6.8 Determinism and the RNG contract (`src/rng.zig`)

@@ -492,7 +492,7 @@ fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim
 fn tq2_0View(blocks: []const dtype_mod.BlockTQ2_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsTQ2_0 {
     // The generic rows container carries mutable blocks; the matmul path
     // never writes them, so the @constCast borrow is sound (see the
-    // stack-wrapper note in matmul2DWithQuantizedRowsTensorRhs).
+    // borrow note on exec/quant_matmul.zig's compactFromBlocks).
     return .{
         .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
         .k = k,

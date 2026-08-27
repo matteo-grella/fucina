@@ -44,6 +44,11 @@ this point; earlier history is `git log`.
   kernel-pinned batch mode (`pin_rowwise_kernels` semantics without the
   context flag). The body is one row-pinned fallback, one fused prologue,
   one accelerator attempt and one backend call.
+- `ExecContext.compactMatmulRhs` / `compactMatmulRhsFromBlocks`
+  (`exec.CompactRhsFor(dt)`): the borrowing compact `.rows` container over
+  a block-quantized weight tensor's blocks or a raw block slice, for
+  `matmulQuant`'s compact arm (any `supportsQuantizedMatmulRhs` dtype; the
+  container borrows the blocks and needs no deinit).
 - `backend/ops.zig` `QuantGemm` (`{ weight, rhs: RhsPack, lhs: LhsForm,
   order: LoopOrder }` with `supported()` as the one kernel matrix, plus
   `Tile` and the `LhsOf`/`RhsOf` operand types): the quantized GEMM
@@ -184,6 +189,39 @@ this point; earlier history is `git log`.
 
 ### Removed
 
+- The deprecated `ExecContext` quantized matmul spellings, each a thin
+  wrapper over `matmulQuant`/`matmulQuantInto` (one entry per name; on
+  the tensor/blocks forms the runtime `QuantizedMatmulOptions` map onto
+  the request as `allow_gpu = false` → `.placement = .cpu` and
+  `rhs_lifetime` carried over unchanged):
+  - `ctx.matmulPacked(a, rhs)` →
+    `ctx.matmulQuant(.{ .plain = a }, rhs, .{})`.
+  - `ctx.matmulPackedInto(out, a, rhs)` →
+    `ctx.matmulQuantInto(out, .{ .plain = a }, rhs, .{})`.
+  - `ctx.splitSwiGluMatmulPacked(gate_up, rhs)` →
+    `ctx.matmulQuant(.{ .plain = gate_up }, rhs, .{ .prologue = .split_swiglu })`.
+  - `ctx.rmsNormMulMatmulPacked(x, w, eps, rhs)` →
+    `ctx.matmulQuant(.{ .rms_norm = .{ .x = x, .weight = w, .eps = eps } }, rhs, .{ .prologue = .rms_norm_mul })`.
+  - `ctx.gegluQuantMatmulPacked(gate, up, rhs)` →
+    `ctx.matmulQuant(.{ .gate_up = .{ .gate = gate, .up = up } }, rhs, .{ .prologue = .geglu_quant })`.
+  - `ctx.matmul2DWithQuantizedTensorRhs(dt, a, rhs, opts)` →
+    `const compact = try ctx.compactMatmulRhs(dt, rhs);` then
+    `ctx.matmulQuant(.{ .plain = a }, &compact, .{ ... })`.
+  - `ctx.matmul2DWithQuantizedBlocksRhs(dt, a, blocks, n, k, opts)` →
+    `const compact = try ctx.compactMatmulRhsFromBlocks(dt, blocks, n, k);`
+    then `ctx.matmulQuant(.{ .plain = a }, &compact, .{ ... })`.
+  - `exec.QuantizedMatmulOptions` (the wrappers' runtime options) →
+    state the request on `exec.QuantMatmul`.
+  - `exec_quant_matmul.MatmulPackedOutput` (the `matmulPacked` return-type
+    helper) → the entries return `!Tensor`.
+  - `kernels.matmul2DTQ2_0F32RhsInto(pc, out, lhs, rhs, m, n, k)` →
+    `kernels.gemm2D(pc, .{ .weight = .tq2_0, .lhs = .f32 }, out, lhs, rhs, m, n, k)`
+    (`gemm2D`, the parallel `ops.QuantGemm` request entry, joins the
+    conformed `kernels` set).
+
+  The `try*` GPU attempts (`tryMatmulQuantRhs`, `tryMatmulTernaryFolded`,
+  `tryMatmulQuantRhsSharedInput`) stay: they take raw quantized bytes and
+  a decline-to-CPU contract that `matmulQuant` does not subsume.
 - `fucina.native_uses_accelerate`: derivable from the facts that remain.
   Rewrite: `fucina.native_blas_kind == .accelerate`.
 
@@ -1081,13 +1119,6 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
 
 ### Deprecated
 
-- The named `ExecContext` quantized matmul entries
-  (`matmul2DWithQuantizedTensorRhs`, `matmul2DWithQuantizedBlocksRhs`,
-  `matmulPacked`, `matmulPackedInto`, `rmsNormMulMatmulPacked`,
-  `splitSwiGluMatmulPacked`, `gegluQuantMatmulPacked`, `tryMatmulQuantRhs`,
-  `tryMatmulTernaryFolded`, `tryMatmulQuantRhsSharedInput`) are thin
-  wrappers over `matmulQuant`/`matmulQuantInto`, each doc comment naming
-  its request form. Wrappers kept; removal follows the deprecation ledger.
 - `fucina.simd.{vecScale,vecMaxReduce,dotF32F16,scoreRows4F16,vecExpAffineSumInPlace,weightedAccumRows4F16}`
   — backend internals that were published under the elemental-op
   namespace; in-tree consumers use `fucina.internal.backend_mod.vector_impl`.

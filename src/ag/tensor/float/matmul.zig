@@ -387,7 +387,7 @@ pub fn Ops(comptime Self: type) type {
                 // identical on every target by construction, so the scalar
                 // leg exercises the same numerics (the quant matmuls instead
                 // select their scalar accumulators through backend/isa.zig).
-                backend_mod.kernels.matmul2DTQ2_0F32RhsInto(config, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
+                backend_mod.kernels.gemm2D(config, .{ .weight = .tq2_0, .lhs = .f32 }, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
                 if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) break :forward product;
                 const reshaped = try product.reshape(result_shape[0..]);
                 product.deinit();
@@ -441,7 +441,7 @@ pub fn Ops(comptime Self: type) type {
                 error.GradientPackedMatmulUnsupported
             else
                 error.GradientQuantizedMatmulUnsupported;
-            var value = try ctx.matmulPacked(self.asRawTensor(), rhs);
+            var value = try ctx.matmulQuant(.{ .plain = self.asRawTensor() }, rhs, .{});
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
         }
@@ -492,7 +492,7 @@ pub fn Ops(comptime Self: type) type {
             }
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(norm_weight), &norm_weight);
             if (self.requiresGrad() or weight_ptr.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try ctx.rmsNormMulMatmulPacked(self.asRawTensor(), weight_ptr.asRawTensor(), eps, rhs);
+            var value = try ctx.matmulQuant(.{ .rms_norm = .{ .x = self.asRawTensor(), .weight = weight_ptr.asRawTensor(), .eps = eps } }, rhs, .{ .prologue = .rms_norm_mul });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
         }
@@ -526,7 +526,7 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("splitSwiGluDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
             }
             if (self.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try ctx.splitSwiGluMatmulPacked(self.asRawTensor(), rhs);
+            var value = try ctx.matmulQuant(.{ .plain = self.asRawTensor() }, rhs, .{ .prologue = .split_swiglu });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, split_tag, out_tag), ctx, value);
         }
@@ -553,7 +553,7 @@ pub fn Ops(comptime Self: type) type {
             comptime if (Rhs != backend_mod.QuantizedMatmulRhsQ8_0x4)
                 @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS " ++ @typeName(Rhs));
             if (self.requiresGrad() or up.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
-            var value = try ctx.gegluQuantMatmulPacked(self.asRawTensor(), up.asRawTensor(), rhs);
+            var value = try ctx.matmulQuant(.{ .gate_up = .{ .gate = self.asRawTensor(), .up = up.asRawTensor() } }, rhs, .{ .prologue = .geglu_quant });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, in_tag, out_tag), ctx, value);
         }

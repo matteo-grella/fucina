@@ -150,10 +150,14 @@ pub fn linearSeqBorrowedQuantized(
     if (input.dim(in_tag) != shape[1]) return Error.InvalidWeightShape;
 
     const blocks = try blockSlice(BlockStorage(dtype), bytes);
-    var value = try ctx.matmul2DWithQuantizedBlocksRhs(dtype, input.asRawTensor(), blocks, shape[0], shape[1], .{
-        .allow_gpu = options.allow_gpu,
-        .rhs_lifetime = options.rhs_lifetime,
-    });
+    const qrhs = try ctx.compactMatmulRhsFromBlocks(dtype, blocks, shape[0], shape[1]);
+    const lhs: exec_mod.QuantMatmulLhs = .{ .plain = input.asRawTensor() };
+    var value = if (!options.allow_gpu)
+        try ctx.matmulQuant(lhs, &qrhs, .{ .placement = .cpu })
+    else switch (options.rhs_lifetime) {
+        .transient => try ctx.matmulQuant(lhs, &qrhs, .{}),
+        .stable_process => try ctx.matmulQuant(lhs, &qrhs, .{ .rhs_lifetime = .stable_process }),
+    };
     errdefer value.deinit();
     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, value);
 }
