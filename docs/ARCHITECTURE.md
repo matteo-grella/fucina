@@ -44,7 +44,7 @@ Top-down; a band may depend only on bands at or below it:
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
 | store | `src/store/**` (disk-streamed block stores: the out-of-core MoE expert tier — `expert_store.zig` the facade over the `io`/`geometry`/`tiers`/`policy`/`persist` concern files) |
-| backend | `src/backend.zig`, `src/backend/**` (build-selected numeric kernels behind the `backend/interface.zig` kernel set; the single-implementation fused kernels live beside their ops in `exec/`) |
+| backend | `src/backend.zig`, `src/backend/**` (the one CPU kernel provider behind the conformance-checked `backend.kernels` set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
 | primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (the tuning table over `parallel`'s env readers) |

@@ -276,7 +276,7 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
 
 `x.crossEntropy(ctx, .class, labels, .{})` is plain mean CE; the trailing
 `options` argument adds the PyTorch-parity knobs
-(`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:33`):
+(`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:41`):
 
 - `ignore_index` — sentinel label: those positions contribute zero loss and
   zero gradient and are excluded from the `.mean` denominator (PyTorch
@@ -293,7 +293,7 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
 The row kernels (softmax fwd/bwd, CE fwd/bwd) are SIMD (ggml-style `vexpf`
 range reduction in `src/backend/vector/primitives.zig`) and parallel over
 rows. Determinism: each row writes its loss to a per-row buffer and the
-`.mean`/`.sum` reduction is ONE serial sum in row order (`src/exec/loss.zig:138-139`),
+`.mean`/`.sum` reduction is ONE serial sum in row order (`src/exec/loss.zig:156-158`),
 so the loss is bitwise stable across thread counts. Measured (M1 Max,
 ReleaseFast, `zig build bench-ce`): CE forward at 1024x151936 354.5 ms →
 ~18 ms, backward 426 ms → ~22 ms (~19-20x); softmax 13-21x across shapes.

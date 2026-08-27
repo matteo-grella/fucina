@@ -60,7 +60,7 @@ type at `src/exec/buffer_pool.zig:52`). It is:
 
 The recycle invariant is asserted by a dedicated unit test: after `first.deinit()`,
 the next same-size op returns `second.buffer == first_buffer`
-(`src/exec_tests.zig:113-131`).
+(`src/exec_tests.zig:138-158`).
 
 ### What is and isn't pooled
 
@@ -68,12 +68,12 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty(.f32, ...)`
-  acquires from it (`src/exec/runtime.zig:321`). In an LLM forward
+  acquires from it (`src/exec/runtime.zig:479-505`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
   slabs (`[]align(64) u8`). `empty` routes every
-  non-f32 dtype through `acquireTyped` (`src/exec/runtime.zig:321-347`), which
+  non-f32 dtype through `BufferPool.acquireTyped` (`src/exec/runtime.zig:491/:502`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
@@ -96,15 +96,15 @@ slot (`src/models/text/kv_cache.zig:286-298`).
 ## 2. Inference vs training: the two lifetime regimes
 
 - **Inference tensors are constants** (`grad_state == null`, built via
-  `fromTensor` / `fromSlice`; `src/ag/tensor/float/creation.zig:42`). `deinit`
-  (`src/ag/tensor.zig:102`) releases the raw buffer immediately, so it returns
+  `fromTensor` / `fromSlice`; `src/ag/tensor/float/creation.zig`). `deinit`
+  (`src/ag/tensor/common.zig:42-49`) releases the raw buffer immediately, so it returns
   to the pool mid-pass. This is what makes the pool behave arena-like *for free*
   in inference.
-- **Training variables retain their inputs.** Backward functions store operand
-  values via `cloneView()` at op-execution time (`src/ag/backward/elementwise.zig`: pointwise mul/div
-  `:59-60`, relu `:177`; `src/ag/backward/matmul.zig`: `DotBackward` `:140`
-  delegating to `EinsumBackward`, cloneViews at `:191/:195`), and `cloneView` bumps the
-  refcount (`src/tensor.zig:264`).
+- **Training variables retain their inputs.** Backward records save operand
+  values as views the op takes when it builds the record
+  (`saved_input = try self.asRawTensor().cloneView()` and friends in
+  `src/ag/tensor/elementwise.zig` and `src/ag/tensor/float/matmul.zig`), and
+  `cloneView` bumps the refcount (`src/tensor.zig:224-228`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -117,16 +117,16 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:264`), `viewWithStrides(Offset)`
-(`src/tensor.zig:270/:274`), `reshape` (`src/tensor.zig:298`), `broadcastTo`
-(`src/tensor.zig:312`); `narrow` goes through `viewWithStridesOffset`
-(`src/exec/gather_scatter.zig:80`). A view's lifetime is independent of its parent's.
+`cloneView` (`src/tensor.zig:224-228`), `viewWithStrides(Offset)`
+(`src/tensor.zig:230/:234`), `reshape` (`src/tensor.zig:258`), `broadcastTo`
+(`src/tensor.zig:272`); `narrow` goes through `viewWithStridesOffset`
+(`src/exec/gather_scatter.zig:66-87`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
-**zero-copy `narrow`** (`src/models/gemma/model.zig:1035`) that aliases a
+**zero-copy `narrow`** (`src/models/gemma/model.zig:1023-1025`) that aliases a
 **session-lifetime, non-pooled f16 buffer** (`KvCache.k/v`, allocated once via
 `empty(.f16, ...)`, `src/models/text/kv_cache.zig:185`; `reset()` only sets
-`len = 0` and keeps the buffers, `:217-219`). A region-reset arena has no per-object
+`count = 0` and keeps the buffers, `:223-225`). A region-reset arena has no per-object
 lifetime to represent this — it would either free live KV memory (corruption) or
 have to carve KV out entirely (at which point it is no longer one arena).
 
@@ -139,9 +139,9 @@ substantive axes (in addition to the view/KV constraint in §3):
 
 1. **Peak memory regresses from working-set to sum-of-all-intermediates.** The
    pool reclaims a buffer the instant a transient dies; per-block peak live set
-   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:976/:1071`),
+   is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:964/:1059`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec/runtime.zig:569`). An arena frees
+   (which frees the old buffer each layer, `src/exec/runtime.zig:765`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
@@ -149,7 +149,7 @@ substantive axes (in addition to the view/KV constraint in §3):
 2. **It destroys cache locality.** Bump allocation returns a fresh address per
    op; the pool returns the *same* address for same-sized successive
    allocations, keeping the hot working buffer warm in L1/L2. Address reuse is
-   the asserted behavior (`src/exec_tests.zig:113-131`) and directly serves the
+   the asserted behavior (`src/exec_tests.zig:138-158`) and directly serves the
    "match/beat llama.cpp on CPU" North Star.
 3. **It cannot express refcounted views / KV aliasing** — see §3.
 4. **It is impossible for training** — activations must outlive the forward for
@@ -180,7 +180,7 @@ amortization — and adds intra-pass reuse plus a bounded cap the arena lacks.
 ## 5. The one honest caveat: ergonomics
 
 The genuine cost of the current pattern is **boilerplate** — ~21 `defer .deinit()`
-lines across `attnBlock` + `ffnBlock` (`src/models/gemma/model.zig:976/:1071`).
+lines across `attnBlock` + `ffnBlock` (`src/models/gemma/model.zig:964/:1059`).
 (The hand-written `catch { …deinit(); return e; }` error-path cleanups this
 section originally cited have since been converted to plain `defer`/`errdefer`
 arms.) These manual frees are the real fragility, and they are precisely the
