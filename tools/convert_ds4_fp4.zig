@@ -619,7 +619,7 @@ pub fn main(init: std.process.Init) !void {
             for (0..n_expert) |e| {
                 try dequantSourceExpert(&shards, exps.layer, e, exps.proj, out_dim, in_dim, expert_f32[0 .. out_dim * in_dim]);
                 var pair = try ptqtp.quantizeMatrix(&ctx, expert_f32[0 .. out_dim * in_dim], out_dim, in_dim, options);
-                defer pair.deinit(ctx.allocator);
+                defer pair.deinit(ctx.allocator());
                 if (pair.planeCount() != planes) return error.PlaneCountMismatch;
                 const src_planes = [3][]const fucina.ptqtp.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
                 for (0..planes) |k| {
@@ -1168,7 +1168,7 @@ fn verify(
             if (e >= n_expert) continue;
             try dequantSourceExpert(shards, layer, e, p.proj, out_dim, in_dim, expert_f32);
             var pair = try ptqtp.quantizeMatrix(ctx, expert_f32, out_dim, in_dim, options);
-            defer pair.deinit(ctx.allocator);
+            defer pair.deinit(ctx.allocator());
             const solved = [3][]const fucina.ptqtp.BlockTQ2_0{ pair.plane1, pair.plane2, pair.plane3 };
             for (0..options.planes) |k| {
                 const stored = plane_infos[k].data[e * expert_bytes ..][0..expert_bytes];
@@ -1242,7 +1242,7 @@ fn smoke(
         const solve_start = nowNs(io);
         try dequantSourceExpert(shards, layer, 0, p.proj, out_dim, in_dim, fp4_f32);
         var pair = try ptqtp.quantizeMatrix(ctx, fp4_f32, out_dim, in_dim, options);
-        defer pair.deinit(ctx.allocator);
+        defer pair.deinit(ctx.allocator());
         const solve_ms = @as(f64, @floatFromInt(nowNs(io) - solve_start)) / 1e6;
         try stdout.print("smoke solve blk.{d}.{s} expert 0: K={d}{s} rel_err {d:.4} unconverged {d}/{d}  {d:.1} ms/expert -> est {d:.0} min for 129 stacks x 256 experts\n", .{
             layer,                      p.gguf_name,               options.planes, if (options.tie_scales) " tied" else "",

@@ -29,7 +29,7 @@ scope_owned: bool = false, // exec-scope borrow flag, see §6
   `grad_state == null`. They participate in any op but never accumulate
   gradients.
 - **Variables** (`variable`, `variableFromSlice`) attach a leaf `GradState`
-  allocated from `ctx.allocator`. `deinit` on the tensor releases both the
+  allocated from `ctx.allocator()`. `deinit` on the tensor releases both the
   value and the state (unless `scope_owned`, in which case `deinit` is a
   no-op and the exec scope releases everything at `closeExecScope`, [§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)).
 - The f32 branch carries the full graph machinery. The f16/bf16 branch is
@@ -310,7 +310,7 @@ pub fn detach(self: *const Self, ctx: *ExecContext) !Self    // no-grad view of 
 
 - `grad` returns `null` for constants and for variables with no accumulated
   gradient; otherwise a caller-owned no-grad tensor holding a deep copy
-  (allocated from `ctx.allocator`). `gradView` is the zero-copy variant: the
+  (allocated from `ctx.allocator()`). `gradView` is the zero-copy variant: the
   result aliases the accumulator *as of that moment*. A later backward pass
   does **not** mutate it — the held reference defeats the engine's
   copy-on-write check (`canTakeInPlace` needs a unique buffer), so the

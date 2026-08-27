@@ -182,7 +182,7 @@ pub fn Engine(comptime TokMod: type) type {
         /// `<|content_text|>` pass through literally so a downstream
         /// open/close splitter can route reasoning vs content.
         pub fn generate(self: *Self, prompt: []const usize, opts: GenerateOptions, sink: *std.Io.Writer) !GenerateResult {
-            const a = self.ctx.allocator;
+            const a = self.ctx.allocator();
             const capacity = prompt.len + opts.max_tokens + 1;
             var cache = try self.model.initCache(self.ctx, capacity);
             defer cache.deinit();

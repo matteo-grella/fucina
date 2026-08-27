@@ -1,14 +1,12 @@
-//! Substrate of `ExecContext`: lifecycle, exec scopes, the worker team, and
-//! the tensor allocation primitives. Every function here takes the context
-//! as its first parameter and is aliased into the `ExecContext` struct body
-//! in `exec.zig`, so `ctx.empty(.f32, ...)` and `exec_runtime.empty(ctx, ...)` are
-//! the same call. The fields these functions operate on are declared on
-//! `ExecContext` itself; domain modules under `src/exec/` reach the same
-//! substrate through the same `*ExecContext`. The substrate fields (the
-//! conceptual `Runtime` group: allocator pair, worker team, buffer pool,
-//! scope stack, tuning, fp env) are the first banner-marked section of the
-//! `ExecContext` layout; the trailing section is model/session execution
-//! state, which this file does not manage beyond init/deinit.
+//! Substrate of `ExecContext`: the `Runtime` struct the context embeds as
+//! `rt`, plus lifecycle, exec scopes, the worker team, and the tensor
+//! allocation primitives. Every function here takes the context as its
+//! first parameter and is aliased into the `ExecContext` struct body in
+//! `exec.zig`, so `ctx.empty(.f32, ...)` and `exec_runtime.empty(ctx, ...)` are
+//! the same call; domain modules under `src/exec/` reach the same
+//! substrate through the same `*ExecContext` (`ctx.rt.<field>`). The
+//! context's trailing fields are model/session execution state, which
+//! this file does not manage beyond init/deinit.
 
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
@@ -29,6 +27,55 @@ const Tensor = tensor.Tensor;
 
 /// Reusable transient-buffer pool. Defined in the `buffer_pool.zig` leaf.
 pub const BufferPool = exec_buffer_pool.BufferPool;
+
+/// The runtime substrate `ExecContext` embeds as `rt`: allocation, the
+/// worker team, transient buffers, exec scopes, tuning, and the float
+/// environment — model-independent, what every op needs to run at all.
+/// PINNED after `ExecContext.init`: `allocator` embeds a pointer to this
+/// runtime's own `thread_safe_allocator` field, so an initialized runtime
+/// (and the context embedding it) must never be copied or moved — keep
+/// the context in a stable stack frame or heap-allocate it, and hand out
+/// `*ExecContext` (every op already takes the pointer). Field defaults
+/// are the initial state; `ExecContext.init` sets only what a fresh
+/// context must compute.
+pub const Runtime = struct {
+    thread_safe_allocator: thread.ThreadSafeAllocator,
+    /// The one allocation seam (a fat pointer into
+    /// `thread_safe_allocator`); public code reaches it through
+    /// `ctx.allocator()`.
+    allocator: Allocator,
+    /// The worker team as published to kernel dispatch (`pc` snapshots it).
+    /// Atomic: kernels may dispatch on other threads (dot-backward's
+    /// `OneShotWorker`) while a lazy `tryWorkPool` retry publishes the pool;
+    /// release/acquire so a racing first observer also sees `Pool.init`'s
+    /// writes.
+    parallel_pool: std.atomic.Value(?*thread.Pool) = .init(null),
+    buffers: BufferPool,
+    /// Per-context tuning overrides (`setTuning`); every field
+    /// null = follow the process-wide gates (see src/tuning.zig).
+    tuning: tuning.Overrides = .{},
+    work_pool: thread.Pool,
+    work_pool_ready: bool = false,
+    /// Latched by `tryWorkPool` when `Pool.init` fails: the context then
+    /// runs every kernel serially for its whole life instead of re-paying
+    /// the failed init on each dispatch (one warning is logged).
+    work_pool_failed: bool = false,
+    work_pool_mutex: thread.Mutex = .{},
+    dot_backward_worker: thread.OneShotWorker,
+    dot_backward_worker_ready: bool = false,
+    dot_backward_worker_mutex: thread.Mutex = .{},
+    /// The context's own exec-scope stack. Scope traffic on a thread that
+    /// has installed a recompute frame (`installScopeStack`, the
+    /// checkpoint backward) goes to that frame instead.
+    scopes: ScopeStack = .{},
+    /// The IEEE floating-point environment observed when this context was
+    /// created, or null where the target does not expose it. Every numeric
+    /// contract the context goes on to honor (backend parity tolerances,
+    /// thread-count invariance, checkpoint reproducibility) is stated under
+    /// this environment; `checkFloatEnvironment` is how a caller confirms it
+    /// still holds after code outside our control has run on the thread.
+    fp_env_at_init: ?fpenv.Environment = null,
+};
 
 pub const ScopeRelease = *const fn (*anyopaque) void;
 
@@ -59,7 +106,7 @@ pub const ExecScope = struct {
 };
 
 /// The exec-scope stack: the adopted entries plus the open-scope depth.
-/// Every context owns one (`ExecContext.scopes`); a checkpoint recompute
+/// Every context owns one (`ctx.rt.scopes`); a checkpoint recompute
 /// installs a second one for its own frame (`installScopeStack`) so the
 /// re-run facade ops adopt into the recompute instead of into a stack
 /// another thread may be driving.
@@ -107,30 +154,32 @@ pub fn restoreScopeStack(previous: ?*ScopeStack) void {
 /// The stack scope traffic goes to on this thread: the installed frame if
 /// one is active, else the context's own.
 fn activeScopes(self: *ExecContext) *ScopeStack {
-    return installed_scope_stack orelse &self.scopes;
+    return installed_scope_stack orelse &self.rt.scopes;
 }
 
 fn activeScopesConst(self: *const ExecContext) *const ScopeStack {
-    return installed_scope_stack orelse &self.scopes;
+    return installed_scope_stack orelse &self.rt.scopes;
 }
 
 pub fn init(self: *ExecContext, allocator: Allocator) void {
     // Every defaulted field takes its declared default from the struct
-    // literal, so the initial state has ONE source (the field decls in
-    // exec.zig); only the computed members are set here. `allocator` and
-    // `buffers` are assigned after the copy because the allocator interface
-    // must capture THIS context's `thread_safe_allocator` field, not the
-    // literal's temporary.
+    // literal, so the initial state has ONE source (the field decls on
+    // `Runtime` and `ExecContext`); only the computed members are set
+    // here. `rt.allocator` and `rt.buffers` are assigned after the copy
+    // because the allocator interface must capture THIS context's
+    // `rt.thread_safe_allocator` field, not the literal's temporary.
     self.* = .{
-        .thread_safe_allocator = .{ .child_allocator = allocator },
-        .allocator = undefined,
-        .buffers = undefined,
-        .work_pool = undefined,
-        .dot_backward_worker = undefined,
-        .fp_env_at_init = fpenv.get(),
+        .rt = .{
+            .thread_safe_allocator = .{ .child_allocator = allocator },
+            .allocator = undefined,
+            .buffers = undefined,
+            .work_pool = undefined,
+            .dot_backward_worker = undefined,
+            .fp_env_at_init = fpenv.get(),
+        },
     };
-    self.allocator = self.thread_safe_allocator.allocator();
-    self.buffers = BufferPool.init(self.allocator);
+    self.rt.allocator = self.rt.thread_safe_allocator.allocator();
+    self.rt.buffers = BufferPool.init(self.rt.allocator);
 }
 
 /// `error.FloatEnvironmentChanged` when the calling thread's rounding or
@@ -144,7 +193,7 @@ pub fn init(self: *ExecContext, allocator: Allocator) void {
 /// bitwise. Always succeeds where the target does not expose the
 /// environment, since there is nothing to observe.
 pub fn checkFloatEnvironment(self: *const ExecContext) !void {
-    const recorded = self.fp_env_at_init orelse return;
+    const recorded = self.rt.fp_env_at_init orelse return;
     const current = fpenv.get() orelse return;
     if (!std.meta.eql(recorded, current)) return error.FloatEnvironmentChanged;
 }
@@ -152,27 +201,27 @@ pub fn checkFloatEnvironment(self: *const ExecContext) !void {
 /// The IEEE floating-point environment recorded at context creation, or
 /// null where the target does not expose it.
 pub fn floatEnvironmentAtInit(self: *const ExecContext) ?fpenv.Environment {
-    return self.fp_env_at_init;
+    return self.rt.fp_env_at_init;
 }
 
 /// Per-context tuning overrides: route policy that can differ between
 /// two contexts in one process (fields left null follow the process-wide
 /// FUCINA_* gates; see `fucina.tuning`).
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void {
-    self.tuning = overrides;
+    self.rt.tuning = overrides;
 }
 
 pub fn deinit(self: *ExecContext) void {
-    self.moe_scratch.deinit(self.allocator);
-    if (self.dot_backward_worker_ready) {
-        self.dot_backward_worker.deinit();
+    self.moe_scratch.deinit(self.rt.allocator);
+    if (self.rt.dot_backward_worker_ready) {
+        self.rt.dot_backward_worker.deinit();
     }
-    if (self.work_pool_ready) {
+    if (self.rt.work_pool_ready) {
         setWorkPool(self, null);
-        self.work_pool.deinit();
+        self.rt.work_pool.deinit();
     }
-    self.scopes.deinit(self.allocator); // releases scopes left open at teardown
-    self.buffers.deinit();
+    self.rt.scopes.deinit(self.rt.allocator); // releases scopes left open at teardown
+    self.rt.buffers.deinit();
     self.* = undefined;
 }
 
@@ -210,7 +259,7 @@ pub fn closeExecScope(self: *ExecContext, mark: ExecScope) void {
 pub fn adopt(self: *ExecContext, entries: []const ScopeEntry) !void {
     const scopes = activeScopes(self);
     std.debug.assert(scopes.depth > 0);
-    try scopes.entries.ensureUnusedCapacity(self.allocator, entries.len);
+    try scopes.entries.ensureUnusedCapacity(self.rt.allocator, entries.len);
     scopes.entries.appendSliceAssumeCapacity(entries);
 }
 
@@ -295,24 +344,24 @@ pub const WorkPoolError = error{WorkPoolUnavailable};
 /// could not start runs serially (`workPool` = null) instead of paying the
 /// failed init on every dispatch.
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
-    self.work_pool_mutex.lock();
-    defer self.work_pool_mutex.unlock();
+    self.rt.work_pool_mutex.lock();
+    defer self.rt.work_pool_mutex.unlock();
 
-    if (self.work_pool_failed) return WorkPoolError.WorkPoolUnavailable;
-    if (!self.work_pool_ready) {
+    if (self.rt.work_pool_failed) return WorkPoolError.WorkPoolUnavailable;
+    if (!self.rt.work_pool_ready) {
         const worker_threads = parallel.cpuThreadCount(parallel.vector_max_threads) - 1;
-        self.work_pool.init(.{
-            .allocator = self.allocator,
+        self.rt.work_pool.init(.{
+            .allocator = self.rt.allocator,
             .max_workers = worker_threads,
         }) catch |err| {
-            self.work_pool_failed = true;
+            self.rt.work_pool_failed = true;
             std.log.warn("exec: worker pool init failed ({s}); this context runs kernels serially", .{@errorName(err)});
             return err;
         };
-        self.work_pool_ready = true;
-        setWorkPool(self, &self.work_pool);
+        self.rt.work_pool_ready = true;
+        setWorkPool(self, &self.rt.work_pool);
     }
-    return &self.work_pool;
+    return &self.rt.work_pool;
 }
 
 pub fn workPool(self: *ExecContext) ?*thread.Pool {
@@ -323,13 +372,13 @@ pub fn workPool(self: *ExecContext) ?*thread.Pool {
 /// ordering pairs with the acquire load in `pc`, so a racing first observer
 /// on another thread also sees `Pool.init`'s writes.
 fn setWorkPool(self: *ExecContext, pool: ?*thread.Pool) void {
-    self.parallel_pool.store(pool, .release);
+    self.rt.parallel_pool.store(pool, .release);
 }
 
 /// The `ParallelConfig` every pool-taking kernel call receives: a snapshot
 /// of the published worker team (`null` runs the kernel serially).
 pub fn pc(self: *const ExecContext) backend_mod.ParallelConfig {
-    return .{ .pool = self.parallel_pool.load(.acquire) };
+    return .{ .pool = self.rt.parallel_pool.load(.acquire) };
 }
 
 /// One row/lane-range pool dispatch for the domain modules'
@@ -432,14 +481,14 @@ pub fn parallelMap(
 }
 
 fn tryDotBackwardWorker(self: *ExecContext) !*thread.OneShotWorker {
-    self.dot_backward_worker_mutex.lock();
-    defer self.dot_backward_worker_mutex.unlock();
+    self.rt.dot_backward_worker_mutex.lock();
+    defer self.rt.dot_backward_worker_mutex.unlock();
 
-    if (!self.dot_backward_worker_ready) {
-        try self.dot_backward_worker.init();
-        self.dot_backward_worker_ready = true;
+    if (!self.rt.dot_backward_worker_ready) {
+        try self.rt.dot_backward_worker.init();
+        self.rt.dot_backward_worker_ready = true;
     }
-    return &self.dot_backward_worker;
+    return &self.rt.dot_backward_worker;
 }
 
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker {
@@ -509,23 +558,23 @@ pub fn empty(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.
         const shape_array = shapeArray(rank, shape);
         if (comptime dtype == .f32) {
             const len = try tensor.elementCountArray(rank, shape_array);
-            const buffer = try self.buffers.acquire(len);
+            const buffer = try self.rt.buffers.acquire(len);
             errdefer buffer.release();
             return Tensor.fromOwnedBuffer(buffer, shape_array[0..]);
         }
         const len = try tensor.storageElementCountArray(dtype, rank, shape_array);
-        const buffer = try self.buffers.acquireTyped(dtype, len);
+        const buffer = try self.rt.buffers.acquireTyped(dtype, len);
         errdefer buffer.release();
         return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape_array[0..]);
     }
     if (comptime dtype == .f32) {
         const len = try tensor.elementCount(shape);
-        const buffer = try self.buffers.acquire(len);
+        const buffer = try self.rt.buffers.acquire(len);
         errdefer buffer.release();
         return Tensor.fromOwnedBuffer(buffer, shape);
     }
     const len = try tensor.storageElementCount(dtype, shape);
-    const buffer = try self.buffers.acquireTyped(dtype, len);
+    const buffer = try self.rt.buffers.acquireTyped(dtype, len);
     errdefer buffer.release();
     return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape);
 }
@@ -578,9 +627,9 @@ pub fn fromBorrowedSlice(self: *ExecContext, comptime dtype: DType, shape: anyty
     if (comptime maybe_rank != null) {
         const rank = comptime maybe_rank.?;
         const shape_array = shapeArray(rank, shape);
-        return tensor.TensorOf(dtype).fromBorrowedSlice(self.allocator, shape_array[0..], values);
+        return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, shape_array[0..], values);
     }
-    return tensor.TensorOf(dtype).fromBorrowedSlice(self.allocator, shape, values);
+    return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, shape, values);
 }
 
 pub fn fromStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
@@ -596,9 +645,9 @@ pub fn fromBorrowedStorageSlice(self: *ExecContext, comptime dtype: DType, shape
     if (comptime maybe_rank != null) {
         const rank = comptime maybe_rank.?;
         const shape_array = shapeArray(rank, shape);
-        return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.allocator, shape_array[0..], values);
+        return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.rt.allocator, shape_array[0..], values);
     }
-    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.allocator, shape, values);
+    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.rt.allocator, shape, values);
 }
 
 pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {

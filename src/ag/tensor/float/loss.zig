@@ -54,7 +54,7 @@ pub fn Ops(comptime Self: type) type {
             const result_tags = comptime if (options.reduction == .none) removeTag(tags, class_tag) else .{};
             const class_axis = comptime axis(class_tag);
             const row_stats = try rowStatsAlloc(ctx, self.requiresGrad(), labels.len);
-            defer if (row_stats) |stats| ctx.allocator.free(stats);
+            defer if (row_stats) |stats| ctx.allocator().free(stats);
             var stats_options = options;
             stats_options.row_stats = row_stats;
             var value = try ctx.crossEntropyLoss(tag_rank, self.asRawTensor(), class_axis, labels, stats_options);
@@ -63,10 +63,10 @@ pub fn Ops(comptime Self: type) type {
             const Record = CrossEntropyExtBackward(tags, class_axis, options);
             var saved_logits = try self.asRawTensor().cloneView();
             errdefer saved_logits.deinit();
-            const owned_labels = try ctx.allocator.dupe(usize, labels);
-            errdefer ctx.allocator.free(owned_labels);
-            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
-            errdefer ctx.allocator.free(owned_row_stats);
+            const owned_labels = try ctx.allocator().dupe(usize, labels);
+            errdefer ctx.allocator().free(owned_labels);
+            const owned_row_stats = try ctx.allocator().dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator().free(owned_row_stats);
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{self.grad_state},
                 .logits = saved_logits,
@@ -104,7 +104,7 @@ pub fn Ops(comptime Self: type) type {
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(weight), &weight);
             const wants_grad = self.requiresGrad() or weight_ptr.requiresGrad();
             const row_stats = try rowStatsAlloc(ctx, wants_grad, labels.len);
-            defer if (row_stats) |stats| ctx.allocator.free(stats);
+            defer if (row_stats) |stats| ctx.allocator().free(stats);
             var logits = try ctx.matmul(.f32, .trans_b, self.asRawTensor(), weight_ptr.asRawTensor());
             defer logits.deinit();
             var stats_options = options;
@@ -119,10 +119,10 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_weight.deinit();
             var saved_logits = try (&logits).cloneView();
             errdefer saved_logits.deinit();
-            const owned_labels = try ctx.allocator.dupe(usize, labels);
-            errdefer ctx.allocator.free(owned_labels);
-            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
-            errdefer ctx.allocator.free(owned_row_stats);
+            const owned_labels = try ctx.allocator().dupe(usize, labels);
+            errdefer ctx.allocator().free(owned_labels);
+            const owned_row_stats = try ctx.allocator().dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator().free(owned_row_stats);
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{ self.grad_state, weight_ptr.grad_state },
                 .x = saved_x,
@@ -176,9 +176,9 @@ pub fn Ops(comptime Self: type) type {
             defer {
                 fwd.logits.deinit();
                 fwd.x_sel.deinit();
-                ctx.allocator.free(fwd.sel_rows);
-                ctx.allocator.free(fwd.local_rows);
-                ctx.allocator.free(fwd.row_stats);
+                ctx.allocator().free(fwd.sel_rows);
+                ctx.allocator().free(fwd.local_rows);
+                ctx.allocator().free(fwd.row_stats);
             }
             errdefer fwd.value.deinit();
             if (!recordsGrad(wants_grad)) return finishNoGrad(.{}, ctx, fwd.value);
@@ -188,16 +188,16 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_weight.deinit();
             var saved_logits = try (&fwd.logits).cloneView();
             errdefer saved_logits.deinit();
-            const owned_sel_rows = try ctx.allocator.dupe(usize, fwd.sel_rows);
-            errdefer ctx.allocator.free(owned_sel_rows);
-            const owned_local_rows = try ctx.allocator.dupe(usize, fwd.local_rows);
-            errdefer ctx.allocator.free(owned_local_rows);
-            const owned_classes = try ctx.allocator.dupe(usize, classes);
-            errdefer ctx.allocator.free(owned_classes);
-            const owned_probs = try ctx.allocator.dupe(f32, probs);
-            errdefer ctx.allocator.free(owned_probs);
-            const owned_row_stats = try ctx.allocator.dupe(f32, fwd.row_stats);
-            errdefer ctx.allocator.free(owned_row_stats);
+            const owned_sel_rows = try ctx.allocator().dupe(usize, fwd.sel_rows);
+            errdefer ctx.allocator().free(owned_sel_rows);
+            const owned_local_rows = try ctx.allocator().dupe(usize, fwd.local_rows);
+            errdefer ctx.allocator().free(owned_local_rows);
+            const owned_classes = try ctx.allocator().dupe(usize, classes);
+            errdefer ctx.allocator().free(owned_classes);
+            const owned_probs = try ctx.allocator().dupe(f32, probs);
+            errdefer ctx.allocator().free(owned_probs);
+            const owned_row_stats = try ctx.allocator().dupe(f32, fwd.row_stats);
+            errdefer ctx.allocator().free(owned_row_stats);
             return finishOp(.{}, ctx, fwd.value, LinearDistillBackward{
                 .parents = .{ self.grad_state, weight_ptr.grad_state },
                 .x_sel = saved_x_sel,

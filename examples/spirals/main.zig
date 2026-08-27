@@ -276,7 +276,7 @@ fn demo(
     x: *const Tensor(.{ .batch, .in }),
     labels: []const usize,
 ) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var path_buf: [128]u8 = undefined;
     var final_buf: [128]u8 = undefined;
     const ckpt_path = try std.fmt.bufPrint(&path_buf, "/tmp/fucina-spirals-{s}", .{name});
@@ -401,7 +401,7 @@ fn groupsDemo(
     x: *const Tensor(.{ .batch, .in }),
     labels: []const usize,
 ) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const name = "adamw-groups";
     const ckpt_path = "/tmp/fucina-spirals-groups";
 

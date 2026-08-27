@@ -104,11 +104,11 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// move the record in. On error nothing was consumed: `value` and the
         /// record's resources stay with the caller.
         pub fn finishWithRecord(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype), record: anytype) !OutT {
-            const node = try core.allocNode(ctx.allocator, @TypeOf(record));
-            errdefer ctx.allocator.destroy(node);
+            const node = try core.allocNode(ctx.allocator(), @TypeOf(record));
+            errdefer ctx.allocator().destroy(node);
             var out = OutT{ .value = value, .grad_state = &node.state };
             if (ctx.execScopeActive()) try adoptResult(ctx, &out);
-            _ = core.initNode(node, ctx.allocator, record);
+            _ = core.initNode(node, ctx.allocator(), record);
             return out;
         }
 
@@ -241,7 +241,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// caller frees it; the node dupes.
         pub fn rowStatsAlloc(ctx: *ExecContext, wants_grad: bool, position_count: usize) !?[]f32 {
             if (!recordsGrad(wants_grad)) return null;
-            return try ctx.allocator.alloc(f32, 2 * position_count);
+            return try ctx.allocator().alloc(f32, 2 * position_count);
         }
 
         /// Shared tail of every differentiable op once `recordsGrad` said yes:

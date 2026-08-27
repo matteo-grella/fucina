@@ -523,14 +523,14 @@ pub const Model = struct {
     weight_mapping: ?gguf.File.MappedRegion = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
-        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file, config);
     }
 
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File, config: Config) !Model {
         try config.validate();
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const swa_pattern = try gguf_meta.readU32OrBoolArray(allocator, file, "gemma4.attention.sliding_window_pattern", config.num_layers, bool);
         defer allocator.free(swa_pattern);
@@ -698,7 +698,7 @@ pub const Model = struct {
         }
 
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const positions = try allocator.alloc(i32, total);
         defer allocator.free(positions);
         {
@@ -743,8 +743,8 @@ pub const Model = struct {
         caches: []const *KvCache,
         token_ids: []const usize,
     ) !fucina.Tensor(.{ .seq, .vocab }) {
-        const spans = try ctx.allocator.alloc(usize, caches.len);
-        defer ctx.allocator.free(spans);
+        const spans = try ctx.allocator().alloc(usize, caches.len);
+        defer ctx.allocator().free(spans);
         @memset(spans, 1);
         return self.forwardStepBatchSpans(ctx, caches, token_ids, spans);
     }
@@ -765,7 +765,7 @@ pub const Model = struct {
         if (kv.len() + token_ids.len > kv.capacity) return kv_cache.Error.KvCacheOverflow;
 
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const rope_positions: fucina.AxisRange = .{ .origin = @intCast(pos0), .len = token_ids.len };
 
@@ -907,8 +907,8 @@ fn attnBlockBatchSpans(
     }
 
     const Out = fucina.Tensor(.{ .seq, .attn });
-    const outs = try ctx.allocator.alloc(Out, caches.len);
-    defer ctx.allocator.free(outs);
+    const outs = try ctx.allocator().alloc(Out, caches.len);
+    defer ctx.allocator().free(outs);
     var built: usize = 0;
     errdefer for (outs[0..built]) |*out| out.deinit();
 
@@ -947,8 +947,8 @@ fn attnBlockBatchSpans(
         attn = outs[0];
         built = 0; // ownership moved
     } else {
-        const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
-        defer ctx.allocator.free(rest);
+        const rest = try ctx.allocator().alloc(*const Out, outs.len - 1);
+        defer ctx.allocator().free(rest);
         for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
         attn = try outs[0].concat(ctx, .seq, rest);
         for (outs[0..built]) |*out| out.deinit();
@@ -1137,7 +1137,7 @@ fn moeFfn(
     moe_in: *const fucina.Tensor(.{ .seq, .embed }),
     profile: ?*ForwardProfile,
 ) !fucina.Tensor(.{ .seq, .embed }) {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const seq = moe_in.dim(.seq);
     const n_expert = config.num_experts;
     const top_k = config.num_experts_used;
@@ -1298,7 +1298,7 @@ fn buildPerLayerInputs(
     x_scaled: *const fucina.Tensor(.{ .seq, .embed }),
     token_ids: []const usize,
 ) ![]fucina.Tensor(.{ .seq, .ple }) {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const n_layer = config.num_layers;
     const ple_w = config.per_layer_input_size;
 
@@ -1395,7 +1395,7 @@ fn packExpertQ8_0(ctx: *ExecContext, blocks: []const fucina.quant.BlockQ8_0, out
 
 fn loadMoe(ctx: *ExecContext, file: *const gguf.File, config: Config, il: usize, router_info: *const gguf.TensorInfo) !MoeFfn {
     var nb: [96]u8 = undefined;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const hidden = config.hidden_size;
     const n_expert = config.num_experts;
     const n_ff = config.moe_intermediate_size;
@@ -1706,7 +1706,7 @@ fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, geom: La
     errdefer ffn_post_norm.deinit();
 
     var moe: ?MoeFfn = null;
-    errdefer if (moe) |*m| m.deinit(ctx.allocator);
+    errdefer if (moe) |*m| m.deinit(ctx.allocator());
     if (file.maybeGet(try weights.layerName(&nb, il, "ffn_gate_inp.weight"))) |router_info| {
         moe = try loadMoe(ctx, file, config, il, router_info);
     }
@@ -1764,7 +1764,7 @@ const LayerLoader = struct {
     }
 
     pub fn deinitLayer(self: LayerLoader, layer: *Layer) void {
-        layer.deinit(self.ctx.allocator);
+        layer.deinit(self.ctx.allocator());
     }
 };
 

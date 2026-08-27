@@ -57,7 +57,7 @@ pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, 
     var checked_any = false;
     inline for (0..n) |input_i| {
         if (inputs[input_i].requiresGrad()) {
-            analytical[input_i] = (try inputs[input_i].grad_state.?.gradClone(ctx.allocator)) orelse
+            analytical[input_i] = (try inputs[input_i].grad_state.?.gradClone(ctx.allocator())) orelse
                 return error.MissingAnalyticalGradient;
             checked_any = true;
         }

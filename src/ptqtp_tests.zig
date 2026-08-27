@@ -49,7 +49,7 @@ test "K=1 recovers an exactly ternary matrix bit-perfectly" {
     for (&w, trits) |*v, t| v.* = 0.5 * @as(f32, @floatFromInt(t));
 
     var pair = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 1 });
-    defer pair.deinit(ctx.allocator);
+    defer pair.deinit(ctx.allocator());
 
     try std.testing.expectEqual(@as(usize, 1), pair.planeCount());
     try std.testing.expectEqual(@as(f64, 0), pair.stats.rel_frob_err);
@@ -72,7 +72,7 @@ test "packed blocks are byte-identical to the scaled TQ2_0 encoder" {
     for (&w, trits) |*v, t| v.* = 0.5 * @as(f32, @floatFromInt(t));
 
     var pair = try ptqtp.quantizeMatrix(&ctx, &w, 1, k, .{ .planes = 1 });
-    defer pair.deinit(ctx.allocator);
+    defer pair.deinit(ctx.allocator());
 
     var reference: [1]BlockTQ2_0 = undefined;
     try quant.ternary.quantizeRowTQ2_0ScaledInto(&reference, &w, 0.5);
@@ -93,9 +93,9 @@ test "dual planes beat one plane beat blind absmean on gaussian weights" {
     fillGaussian(&prng, &w, 0.02);
 
     var pair2 = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 2 });
-    defer pair2.deinit(ctx.allocator);
+    defer pair2.deinit(ctx.allocator());
     var pair1 = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 1 });
-    defer pair1.deinit(ctx.allocator);
+    defer pair1.deinit(ctx.allocator());
 
     // Blind b1.58: one absmean scale for the whole matrix, round-clip.
     const absmean_blocks = try std.testing.allocator.alloc(BlockTQ2_0, n * k / ptqtp.block_len);
@@ -152,7 +152,7 @@ test "borrowed RHS views multiply like the reconstruction" {
     fillGaussian(&prng, &x, 1.0);
 
     var pair = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{});
-    defer pair.deinit(ctx.allocator);
+    defer pair.deinit(ctx.allocator());
 
     var y = [_]f32{0} ** (m * n);
     var y_plane = [_]f32{0} ** (m * n);
@@ -187,9 +187,9 @@ test "NaN weights degrade to zero trits without poisoning their group" {
     w_zero[7] = 0;
 
     var pair_nan = try ptqtp.quantizeMatrix(&ctx, &w_nan, 1, k, .{});
-    defer pair_nan.deinit(ctx.allocator);
+    defer pair_nan.deinit(ctx.allocator());
     var pair_zero = try ptqtp.quantizeMatrix(&ctx, &w_zero, 1, k, .{});
-    defer pair_zero.deinit(ctx.allocator);
+    defer pair_zero.deinit(ctx.allocator());
 
     try std.testing.expect(std.mem.eql(
         u8,
@@ -217,9 +217,9 @@ test "quantizeMatrix is deterministic across runs" {
     fillGaussian(&prng, w, 0.03);
 
     var a = try ptqtp.quantizeMatrix(&ctx, w, n, k, .{});
-    defer a.deinit(ctx.allocator);
+    defer a.deinit(ctx.allocator());
     var b = try ptqtp.quantizeMatrix(&ctx, w, n, k, .{});
-    defer b.deinit(ctx.allocator);
+    defer b.deinit(ctx.allocator());
 
     try std.testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(a.plane1), std.mem.sliceAsBytes(b.plane1)));
     try std.testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(a.plane2), std.mem.sliceAsBytes(b.plane2)));
@@ -256,7 +256,7 @@ test "all-zero matrix packs to zero scales and zero trits" {
     const k = 256;
     const w = [_]f32{0} ** (2 * k);
     var pair = try ptqtp.quantizeMatrix(&ctx, &w, 2, k, .{});
-    defer pair.deinit(ctx.allocator);
+    defer pair.deinit(ctx.allocator());
 
     try std.testing.expectEqual(@as(f64, 0), pair.stats.rel_frob_err);
     try std.testing.expectEqual(@as(f64, 1), pair.stats.zero_frac[0]);
@@ -343,9 +343,9 @@ test "triple planes beat dual planes on gaussian weights, roughly threefold" {
     fillGaussian(&prng, &w, 0.03);
 
     var pair3 = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 3 });
-    defer pair3.deinit(ctx.allocator);
+    defer pair3.deinit(ctx.allocator());
     var pair2 = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 2 });
-    defer pair2.deinit(ctx.allocator);
+    defer pair2.deinit(ctx.allocator());
 
     try std.testing.expectEqual(@as(usize, 3), pair3.planeCount());
     // The 27-level high-rate bound sits ~3x below the 9-level one; the
@@ -396,9 +396,9 @@ test "planes=3 deterministic; planes=4 rejected" {
     fillGaussian(&prng, &w, 0.05);
 
     var a = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 3 });
-    defer a.deinit(ctx.allocator);
+    defer a.deinit(ctx.allocator());
     var b = try ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 3 });
-    defer b.deinit(ctx.allocator);
+    defer b.deinit(ctx.allocator());
     try std.testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(a.plane3), std.mem.sliceAsBytes(b.plane3)));
 
     try std.testing.expectError(ptqtp.Error.InvalidOptions, ptqtp.quantizeMatrix(&ctx, &w, n, k, .{ .planes = 4 }));

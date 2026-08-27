@@ -466,7 +466,7 @@ pub fn encode(ctx: *ExecContext, file: *const gguf.File, cfg: loader.Config, mel
 /// encoder→decoder module boundary). Caller owns it.
 pub fn encodeWithWeights(ctx: *ExecContext, file: *const gguf.File, cfg: loader.Config, mel: []const f32, n_mels: usize, t_in: usize, w: *ParakeetWeights) !fucina.Tensor(2) {
     const d = cfg.d_model;
-    const alloc = ctx.allocator;
+    const alloc = ctx.allocator();
 
     var cur = try subsampling.subsampleWithWeights(ctx, file, cfg, mel, n_mels, t_in, w); // [T', d_model] facade
     errdefer cur.deinit();

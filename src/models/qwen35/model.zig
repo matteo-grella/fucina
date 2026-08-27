@@ -689,7 +689,7 @@ pub const Model = struct {
     pub fn loadGgufOptions(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config, options: LoadOptions) !Model {
         // mmap, matching the CLI (examples/qwen35/main.zig): lets resident MoE
         // expert stacks borrow straight from the mapping instead of copying.
-        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFileOptions(ctx, &file, config, options);
     }
@@ -700,7 +700,7 @@ pub const Model = struct {
 
     pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, config: Config, options: LoadOptions) !Model {
         try config.validate();
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
@@ -960,12 +960,12 @@ pub const Cache = struct {
         errdefer kv.deinit();
         const conv_stride = (cfg.ssm_d_conv - 1) * cfg.convDim();
         const ssm_stride = cfg.numVHeads() * cfg.headVDim() * cfg.headVDim();
-        const conv = try ctx.allocator.alloc(f32, n_layers * conv_stride);
-        errdefer ctx.allocator.free(conv);
+        const conv = try ctx.allocator().alloc(f32, n_layers * conv_stride);
+        errdefer ctx.allocator().free(conv);
         @memset(conv, 0);
-        const ssm = try ctx.allocator.alloc(f32, n_layers * ssm_stride);
+        const ssm = try ctx.allocator().alloc(f32, n_layers * ssm_stride);
         @memset(ssm, 0);
-        return .{ .allocator = ctx.allocator, .kv = kv, .conv = conv, .ssm = ssm, .conv_stride = conv_stride, .ssm_stride = ssm_stride };
+        return .{ .allocator = ctx.allocator(), .kv = kv, .conv = conv, .ssm = ssm, .conv_stride = conv_stride, .ssm_stride = ssm_stride };
     }
 
     pub fn deinit(self: *Cache) void {
@@ -1616,7 +1616,7 @@ fn scanCarry(t: *const HeadTask) void {
 ///   KGV = Kwᵀ·δ,  Kw_s = exp(G_{C−1}−G_s)·k_s (transA dot)
 ///   S ← P_{C−1}·S₀ + KGV                       (carry)
 fn deltaNetScanBatched(ctx: *ExecContext, p: BatchedScan) !void {
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const H = p.H;
     const Sd = p.Sd;
     const seq = p.seq;
@@ -1771,7 +1771,7 @@ fn linearForward(
     io: ?std.Io,
     profile: ?*ForwardProfile,
 ) !fucina.Tensor(.{ .seq, .embed }) {
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const total_start = profileStart(profile, io);
     if (profile) |p| p.linear_layers += 1;
 
@@ -2063,7 +2063,7 @@ fn moeContribution(
     io: ?std.Io,
     profile: ?*ForwardProfile,
 ) !fucina.Tensor(.{ .seq, .embed }) {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const seq = ffn_in.dim(.seq);
     const top_k = cfg.num_experts_used;
 
@@ -2397,7 +2397,7 @@ test "deltaNetScanBatched matches the per-token runHeadScan (gated output + carr
     var ctx: ExecContext = undefined;
     ctx.init(gpa.allocator());
     defer ctx.deinit();
-    const a = ctx.allocator;
+    const a = ctx.allocator();
 
     var prng = std.Random.DefaultPrng.init(0xDE17A);
     const rnd = prng.random();
@@ -2524,7 +2524,7 @@ test "non-uniform DeltaNet heads: batched scan matches the recurrent scan under 
     var ctx: ExecContext = undefined;
     ctx.init(gpa.allocator());
     defer ctx.deinit();
-    const a = ctx.allocator;
+    const a = ctx.allocator();
 
     var prng = std.Random.DefaultPrng.init(0xB05A1);
     const rnd = prng.random();

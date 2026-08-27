@@ -303,8 +303,8 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
         // any sharing switches to per-head planes + the fixed-order reduce.
         var shared_kv_head = heads != kv_heads;
         if (!shared_kv_head) {
-            const seen = try self.allocator.alloc(bool, kv_heads);
-            defer self.allocator.free(seen);
+            const seen = try self.allocator().alloc(bool, kv_heads);
+            defer self.allocator().free(seen);
             @memset(seen, false);
             for (kv_head_for_head) |kv_head_i| {
                 if (seen[kv_head_i]) shared_kv_head = true;
@@ -322,13 +322,13 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
         if (partial_mode) {
             const plane_len = heads * kv_seq * d;
             if (need_k) {
-                const buffer = try self.buffers.acquire(plane_len);
+                const buffer = try self.rt.buffers.acquire(plane_len);
                 dk_plane_storage = buffer;
                 @memset(buffer.data[0..plane_len], 0);
                 dk_target = buffer.data[0..plane_len];
             }
             if (need_v) {
-                const buffer = try self.buffers.acquire(plane_len);
+                const buffer = try self.rt.buffers.acquire(plane_len);
                 dv_plane_storage = buffer;
                 @memset(buffer.data[0..plane_len], 0);
                 dv_target = buffer.data[0..plane_len];
@@ -367,8 +367,8 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
             if (self.workPool()) |pool| {
                 const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
                 if (task_count > 1) {
-                    const task_scratch = try self.allocator.alloc(f32, task_count * panel_len);
-                    defer self.allocator.free(task_scratch);
+                    const task_scratch = try self.allocator().alloc(f32, task_count * panel_len);
+                    defer self.allocator().free(task_scratch);
                     var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionBackwardTiledTask = undefined;
                     for (0..task_count) |task_i| {
                         task_storage[task_i] = base_task;
@@ -386,8 +386,8 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
             }
         }
         if (!dispatched) {
-            const task_scratch = try self.allocator.alloc(f32, panel_len);
-            defer self.allocator.free(task_scratch);
+            const task_scratch = try self.allocator().alloc(f32, panel_len);
+            defer self.allocator().free(task_scratch);
             var serial_task = base_task;
             serial_task.scratch = task_scratch;
             if (blas_route) {
@@ -428,8 +428,8 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
         if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), kv_heads);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionBackwardTask = undefined;
-            const task_scratch = try self.allocator.alloc(f32, task_count * kv_seq * 2);
-            defer self.allocator.free(task_scratch);
+            const task_scratch = try self.allocator().alloc(f32, task_count * kv_seq * 2);
+            defer self.allocator().free(task_scratch);
             const base: GroupedCausalAttentionBackwardTask = .{
                 .q_data = q_data,
                 .k_data = k_data,
@@ -469,9 +469,9 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
     var stack_scores: [4096]f32 = undefined;
     var stack_dprob: [4096]f32 = undefined;
     var heap_scratch: ?[]f32 = null;
-    defer if (heap_scratch) |values| self.allocator.free(values);
+    defer if (heap_scratch) |values| self.allocator().free(values);
     const scores = if (kv_seq <= stack_scores.len) stack_scores[0..kv_seq] else blk: {
-        const values = try self.allocator.alloc(f32, kv_seq * 2);
+        const values = try self.allocator().alloc(f32, kv_seq * 2);
         heap_scratch = values;
         break :blk values[0..kv_seq];
     };
@@ -608,7 +608,7 @@ fn groupedCausalAttentionMultiImpl(
         if (self.workPool()) |pool| {
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), total_work);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionMultiTask(KvElem) = undefined;
-            const scores_storage = try self.buffers.acquire(task_count * scores_per_task);
+            const scores_storage = try self.rt.buffers.acquire(task_count * scores_per_task);
             defer scores_storage.release();
             const task_scores = scores_storage.data[0 .. task_count * scores_per_task];
 
@@ -644,7 +644,7 @@ fn groupedCausalAttentionMultiImpl(
     var scores_storage: ?*storage.Buffer = null;
     defer if (scores_storage) |buffer| buffer.release();
     const scores = if (scores_per_task <= stack_scores.len) stack_scores[0..scores_per_task] else blk: {
-        const buffer = try self.buffers.acquire(scores_per_task);
+        const buffer = try self.rt.buffers.acquire(scores_per_task);
         scores_storage = buffer;
         break :blk buffer.data[0..scores_per_task];
     };
@@ -886,7 +886,7 @@ fn groupedCausalAttentionDispatch(
                 // contexts this crosses the allocator's mmap threshold, so a
                 // plain alloc would pay a syscall pair + page faults per
                 // layer per token.
-                const scores_storage = try self.buffers.acquire(task_count * kv_seq * 2);
+                const scores_storage = try self.rt.buffers.acquire(task_count * kv_seq * 2);
                 defer scores_storage.release();
                 const task_scores = scores_storage.data[0 .. task_count * kv_seq * 2];
 
@@ -922,7 +922,7 @@ fn groupedCausalAttentionDispatch(
 
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), heads);
             var task_storage: [parallel.vector_max_threads]GroupedCausalAttentionTask(KvElem) = undefined;
-            const scores_storage = try self.buffers.acquire(task_count * kv_seq);
+            const scores_storage = try self.rt.buffers.acquire(task_count * kv_seq);
             defer scores_storage.release();
             const task_scores = scores_storage.data[0 .. task_count * kv_seq];
 
@@ -963,7 +963,7 @@ fn groupedCausalAttentionDispatch(
         var pair_scores_storage: ?*storage.Buffer = null;
         defer if (pair_scores_storage) |buffer| buffer.release();
         const pair_scores = if (kv_seq * 2 <= stack_pair_scores.len) stack_pair_scores[0 .. kv_seq * 2] else blk: {
-            const buffer = try self.buffers.acquire(kv_seq * 2);
+            const buffer = try self.rt.buffers.acquire(kv_seq * 2);
             pair_scores_storage = buffer;
             break :blk buffer.data[0 .. kv_seq * 2];
         };
@@ -995,7 +995,7 @@ fn groupedCausalAttentionDispatch(
     var scores_storage: ?*storage.Buffer = null;
     defer if (scores_storage) |buffer| buffer.release();
     const scores = if (kv_seq <= stack_scores.len) stack_scores[0..kv_seq] else blk: {
-        const buffer = try self.buffers.acquire(kv_seq);
+        const buffer = try self.rt.buffers.acquire(kv_seq);
         scores_storage = buffer;
         break :blk buffer.data[0..kv_seq];
     };

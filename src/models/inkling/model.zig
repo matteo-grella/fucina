@@ -397,13 +397,13 @@ pub const Model = struct {
     layers: []Layer,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8) !Model {
-        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmapAuto(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file);
     }
 
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         var config = try Config.fromGguf(allocator, file);
         errdefer config.deinit(allocator);
 
@@ -498,7 +498,7 @@ pub const Model = struct {
     /// computed jointly but causally: row r attends to cache positions
     /// <= cache.len() + r only, so batch prefill matches S=1 stepping.
     pub fn step(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const rows = try allocator.alloc(Row, tokens.len);
         defer allocator.free(rows);
         for (rows, tokens) |*r, t| r.* = .{ .token = t };
@@ -516,7 +516,7 @@ pub const Model = struct {
     /// `step` over mixed token/embedding rows (multimodal prompts).
     pub fn stepMixed(self: *const Model, ctx: *ExecContext, cache: *HostCache, items: []const Row) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = &self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         if (items.len == 0) return Error.InvalidSequenceLength;
         if (cache.len() + items.len > cache.capacity) return Error.KvCacheOverflow;
 
@@ -576,7 +576,7 @@ pub const Model = struct {
     /// One layer over `x` rows in place.
     fn layerForward(self: *const Model, ctx: *ExecContext, cache: *HostCache, layer: *const Layer, layer_i: usize, x: []f32, S: usize, pos0: usize) !void {
         const cfg = &self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const H = cfg.hidden_size;
         const hd = cfg.head_dim;
         const n_head = cfg.num_heads;
@@ -1012,7 +1012,7 @@ fn packDenseLinearRhs(ctx: *ExecContext, linear: *const LinearWeight) !?fucina.P
 }
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: *const Config, layer_i: usize) !Layer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [96]u8 = undefined;
 
     const H = config.hidden_size;

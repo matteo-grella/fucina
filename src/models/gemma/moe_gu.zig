@@ -381,7 +381,7 @@ fn guBatchBody(
     profile: ?*MoeBatchProfile,
     total_start: i128,
 ) !Tensor {
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const seq = shape.seq;
     const hidden = shape.hidden;
     const out_pe = shape.out_pe;
@@ -619,7 +619,7 @@ pub fn batchPacked(
     profile: ?*MoeBatchProfile,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
     const hidden = xv.dim(1);
@@ -692,7 +692,7 @@ fn batchRawGpu(
     profile: ?*MoeBatchProfile,
     total_start: i128,
 ) !?Tensor {
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const count = route.count;
     const offset = route.offset;
     const order = route.order;
@@ -1116,7 +1116,7 @@ pub fn batchRaw(
     profile: ?*MoeBatchProfile,
 ) !Tensor {
     const qm = backend_mod.quantized_matmul;
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
     const hidden = xv.dim(1);

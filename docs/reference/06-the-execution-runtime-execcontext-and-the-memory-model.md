@@ -11,17 +11,19 @@ autograd semantics in [§5](05-automatic-differentiation.md), backend selection 
 
 ## 6.1 ExecContext: role and lifecycle (`src/exec.zig`, `src/exec/runtime.zig`)
 
-`ExecContext` is one struct: the substrate fields (allocation, thread, and
-scope machinery, plus the MoE-decode scratch) are declared on it in
-`src/exec.zig`, and every method is an alias line resolving to a function
-that takes `*ExecContext` first. The substrate functions (lifecycle, scopes,
-worker team, tensor allocation primitives, `replace`) live in
+`ExecContext` is one struct: the runtime substrate is the embedded
+`rt: Runtime` (allocation, thread, and scope machinery; the `Runtime`
+struct is declared in `src/exec/runtime.zig`), the trailing fields are
+model/session execution state (kernel pinning, MoE-decode scratch), and
+every method is an alias line resolving to a function that takes
+`*ExecContext` first. The substrate functions (lifecycle, scopes, worker
+team, tensor allocation primitives, `replace`) live in
 `src/exec/runtime.zig`; the domain ops live in the modules under `src/exec/`
 (`elementwise.zig`, `matmul.zig`, `conv.zig`, `attention.zig`, `moe.zig`, …)
 and receive `*ExecContext` explicitly.
 
 ```zig
-pub const ExecContext = struct {
+pub const Runtime = struct {                 // src/exec/runtime.zig
     thread_safe_allocator: thread.ThreadSafeAllocator,
     allocator: Allocator,            // fat pointer into thread_safe_allocator
     parallel_pool: std.atomic.Value(?*thread.Pool), // the published worker team (pc() snapshots it)
@@ -30,35 +32,42 @@ pub const ExecContext = struct {
     work_pool: thread.Pool,          // + work_pool_ready, work_pool_failed, work_pool_mutex
     dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
     scopes: ScopeStack,              // the context's own exec-scope stack
+    fp_env_at_init: ?fpenv.Environment,
+};
+
+pub const ExecContext = struct {
+    rt: Runtime,                     // the runtime substrate
     quant_dot_gpu_disabled: std.atomic.Value(u32), // open disableQuantDotGpu scopes
     rowwise_numerics_pinned: u32, // open pinRowwiseNumerics scopes
-    fp_env_at_init: ?fpenv.Environment,
     moe_scratch: MoeDecodeScratch,   // grow-only MoE decode scratch
 
+    pub fn allocator(self: *const ExecContext) Allocator // rt.allocator, the public accessor
     pub const init = exec_runtime.init;      // (self: *ExecContext, allocator: Allocator) void
     pub const deinit = exec_runtime.deinit;  // (self: *ExecContext) void
     pub const add = exec_elementwise.add;    // ... one alias line per op
 };
 ```
 
-Fields (internal but observable, reached as `ctx.<field>`):
+Public code takes the allocator through `ctx.allocator()`; the other
+substrate fields are internal but observable, reached as `ctx.rt.<field>`:
 
 | Field | Type | Created |
 |---|---|---|
-| `thread_safe_allocator` | `thread.ThreadSafeAllocator` | at `init` (wraps the caller's allocator in a mutex) |
-| `allocator` | `std.mem.Allocator` | at `init` (fat pointer into `thread_safe_allocator`) |
-| `parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig), [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig)) |
-| `buffers` | `BufferPool` | at `init` ([§6.5](06-the-execution-runtime-execcontext-and-the-memory-model.md#65-bufferpool-transient-reuse-and-scratch-leases-srcexecbuffer_poolzig)) |
-| `work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
-| `dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
-| `scopes` | `ScopeStack` (entries + open depth) | at `init`, empty ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) |
+| `rt.thread_safe_allocator` | `thread.ThreadSafeAllocator` | at `init` (wraps the caller's allocator in a mutex) |
+| `rt.allocator` | `std.mem.Allocator` | at `init` (fat pointer into `rt.thread_safe_allocator`) |
+| `rt.parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig), [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig)) |
+| `rt.buffers` | `BufferPool` | at `init` ([§6.5](06-the-execution-runtime-execcontext-and-the-memory-model.md#65-bufferpool-transient-reuse-and-scratch-leases-srcexecbuffer_poolzig)) |
+| `rt.work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
+| `rt.dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
+| `rt.scopes` | `ScopeStack` (entries + open depth) | at `init`, empty ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) |
 | `quant_dot_gpu_disabled` | `std.atomic.Value(u32)` | at `init`, zero; the open `disableQuantDotGpu` scopes ([§5.5](05-automatic-differentiation.md)) |
 
 **The init(self-pointer) pattern.** `init` takes `self: *ExecContext` and
 returns `void` instead of returning a value: the context is self-referential
-(`ctx.allocator` is a fat pointer into `ctx.thread_safe_allocator`), so it
+(`ctx.rt.allocator` is a fat pointer into `ctx.rt.thread_safe_allocator`), so it
 must be initialized in place at its final address and must never be moved or
-copied afterwards. The idiom:
+copied afterwards. The PINNED property is stated on `Runtime`, the field
+that embeds it. The idiom:
 
 ```zig
 test "context lifecycle" {
@@ -493,7 +502,7 @@ modules under `src/exec/` the alias lines resolve to are not public API.
 ## 6.5 BufferPool: transient reuse and scratch leases (`src/exec/buffer_pool.zig`)
 
 `BufferPool` (re-exported as `exec.BufferPool`; one instance per context at
-`ctx.buffers`) recycles owned, refcounted storage buffers across ops.
+`ctx.rt.buffers`) recycles owned, refcounted storage buffers across ops.
 Kernels never allocate — the allocation primitives of [§6.4](06-the-execution-runtime-execcontext-and-the-memory-model.md#64-raw-construction-and-copy-helpers-on-ctx-srcexeczig-srcexecruntimezig) are the
 only source of transient tensors, and all of them draw from the pool. Two
 arms share one byte budget:
@@ -842,8 +851,8 @@ What is thread-safe inside a context:
 
 - **The allocator**: `init` wraps the caller's allocator in
   `thread.ThreadSafeAllocator` (a mutex around alloc/resize/remap/free), so
-  internal allocations and frees may happen on worker threads. `ctx.allocator`
-  is this wrapper.
+  internal allocations and frees may happen on worker threads.
+  `ctx.allocator()` returns this wrapper.
 - **The BufferPool**: both arms are mutex-guarded, `outstanding` is atomic,
   and buffer/slab release hooks run on whatever thread drops the last
   reference (storage refcounts are atomic).

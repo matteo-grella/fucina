@@ -693,7 +693,7 @@ test "public Tensor biasAdd / addAxisVectorInPlace / addScaledInPlace" {
     defer a.deinit();
     var b = try S.fromSlice(&ctx, .{ 2, 2 }, &.{ 10, 20, 30, 40 });
     defer b.deinit();
-    var raw = try a.asRawTensor().clone(ctx.allocator);
+    var raw = try a.asRawTensor().clone(ctx.allocator());
     defer raw.deinit();
     try a.addScaledInPlace(&ctx, b, 0.5);
     try ctx.addScaledInPlace(&raw, b.asRawTensor(), 0.5);

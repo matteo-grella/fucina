@@ -869,7 +869,7 @@ test "PTQTP: planes reconstruct and multiply as plain TQ2_0 tensors" {
     for (&w, 0..) |*v, i| v.* = 0.02 * @sin(@as(f32, @floatFromInt(i)));
 
     var pair = try fucina.ptqtp.quantizeMatrix(&ctx, &w, n, k, .{}); // K = 2
-    defer pair.deinit(ctx.allocator);
+    defer pair.deinit(ctx.allocator());
     try std.testing.expect(pair.stats.rel_frob_err < 0.25); // 9-level regime
 
     // Each plane is a byte-valid TQ2_0 tensor; the decorated product is

@@ -164,7 +164,7 @@ pub fn encodeOutputLength(n_samples: usize) isize {
 /// `[T_a, 256]` rows. The whole stack runs host-side with the reference's
 /// exact arithmetic: ggml-parity f16 convs + libm-parity snake.
 pub fn encodeForward(ctx: *ExecContext, enc: *const codec.DacEncoder, audio: []const f32) !Act {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     // conv1: 1→64, k=7, s=1, p=3 (+ bias).
     var x = try codec.ggmlConv1d(allocator, audio, audio.len, 1, &enc.conv1_w, enc.conv1_b, 1, 3, 1);

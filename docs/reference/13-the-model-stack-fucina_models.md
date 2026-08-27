@@ -560,7 +560,7 @@ interleaves local sliding-window layers (kv_heads 8, head_dim 256) with global
 layers (kv_heads 2, head_dim 512). The cache itself has no window logic: every
 position is appended and retained, and windowed models apply their sliding
 window at read time through the windowed attention kernels (which also keeps
-`truncate` rewind trivially correct). Allocations use `ctx.allocator`; the
+`truncate` rewind trivially correct). Allocations use `ctx.allocator()`; the
 caller owns the cache and must `deinit` it.
 
 Decode-loop API:
@@ -1521,7 +1521,7 @@ Semantics:
 
 ```zig
 fn snippetConversation(ctx: *fucina.ExecContext, io: std.Io, out: *std.Io.Writer) !void {
-    const alloc = ctx.allocator;
+    const alloc = ctx.allocator();
     var file = try fucina.gguf.File.loadMmap(alloc, io, "qwen3-0.6b.gguf");
     defer file.deinit();
     var model = try models.qwen3.model.Model.loadGgufFromFile(ctx, &file, try models.qwen3.model.Config.fromGguf(&file));
@@ -1664,7 +1664,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
   `history.items.len == kv.len() + 1` (every committed token in `history`, the
   last one not yet forwarded into the cache); a violated invariant is
   `error.InvalidDecodeState` at runtime. `history` must be allocated with
-  `ctx.allocator` — the decoder appends committed tokens to it. Each committed
+  `ctx.allocator()` — the decoder appends committed tokens to it. Each committed
   token is emitted through `sink`; returns the number committed (≥ 1). Verify
   passes run one batched `forwardStepAllLogits` over `[carried token,
   draft...]`, and `kv.truncate` drops rejected rows — on error-unwind paths
@@ -1847,7 +1847,7 @@ fn snippetDecoderLoop(
     sink: models.text.speculative.core.TokenSink,
 ) !void {
     const Decoder = models.text.speculative.core.SpeculativeDecoder(models.qwen3.model.Model);
-    var decoder = try Decoder.init(ctx.allocator, index.asDraftSource(), .{ .max_draft = 16 });
+    var decoder = try Decoder.init(ctx.allocator(), index.asDraftSource(), .{ .max_draft = 16 });
     defer decoder.deinit();
     var sampler = models.text.sampler.Sampler.init(.{});
     // Invariant: history.len == kv.len() + 1 (last committed token not yet forwarded).

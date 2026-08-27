@@ -109,8 +109,8 @@ fn correlate(ctx: *ExecContext, sig: []f32, kern: []f32, out: []f32) !void {
     std.debug.assert(taps * chans == kern.len);
     std.debug.assert(sig.len >= out.len + kern.len - 1);
 
-    const wbuf = try ctx.allocator.alloc(f32, taps * chans);
-    defer ctx.allocator.free(wbuf);
+    const wbuf = try ctx.allocator().alloc(f32, taps * chans);
+    defer ctx.allocator().free(wbuf);
     // weight[(k*in_per_group + i)*out + o], in_per_group = 1.
     for (0..chans) |c| {
         for (0..taps) |k| wbuf[k * chans + c] = kern[c * taps + k];
@@ -1772,7 +1772,7 @@ const SpeakSink = struct {
 
     fn decodeJob(self: *SpeakSink, job: Job) !void {
         const audio = try self.sess.step(self.ctx, job.kt, job.span);
-        defer self.ctx.allocator.free(audio);
+        defer self.ctx.allocator().free(audio);
         const emitted = audio[job.ctx_frames * qtts.codec.hop_length ..];
         var lvl: f32 = 0;
         for (emitted) |x| lvl += x * x;

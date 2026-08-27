@@ -179,7 +179,7 @@ pub fn Ops(comptime Self: type) type {
                     // one-pass probability rebuild; the capture is write-only,
                     // so the output is bitwise identical either way.
                     const row_stats = try rowStatsAlloc(ctx, wants_grad, kv_head_for_head.len * self.asRawTensor().shape.at(0));
-                    defer if (row_stats) |stats| ctx.allocator.free(stats);
+                    defer if (row_stats) |stats| ctx.allocator().free(stats);
                     var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = k.asRawTensor(), .v = v.asRawTensor() } }, kv_head_for_head, scale_value, .{ .mask = mask, .window = window, .stats_out = row_stats });
                     errdefer value.deinit();
                     if (!recordsGrad(wants_grad)) return finishNoGrad(.{ .seq, out_tag }, ctx, value);
@@ -189,10 +189,10 @@ pub fn Ops(comptime Self: type) type {
                     errdefer saved_k.deinit();
                     var saved_v = try v.asRawTensor().cloneView();
                     errdefer saved_v.deinit();
-                    const owned_kv_head_for_head = try ctx.allocator.dupe(usize, kv_head_for_head);
-                    errdefer ctx.allocator.free(owned_kv_head_for_head);
-                    const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
-                    errdefer ctx.allocator.free(owned_row_stats);
+                    const owned_kv_head_for_head = try ctx.allocator().dupe(usize, kv_head_for_head);
+                    errdefer ctx.allocator().free(owned_kv_head_for_head);
+                    const owned_row_stats = try ctx.allocator().dupe(f32, row_stats orelse &[_]f32{});
+                    errdefer ctx.allocator().free(owned_row_stats);
                     return finishOp(.{ .seq, out_tag }, ctx, value, GroupedCausalAttentionBackward{
                         .parents = .{ self.grad_state, k.grad_state, v.grad_state },
                         .q = saved_q,
@@ -263,7 +263,7 @@ pub fn Ops(comptime Self: type) type {
             defer v32.deinit();
             try ctx.dequantizeQ8_0RowsInto(v32.data(), v_blocks);
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
-            defer if (row_stats) |stats| ctx.allocator.free(stats);
+            defer if (row_stats) |stats| ctx.allocator().free(stats);
             var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = &k32, .v = &v32 } }, kv_head_for_head, scale_value, .{ .window = window, .stats_out = row_stats });
             errdefer value.deinit();
             if (!recordsGrad(true)) return finishNoGrad(.{ .seq, out_tag }, ctx, value);
@@ -273,10 +273,10 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_k.deinit();
             var saved_v = try (&v32).cloneView();
             errdefer saved_v.deinit();
-            const owned_kv_head_for_head = try ctx.allocator.dupe(usize, kv_head_for_head);
-            errdefer ctx.allocator.free(owned_kv_head_for_head);
-            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
-            errdefer ctx.allocator.free(owned_row_stats);
+            const owned_kv_head_for_head = try ctx.allocator().dupe(usize, kv_head_for_head);
+            errdefer ctx.allocator().free(owned_kv_head_for_head);
+            const owned_row_stats = try ctx.allocator().dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator().free(owned_row_stats);
             return finishOp(.{ .seq, out_tag }, ctx, value, GroupedCausalAttentionBackward{
                 .parents = .{ self.grad_state, null, null },
                 .q = saved_q,
@@ -312,7 +312,7 @@ pub fn Ops(comptime Self: type) type {
             var v32 = try ctx.cast(.f16, .f32, v.asRawTensor());
             defer v32.deinit();
             const row_stats = try rowStatsAlloc(ctx, true, kv_head_for_head.len * self.asRawTensor().shape.at(0));
-            defer if (row_stats) |stats| ctx.allocator.free(stats);
+            defer if (row_stats) |stats| ctx.allocator().free(stats);
             const mask: AttentionMask = if (causal) .causal else .bidirectional;
             var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = &k32, .v = &v32 } }, kv_head_for_head, scale_value, .{ .mask = mask, .window = window, .stats_out = row_stats });
             errdefer value.deinit();
@@ -323,10 +323,10 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_k.deinit();
             var saved_v = try (&v32).cloneView();
             errdefer saved_v.deinit();
-            const owned_kv_head_for_head = try ctx.allocator.dupe(usize, kv_head_for_head);
-            errdefer ctx.allocator.free(owned_kv_head_for_head);
-            const owned_row_stats = try ctx.allocator.dupe(f32, row_stats orelse &[_]f32{});
-            errdefer ctx.allocator.free(owned_row_stats);
+            const owned_kv_head_for_head = try ctx.allocator().dupe(usize, kv_head_for_head);
+            errdefer ctx.allocator().free(owned_kv_head_for_head);
+            const owned_row_stats = try ctx.allocator().dupe(f32, row_stats orelse &[_]f32{});
+            errdefer ctx.allocator().free(owned_row_stats);
             return finishOp(.{ .seq, out_tag }, ctx, value, GroupedCausalAttentionBackward{
                 .parents = .{ self.grad_state, null, null },
                 .q = saved_q,

@@ -271,8 +271,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(.{out_tag}), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(.{out_tag}, ctx, value);
-            const owned_shape = try ctx.allocator.dupe(usize, (&self.value).shape.slice());
-            errdefer ctx.allocator.free(owned_shape);
+            const owned_shape = try ctx.allocator().dupe(usize, (&self.value).shape.slice());
+            errdefer ctx.allocator().free(owned_shape);
             return finishOp(.{out_tag}, ctx, value, ReshapeBackward{ .parents = .{gradStateOf(self)}, .source_shape = owned_shape });
         }
 
@@ -282,8 +282,8 @@ pub fn Ops(comptime Self: type) type {
         /// scatters 1-to-1).
         pub fn flip(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Self {
             const n = self.asRawTensor().shape.at(axis(tag));
-            const indices = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, n);
+            defer ctx.allocator().free(indices);
             for (indices, 0..) |*index, i| index.* = n - 1 - i;
             return self.gather(ctx, tag, indices, tag);
         }
@@ -295,8 +295,8 @@ pub fn Ops(comptime Self: type) type {
         /// permutation (exact gradient, like `flip`).
         pub fn roll(self: *const Self, ctx: *ExecContext, comptime tag: Tag, shift: isize) !Self {
             const n = self.asRawTensor().shape.at(axis(tag));
-            const indices = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, n);
+            defer ctx.allocator().free(indices);
             // out[i] = x[(i - shift) mod n]; s = shift mod n in [0, n).
             const s: usize = @intCast(@mod(shift, @as(isize, @intCast(n))));
             for (indices, 0..) |*index, i| index.* = (i + n - s) % n;
@@ -326,12 +326,12 @@ pub fn Ops(comptime Self: type) type {
 
             // Normalize each section's shift once: s in [0, n) with
             // out[j] = x[(j - s) mod n], matching `roll`.
-            const normalized = try ctx.allocator.alloc(usize, sections);
-            defer ctx.allocator.free(normalized);
+            const normalized = try ctx.allocator().alloc(usize, sections);
+            defer ctx.allocator().free(normalized);
             for (normalized, offsets) |*s, shift| s.* = @intCast(@mod(shift, @as(isize, @intCast(n))));
 
-            const indices = try ctx.allocator.alloc(usize, total);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, total);
+            defer ctx.allocator().free(indices);
             const section_stride = n * inner;
             for (indices, 0..) |*index, i| {
                 const outer = i / section_stride;
@@ -422,8 +422,8 @@ pub fn Ops(comptime Self: type) type {
             if (start >= axis_dim or start + (length - 1) * step >= axis_dim) return TensorError.InvalidShape;
             if (self.requiresGrad()) {
                 if (comptime !differentiable) return error.UnsupportedGradient;
-                const indices = try ctx.allocator.alloc(usize, length);
-                defer ctx.allocator.free(indices);
+                const indices = try ctx.allocator().alloc(usize, length);
+                defer ctx.allocator().free(indices);
                 for (indices, 0..) |*index, i| index.* = start + i * step;
                 return self.gather(ctx, tag, indices, tag);
             }
@@ -538,8 +538,8 @@ pub fn Ops(comptime Self: type) type {
             if (comptime !differentiable) return finishTypedNoGrad(Out(result_tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
             const Record = GatherBackward(tags, gather_axis);
-            const owned_indices = try ctx.allocator.dupe(usize, indices);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, indices);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{gradStateOf(self)},
                 .source_shape = rawShapeArray(tags, (&self.value)),
@@ -569,8 +569,8 @@ pub fn Ops(comptime Self: type) type {
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad() or update.requiresGrad());
             if (!recordsGrad(self.requiresGrad() or update.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = SetRowsBackward(tags, rows_axis);
-            const owned_indices = try ctx.allocator.dupe(usize, indices);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, indices);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(tags, ctx, value, Record{ .parents = .{ gradStateOf(self), gradStateOf(update) }, .indices = owned_indices });
         }
 
@@ -583,8 +583,8 @@ pub fn Ops(comptime Self: type) type {
             const raw_inputs = if (input_count <= raw_inputs_stack.len)
                 raw_inputs_stack[0..input_count]
             else
-                try ctx.allocator.alloc(*const RawT, input_count);
-            defer if (input_count > raw_inputs_stack.len) ctx.allocator.free(raw_inputs);
+                try ctx.allocator().alloc(*const RawT, input_count);
+            defer if (input_count > raw_inputs_stack.len) ctx.allocator().free(raw_inputs);
             raw_inputs[0] = self.asRawTensor();
             for (others, raw_inputs[1..]) |other, *raw| raw.* = other.asRawTensor();
 
@@ -595,10 +595,10 @@ pub fn Ops(comptime Self: type) type {
             if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
             // The record owns one parent slot and one axis size per input.
             const Record = ConcatBackward(tags, concat_axis);
-            const owned_parents = try ctx.allocator.alloc(?*GradState, input_count);
-            errdefer ctx.allocator.free(owned_parents);
-            const owned_sizes = try ctx.allocator.alloc(usize, input_count);
-            errdefer ctx.allocator.free(owned_sizes);
+            const owned_parents = try ctx.allocator().alloc(?*GradState, input_count);
+            errdefer ctx.allocator().free(owned_parents);
+            const owned_sizes = try ctx.allocator().alloc(usize, input_count);
+            errdefer ctx.allocator().free(owned_sizes);
             owned_parents[0] = gradStateOf(self);
             owned_sizes[0] = self.asRawTensor().shape.at(concat_axis);
             for (others, owned_parents[1..], owned_sizes[1..]) |other, *parent, *size| {
@@ -623,8 +623,8 @@ pub fn Ops(comptime Self: type) type {
             for (others) |other| any_grad = any_grad or other.requiresGrad();
 
             const Expanded = Out(insertTagAt(tags, new_tag, axis_index));
-            var expanded = try ctx.allocator.alloc(Expanded, others.len + 1);
-            defer ctx.allocator.free(expanded);
+            var expanded = try ctx.allocator().alloc(Expanded, others.len + 1);
+            defer ctx.allocator().free(expanded);
             var created: usize = 0;
             // The inserted-axis views are composition temporaries: releasing
             // their handles is always safe (the concat record retains their
@@ -642,8 +642,8 @@ pub fn Ops(comptime Self: type) type {
             const ptrs = if (others.len <= ptrs_stack.len)
                 ptrs_stack[0..others.len]
             else
-                try ctx.allocator.alloc(*const Expanded, others.len);
-            defer if (others.len > ptrs_stack.len) ctx.allocator.free(ptrs);
+                try ctx.allocator().alloc(*const Expanded, others.len);
+            defer if (others.len > ptrs_stack.len) ctx.allocator().free(ptrs);
             for (ptrs, expanded[1..]) |*ptr, *view| ptr.* = view;
             return expanded[0].concat(ctx, new_tag, ptrs);
         }
@@ -676,8 +676,8 @@ pub fn Ops(comptime Self: type) type {
         pub fn repeatAxis(self: *const Self, ctx: *ExecContext, comptime tag: Tag, n: usize) !Self {
             if (n == 0) return TensorError.InvalidShape;
             if (n == 1) return self.withTags(ctx, tags);
-            const ptrs = try ctx.allocator.alloc(*const Self, n - 1);
-            defer ctx.allocator.free(ptrs);
+            const ptrs = try ctx.allocator().alloc(*const Self, n - 1);
+            defer ctx.allocator().free(ptrs);
             for (ptrs) |*ptr| ptr.* = self;
             return self.concat(ctx, tag, ptrs);
         }

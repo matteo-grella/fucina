@@ -262,13 +262,13 @@ fn makeInput(ctx: *ExecContext, seed: u64) !Tensor(.{ .batch, .in }) {
 fn gradData(ctx: *ExecContext, t: anytype) ![]f32 {
     var g = (try t.grad(ctx)).?;
     defer g.deinit();
-    return ctx.allocator.dupe(f32, try g.dataConst());
+    return ctx.allocator().dupe(f32, try g.dataConst());
 }
 
 fn snapshotGrads(ctx: *ExecContext, model: *const Model, x: anytype) ![7][]f32 {
     var out: [7][]f32 = undefined;
     var filled: usize = 0;
-    errdefer for (out[0..filled]) |s| ctx.allocator.free(s);
+    errdefer for (out[0..filled]) |s| ctx.allocator().free(s);
     out[0] = try gradData(ctx, x);
     filled = 1;
     out[1] = try gradData(ctx, &model.w1);
@@ -291,7 +291,7 @@ fn snapshotGrads(ctx: *ExecContext, model: *const Model, x: anytype) ![7][]f32 {
 fn snapshotGradsTwoLayers(ctx: *ExecContext, model: *const Model, x: anytype) ![5][]f32 {
     var out: [5][]f32 = undefined;
     var filled: usize = 0;
-    errdefer for (out[0..filled]) |s| ctx.allocator.free(s);
+    errdefer for (out[0..filled]) |s| ctx.allocator().free(s);
     out[0] = try gradData(ctx, x);
     filled = 1;
     out[1] = try gradData(ctx, &model.w1);
@@ -720,11 +720,11 @@ test "checkpoint flows gradients to every input and prunes non-grad inputs" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scopes.entries.items.len;
+        const base = ctx.rt.scopes.entries.items.len;
         const h = try checkpoint(&ctx, Blocks.layer1, .{ &x_const, &w_const, &b_const });
         try std.testing.expect(!h.requiresGrad());
         try std.testing.expect(h.scope_owned);
-        try std.testing.expectEqual(base + 1, ctx.scopes.entries.items.len);
+        try std.testing.expectEqual(base + 1, ctx.rt.scopes.entries.items.len);
     }
 }
 
@@ -810,12 +810,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const plain_gx, const plain_gw, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scopes.entries.items.len;
+        const base = ctx.rt.scopes.entries.items.len;
         var h = try Blocks.square(&ctx, &x, &w);
         for (1..chain_len) |_| {
             h = try Blocks.square(&ctx, &h, &w);
         }
-        plain_entries = ctx.scopes.entries.items.len - base;
+        plain_entries = ctx.rt.scopes.entries.items.len - base;
         var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -836,12 +836,12 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
     const ck_gx, const ck_gw, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scopes.entries.items.len;
+        const base = ctx.rt.scopes.entries.items.len;
         var h = try checkpoint(&ctx, Blocks.square, .{ &x, &w });
         for (1..chain_len) |_| {
             h = try checkpoint(&ctx, Blocks.square, .{ &h, &w });
         }
-        ck_entries = ctx.scopes.entries.items.len - base;
+        ck_entries = ctx.rt.scopes.entries.items.len - base;
         var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1396,12 +1396,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const plain_gx, const plain_loss = plain: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scopes.entries.items.len;
+        const base = ctx.rt.scopes.entries.items.len;
         var h = try ContextBlocks.square(&ctx, &chain_ctx, &x);
         for (1..chain_len) |_| {
             h = try ContextBlocks.square(&ctx, &chain_ctx, &h);
         }
-        plain_entries = ctx.scopes.entries.items.len - base;
+        plain_entries = ctx.rt.scopes.entries.items.len - base;
         var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
@@ -1417,12 +1417,12 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
     const ck_gx, const ck_loss = ck: {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const base = ctx.scopes.entries.items.len;
+        const base = ctx.rt.scopes.entries.items.len;
         var h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&x});
         for (1..chain_len) |_| {
             h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&h});
         }
-        ck_entries = ctx.scopes.entries.items.len - base;
+        ck_entries = ctx.rt.scopes.entries.items.len - base;
         var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();

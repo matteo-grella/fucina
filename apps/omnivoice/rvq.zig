@@ -51,8 +51,8 @@ pub const DecodeOut = struct {
 pub fn decode(ctx: *ExecContext, dec: *const codec.RvqDecoder, codes: []const i32, t: usize) !DecodeOut {
     if (t == 0 or codes.len != codec.n_codebooks * t) return Error.InvalidCodes;
 
-    const indices = try ctx.allocator.alloc(usize, t);
-    defer ctx.allocator.free(indices);
+    const indices = try ctx.allocator().alloc(usize, t);
+    defer ctx.allocator().free(indices);
 
     var acc: ?Latent = null;
     errdefer if (acc) |*a| a.deinit();
@@ -163,8 +163,8 @@ pub fn encodeCodes(
 
     const codes = try allocator.alloc(i32, codec.n_codebooks * t);
     errdefer allocator.free(codes);
-    const indices = try ctx.allocator.alloc(usize, t);
-    defer ctx.allocator.free(indices);
+    const indices = try ctx.allocator().alloc(usize, t);
+    defer ctx.allocator().free(indices);
 
     for (0..codec.n_codebooks) |k| {
         const q = &dec.quantizers[k];
@@ -222,8 +222,8 @@ pub fn encode(
 
     // Step 1: 16 kHz semantic input → HuBERT features [T_s, 768]. The
     // FMA-contracted resample matches the shipped reference binary.
-    const audio_16k = try wav.resampleFma(ctx.allocator, audio_24k, 24000, 16000);
-    defer ctx.allocator.free(audio_16k);
+    const audio_16k = try wav.resampleFma(ctx.allocator(), audio_24k, 24000, 16000);
+    defer ctx.allocator().free(audio_16k);
     if (taps) |tp| tp.audio_16k = try tp.allocator.dupe(f32, audio_16k);
 
     const hubert_taps: ?*hubert.Taps = if (taps) |tp| &tp.hubert else null;
@@ -242,8 +242,8 @@ pub fn encode(
     var e_acoustic = blk: {
         if (t_a_no_pad != @as(isize, @intCast(t_s))) {
             const p = config.hop_length / 2; // 480
-            const padded = try ctx.allocator.alloc(f32, audio_24k.len + 2 * p);
-            defer ctx.allocator.free(padded);
+            const padded = try ctx.allocator().alloc(f32, audio_24k.len + 2 * p);
+            defer ctx.allocator().free(padded);
             @memset(padded, 0);
             @memcpy(padded[p..][0..audio_24k.len], audio_24k);
             break :blk try dac.encodeForward(ctx, &enc.dac, padded);

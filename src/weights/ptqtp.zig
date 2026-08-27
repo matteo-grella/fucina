@@ -119,7 +119,7 @@ pub fn linearSeqPtqtpFused(
         }
     }
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const lhs = try allocator.alloc(dtype_mod.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
@@ -259,7 +259,7 @@ pub fn linearSeqFx4(
         }
     }
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     // Prefill arm: dequantized weight panels through BLAS/AMX (the
     // backend's gate decides; decode and short bursts stay on the
@@ -404,7 +404,7 @@ pub const WeightPtqtp = struct {
             try plane.withTags(ctx, .{ .out, .in })
         else
             null;
-        return WeightPtqtp.init(ctx.allocator, p1, p2, p3, false);
+        return WeightPtqtp.init(ctx.allocator(), p1, p2, p3, false);
     }
 
     /// Multi-plane linear: the fused single-dispatch path when it applies
@@ -618,9 +618,9 @@ pub const WeightPtqtpFx4 = struct {
     /// The fold IS the weight: clone copies the pack (unlike the ptqtp
     /// clone, which drops fold/tie and rebuilds free).
     pub fn cloneView(self: *const WeightPtqtpFx4, ctx: *ExecContext) !WeightPtqtpFx4 {
-        const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, self.pack.len);
+        const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, self.pack.len);
         @memcpy(owned, self.pack);
-        return WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, self.n, self.k, true);
+        return WeightPtqtpFx4.init(ctx.allocator(), owned, ctx.allocator(), self.n, self.k, true);
     }
 
     /// One-pass folded linear (`linearSeqFx4`); `in_tag` is fixed by the

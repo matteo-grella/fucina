@@ -380,13 +380,13 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(absmean_w3);
 
     var k1_w2 = try ptqtp.quantizeMatrix(&ctx, w2_data, hidden, hidden, .{ .planes = 1 });
-    defer k1_w2.deinit(ctx.allocator);
+    defer k1_w2.deinit(ctx.allocator());
     var k1_w3 = try ptqtp.quantizeMatrix(&ctx, w3_data, n_classes, hidden, .{ .planes = 1 });
-    defer k1_w3.deinit(ctx.allocator);
+    defer k1_w3.deinit(ctx.allocator());
     var k2_w2 = try ptqtp.quantizeMatrix(&ctx, w2_data, hidden, hidden, .{});
-    defer k2_w2.deinit(ctx.allocator);
+    defer k2_w2.deinit(ctx.allocator());
     var k2_w3 = try ptqtp.quantizeMatrix(&ctx, w3_data, n_classes, hidden, .{});
-    defer k2_w3.deinit(ctx.allocator);
+    defer k2_w3.deinit(ctx.allocator());
 
     try stdout.print(
         "\nptqtp packed stats (w2 256x256, w3 2x256):\n" ++

@@ -246,7 +246,7 @@ pub const ColdQuantWeight = struct {
             fn cloneViewFn(box: *anyopaque, ctx: *ExecContext) anyerror!*anyopaque {
                 var view = try cast(box).withTags(ctx, .{ .out, .in });
                 errdefer view.deinit();
-                const fresh = try ctx.allocator.create(W);
+                const fresh = try ctx.allocator().create(W);
                 fresh.* = view;
                 return fresh;
             }
@@ -275,14 +275,14 @@ pub const ColdQuantWeight = struct {
         errdefer owned.deinit();
         const out_dim = owned.dim(.out);
         const in_dim = owned.dim(.in);
-        const box = try ctx.allocator.create(QuantWeight(dt));
+        const box = try ctx.allocator().create(QuantWeight(dt));
         box.* = owned;
         return .{
             .dtype = dt,
             .out_dim = out_dim,
             .in_dim = in_dim,
             .box = box,
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
             .vt = &Impl(dt).vtable,
         };
     }
@@ -310,7 +310,7 @@ pub const ColdQuantWeight = struct {
             .out_dim = self.out_dim,
             .in_dim = self.in_dim,
             .box = box,
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
             .vt = self.vt,
         };
     }
@@ -396,10 +396,10 @@ pub const LinearWeight = union(enum) {
                 // Copy (like every dense quant arm): load() has no file
                 // handle, so mmap lifetime cannot be promised here. Still
                 // 4.0625 bpw once — no planes, no x4 packs, no fold pass.
-                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
-                errdefer ctx.allocator.free(owned);
+                const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                errdefer ctx.allocator().free(owned);
                 @memcpy(owned, src);
-                break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, n, k, options.gpu_resident) };
+                break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator(), owned, ctx.allocator(), n, k, options.gpu_resident) };
             },
             else => Error.UnsupportedWeightType,
         };
@@ -455,7 +455,7 @@ pub const LinearWeight = union(enum) {
         }
         const rows = self.outDim();
         const cols = self.inDim();
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const values = try allocator.alloc(f16, rows * cols);
         defer allocator.free(values);
@@ -500,7 +500,7 @@ pub const LinearWeight = union(enum) {
         if (!self.ptqtpEligible()) return Error.UnsupportedWeightType;
         const rows = self.outDim();
         const cols = self.inDim();
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const values = try allocator.alloc(f32, rows * cols);
         defer allocator.free(values);
@@ -518,7 +518,7 @@ pub const LinearWeight = union(enum) {
         }
 
         var pair = try ptqtp.quantizeMatrix(ctx, values, rows, cols, options);
-        defer pair.deinit(ctx.allocator);
+        defer pair.deinit(ctx.allocator());
         var p1 = try QuantWeight(.tq2_0).fromBlocks(ctx, .{ rows, cols }, pair.plane1);
         errdefer p1.deinit();
         var p2: ?QuantWeight(.tq2_0) = if (pair.plane2.len != 0)
@@ -532,7 +532,7 @@ pub const LinearWeight = union(enum) {
             null;
         const stats = pair.stats;
         self.deinit();
-        self.* = .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, options.tie_scales) };
+        self.* = .{ .ptqtp = WeightPtqtp.init(ctx.allocator(), p1, p2, p3, options.tie_scales) };
         return stats;
     }
 
@@ -635,7 +635,7 @@ pub const LookupWeight = union(enum) {
         if (comptime !offload.enabled) {
             if (file.is_mmap and !file.isSplit()) {
                 const shape = try requireMatrixShape(info, expected_rows, expected_cols);
-                if (gguf.RowTable.init(ctx.allocator, info)) |table| {
+                if (gguf.RowTable.init(ctx.allocator(), info)) |table| {
                     return .{ .mapped = .{ .table = table, .rows = shape[0] } };
                 } else |_| {} // no row decoder for this dtype: fall through to the copy
             }

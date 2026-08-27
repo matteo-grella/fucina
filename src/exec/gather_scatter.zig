@@ -597,8 +597,8 @@ pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
         return out;
     }
 
-    var zero_mask = try ctx.allocator.alloc(bool, source.shape[axis]);
-    defer ctx.allocator.free(zero_mask);
+    var zero_mask = try ctx.allocator().alloc(bool, source.shape[axis]);
+    defer ctx.allocator().free(zero_mask);
     @memset(zero_mask, false);
     for (indices) |index| zero_mask[index] = true;
     const source_strides = contiguousStridesArray(rank, source.shape);
@@ -875,8 +875,8 @@ fn writeRowsAxis(
 }
 
 fn validateUniqueIndices(ctx: *ExecContext, indices: []const usize, limit: usize) !void {
-    var seen = try ctx.allocator.alloc(bool, limit);
-    defer ctx.allocator.free(seen);
+    var seen = try ctx.allocator().alloc(bool, limit);
+    defer ctx.allocator().free(seen);
     @memset(seen, false);
     for (indices) |index| {
         if (index >= limit) return tensor.TensorError.IndexOutOfBounds;

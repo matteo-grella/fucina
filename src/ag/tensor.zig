@@ -1455,8 +1455,8 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
                 if (axis(tag) != 0) @compileError("block-quantized concat currently supports the row axis only");
             }
 
-            var raw_inputs = try ctx.allocator.alloc(*const RawTypedTensor, others.len + 1);
-            defer ctx.allocator.free(raw_inputs);
+            var raw_inputs = try ctx.allocator().alloc(*const RawTypedTensor, others.len + 1);
+            defer ctx.allocator().free(raw_inputs);
 
             raw_inputs[0] = self.asRawTensor();
             for (others, 0..) |other, i| raw_inputs[i + 1] = other.asRawTensor();

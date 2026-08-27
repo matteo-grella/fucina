@@ -102,8 +102,8 @@ pub fn sumSquares(ctx: *ExecContext, values: []const f32) !f64 {
     const chunk_count = (values.len + sumsq_chunk_len - 1) / sumsq_chunk_len;
     if (values.len >= parallel_map_min_len) {
         if (ctx.workPool()) |pool| {
-            const partials = try ctx.allocator.alloc(f64, chunk_count);
-            defer ctx.allocator.free(partials);
+            const partials = try ctx.allocator().alloc(f64, chunk_count);
+            defer ctx.allocator().free(partials);
             const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), chunk_count);
             var tasks: [parallel.vector_max_threads]SumSquaresTask = undefined;
             for (0..task_count) |task_i| {

@@ -74,8 +74,8 @@ fn PackedQuantWeight(comptime dt: DType) type {
         }
 
         pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
-            var raw_others = try ctx.allocator.alloc(*const QuantWeight(dt), others.len);
-            defer ctx.allocator.free(raw_others);
+            var raw_others = try ctx.allocator().alloc(*const QuantWeight(dt), others.len);
+            defer ctx.allocator().free(raw_others);
             for (others, 0..) |other, i| raw_others[i] = &other.value;
 
             var value = try self.value.concat(ctx, tag, raw_others);

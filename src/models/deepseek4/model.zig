@@ -197,7 +197,7 @@ const Rope = struct {
 
     fn init(ctx: *ExecContext, config: Config) !Rope {
         const raw_freq = try models_ops.yarnBlendInvFreqsF64(ctx, config.rope_dims, config.rope_theta, 1.0, 0);
-        errdefer ctx.allocator.free(raw_freq);
+        errdefer ctx.allocator().free(raw_freq);
         const comp_freq = try models_ops.yarnBlendInvFreqsF64(ctx, config.rope_dims, config.compress_rope_theta, config.yarn_factor, config.yarn_orig_ctx);
         return .{ .raw_freq = raw_freq, .comp_freq = comp_freq, .pairs = config.rope_dims / 2 };
     }
@@ -563,13 +563,13 @@ pub const Model = struct {
     };
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, options: LoadOptions) !Model {
-        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmapAuto(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFileOptions(ctx, &file, options);
     }
 
     pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, options: LoadOptions) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const config = try Config.fromGguf(allocator, file);
         errdefer allocator.free(config.compress_ratio);
 
@@ -725,7 +725,7 @@ const moeProjSpec = ptqtp_gguf.streamedProjSpecAuto;
 /// Layer loader shared by the trunk ("blk.N." names) and the MTP sidecar
 /// ("mtp.0." names, always raw-family, top-k routed).
 fn loadLayerNamed(ctx: *ExecContext, file: *const gguf.File, config: Config, prefix: []const u8, ratio: usize, hash_routed: bool, store: ?*fucina.ExpertStore, store_layer: usize) !Layer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var buf: [96]u8 = undefined;
     const name = struct {
         fn of(b: []u8, p: []const u8, suffix: []const u8) ![]const u8 {
@@ -1323,7 +1323,7 @@ fn compressorAdvance(
     layer_compressed: bool,
     pos: usize,
 ) !bool {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const ratio = comp.ratio;
     const width = comp.width;
     const pos_mod = pos % ratio;
@@ -1379,7 +1379,7 @@ fn compressorAdvance(
     // rms-norm with the compressor weight, rope at the compressed position
     // (its own 1-position table — the emitted row's position lags the
     // token's), then the family quantization round-trip.
-    const out_row = try out_rows.addManyAsSlice(ctx.allocator, head_dim);
+    const out_row = try out_rows.addManyAsSlice(ctx.allocator(), head_dim);
     rmsNormInto(out_row, pooled, comp.norm, self.config.rms_norm_eps);
     const comp_pos = pos + 1 - ratio;
     {
@@ -1517,8 +1517,8 @@ fn outputLogits(self: *Model, ctx: *ExecContext, streams: []const f32) ![]f32 {
 /// its own hc_head module and final norm but shares the trunk's vocab head).
 /// Owned-slice variant (MTP head + per-row batch logits): allocates.
 fn outputLogitsWith(self: *Model, ctx: *ExecContext, streams: []const f32, head_hc: *const HcModule, out_norm: []const f32) ![]f32 {
-    const dst = try ctx.allocator.alloc(f32, self.config.vocab_size);
-    errdefer ctx.allocator.free(dst);
+    const dst = try ctx.allocator().alloc(f32, self.config.vocab_size);
+    errdefer ctx.allocator().free(dst);
     return outputLogitsWithInto(self, ctx, streams, head_hc, out_norm, dst);
 }
 
@@ -1584,7 +1584,7 @@ pub const StreamsOut = union(enum) {
 /// aliases the last row) and `out_streams` (see `StreamsOut`).
 pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens: []const usize, out_logits_rows: ?[][]f32, out_streams: ?StreamsOut) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const cache = &session.cache;
     const S = tokens.len;
     if (S == 0) return Error.KvCacheOverflow;
@@ -1659,7 +1659,7 @@ pub fn stepBatchExtra(self: *Model, ctx: *ExecContext, session: *Session, tokens
 /// per row (4x4 host math), and the pre-weighted stream sum as one batched
 /// contraction. Fills `splits` for the matching hcPostBatch.
 fn hcPreBatch(ctx: *ExecContext, config: Config, module: *const HcModule, streams_all: []const f32, S: usize, splits: []HcSplit) ![]f32 {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const hc_dim = config.n_hc * config.hidden_size;
 
     var flat_t = try fucina.Tensor(.{ .seq, .embed }).fromBorrowedConstSlice(ctx, .{ S, hc_dim }, streams_all[0 .. S * hc_dim]);
@@ -1692,7 +1692,7 @@ fn hcPreBatch(ctx: *ExecContext, config: Config, module: *const HcModule, stream
 /// Batched hcPost: streams'[s,dst] = post[s,dst]*block_out[s] +
 /// sum_src comb[s,dst,src]*streams[s,src], all rows at once.
 fn hcPostBatch(ctx: *ExecContext, config: Config, splits: []const HcSplit, block_out: []const f32, streams_all: []f32, S: usize) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const n = config.n_hc;
     const hc_dim = n * config.hidden_size;
 
@@ -1733,7 +1733,7 @@ fn hcPostBatch(ctx: *ExecContext, config: Config, splits: []const HcSplit, block
 /// afterwards.
 fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos0: usize, S: usize, tables: *const StepRope, scratch: *StepScratch) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const lc = &cache.layers[layer_i];
     const ratio = cfg.compress_ratio[layer_i];
     const compressed_family = ratio != 0;
@@ -1957,7 +1957,7 @@ fn attnBlockBatch(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const 
 
 fn attnBlock(self: *Model, ctx: *ExecContext, cache: *Cache, layer: *const Layer, layer_i: usize, sub_in: []const f32, pos: usize, tables: *const StepRope, scratch: *StepScratch, probe: ?*IndexProbe) !fucina.Tensor(.{ .seq, .attn }) {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const lc = &cache.layers[layer_i];
     const ratio = cfg.compress_ratio[layer_i];
     const compressed_family = ratio != 0;
@@ -2144,7 +2144,7 @@ fn attendRowsSink(self: *const Model, ctx: *ExecContext, layer: *const Layer, q_
 
 fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: anytype, qr_norm_t: anytype, lc: *LayerCache, tables: *const StepRope) ![]bool {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var q_t = try layer.indexer_q_b.?.linearSeq(ctx, qr_norm_t, .q, .attn);
     defer q_t.deinit();
@@ -2169,7 +2169,7 @@ fn indexerSelect(self: *Model, ctx: *ExecContext, layer: *const Layer, x_norm: a
 /// attention-compressed rows (1:1 counts).
 fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []f32, index_comp: []const f32, n_allowed_rows: usize) ![]bool {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const n_comp = index_comp.len / cfg.indexer_head_dim;
     const allowed = try allocator.alloc(bool, n_allowed_rows);
     errdefer allocator.free(allowed);
@@ -2219,7 +2219,7 @@ fn indexerSelectFrom(self: *const Model, ctx: *ExecContext, q: []f32, head_w: []
 /// Hash-routed layers are exact. Purely advisory: never changes output.
 fn pilotPrefetchNext(self: *Model, ctx: *ExecContext, next_layer_i: usize, streams: []const f32, token: usize) !void {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const next = &self.layers[next_layer_i];
     const store = switch (next.moe.gate) {
         .streamed => |*sw| sw.store,
@@ -2317,7 +2317,7 @@ fn moeBlock(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []cons
 
 fn moeBlockBatch(self: *Model, ctx: *ExecContext, layer: *const Layer, sub_in: []const f32, tokens: []const usize) !fucina.Tensor(.{ .seq, .embed }) {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const S = tokens.len;
     const used = cfg.num_experts_used;
     const prof_decode = S == 1;
@@ -2533,7 +2533,7 @@ pub const Mtp = struct {
     mapping: ?gguf.File.MappedRegion = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Mtp {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         var file = try gguf.File.loadMmapAuto(allocator, io, path);
         defer file.deinit();
         const hidden = config.hidden_size;
@@ -2618,7 +2618,7 @@ pub const MtpState = struct {
 /// this draft's output streams and appends this position's KV row.
 pub fn mtpDraftStep(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpState, token: usize, prev_streams: []const f32, pos: usize) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const hidden = cfg.hidden_size;
     const hc_dim = cfg.n_hc * hidden;
 
@@ -2678,7 +2678,7 @@ pub fn mtpDraftStep(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *Mt
 /// indexer, over the position-indexed private ring (raw rope family).
 fn mtpAttnBlock(self: *Model, mtp: *const Mtp, ctx: *ExecContext, state: *MtpState, sub_in: []const f32, pos: usize) ![]f32 {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const layer = &mtp.layer;
     const hd = cfg.head_dim;
     var tables = try StepRope.init(&self.rope, ctx, pos, 1);

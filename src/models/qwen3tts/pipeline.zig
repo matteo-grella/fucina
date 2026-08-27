@@ -86,7 +86,7 @@ pub fn generate(
     on_frame_user: ?*anyopaque,
     taps: ?*Taps,
 ) !Result {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const cfg = &model.talker.cfg;
     const sp = &model.specials;
     const hidden = cfg.hidden;

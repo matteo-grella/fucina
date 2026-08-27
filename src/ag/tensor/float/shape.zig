@@ -66,8 +66,8 @@ pub fn Ops(comptime Self: type) type {
             const sections = total / n;
             if (offsets.len != sections) return TensorError.InvalidShape;
 
-            const indices = try ctx.allocator.alloc(usize, total);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, total);
+            defer ctx.allocator().free(indices);
             var mask = try Self.empty(ctx, self.shape());
             defer mask.deinit();
             const fill_mask = try mask.data();
@@ -155,8 +155,8 @@ pub fn Ops(comptime Self: type) type {
             const n = self.asRawTensor().shape.at(0);
             var base = try Self.zeros(ctx, .{n * n});
             defer base.deinit();
-            const indices = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, n);
+            defer ctx.allocator().free(indices);
             for (indices, 0..) |*index, i| index.* = i * (n + 1);
             var filled = try base.setRows(ctx, tags[0], indices, self);
             defer filled.deinit();

@@ -104,7 +104,7 @@ pub fn Ops(comptime Self: type) type {
         /// is a constant and receives no gradient; for a trainable bias use
         /// `add` with a broadcast operand).
         pub fn biasAdd(self: *const Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !Self {
-            var value = try self.value.clone(ctx.allocator);
+            var value = try self.value.clone(ctx.allocator());
             errdefer value.deinit();
             try ctx.addAxisVectorInPlace(tensor_rank, null, &value, bias, comptime Self.axis(axis_tag));
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);

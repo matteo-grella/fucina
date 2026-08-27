@@ -78,7 +78,7 @@ fn packInputs(x: *const Hidden, pack: *const shine.LayerLora) InputsTuple {
 /// pass, and packed conversation passes.
 const LayerBlock = struct {
     fn run(ctx: *ExecContext, extra: LayerExtra, inputs: InputsTuple) !Hidden {
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const lora = try a.alloc(shine.LayerLora, extra.segs.len);
         defer a.free(lora);
         var built: usize = 0;
@@ -387,7 +387,7 @@ pub const ShineTrainer = struct {
     /// building a graph).
     pub fn generatedBlock(self: *ShineTrainer, ctx: *ExecContext, evidence_ids: []const usize) !fucina.Tensor(.{ .layer, .mem, .embed }) {
         if (evidence_ids.len == 0) return qwen3.Error.InvalidSequenceLength;
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const base = self.model.config;
         const mem = self.config.num_mem_token;
 
@@ -449,7 +449,7 @@ pub const ShineTrainer = struct {
     pub fn lossPacked(self: *ShineTrainer, ctx: *ExecContext, examples: []const Example) !fucina.Tensor(.{}) {
         const b_count = examples.len;
         if (b_count == 0) return qwen3.Error.InvalidSequenceLength;
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const base = self.model.config;
         const mem = self.config.num_mem_token;
 
@@ -574,8 +574,8 @@ pub const ShineTrainer = struct {
     /// heap-owned and step-retained (see `freeTransient`).
     fn segmentRope(self: *ShineTrainer, ctx: *ExecContext, segs: []const usize, total: usize) !*const fucina.RopeTable {
         const base = self.model.config;
-        const positions = try ctx.allocator.alloc(i32, total);
-        defer ctx.allocator.free(positions);
+        const positions = try ctx.allocator().alloc(i32, total);
+        defer ctx.allocator().free(positions);
         var at: usize = 0;
         for (segs) |seg| {
             for (0..seg) |i| {
@@ -603,7 +603,7 @@ pub const ShineTrainer = struct {
     /// evidence_0 ++ mem ++ evidence_1 ++ mem ++ ... as one embedded pack
     /// (memory rows are constant zeros, the reference's trained state).
     fn packedEncoderInput(self: *ShineTrainer, ctx: *ExecContext, examples: []const Example) !fucina.Tensor(.{ .seq, .embed }) {
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const base = self.model.config;
         const mem = self.config.num_mem_token;
 
@@ -738,7 +738,7 @@ fn segmentAttention(
     attn_scale: f32,
 ) !fucina.Tensor(.{ .seq, .attn }) {
     if (segs.len == 1) return q.groupedAttention(ctx, k, v, model.kv_head_for_head, .attn, attn_scale, .{});
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const parts = try a.alloc(fucina.Tensor(.{ .seq, .attn }), segs.len);
     defer a.free(parts);
     var built: usize = 0;
@@ -777,7 +777,7 @@ fn addLoraSeg(
         defer delta.deinit();
         return proj.add(ctx, &delta);
     }
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     const parts = try a.alloc(fucina.Tensor(.{ .seq, out_tag }), segs.len);
     defer a.free(parts);
     var built: usize = 0;
@@ -804,7 +804,7 @@ fn addLoraSeg(
 /// views — gradients route back to each example's M2P output. Must run
 /// under an exec scope (partial results lean on scope cleanup).
 fn packLayer(ctx: *ExecContext, generated: []const shine.LoraSet, layer_i: usize) !shine.LayerLora {
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     var out: shine.LayerLora = undefined;
     const rest_a = try a.alloc(*const ATensor, generated.len - 1);
     defer a.free(rest_a);
@@ -841,7 +841,7 @@ pub fn sliceViews(
     config: shine.Config,
     plain: *const fucina.Tensor(.{ .layer, .mem, .embed }),
 ) !shine.LoraSet {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const r = config.lora_r;
 
     var scaled = try plain.scale(ctx, @sqrt(config.scale));
@@ -895,7 +895,7 @@ pub fn sliceCartridgeViews(
     plain: *const fucina.Tensor(.{ .layer, .mem, .embed }),
 ) !cartridge_mod.Cartridge {
     if (config.cartridge_rows == 0) return shine.Error.InvalidShineConfig;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const rows = config.cartridge_rows;
     const kv_heads = base.num_key_value_heads;
     const head_dim = base.head_dim;

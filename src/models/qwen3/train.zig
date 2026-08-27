@@ -234,7 +234,7 @@ pub const FrozenCache = struct {
 /// Deep-copy a scope-owned raw f32 matrix OUT of the active exec scope
 /// (the `adoptFusedHead` pattern) — cache entries must outlive the step.
 fn adoptWidened(ctx: *ExecContext, raw: anytype) !fucina.Tensor(.{ .out, .in }) {
-    var value = try raw.clone(ctx.allocator);
+    var value = try raw.clone(ctx.allocator());
     return fucina.Tensor(.{ .out, .in }).fromTensor(ctx, value) catch |err| {
         value.deinit();
         return err;
@@ -265,7 +265,7 @@ fn widenedFrozen(cache: *FrozenCache, weight: *const LinearWeight, ctx: *ExecCon
         else => return null,
     };
     errdefer wide.deinit();
-    try cache.map.put(ctx.allocator, weight, wide);
+    try cache.map.put(ctx.allocator(), weight, wide);
     return cache.map.getPtr(weight).?;
 }
 
@@ -469,7 +469,7 @@ pub fn Trainer(comptime targets: Targets) type {
 
         pub fn init(ctx: *ExecContext, model: *const qwen3.Model, config: lora.Config, seed: u64) !Self {
             if (model.config.isMoe()) return Error.MoeUnsupported;
-            const allocator = ctx.allocator;
+            const allocator = ctx.allocator();
             const n_layers = model.config.num_layers;
 
             const adapters = try allocator.alloc(LayerAdapters, n_layers);
@@ -689,7 +689,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var logits = try self.logitsTail(ctx, &hidden);
             defer logits.deinit();
             // Deep-copy out of the scope: everything else dies at close.
-            var value = try logits.value.clone(ctx.allocator);
+            var value = try logits.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -709,7 +709,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var logits = try self.logitsTail(ctx, &hidden);
             defer logits.deinit();
             // Deep-copy out of the scope: everything else dies at close.
-            var value = try logits.value.clone(ctx.allocator);
+            var value = try logits.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -733,7 +733,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var logits = try self.logitsTail(ctx, &picked);
             defer logits.deinit();
             // Deep-copy so the caller owns a clean constant either way.
-            var value = try logits.value.clone(ctx.allocator);
+            var value = try logits.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -894,10 +894,10 @@ pub fn Trainer(comptime targets: Targets) type {
             const n = distill_targets.positions.len;
             if (n == 0 or distill_targets.tokens.len != n or distill_targets.logprobs.len != n) return cartridge_mod.Error.InvalidTargets;
             const seq = normed.dim(.seq);
-            const rows = try ctx.allocator.alloc(usize, n);
-            defer ctx.allocator.free(rows);
-            const probs = try ctx.allocator.alloc(f32, n);
-            defer ctx.allocator.free(probs);
+            const rows = try ctx.allocator().alloc(usize, n);
+            defer ctx.allocator().free(rows);
+            const probs = try ctx.allocator().alloc(f32, n);
+            defer ctx.allocator().free(probs);
             for (rows, probs, distill_targets.positions, distill_targets.tokens, distill_targets.logprobs) |*row, *prob, pos, token, logprob| {
                 if (pos == 0 or pos > seq) return cartridge_mod.Error.InvalidTargets;
                 if (token >= model.config.vocab_size) return cartridge_mod.Error.InvalidTargets;
@@ -939,7 +939,7 @@ pub fn Trainer(comptime targets: Targets) type {
         }
 
         fn adoptFusedHead(self: *Self, ctx: *ExecContext, raw: anytype) void {
-            var value = raw.clone(ctx.allocator) catch return;
+            var value = raw.clone(ctx.allocator()) catch return;
             if (fucina.Tensor(.{ .vocab, .embed }).fromTensor(ctx, value)) |head| {
                 self.fused_head = head;
                 self.fused_head_state = .ready;
@@ -963,7 +963,7 @@ pub fn Trainer(comptime targets: Targets) type {
             var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
             defer last.deinit();
             // Deep-copy out of the scope: everything else dies at close.
-            var value = try last.value.clone(ctx.allocator);
+            var value = try last.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -1137,8 +1137,8 @@ pub fn Trainer(comptime targets: Targets) type {
         /// `freeTransientRope`.
         fn preparePackedRope(self: *Self, ctx: *ExecContext, offset: usize, total_len: usize, seg_lens: []const usize) !*const fucina.RopeTable {
             const cfg = self.model.config;
-            const positions = try ctx.allocator.alloc(i32, total_len);
-            defer ctx.allocator.free(positions);
+            const positions = try ctx.allocator().alloc(i32, total_len);
+            defer ctx.allocator().free(positions);
             var idx: usize = 0;
             for (seg_lens) |len| {
                 for (0..len) |j| {
@@ -1361,8 +1361,8 @@ pub fn Trainer(comptime targets: Targets) type {
             const seg_lens = extra.packed_segments.?;
             const Out = fucina.Tensor(.{ .seq, .attn });
 
-            const outs = try ctx.allocator.alloc(Out, seg_lens.len);
-            defer ctx.allocator.free(outs);
+            const outs = try ctx.allocator().alloc(Out, seg_lens.len);
+            defer ctx.allocator().free(outs);
             var built: usize = 0;
             errdefer for (outs[0..built]) |*out| out.deinit();
 
@@ -1394,8 +1394,8 @@ pub fn Trainer(comptime targets: Targets) type {
 
             if (outs.len == 1) return outs[0];
             defer for (outs) |*out| out.deinit(); // scope-owned borrows: safe no-ops
-            const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
-            defer ctx.allocator.free(rest);
+            const rest = try ctx.allocator().alloc(*const Out, outs.len - 1);
+            defer ctx.allocator().free(rest);
             for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
             return outs[0].concat(ctx, .seq, rest);
         }

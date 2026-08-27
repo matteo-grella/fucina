@@ -336,6 +336,21 @@ this point; earlier history is `git log`.
   proof binary are byte-identical before/after, and the x86dot-check
   checksum is unchanged.
 
+- `ExecContext` embeds its runtime substrate as one struct field:
+  `rt: exec.Runtime` (declared in `src/exec/runtime.zig`) carries
+  `thread_safe_allocator`, `allocator`, `parallel_pool`, `buffers`,
+  `tuning`, the `work_pool` triple, the `dot_backward_worker` pair,
+  `scopes`, and `fp_env_at_init`; the model/session state
+  (`quant_dot_gpu_disabled`, `rowwise_numerics_pinned`, `moe_scratch`)
+  stays a direct field set. The PINNED property (self-referential
+  allocator; never copy or move an initialized context) is stated on
+  `Runtime`. Rewrites: `ctx.allocator` → `ctx.allocator()` (the one
+  forwarding accessor, kept because the reference documents the
+  spelling in user code); every other substrate field access
+  `ctx.<field>` → `ctx.rt.<field>` (`ctx.buffers` → `ctx.rt.buffers`,
+  `ctx.tuning` → `ctx.rt.tuning`, `ctx.scopes` → `ctx.rt.scopes`, ...).
+  The method surface (`workPool`, `pc`, `setTuning`, `openExecScope`,
+  ...) is unchanged.
 - The fused row kernels (softmax/logsumexp/log-softmax rows and their
   strided inner-lane arms, layer/RMS-norm rows and backward stats,
   cross-entropy and distillation rows, dropout, scatter-add, the gated

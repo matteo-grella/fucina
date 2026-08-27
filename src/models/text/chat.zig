@@ -415,19 +415,19 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
             errdefer cache.deinit();
             const stop_id: ?u32 = tokenizer.tokenId(template.stopMarker()) orelse tokenizer.eosId();
             var history: std.ArrayList(usize) = .empty;
-            errdefer history.deinit(ctx.allocator);
+            errdefer history.deinit(ctx.allocator());
             if (warm_opt) |w| {
                 // The cache may only claim positions its token shadow (plus
                 // any declared preloaded prefix) describes; a short shadow
                 // clamps it.
                 cache.truncate(w.prefix_rows + w.tokens.len);
-                try history.appendSlice(ctx.allocator, w.tokens);
+                try history.appendSlice(ctx.allocator(), w.tokens);
             }
             var spec: ?*SpecState = null;
             if (options.speculation) {
-                const st = try ctx.allocator.create(SpecState);
-                errdefer ctx.allocator.destroy(st);
-                st.index = try spec_cascade.SpeculationIndex.init(ctx.allocator, model.config.vocab_size);
+                const st = try ctx.allocator().create(SpecState);
+                errdefer ctx.allocator().destroy(st);
+                st.index = try spec_cascade.SpeculationIndex.init(ctx.allocator(), model.config.vocab_size);
                 errdefer st.index.deinit();
                 st.grammar_source = if (options.logit_processor) |p|
                     (if (p.hasStructure()) spec_constrained.ConstrainedSource.init(p, st.index.asDraftSource()) else null)
@@ -442,7 +442,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 // Acceptance accounting settles only drafts the decoder
                 // actually verifies (cascade.zig's accounting contract).
                 st.index.accounting_min_draft = spec_options.min_draft;
-                st.decoder = try speculative.SpeculativeDecoder(Model).init(ctx.allocator, st.baseSource(), spec_options);
+                st.decoder = try speculative.SpeculativeDecoder(Model).init(ctx.allocator(), st.baseSource(), spec_options);
                 st.decoder.io = options.io;
                 spec = st;
             }
@@ -451,7 +451,7 @@ pub fn Conversation(comptime Model: type, comptime Tok: type) type {
                 .model = model,
                 .tokenizer = tokenizer,
                 .template = template,
-                .allocator = ctx.allocator,
+                .allocator = ctx.allocator(),
                 .cache = cache,
                 .stream = Tok.StreamDecoder.init(tokenizer),
                 .sampler = blk: {

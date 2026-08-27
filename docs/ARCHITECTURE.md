@@ -145,14 +145,15 @@ Core value types and substrate:
 Execution runtime:
 
 - `src/exec.zig`: `ExecContext`, the public runtime boundary. One struct
-  declares the substrate state (thread-safe allocator, published worker
-  team, `BufferPool`, exec-scope stack, MoE decode scratch) and
-  carries every op as an alias line (`pub const add = exec_elementwise.add;`)
-  grouped by domain; the struct body is the registry, the bodies live under
-  `src/exec/`.
-- `src/exec/runtime.zig`: the substrate functions of `ExecContext`
-  (lifecycle, exec scopes, worker team, tensor allocation primitives,
-  `replace`), each taking `*ExecContext` first. Domain modules receive
+  embeds the runtime substrate as `rt: Runtime` (thread-safe allocator,
+  published worker team, `BufferPool`, exec-scope stack, tuning, fp env),
+  declares the model/session execution state beside it (kernel pinning,
+  MoE decode scratch), and carries every op as an alias line
+  (`pub const add = exec_elementwise.add;`) grouped by domain; the struct
+  body is the registry, the bodies live under `src/exec/`.
+- `src/exec/runtime.zig`: the `Runtime` struct and the substrate
+  functions of `ExecContext` (lifecycle, exec scopes, worker team, tensor
+  allocation primitives, `replace`), each taking `*ExecContext` first. Domain modules receive
   `*ExecContext` explicitly (never `self: anytype`), so their code is
   monomorphic; `src/exec.zig` and `src/exec/*.zig` form the one permitted
   root-anchored import cycle (see *Layering And Enforcement*).
@@ -442,16 +443,20 @@ is the canonical in-tree name for allowed-raw zones.
 ## Execution Runtime
 
 `ExecContext` is the eager runtime boundary. The struct, declared in
-`src/exec.zig`, owns:
+`src/exec.zig`, embeds the substrate as `rt: Runtime` (declared in
+`src/exec/runtime.zig`), which owns:
 
-- a thread-safe allocator wrapper,
-- the published worker team (`parallel_pool`, an atomic pointer that
+- a thread-safe allocator wrapper (`ctx.allocator()` is the public
+  accessor),
+- the published worker team (`rt.parallel_pool`, an atomic pointer that
   `pc()` snapshots into the `ParallelConfig` every kernel call receives),
 - a reusable `BufferPool` (`src/exec/buffer_pool.zig`),
 - a lazily initialized `thread.Pool` (spin-then-park hot worker team),
 - the exec-scope stack (`openExecScope`/`closeExecScope`: implicit ownership
   of training intermediates; see `MEMORY-MODEL.md` and `TRAINING.md`),
-- the grow-only MoE decode scratch (`moe_scratch`).
+
+and declares the model/session execution state beside it, including the
+grow-only MoE decode scratch (`moe_scratch`).
 
 The substrate functions that operate on these fields (lifecycle, scopes,
 worker team, tensor allocation primitives) are free functions in

@@ -1,20 +1,18 @@
-//! `ExecContext`: the eager execution runtime. One struct carries two
-//! field groups — the runtime substrate (allocator pair, worker team,
-//! buffer pool, exec-scope stack, tuning, fp env; the section banners
-//! below mark it) and the per-model execution state (kernel pinning,
-//! MoE decode scratch) — and every op as a method. Bodies live in
-//! `exec/`: `exec/runtime.zig` holds the lifecycle, scope, pool, and tensor
-//! allocation primitives; `exec/<domain>.zig` holds the ops, each taking
-//! `*ExecContext` first. The struct body below is the alias registry (`pub
-//! const add = exec_elementwise.add;`) grouped by domain; the section banners
-//! name the file each group resolves to. Layer stack: docs/ARCHITECTURE.md.
+//! `ExecContext`: the eager execution runtime. One struct carries the
+//! embedded runtime substrate (`rt: Runtime` — allocator pair, worker
+//! team, buffer pool, exec-scope stack, tuning, fp env; declared in
+//! `exec/runtime.zig`) and the per-model execution state (kernel
+//! pinning, MoE decode scratch) — and every op as a method. Bodies live
+//! in `exec/`: `exec/runtime.zig` holds the lifecycle, scope, pool, and
+//! tensor allocation primitives; `exec/<domain>.zig` holds the ops, each
+//! taking `*ExecContext` first. The struct body below is the alias
+//! registry (`pub const add = exec_elementwise.add;`) grouped by domain;
+//! the section banners name the file each group resolves to. Layer
+//! stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const backend_mod = @import("backend.zig");
 const backend_ops = backend_mod.ops;
-const fpenv = @import("fpenv.zig");
 const tensor = @import("tensor.zig");
-const thread = @import("thread.zig");
-const tuning = @import("tuning.zig");
 
 const exec_attention = @import("exec/attention.zig");
 const exec_moe = @import("exec/moe.zig");
@@ -121,59 +119,26 @@ pub const QuantMatmulLhs = exec_quant_matmul.Lhs;
 pub const CompactRhsFor = exec_quant_matmul.CompactRhsFor;
 
 /// Reusable transient-buffer pool. Defined in the `exec/buffer_pool.zig` leaf;
-/// re-exported here so `exec.BufferPool` stays reachable and the `buffers`
-/// field below can name it.
+/// re-exported here so `exec.BufferPool` stays reachable.
 pub const BufferPool = exec_buffer_pool.BufferPool;
 
-/// The eager execution runtime. PINNED after `init`: `allocator` embeds a
-/// pointer to this context's own `thread_safe_allocator` field, so an
-/// initialized context must never be copied or moved — keep it in a stable
-/// stack frame or heap-allocate it, and hand out `*ExecContext` (every op
-/// already takes the pointer). Field defaults below are the initial state;
-/// `init` sets only what a fresh context must compute (see
-/// exec/runtime.zig).
+/// The runtime substrate embedded as `ExecContext.rt`. Declared in
+/// `exec/runtime.zig`; re-exported here so `exec.Runtime` names it.
+pub const Runtime = exec_runtime.Runtime;
+
+/// The eager execution runtime. PINNED after `init` (see `Runtime`): the
+/// embedded `rt` is self-referential, so an initialized context must
+/// never be copied or moved — keep it in a stable stack frame or
+/// heap-allocate it, and hand out `*ExecContext` (every op already takes
+/// the pointer). Field defaults below are the initial state; `init` sets
+/// only what a fresh context must compute (see exec/runtime.zig).
 pub const ExecContext = struct {
-    // ------------------------------------------------------------------
-    // Runtime substrate (the conceptual `Runtime` group; lifecycle in
-    // exec/runtime.zig): allocation, the worker team, transient buffers,
-    // exec scopes, tuning, and the float environment. Model-independent —
-    // what every op needs to run at all. Zig has no field aliasing, so
-    // the group is a documented layout, not a nested struct: `ctx.<field>`
-    // spellings across the tree stay what they are.
-    // ------------------------------------------------------------------
-    thread_safe_allocator: thread.ThreadSafeAllocator,
-    allocator: Allocator,
-    /// The worker team as published to kernel dispatch (`pc` snapshots it).
-    /// Atomic: kernels may dispatch on other threads (dot-backward's
-    /// `OneShotWorker`) while a lazy `tryWorkPool` retry publishes the pool;
-    /// release/acquire so a racing first observer also sees `Pool.init`'s
-    /// writes.
-    parallel_pool: std.atomic.Value(?*thread.Pool) = .init(null),
-    buffers: BufferPool,
-    /// Per-context tuning overrides (`setTuning`); every field
-    /// null = follow the process-wide gates (see src/tuning.zig).
-    tuning: tuning.Overrides = .{},
-    work_pool: thread.Pool,
-    work_pool_ready: bool = false,
-    /// Latched by `tryWorkPool` when `Pool.init` fails: the context then
-    /// runs every kernel serially for its whole life instead of re-paying
-    /// the failed init on each dispatch (one warning is logged).
-    work_pool_failed: bool = false,
-    work_pool_mutex: thread.Mutex = .{},
-    dot_backward_worker: thread.OneShotWorker,
-    dot_backward_worker_ready: bool = false,
-    dot_backward_worker_mutex: thread.Mutex = .{},
-    /// The context's own exec-scope stack. Scope traffic on a thread that
-    /// has installed a recompute frame (`installScopeStack`, the
-    /// checkpoint backward) goes to that frame instead.
-    scopes: exec_runtime.ScopeStack = .{},
-    /// The IEEE floating-point environment observed when this context was
-    /// created, or null where the target does not expose it. Every numeric
-    /// contract the context goes on to honor (backend parity tolerances,
-    /// thread-count invariance, checkpoint reproducibility) is stated under
-    /// this environment; `checkFloatEnvironment` is how a caller confirms it
-    /// still holds after code outside our control has run on the thread.
-    fp_env_at_init: ?fpenv.Environment = null,
+    /// The runtime substrate (lifecycle in exec/runtime.zig): allocation,
+    /// the worker team, transient buffers, exec scopes, tuning, and the
+    /// float environment. Model-independent — what every op needs to run
+    /// at all. Public code takes the allocator through `ctx.allocator()`;
+    /// the other substrate fields are reached as `ctx.rt.<field>`.
+    rt: Runtime,
     // ------------------------------------------------------------------
     // Model/session execution state: per-context toggles and scratch that
     // exist for the models running on this context, not for the runtime
@@ -209,6 +174,12 @@ pub const ExecContext = struct {
     pub const init = exec_runtime.init;
     pub const deinit = exec_runtime.deinit;
     pub const setTuning = exec_runtime.setTuning;
+
+    /// The substrate's allocator (`rt.allocator`, thread-safe): the public
+    /// forwarding accessor — allocate and free through `ctx.allocator()`.
+    pub fn allocator(self: *const ExecContext) Allocator {
+        return self.rt.allocator;
+    }
     pub const checkFloatEnvironment = exec_runtime.checkFloatEnvironment;
     pub const floatEnvironmentAtInit = exec_runtime.floatEnvironmentAtInit;
 

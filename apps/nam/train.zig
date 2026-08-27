@@ -1501,8 +1501,8 @@ fn applyA2PRelu(ctx: *ExecContext, act: *const nam_file.Activation, x: *const A2
         return positive.add(ctx, &scaled_negative);
     }
 
-    const slopes = try ctx.allocator.alloc(f32, width);
-    defer ctx.allocator.free(slopes);
+    const slopes = try ctx.allocator().alloc(f32, width);
+    defer ctx.allocator().free(slopes);
     for (slopes, 0..) |*dst, i| dst.* = act.negative_slopes[i % act.negative_slopes.len];
     var slope_tensor = try A2Bias.fromSlice(ctx, .{width}, slopes);
     defer slope_tensor.deinit();
@@ -1522,8 +1522,8 @@ fn applyA2PReluNoGrad(ctx: *ExecContext, act: *const nam_file.Activation, x: *co
         return positive.add(ctx, &scaled_negative);
     }
 
-    const slopes = try ctx.allocator.alloc(f32, width);
-    defer ctx.allocator.free(slopes);
+    const slopes = try ctx.allocator().alloc(f32, width);
+    defer ctx.allocator().free(slopes);
     for (slopes, 0..) |*dst, i| dst.* = act.negative_slopes[i % act.negative_slopes.len];
     var slope_tensor = try A2Bias.fromSlice(ctx, .{width}, slopes);
     defer slope_tensor.deinit();
@@ -1597,8 +1597,8 @@ fn stftMagnitude(ctx: *ExecContext, signal: *const Tensor(.{.time}), resolution:
     const gathered_count = frame_count * resolution.win_length;
     const window_offset = (resolution.fft_size - resolution.win_length) / 2;
 
-    const indices = try ctx.allocator.alloc(usize, gathered_count);
-    defer ctx.allocator.free(indices);
+    const indices = try ctx.allocator().alloc(usize, gathered_count);
+    defer ctx.allocator().free(indices);
     for (0..frame_count) |frame| {
         const frame_start: i64 = @as(i64, @intCast(frame * resolution.hop_size)) - @as(i64, @intCast(reflect_pad));
         for (0..resolution.win_length) |win| {
@@ -1608,10 +1608,10 @@ fn stftMagnitude(ctx: *ExecContext, signal: *const Tensor(.{.time}), resolution:
     }
 
     const coeff_len = resolution.win_length * freq_count;
-    const real_coeffs = try ctx.allocator.alloc(f32, coeff_len);
-    defer ctx.allocator.free(real_coeffs);
-    const imag_coeffs = try ctx.allocator.alloc(f32, coeff_len);
-    defer ctx.allocator.free(imag_coeffs);
+    const real_coeffs = try ctx.allocator().alloc(f32, coeff_len);
+    defer ctx.allocator().free(real_coeffs);
+    const imag_coeffs = try ctx.allocator().alloc(f32, coeff_len);
+    defer ctx.allocator().free(imag_coeffs);
     fillStftCoefficients(real_coeffs, imag_coeffs, resolution, freq_count, window_offset);
 
     const flat = try signal.gather(ctx, .time, indices, .flat);

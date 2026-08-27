@@ -86,8 +86,8 @@ fn filledTensor(ctx: *fucina.ExecContext, comptime spec: anytype, comptime rank:
 fn filledVariable(ctx: *fucina.ExecContext, comptime spec: anytype, comptime rank: usize, shape: [rank]usize, seed: usize) !fucina.Tensor(spec) {
     var elems: usize = 1;
     for (shape) |d| elems *= d;
-    const data = try ctx.allocator.alloc(f32, elems);
-    defer ctx.allocator.free(data);
+    const data = try ctx.allocator().alloc(f32, elems);
+    defer ctx.allocator().free(data);
     for (data, 0..) |*v, i| {
         const mixed = (i * 17 + seed * 31) % 97;
         v.* = @as(f32, @floatFromInt(@as(i32, @intCast(mixed)) - 48)) * 0.0025;

@@ -365,7 +365,7 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
     _ = try rhs.rankView(2);
     var rr = try self.prepareContiguous(dtype, rhs);
     defer rr.deinit();
-    return kernels.packDenseRhs(dtype, self.allocator, rr.tensor());
+    return kernels.packDenseRhs(dtype, self.allocator(), rr.tensor());
 }
 
 // ---------------------------------------------------------------------------
@@ -390,8 +390,8 @@ pub fn packDenseMatmulRhs(self: *ExecContext, comptime dtype: DType, rhs: *const
 /// The shadow route's crossover for this runtime, or null when the route is
 /// off. Per-context `Overrides` win; otherwise the process table decides.
 fn cpuShadowMinM(ctx: *const ExecContext) ?u64 {
-    if (!tuning.resolve(&ctx.tuning, "cpu_f32_shadow")) return null;
-    return tuning.resolve(&ctx.tuning, "cpu_f32_shadow_min_m");
+    if (!tuning.resolve(&ctx.rt.tuning, "cpu_f32_shadow")) return null;
+    return tuning.resolve(&ctx.rt.tuning, "cpu_f32_shadow_min_m");
 }
 
 const CpuShadow = struct {

@@ -42,7 +42,7 @@ fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *Lin
         },
         // loadForFusion skipped the fold residency; a declined fx4 part
         // serves standalone and wants it back.
-        .tq2_0_fx4 => |*weight| weight.buildGpuResidency(ctx.allocator),
+        .tq2_0_fx4 => |*weight| weight.buildGpuResidency(ctx.allocator()),
         else => {},
     };
 }
@@ -133,7 +133,7 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
         var all_tied = true;
         for (parts) |part| all_tied = all_tied and part.ptqtp.tied;
         for (parts) |part| part.deinit();
-        return .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, all_tied) };
+        return .{ .ptqtp = WeightPtqtp.init(ctx.allocator(), p1, p2, p3, all_tied) };
     }
     // Native-folded parts concat by plain pack append: the layout is
     // column-group-major and every part's out dim is a multiple of 4 (the
@@ -152,15 +152,15 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
             total_blocks += part.tq2_0_fx4.pack.len;
             total_n += part.tq2_0_fx4.n;
         }
-        const fused = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, total_blocks);
-        errdefer ctx.allocator.free(fused);
+        const fused = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, total_blocks);
+        errdefer ctx.allocator().free(fused);
         var off: usize = 0;
         for (parts) |part| {
             @memcpy(fused[off..][0..part.tq2_0_fx4.pack.len], part.tq2_0_fx4.pack);
             off += part.tq2_0_fx4.pack.len;
         }
         for (parts) |part| part.deinit();
-        return .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, fused, ctx.allocator, total_n, k, true) };
+        return .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator(), fused, ctx.allocator(), total_n, k, true) };
     }
     return declinedFusion(ctx, parts);
 }

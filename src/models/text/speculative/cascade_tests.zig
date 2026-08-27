@@ -257,7 +257,7 @@ fn plainRun(
     defer kv.deinit();
     var sampler = Sampler.init(sampler_cfg);
 
-    try out.appendSlice(ctx.allocator, prompt);
+    try out.appendSlice(ctx.allocator(), prompt);
     if (prompt.len > 1) {
         var pre = try model.forwardStep(ctx, &kv, prompt[0 .. prompt.len - 1], 0);
         pre.deinit();
@@ -267,7 +267,7 @@ fn plainRun(
         var logits = try model.forwardStep(ctx, &kv, &.{last}, kv.len());
         defer logits.deinit();
         const next = try sampler.next(ctx, &logits, out.items);
-        try out.append(ctx.allocator, next);
+        try out.append(ctx.allocator(), next);
     }
 }
 
@@ -288,10 +288,10 @@ fn cascadeRun(
     defer kv.deinit();
     var sampler = Sampler.init(sampler_cfg);
 
-    var decoder = try speculative.SpeculativeDecoder(qwen3.Model).init(ctx.allocator, index.asDraftSource(), options);
+    var decoder = try speculative.SpeculativeDecoder(qwen3.Model).init(ctx.allocator(), index.asDraftSource(), options);
     defer decoder.deinit();
 
-    try out.appendSlice(ctx.allocator, prompt);
+    try out.appendSlice(ctx.allocator(), prompt);
     index.observe(prompt);
     if (prompt.len > 1) {
         var pre = try model.forwardStep(ctx, &kv, prompt[0 .. prompt.len - 1], 0);

@@ -385,7 +385,7 @@ pub fn Trainer(comptime targets: Targets) type {
                 }
             }
 
-            const allocator = ctx.allocator;
+            const allocator = ctx.allocator();
             const n_layers = model.config.num_layers;
             const adapters = try allocator.alloc(LayerAdapters, n_layers);
             errdefer allocator.free(adapters);
@@ -514,7 +514,7 @@ pub fn Trainer(comptime targets: Targets) type {
             defer logits.deinit();
             var last = try logits.narrow(ctx, .seq, logits.dim(.seq) - 1, 1);
             defer last.deinit();
-            var value = try last.value.clone(ctx.allocator);
+            var value = try last.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -591,7 +591,7 @@ pub fn Trainer(comptime targets: Targets) type {
             defer ctx.closeExecScope(scope);
             var logits = try self.forwardLogitsOpts(ctx, tokens, null, opts);
             defer logits.deinit();
-            var value = try logits.value.clone(ctx.allocator);
+            var value = try logits.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }
@@ -611,7 +611,7 @@ pub fn Trainer(comptime targets: Targets) type {
             defer picked.deinit();
             var logits = try self.logitsTail(ctx, &picked);
             defer logits.deinit();
-            var value = try logits.value.clone(ctx.allocator);
+            var value = try logits.value.clone(ctx.allocator());
             errdefer value.deinit();
             return fucina.Tensor(.{ .seq, .vocab }).fromTensor(ctx, value);
         }

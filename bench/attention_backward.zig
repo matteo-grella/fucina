@@ -158,8 +158,8 @@ const Base = struct {
         errdefer v.deinit();
         var gy = try ctx.empty(.f32, .{ case.q_seq, case.heads * case.d });
         errdefer gy.deinit();
-        const kv_head_for_head = try ctx.allocator.alloc(usize, case.heads);
-        errdefer ctx.allocator.free(kv_head_for_head);
+        const kv_head_for_head = try ctx.allocator().alloc(usize, case.heads);
+        errdefer ctx.allocator().free(kv_head_for_head);
 
         fillPattern(&q, 1);
         fillPattern(&k, 2);
@@ -174,7 +174,7 @@ const Base = struct {
             .v = v,
             .gy = gy,
             .kv_head_for_head = kv_head_for_head,
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
         };
     }
 

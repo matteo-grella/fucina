@@ -150,11 +150,11 @@ fn zeroPair(ctx: *ExecContext, in_dim: usize, r: usize, out_dim: usize) !shine.L
 }
 
 fn zeroLoraSet(ctx: *ExecContext, base: qwen3.Config, r: usize) !shine.LoraSet {
-    const layers = try ctx.allocator.alloc(shine.LayerLora, base.num_layers);
+    const layers = try ctx.allocator().alloc(shine.LayerLora, base.num_layers);
     var built: usize = 0;
     errdefer {
         for (layers[0..built]) |*layer| layer.deinit();
-        ctx.allocator.free(layers);
+        ctx.allocator().free(layers);
     }
     for (layers) |*layer| {
         inline for (shine.modules) |module| {
@@ -163,7 +163,7 @@ fn zeroLoraSet(ctx: *ExecContext, base: qwen3.Config, r: usize) !shine.LoraSet {
         }
         built += 1;
     }
-    return .{ .allocator = ctx.allocator, .layers = layers };
+    return .{ .allocator = ctx.allocator(), .layers = layers };
 }
 
 test "zero adapter forwardStep matches the base model bitwise" {

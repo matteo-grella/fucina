@@ -562,7 +562,7 @@ pub const Model = struct {
     };
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8) !Model {
-        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmapAuto(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file);
     }
@@ -573,7 +573,7 @@ pub const Model = struct {
 
     pub fn loadGgufFromFileOptions(ctx: *ExecContext, file: *gguf.File, options: LoadOptions) !Model {
         const config = try Config.fromGguf(file);
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
@@ -715,7 +715,7 @@ pub const Model = struct {
     /// return shape; caller deinits).
     pub fn step(self: *const Model, ctx: *ExecContext, cache: *MlaCache, token: usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         if (cache.len() >= cache.capacity) return Error.KvCacheOverflow;
         const pos = cache.len();
         cache.shareReset();
@@ -989,7 +989,7 @@ pub const Model = struct {
     /// cache mode only (the production path).
     pub fn stepBatch(self: *const Model, ctx: *ExecContext, cache: *MlaCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const S = tokens.len;
         if (S == 0) return Error.InvalidSequenceLength;
         if (S == 1) return self.step(ctx, cache, tokens[0]);
@@ -1337,7 +1337,7 @@ pub const Model = struct {
             else => return,
         };
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const h = try allocator.alloc(f32, cfg.hidden_size);
         defer allocator.free(h);
@@ -1378,7 +1378,7 @@ pub const Model = struct {
             else => return,
         };
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const hidden = cfg.hidden_size;
 
         const h = try allocator.alloc(f32, S * hidden);
@@ -1593,7 +1593,7 @@ fn dsaAppendKey(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer: 
 /// sign. Returned slice is caller-owned.
 fn dsaSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer: *const Layer, layer_i: usize, idx_q_t: anytype, h_t: anytype, t_len: usize, rope_table: anytype) ![]usize {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const heads = cfg.indexer_heads;
     const dim = cfg.indexer_key_dim;
 
@@ -1614,7 +1614,7 @@ fn dsaSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer: *co
 /// the cached keys, returns the top-k positions ascending (caller-owned).
 fn dsaScoreSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer_i: usize, q_buf: []const f32, head_w: []const f32, t_len: usize) ![]usize {
     const cfg = self.config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const heads = cfg.indexer_heads;
     const dim = cfg.indexer_key_dim;
 
@@ -1645,7 +1645,7 @@ fn dsaScoreSelect(self: *const Model, ctx: *ExecContext, cache: *MlaCache, layer
 }
 
 fn loadLayer(ctx: *ExecContext, file: *const gguf.File, config: Config, layer_i: usize, store: ?*fucina.ExpertStore, dsa: bool) !Layer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [96]u8 = undefined;
     const name = struct {
         fn of(buf: []u8, i: usize, suffix: []const u8) ![]const u8 {

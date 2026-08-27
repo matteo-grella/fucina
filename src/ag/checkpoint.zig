@@ -150,7 +150,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
         // The block result is an op result, so the inner scope owns it (along
         // with everything else the block built); it is not deinited here.
         const out = try callBlock(block, ctx, extra, &consts);
-        break :value try out.value.clone(ctx.allocator);
+        break :value try out.value.clone(ctx.allocator());
     };
     errdefer out_value.deinit();
 
@@ -289,7 +289,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             // the scope, restore the outer frame, release the stack — so
             // every recomputed intermediate is freed on every exit path.
             var frame = ExecContext.ScopeStack{};
-            defer frame.deinit(ctx.allocator);
+            defer frame.deinit(ctx.allocator());
             const outer_frame = ExecContext.installScopeStack(&frame);
             defer ExecContext.restoreScopeStack(outer_frame);
             const scope = ctx.openExecScope();
@@ -333,7 +333,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             // engine deinits any slots already filled (core.executeBackward).
             inline for (0..n) |i| {
                 if (core.needs(self, i)) {
-                    out[i] = (try rewrapped[i].grad_state.?.gradClone(ctx.allocator)) orelse
+                    out[i] = (try rewrapped[i].grad_state.?.gradClone(ctx.allocator())) orelse
                         return error.CheckpointMissingInputGradient;
                 }
             }

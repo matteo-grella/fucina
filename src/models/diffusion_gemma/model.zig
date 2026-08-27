@@ -144,7 +144,7 @@ pub const Model = struct {
     weight_mapping: ?gguf.File.MappedRegion = null,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, config: Config) !Model {
-        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file, config);
     }
@@ -154,7 +154,7 @@ pub const Model = struct {
         // The DiffusionGemma family has no per-layer-embeddings arm; the
         // forward modes here do not implement PLE injection.
         if (config.base.per_layer_input_size != 0) return Error.InvalidConfig;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const swa_pattern = try gguf_meta.readU32OrBoolArray(allocator, file, "diffusion-gemma.attention.sliding_window_pattern", config.base.num_layers, bool);
         defer allocator.free(swa_pattern);
@@ -690,7 +690,7 @@ pub fn samplerPass(
     u: []const f32,
     options: SamplerOptions,
 ) !SamplerPass {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const c_len = logits.dim(.seq);
     const vocab = logits.dim(.vocab);
     if (u.len != c_len) return Error.CanvasLengthMismatch;
@@ -861,7 +861,7 @@ pub fn denoiseCanvas(
     canvas: []usize,
     options: DenoiseOptions,
 ) !DenoiseResult {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const c_len = canvas.len;
     const vocab = model.config.base.vocab_size;
     const eb = options.eb;
@@ -993,7 +993,7 @@ pub fn generate(
     options: GenerateOptions,
 ) !GenerateResult {
     if (prompt_tokens.len == 0) return Error.InvalidSequenceLength;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const c_len = model.config.canvas_length;
     const limit = @min(options.max_new_tokens, out_tokens.len);
 

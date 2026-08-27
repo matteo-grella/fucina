@@ -82,7 +82,7 @@ pub fn generateOutcome(
     sink: TokenSink,
 ) !Outcome {
     decoder.assertDecoder(Model);
-    const a = ctx.allocator;
+    const a = ctx.allocator();
     if (prompt.len == 0) return error.InvalidSequenceLength;
 
     // Committed tokens (prompt + reply): the repetition-penalty window.

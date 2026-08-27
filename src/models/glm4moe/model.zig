@@ -108,7 +108,7 @@ pub const Model = struct {
     };
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, max_positions: usize, options: LoadOptions) !Model {
-        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmapAuto(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFileOptions(ctx, &file, max_positions, options);
     }
@@ -118,7 +118,7 @@ pub const Model = struct {
         if (!std.mem.eql(u8, arch, "glm4moe")) return Error.InvalidConfig;
         const config = try Config.fromGguf(file);
         const nextn = gguf_meta.metaIntOpt(file, "glm4moe", "nextn_predict_layers", .accept_zero) orelse 0;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         // Store layer indices include the nextn layer (blk.46), so the
         // trunk load sizes the store for trunk + MTP.
@@ -203,7 +203,7 @@ pub const Model = struct {
     /// last row).
     pub fn step(self: *Model, ctx: *ExecContext, cache: *runner.HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const S = tokens.len;
         // Residual stream rows [S, hidden]; the trunk walk leaves the
         // pre-norm hiddens here for the MTP stream.
@@ -259,7 +259,7 @@ pub const Model = struct {
     /// (validated empirically against the reference stacks).
     pub fn mtpDraftStep(self: *Model, ctx: *ExecContext, mtp_cache: *runner.HostCache, token: usize, h_prev: []const f32, h_out: []f32) !fucina.Tensor(.{ .seq, .vocab }) {
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const mtp = if (self.mtp) |*m| m else return Error.InvalidConfig;
         if (mtp_cache.len() >= mtp_cache.capacity or mtp_cache.len() >= self.band.rope.capacity) return Error.KvCacheOverflow;
 

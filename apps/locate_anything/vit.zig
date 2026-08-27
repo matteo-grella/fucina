@@ -75,24 +75,24 @@ const Layer = struct {
         errdefer norm0_b.deinit();
         var wqkv = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "wqkv.weight")), qkv_dim, hid);
         errdefer wqkv.deinit();
-        const wqkv_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "wqkv.bias")), qkv_dim);
-        errdefer ctx.allocator.free(wqkv_b);
+        const wqkv_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "wqkv.bias")), qkv_dim);
+        errdefer ctx.allocator().free(wqkv_b);
         var wo = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "wo.weight")), hid, hid);
         errdefer wo.deinit();
-        const wo_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "wo.bias")), hid);
-        errdefer ctx.allocator.free(wo_b);
+        const wo_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "wo.bias")), hid);
+        errdefer ctx.allocator().free(wo_b);
         var norm1_w = try weights.loadVector(ctx, try file.get(try t(&name_buf, layer_i, "norm1.weight")), hid, .hidden);
         errdefer norm1_w.deinit();
         var norm1_b = try weights.loadVector(ctx, try file.get(try t(&name_buf, layer_i, "norm1.bias")), hid, .hidden);
         errdefer norm1_b.deinit();
         var fc0 = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "fc0.weight")), config.vit_intermediate, hid);
         errdefer fc0.deinit();
-        const fc0_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "fc0.bias")), config.vit_intermediate);
-        errdefer ctx.allocator.free(fc0_b);
+        const fc0_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "fc0.bias")), config.vit_intermediate);
+        errdefer ctx.allocator().free(fc0_b);
         var fc1 = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "fc1.weight")), hid, config.vit_intermediate);
         errdefer fc1.deinit();
-        const fc1_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "fc1.bias")), hid);
-        errdefer ctx.allocator.free(fc1_b);
+        const fc1_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "fc1.bias")), hid);
+        errdefer ctx.allocator().free(fc1_b);
 
         return .{
             .norm0_w = norm0_w,
@@ -147,7 +147,7 @@ pub const Vit = struct {
     kv_head_for_head: []usize,
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File, config: Config) !Vit {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const hid = config.vit_hidden;
         const patch_dim = config.vit_patch * config.vit_patch * 3;
         const merged_dim = config.vit_merge_h * config.vit_merge_w * hid;
@@ -250,8 +250,8 @@ pub const Vit = struct {
         errdefer x.deinit();
         try x.addAxisVectorInPlace(ctx, self.patch_embed_b, .hidden);
 
-        const pos = try bicubicPosEmb(ctx.allocator, self.pos_emb, self.config.vit_pos_emb_hw, self.config.vit_pos_emb_hw, hid, gh, gw);
-        defer ctx.allocator.free(pos);
+        const pos = try bicubicPosEmb(ctx.allocator(), self.pos_emb, self.config.vit_pos_emb_hw, self.config.vit_pos_emb_hw, hid, gh, gw);
+        defer ctx.allocator().free(pos);
         var pos_t = try Tokens.fromSlice(ctx, .{ n_tok, hid }, pos);
         defer pos_t.deinit();
         try x.addScaledInPlace(ctx, &pos_t, 1.0);
@@ -318,7 +318,7 @@ pub const Vit = struct {
         var x = try self.patchAndPos(ctx, pixel_values, gh, gw);
         errdefer x.deinit();
 
-        var rope_table = try buildRope2dTable(ctx.allocator, gh, gw, self.config.vit_head_dim, self.config.vit_rope_theta);
+        var rope_table = try buildRope2dTable(ctx.allocator(), gh, gw, self.config.vit_head_dim, self.config.vit_rope_theta);
         defer rope_table.deinit();
 
         const n_blocks = if (stop_after_block) |last| last + 1 else self.layers.len;
@@ -337,8 +337,8 @@ pub const Vit = struct {
     pub fn mergePatches(self: *const Vit, ctx: *ExecContext, vit_final: *const Tokens, gh: usize, gw: usize) !fucina.Tensor(.{ .seq, .channel }) {
         const mh = gh / self.config.vit_merge_h;
         const mw = gw / self.config.vit_merge_w;
-        const indices = try ctx.allocator.alloc(usize, mh * mw * 4);
-        defer ctx.allocator.free(indices);
+        const indices = try ctx.allocator().alloc(usize, mh * mw * 4);
+        defer ctx.allocator().free(indices);
         var slot: usize = 0;
         for (0..mh) |a| {
             for (0..mw) |c| {

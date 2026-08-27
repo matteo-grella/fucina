@@ -488,16 +488,16 @@ test "typed results are scope borrows: deinit is a no-op and the scope releases 
     defer x.deinit();
 
     const scope = ctx.openExecScope();
-    const base = ctx.scopes.entries.items.len;
+    const base = ctx.rt.scopes.entries.items.len;
     var idx = try x.argmax(&ctx, .d); // i64: one entry, the buffer
     try std.testing.expect(idx.scope_owned);
-    try std.testing.expectEqual(base + 1, ctx.scopes.entries.items.len);
+    try std.testing.expectEqual(base + 1, ctx.rt.scopes.entries.items.len);
     var mask = try x.compare(&ctx, .gt, 2); // bool: one entry
     try std.testing.expect(mask.scope_owned);
-    try std.testing.expectEqual(base + 2, ctx.scopes.entries.items.len);
+    try std.testing.expectEqual(base + 2, ctx.rt.scopes.entries.items.len);
     var narrow = try x.to(&ctx, .bf16); // grad-carrying 16-bit: buffer + node
     try std.testing.expect(narrow.scope_owned);
-    try std.testing.expectEqual(base + 4, ctx.scopes.entries.items.len);
+    try std.testing.expectEqual(base + 4, ctx.rt.scopes.entries.items.len);
     try std.testing.expectEqualSlices(i64, &.{ 1, 1 }, try idx.dataConst());
 
     // The caller's deinit is a no-op on every borrow, whatever the dtype;
@@ -506,9 +506,9 @@ test "typed results are scope borrows: deinit is a no-op and the scope releases 
     idx.deinit();
     mask.deinit();
     narrow.deinit();
-    try std.testing.expectEqual(base + 4, ctx.scopes.entries.items.len);
+    try std.testing.expectEqual(base + 4, ctx.rt.scopes.entries.items.len);
     ctx.closeExecScope(scope);
-    try std.testing.expectEqual(base, ctx.scopes.entries.items.len);
+    try std.testing.expectEqual(base, ctx.rt.scopes.entries.items.len);
 }
 
 test "a borrow's deinit after its scope closed is still a no-op" {
@@ -592,11 +592,11 @@ test "exec scope holds buffers until close; deinit-ASAP recycles through the poo
         defer ctx.deinit();
         var c = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ side, side }, data);
         defer c.deinit();
-        const base = ctx.buffers.outstandingBuffers();
+        const base = ctx.rt.buffers.outstandingBuffers();
         var cur = try c.add(&ctx, &c);
         for (1..chain_len) |_| {
             const next = try cur.add(&ctx, &c);
-            peak_asap = @max(peak_asap, ctx.buffers.outstandingBuffers() - base);
+            peak_asap = @max(peak_asap, ctx.rt.buffers.outstandingBuffers() - base);
             cur.deinit(); // previous intermediate returns to the pool immediately
             cur = next;
         }
@@ -612,15 +612,15 @@ test "exec scope holds buffers until close; deinit-ASAP recycles through the poo
         defer ctx.deinit();
         var c = try Tensor(.{ .batch, .d }).fromSlice(&ctx, .{ side, side }, data);
         defer c.deinit();
-        const base = ctx.buffers.outstandingBuffers();
+        const base = ctx.rt.buffers.outstandingBuffers();
         const scope = ctx.openExecScope();
         var cur = try c.add(&ctx, &c);
         for (1..chain_len) |_| {
             cur = try cur.add(&ctx, &c);
-            peak_scope = @max(peak_scope, ctx.buffers.outstandingBuffers() - base);
+            peak_scope = @max(peak_scope, ctx.rt.buffers.outstandingBuffers() - base);
         }
         ctx.closeExecScope(scope);
-        try std.testing.expectEqual(base, ctx.buffers.outstandingBuffers());
+        try std.testing.expectEqual(base, ctx.rt.buffers.outstandingBuffers());
     }
     try std.testing.expectEqual(chain_len, peak_scope);
 }

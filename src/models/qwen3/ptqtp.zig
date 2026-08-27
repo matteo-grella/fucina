@@ -81,7 +81,7 @@ pub fn decorate(model: *qwen3.Model, ctx: *ExecContext, decorate_options: Decora
 /// names, so the saved file is independent of this load's fusion decisions.
 /// `src` must be the still-open GGUF this model was loaded from.
 pub fn save(model: *const qwen3.Model, ctx: *ExecContext, io: std.Io, src: *const gguf.File, out_path: []const u8) !ptqtp_gguf.SaveReport {
-    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator());
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
@@ -128,7 +128,7 @@ pub fn save(model: *const qwen3.Model, ctx: *ExecContext, io: std.Io, src: *cons
     const options = ptqtp_gguf.SaveOptions{
         .header_bytes = if (model.weight_mapping) |mapping| mapping.bytes else null,
     };
-    return ptqtp_gguf.saveFile(ctx.allocator, io, src, entries.items, options, out_path);
+    return ptqtp_gguf.saveFile(ctx.allocator(), io, src, entries.items, options, out_path);
 }
 
 /// `weights.layerName` with owned storage — `save` builds its entry list in

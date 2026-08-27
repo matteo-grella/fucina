@@ -253,7 +253,7 @@ fn expectTypedBatchedDotMatchesPerBatchGemm(
     k: usize,
     n: usize,
 ) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const left_values = try allocator.alloc(f32, batch * m * k);
     defer allocator.free(left_values);
     for (left_values, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.7 + 0.3) * 0.5;
@@ -317,7 +317,7 @@ fn expectTypedDotMatchesDirectGemm(
     k: usize,
     n: usize,
 ) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const left_values = try allocator.alloc(f32, m * k);
     defer allocator.free(left_values);
     for (left_values, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.7 + 0.3) * 0.5;

@@ -233,8 +233,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = SegmentSumBackward(tags, seg_axis);
-            const owned_offsets = try ctx.allocator.dupe(usize, offsets);
-            errdefer ctx.allocator.free(owned_offsets);
+            const owned_offsets = try ctx.allocator().dupe(usize, offsets);
+            errdefer ctx.allocator().free(owned_offsets);
             return finishOp(tags, ctx, value, Record{
                 .parents = .{self.grad_state},
                 .offsets = owned_offsets,

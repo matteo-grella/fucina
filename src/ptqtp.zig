@@ -447,7 +447,7 @@ pub fn quantizeMatrix(ctx: *ExecContext, weights: []const f32, n: usize, k: usiz
     const total = std.math.mul(usize, n, k) catch return Error.InvalidShape;
     if (weights.len != total) return Error.InvalidShape;
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const blocks_per_row = k / block_len;
     const plane1 = try allocator.alloc(BlockTQ2_0, n * blocks_per_row);
     errdefer allocator.free(plane1);

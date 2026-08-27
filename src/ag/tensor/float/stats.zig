@@ -168,8 +168,8 @@ pub fn Ops(comptime Self: type) type {
                 break :blk try prepared.?.dataConstChecked();
             };
 
-            const scratch = try ctx.allocator.alloc(f64, classes);
-            defer ctx.allocator.free(scratch);
+            const scratch = try ctx.allocator().alloc(f64, classes);
+            defer ctx.allocator().free(scratch);
 
             const out_shape: [tag_rank]usize = if (tag_rank == 2) .{ rows, num_samples } else .{num_samples};
             var out = try Tensor(.{ .dtype = .i64, .tags = result_tags }).empty(ctx, out_shape);

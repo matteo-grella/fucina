@@ -282,7 +282,7 @@ not on the type:
 | Taken | `take*` ops consume their target in place when `canTakeInPlace()` holds and return the same storage as a new value | releases the (single) reference |
 | Leased | `BufferPool.acquire`/`acquireScratch` handles (`release()`, not `deinit`) | n/a; `release` returns to the pool |
 
-The mode is dynamic state (`ctx.scopes.depth`), not type state, by design:
+The mode is dynamic state (`ctx.rt.scopes.depth`), not type state, by design:
 the same forward function must run caller-owned in inference and
 scope-owned in training (section 2). The cost of that design is exactly
 this table; when in doubt, `defer x.deinit()` is always correct — a

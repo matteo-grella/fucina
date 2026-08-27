@@ -194,8 +194,8 @@ pub fn crossEntropyLoss(
         null;
     errdefer if (none_out) |*value| value.deinit();
     const owns_row_losses = none_out == null;
-    const row_losses: []f32 = if (none_out) |*value| value.data() else try ctx.allocator.alloc(f32, position_count);
-    defer if (owns_row_losses) ctx.allocator.free(row_losses);
+    const row_losses: []f32 = if (none_out) |*value| value.data() else try ctx.allocator().alloc(f32, position_count);
+    defer if (owns_row_losses) ctx.allocator().free(row_losses);
 
     if (inner == 1) {
         const base_task: CrossEntropyLossRowsTask = .{
@@ -635,8 +635,8 @@ pub fn linearDistillLossStats(
 
     // Unique supervised rows (ascending) + the per-entry local remap.
     const sel_rows = blk: {
-        const sorted = try ctx.allocator.dupe(usize, rows);
-        defer ctx.allocator.free(sorted);
+        const sorted = try ctx.allocator().dupe(usize, rows);
+        defer ctx.allocator().free(sorted);
         std.mem.sort(usize, sorted, {}, std.sort.asc(usize));
         var unique: usize = 0;
         for (sorted, 0..) |row, i| {
@@ -645,11 +645,11 @@ pub fn linearDistillLossStats(
                 unique += 1;
             }
         }
-        break :blk try ctx.allocator.dupe(usize, sorted[0..unique]);
+        break :blk try ctx.allocator().dupe(usize, sorted[0..unique]);
     };
-    errdefer ctx.allocator.free(sel_rows);
-    const local_rows = try ctx.allocator.alloc(usize, n);
-    errdefer ctx.allocator.free(local_rows);
+    errdefer ctx.allocator().free(sel_rows);
+    const local_rows = try ctx.allocator().alloc(usize, n);
+    errdefer ctx.allocator().free(local_rows);
     for (local_rows, rows) |*local, row| {
         local.* = std.sort.binarySearch(usize, sel_rows, row, orderUsize).?;
     }
@@ -667,8 +667,8 @@ pub fn linearDistillLossStats(
     var logits = try exec_matmul.matmul(ctx, .f32, .trans_b, &x_sel, weight);
     errdefer logits.deinit();
 
-    const row_stats = try ctx.allocator.alloc(f32, 2 * sel_rows.len);
-    errdefer ctx.allocator.free(row_stats);
+    const row_stats = try ctx.allocator().alloc(f32, 2 * sel_rows.len);
+    errdefer ctx.allocator().free(row_stats);
     dispatchDistillStatsRows(ctx, .{
         .input = logits.dataConst(),
         .row_stats = row_stats,
@@ -752,8 +752,8 @@ pub fn linearDistillBackwardUpstream(
     var grad_common: f32 = gy.item() * options.loss_scale;
     if (options.reduction == .mean) grad_common /= @as(f32, @floatFromInt(n));
 
-    const row_mass = try ctx.allocator.alloc(f32, sel_count);
-    defer ctx.allocator.free(row_mass);
+    const row_mass = try ctx.allocator().alloc(f32, sel_count);
+    defer ctx.allocator().free(row_mass);
     @memset(row_mass, 0);
     for (local_rows, probs) |local, prob| row_mass[local] += grad_common * prob;
 

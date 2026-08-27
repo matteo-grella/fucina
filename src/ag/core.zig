@@ -519,7 +519,7 @@ pub const GradEngine = struct {
     /// checkpoint-recompute contract, `backwardGradSerial`).
     pub fn init(ctx: *ExecContext, mode: Mode) GradEngine {
         return .{
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
             .ctx = ctx,
             .pool = switch (mode) {
                 .parallel => ctx.tryWorkPool() catch null,
@@ -654,8 +654,8 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
     // states would stop at their `.pending` check and report success with
     // missing gradients.
     var seeds_scratch: SmallSlice(?Tensor, 8) = .{};
-    defer seeds_scratch.deinit(ctx.allocator);
-    const seeds = try seeds_scratch.init(ctx.allocator, outputs.len);
+    defer seeds_scratch.deinit(ctx.allocator());
+    const seeds = try seeds_scratch.init(ctx.allocator(), outputs.len);
     @memset(seeds, null);
     defer {
         for (seeds) |*seed| {
@@ -725,13 +725,13 @@ test "backward scheduler releases pending operand on missing gradient" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const parent = try GradState.leaf(ctx.allocator);
+    const parent = try GradState.leaf(ctx.allocator());
     defer parent.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(ctx.allocator, MissingGradientBackward{ .parents = .{parent} });
+    const output = try createNode(ctx.allocator(), MissingGradientBackward{ .parents = .{parent} });
     defer output.release();
 
     try std.testing.expectError(AgError.MissingBackwardGradient, backwardGradOne(&ctx, output, &output_value));
@@ -765,13 +765,13 @@ test "backward scheduler releases pending operand on backward error" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const parent = try GradState.leaf(ctx.allocator);
+    const parent = try GradState.leaf(ctx.allocator());
     defer parent.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try createNode(ctx.allocator, FailingBackward{ .parents = .{parent} });
+    const output = try createNode(ctx.allocator(), FailingBackward{ .parents = .{parent} });
     defer output.release();
 
     try std.testing.expectError(FailingBackward.BackwardError.FailedBackward, backwardGradOne(&ctx, output, &output_value));

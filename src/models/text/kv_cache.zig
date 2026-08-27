@@ -81,7 +81,7 @@ pub const KvCache = struct {
         capacity: usize,
         dtype: KvDtype,
     ) !KvCache {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const kv_heads_arr = try allocator.alloc(usize, num_layers);
         defer allocator.free(kv_heads_arr);
         @memset(kv_heads_arr, kv_heads);
@@ -110,7 +110,7 @@ pub const KvCache = struct {
         capacity: usize,
         dtype: KvDtype,
     ) !KvCache {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const num_layers = head_dims.len;
         std.debug.assert(kv_heads_per_layer.len == num_layers);
         if (dtype == .q8_0) for (head_dims) |head_dim| {

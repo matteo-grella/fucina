@@ -273,8 +273,8 @@ pub fn streamingRelposAttention(
     var bdraw = try qvt.matmul(ctx, &pht, .trans_b, 3); // [H,Tc,P]: (q+v)·pᵀ
     defer bdraw.deinit();
 
-    const mask = try streamingAttnMask(ctx.allocator, tc, tk, cache_len, cache.valid, att_left, att_right);
-    defer ctx.allocator.free(mask);
+    const mask = try streamingAttnMask(ctx.allocator(), tc, tk, cache_len, cache.valid, att_left, att_right);
+    defer ctx.allocator().free(mask);
 
     const acd = try ac.dataConst();
     // Transformer-XL skew via the public relposShift op: bd[H,Tc,P] ->
@@ -545,7 +545,7 @@ pub const StreamingEncoder = struct {
         const tk = self.chan_caches[0].cache_len + tc;
         var pet = try fucina.Tensor(2).empty(ctx, .{ 2 * tk - 1, d }); // [2Tk-1, d]
         defer pet.deinit();
-        try encoder.relPosEncodingInto(ctx.allocator, try pet.data(), tk, d);
+        try encoder.relPosEncodingInto(ctx.allocator(), try pet.data(), tk, d);
 
         var cur = try x.detach(ctx);
         errdefer cur.deinit();

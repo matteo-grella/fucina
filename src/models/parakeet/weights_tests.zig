@@ -24,7 +24,7 @@ test "resident byte registry: non-gpu identity + no growth; gpu cache-hit; deini
     var ctx: fucina.ExecContext = undefined;
     ctx.init(std.testing.allocator);
     defer ctx.deinit();
-    // The resident registry touches only ctx.allocator (not `file`), so a
+    // The resident registry touches only ctx.allocator() (not `file`), so a
     // direct minimal struct suffices — no synthetic GGUF needed. `defer deinit`
     // under the testing allocator is the registry-cleanup check; GPU builds also
     // release any resident shim buffer slot.

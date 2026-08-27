@@ -192,8 +192,8 @@ test "buffer pool reuses bucket-rounded buffers across many small temporaries" {
         y.deinit();
     }
 
-    try std.testing.expect(ctx.buffers.cachedBuffers() >= 1);
-    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
+    try std.testing.expect(ctx.rt.buffers.cachedBuffers() >= 1);
+    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
 }
 
 test "exec context cross entropy ex matches a naive reference across options" {
@@ -555,10 +555,10 @@ test "exec context latches a failed worker pool init and stays serial" {
     // set by hand: every later request must report the failure without
     // touching `work_pool` (`work_pool_ready` stays false, so deinit skips
     // it) and `workPool` must answer null, the serial path.
-    ctx.work_pool_failed = true;
+    ctx.rt.work_pool_failed = true;
     try std.testing.expectError(error.WorkPoolUnavailable, ctx.tryWorkPool());
     try std.testing.expect(ctx.workPool() == null);
-    try std.testing.expect(!ctx.work_pool_ready);
+    try std.testing.expect(!ctx.rt.work_pool_ready);
     try std.testing.expect(ctx.pc().pool == null);
 
     // Kernels still run (serially) on a latched context.
@@ -573,8 +573,8 @@ test "exec context latches a failed worker pool init and stays serial" {
     fresh.init(allocator);
     defer fresh.deinit();
     try std.testing.expect(fresh.workPool() != null);
-    try std.testing.expect(fresh.work_pool_ready);
-    try std.testing.expect(!fresh.work_pool_failed);
+    try std.testing.expect(fresh.rt.work_pool_ready);
+    try std.testing.expect(!fresh.rt.work_pool_failed);
 }
 
 test "exec context reuses buffers for arbitrary broadcast materialization" {
@@ -590,27 +590,27 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     var middle_b = try ctx.broadcastTo(&middle, .{ 2, 4, 3 });
     defer middle_b.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
-    try std.testing.expectEqual(@as(usize, 0), ctx.buffers.cachedBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expectEqual(@as(usize, 0), ctx.rt.buffers.cachedBuffers());
 
     var first = try ctx.elementwise(.f32, .add, &x, &middle_b);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
         4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6,
     }, first.dataConst());
-    try std.testing.expectEqual(@as(usize, 3), ctx.buffers.outstandingBuffers());
-    try std.testing.expect(ctx.buffers.cachedBuffers() >= 1);
+    try std.testing.expectEqual(@as(usize, 3), ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expect(ctx.rt.buffers.cachedBuffers() >= 1);
     first.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
-    const cached_after_first = ctx.buffers.cachedBuffers();
+    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
+    const cached_after_first = ctx.rt.buffers.cachedBuffers();
     try std.testing.expect(cached_after_first >= 2);
 
     var second = try ctx.elementwise(.f32, .add, &x, &middle_b);
     second.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
-    try std.testing.expectEqual(cached_after_first, ctx.buffers.cachedBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
+    try std.testing.expectEqual(cached_after_first, ctx.rt.buffers.cachedBuffers());
 }
 
 test "exec context allocates typed non-f32 tensors without using f32 kernels" {

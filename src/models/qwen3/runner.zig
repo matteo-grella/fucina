@@ -311,7 +311,7 @@ pub const Model = struct {
         // avoids an eager multi-GB heap read that coexists with the
         // materialized weights, and lets MoE experts borrow straight from the
         // mapping (loadGgufFromFile takes ownership of it via takeMapping).
-        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFileOptions(ctx, &file, config, options);
     }
@@ -327,7 +327,7 @@ pub const Model = struct {
         try config.validate();
         if (config.block_style == .host_reference) return loadHostReference(ctx, file, config, options);
 
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var expert_store: ?*fucina.ExpertStore = null;
         if (options.moe_stream) |stream_options| {
@@ -574,7 +574,7 @@ pub const Model = struct {
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
         }
 
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const positions = try a.alloc(i32, n);
         defer a.free(positions);
         for (positions, caches) |*position, kv| position.* = @intCast(kv.len());
@@ -646,7 +646,7 @@ pub const Model = struct {
             for (caches[0..i]) |prev| if (prev == kv) return Error.MismatchedKvCaches;
         }
 
-        const a = ctx.allocator;
+        const a = ctx.allocator();
         const positions = try a.alloc(i32, total);
         defer a.free(positions);
         {
@@ -683,7 +683,7 @@ pub const Model = struct {
     // ---- host_reference band (see `BlockStyle`) --------------------------
 
     fn loadHostReference(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var trunk = try loadHostTrunk(ctx, file, config, options, config.num_layers);
         errdefer trunk.deinit(allocator);
@@ -725,7 +725,7 @@ pub const Model = struct {
     pub fn hostStep(self: *const Model, ctx: *ExecContext, cache: *HostCache, tokens: []const usize) !fucina.Tensor(.{ .seq, .vocab }) {
         const band = if (self.host) |*b| b else return Error.WrongBlockStyle;
         const cfg = self.config;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const x = try allocator.alloc(f32, tokens.len * cfg.hidden_size);
         defer allocator.free(x);
@@ -756,7 +756,7 @@ pub const HostTrunk = struct {
 };
 
 pub fn loadHostTrunk(ctx: *ExecContext, file: *gguf.File, config: Descriptor, options: LoadOptions, store_layers: usize) !HostTrunk {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var expert_store: ?*fucina.ExpertStore = null;
     if (options.moe_stream) |stream_options| {
@@ -1351,8 +1351,8 @@ fn attentionBlockBatchSpans(
     defer k_rope.deinit();
 
     const Out = fucina.Tensor(.{ .seq, .attn });
-    const outs = try ctx.allocator.alloc(Out, caches.len);
-    defer ctx.allocator.free(outs);
+    const outs = try ctx.allocator().alloc(Out, caches.len);
+    defer ctx.allocator().free(outs);
     var built: usize = 0;
     errdefer for (outs[0..built]) |*out| out.deinit();
 
@@ -1394,8 +1394,8 @@ fn attentionBlockBatchSpans(
         attn = outs[0];
         built = 0; // ownership moved
     } else {
-        const rest = try ctx.allocator.alloc(*const Out, outs.len - 1);
-        defer ctx.allocator.free(rest);
+        const rest = try ctx.allocator().alloc(*const Out, outs.len - 1);
+        defer ctx.allocator().free(rest);
         for (rest, outs[1..]) |*ptr, *out| ptr.* = out;
         attn = try outs[0].concat(ctx, .seq, rest);
         for (outs[0..built]) |*out| out.deinit();
@@ -1607,7 +1607,7 @@ fn moeFfn(
     profile: ?*ForwardProfile,
 ) !fucina.Tensor(.{ .seq, .embed }) {
     const router_start = profileStart(profile, io);
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const seq = ffn_in.dim(.seq);
     const top_k = config.num_experts_used;
 
@@ -1974,7 +1974,7 @@ pub const HostLayer = struct {
 };
 
 pub fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descriptor, layer_i: usize, store: ?*fucina.ExpertStore) !HostLayer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [96]u8 = undefined;
 
     const attn_norm = try weights.hostVector(allocator, file, try weights.layerName(&name_buf, layer_i, "attn_norm.weight"), config.hidden_size);
@@ -2059,7 +2059,7 @@ pub fn loadHostLayer(ctx: *ExecContext, file: *const gguf.File, config: Descript
 /// routes the K/V through the MTP stream's own single-layer cache (the
 /// glm4moe `nextn` head); the runner's own entries pass null.
 pub fn hostLayerForward(ctx: *ExecContext, cfg: Descriptor, band: *const HostBand, cache: ?*HostCache, layer: *const HostLayer, layer_i: usize, x: []f32, S: usize, pos0: usize, mtp_cache: ?*HostCache) !void {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const heads_per_kv = cfg.num_attention_heads / cfg.num_key_value_heads;
 
     const h_norm = try allocator.alloc(f32, S * cfg.hidden_size);

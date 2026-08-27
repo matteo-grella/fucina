@@ -592,7 +592,7 @@ fn rmsNormBackwardWeight(
             rmsNormMulBackwardWeightRows(base_task);
             return out;
         }
-        const partials_buffer = try ctx.buffers.acquire(block_count * axis_dim);
+        const partials_buffer = try ctx.rt.buffers.acquire(block_count * axis_dim);
         defer partials_buffer.release();
         const partials = partials_buffer.data[0 .. block_count * axis_dim];
         const blocks_task: RmsNormWeightGradBlocksTask = .{
@@ -1227,9 +1227,9 @@ fn layerNormBackwardDispatchAxisRank(
                     // task structs / kernels), unlike per-task row
                     // partials combined in task order.
                     var stats: []f32 = &.{};
-                    defer if (stats.len > 0) ctx.allocator.free(stats);
+                    defer if (stats.len > 0) ctx.allocator().free(stats);
                     if (need_weight) {
-                        stats = try ctx.allocator.alloc(f32, 2 * outer);
+                        stats = try ctx.allocator().alloc(f32, 2 * outer);
                         const stats_base: LayerNormRowStatsTask = .{
                             .input = input,
                             .stats = stats,

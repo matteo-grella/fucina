@@ -246,12 +246,12 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
     }
     const position_count = spec.positions.len();
     const angle_count = try std.math.mul(usize, position_count, pair_count);
-    const values = try ctx.allocator.alloc(f32, try std.math.mul(usize, angle_count, 2));
-    errdefer ctx.allocator.free(values);
-    const positions_copy = try ctx.allocator.alloc(i32, position_count);
-    errdefer ctx.allocator.free(positions_copy);
-    const refs = try ctx.allocator.create(std.atomic.Value(usize));
-    errdefer ctx.allocator.destroy(refs);
+    const values = try ctx.allocator().alloc(f32, try std.math.mul(usize, angle_count, 2));
+    errdefer ctx.allocator().free(values);
+    const positions_copy = try ctx.allocator().alloc(i32, position_count);
+    errdefer ctx.allocator().free(positions_copy);
+    const refs = try ctx.allocator().create(std.atomic.Value(usize));
+    errdefer ctx.allocator().destroy(refs);
     refs.* = .init(1);
     for (positions_copy, 0..) |*slot, i| slot.* = spec.positions.at(i);
 
@@ -263,8 +263,8 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
             // theta_base^(2i/d) is position-invariant, so hoist the pow; the
             // factors divide must stay per-element — folding it into the
             // cache changes f32 rounding ((pos/a)/b != pos/(a*b)).
-            const pow_cache = try ctx.allocator.alloc(f32, pair_count);
-            defer ctx.allocator.free(pow_cache);
+            const pow_cache = try ctx.allocator().alloc(f32, pair_count);
+            defer ctx.allocator().free(pow_cache);
             for (pow_cache, 0..) |*p, pair_i| {
                 const exponent = @as(f32, @floatFromInt(2 * pair_i)) / @as(f32, @floatFromInt(spec.feature_dim));
                 p.* = std.math.pow(f32, t.base, exponent);
@@ -295,7 +295,7 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
     }
 
     return .{
-        .allocator = ctx.allocator,
+        .allocator = ctx.allocator(),
         .positions = positions_copy,
         .feature_dim = spec.feature_dim,
         .pair_count = pair_count,

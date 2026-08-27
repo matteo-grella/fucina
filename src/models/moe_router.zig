@@ -29,7 +29,7 @@ pub fn cacheRouteSel(gate: *const MoeRhs, choice: []const f32, sel: []usize) boo
 pub fn pilotHintTopK(ctx: *ExecContext, nrm: *const fucina.Tensor(.{ .seq, .embed }), router: *const LinearWeight, top_k: usize, store: *ExpertStore, layer_i: usize) !void {
     var logits = try router.linearSeq(ctx, nrm, .embed, .expert);
     defer logits.deinit();
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const seq = nrm.dim(.seq);
     const sel = try allocator.alloc(usize, seq * top_k);
     defer allocator.free(sel);

@@ -62,15 +62,15 @@ const tiny_moe_config = gemma4.Config{
 };
 
 fn randLinear(ctx: *ExecContext, seed: u64, out_dim: usize, in_dim: usize, bound: f32) !LinearWeight {
-    const values = try ctx.allocator.alloc(f32, out_dim * in_dim);
-    defer ctx.allocator.free(values);
+    const values = try ctx.allocator().alloc(f32, out_dim * in_dim);
+    defer ctx.allocator().free(values);
     rng.uniformFill(seed, values, -bound, bound);
     return .{ .dense = .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) } };
 }
 
 fn randVector(ctx: *ExecContext, seed: u64, comptime tag: Tag, len: usize) !fucina.Tensor(.{tag}) {
-    const values = try ctx.allocator.alloc(f32, len);
-    defer ctx.allocator.free(values);
+    const values = try ctx.allocator().alloc(f32, len);
+    defer ctx.allocator().free(values);
     rng.uniformFill(seed, values, 0.8, 1.2);
     return fucina.Tensor(.{tag}).fromSlice(ctx, .{len}, values);
 }
@@ -126,7 +126,7 @@ fn buildTinyDenseLayer(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4
 }
 
 fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const qm = backend_mod.quantized_matmul;
     const hidden = cfg.hidden_size;
     const n_expert = cfg.num_experts;
@@ -191,7 +191,7 @@ fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn
 }
 
 fn buildTinyModel(ctx: *ExecContext, cfg: gemma4.Config, seed: u64, with_moe: bool) !gemma4.Model {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var token_embedding = try randLinear(ctx, rng.at(seed, 100), cfg.vocab_size, cfg.hidden_size, 0.35);
     errdefer token_embedding.deinit();

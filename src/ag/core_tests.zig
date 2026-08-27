@@ -54,7 +54,7 @@ test "backward scheduler handles more operands than stack scratch capacity" {
         }
     }
     for (0..operand_count) |i| {
-        const parent = try GradState.leaf(ctx.allocator);
+        const parent = try GradState.leaf(ctx.allocator());
         parents[i] = parent;
         parent_operands[i] = parent;
         initialized += 1;
@@ -68,15 +68,15 @@ test "backward scheduler handles more operands than stack scratch capacity" {
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const owned_parents = try ctx.allocator.dupe(?*GradState, &parent_operands);
-    errdefer ctx.allocator.free(owned_parents);
-    const output = try core.createNode(ctx.allocator, WideBackward{ .parents = owned_parents });
+    const owned_parents = try ctx.allocator().dupe(?*GradState, &parent_operands);
+    errdefer ctx.allocator().free(owned_parents);
+    const output = try core.createNode(ctx.allocator(), WideBackward{ .parents = owned_parents });
     defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
 
     for (&parents, 0..) |parent, i| {
-        var grad = (try parent.gradClone(ctx.allocator)).?;
+        var grad = (try parent.gradClone(ctx.allocator())).?;
         defer grad.deinit();
         try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), grad.item());
     }
@@ -107,22 +107,22 @@ test "gradient accumulation copy-on-write protects shared view contributions" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const a = try GradState.leaf(ctx.allocator);
+    const a = try GradState.leaf(ctx.allocator());
     defer a.release();
-    const b = try GradState.leaf(ctx.allocator);
+    const b = try GradState.leaf(ctx.allocator());
     defer b.release();
 
     var output_value = try ctx.scalar(.f32, 0);
     defer output_value.deinit();
 
-    const output = try core.createNode(ctx.allocator, DuplicateViewBackward{ .parents = .{ a, b, a } });
+    const output = try core.createNode(ctx.allocator(), DuplicateViewBackward{ .parents = .{ a, b, a } });
     defer output.release();
 
     try backwardGradOne(&ctx, output, &output_value);
 
-    var ga = (try a.gradClone(ctx.allocator)).?;
+    var ga = (try a.gradClone(ctx.allocator())).?;
     defer ga.deinit();
-    var gb = (try b.gradClone(ctx.allocator)).?;
+    var gb = (try b.gradClone(ctx.allocator())).?;
     defer gb.deinit();
     try std.testing.expectEqual(@as(f32, 2), ga.item());
     try std.testing.expectEqual(@as(f32, 1), gb.item());
@@ -156,13 +156,13 @@ test "multi-output backward adds a seed when a prior output already touched that
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const x = try GradState.leaf(ctx.allocator);
+    const x = try GradState.leaf(ctx.allocator());
     defer x.release();
 
-    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
+    const z = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
     defer z.release();
 
-    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{z}, .factor = 2 });
+    const y = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{z}, .factor = 2 });
     defer y.release();
 
     var y_value = try ctx.scalar(.f32, 0);
@@ -172,11 +172,11 @@ test "multi-output backward adds a seed when a prior output already touched that
 
     try backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value });
 
-    var gz = (try z.gradClone(ctx.allocator)).?;
+    var gz = (try z.gradClone(ctx.allocator())).?;
     defer gz.deinit();
     try std.testing.expectEqual(@as(f32, 3), gz.item());
 
-    var gx = (try x.gradClone(ctx.allocator)).?;
+    var gx = (try x.gradClone(ctx.allocator())).?;
     defer gx.deinit();
     try std.testing.expectEqual(@as(f32, 9), gx.item());
 }
@@ -203,13 +203,13 @@ test "failed output seeding leaves the graph re-runnable" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    const x = try GradState.leaf(ctx.allocator);
+    const x = try GradState.leaf(ctx.allocator());
     defer x.release();
 
-    const y = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 2 });
+    const y = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{x}, .factor = 2 });
     defer y.release();
 
-    const z = try core.createNode(ctx.allocator, ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
+    const z = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{x}, .factor = 3 });
     defer z.release();
 
     var y_value = try ctx.scalar(.f32, 0);
@@ -223,7 +223,7 @@ test "failed output seeding leaves the graph re-runnable" {
         core.AgError.MissingOutputGradient,
         backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value }),
     );
-    try std.testing.expect((try x.gradClone(ctx.allocator)) == null);
+    try std.testing.expect((try x.gradClone(ctx.allocator())) == null);
 
     // Seeding z explicitly repairs the SAME graph: the retry must deliver
     // both contributions to x (stale counters from the failed pass would
@@ -231,7 +231,7 @@ test "failed output seeding leaves the graph re-runnable" {
     z.setGrad(try ctx.scalar(.f32, 1));
     try backwardGrad(&ctx, &.{ y, z }, &.{ &y_value, &z_value });
 
-    var gx = (try x.gradClone(ctx.allocator)).?;
+    var gx = (try x.gradClone(ctx.allocator())).?;
     defer gx.deinit();
     try std.testing.expectEqual(@as(f32, 5), gx.item());
 

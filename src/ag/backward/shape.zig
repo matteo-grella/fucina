@@ -133,7 +133,7 @@ pub fn AxisViewBackward(comptime source_tags: anytype, comptime axes: anytype) t
             if (!core.needs(self, 0)) return;
 
             if (comptime source_tags.len == 0) {
-                out[0] = try gy.clone(ctx.allocator);
+                out[0] = try gy.clone(ctx.allocator());
                 return;
             }
 

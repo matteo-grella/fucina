@@ -264,7 +264,7 @@ pub const Model = struct {
     dec: SeanetW,
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const d: usize = @intCast(file.getInt("pocket.d_model") orelse return Error.MissingMetadata);
         const layers: usize = @intCast(file.getInt("pocket.layers") orelse return Error.MissingMetadata);
         const heads: usize = @intCast(file.getInt("pocket.heads") orelse return Error.MissingMetadata);
@@ -612,7 +612,7 @@ fn transformerForward(
     out_rows: []f32,
 ) !void {
     if (kv.offset + s > kv.cap) return Error.KvOverflow;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const positions = try allocator.alloc(i32, s);
     defer allocator.free(positions);
     for (positions, 0..) |*pp, i| pp.* = @intCast(kv.offset + i);
@@ -951,7 +951,7 @@ pub const Engine = struct {
     temp_default: f32,
 
     pub fn init(ctx: *ExecContext, file: *const gguf.File, voice: []const u8) !Engine {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         var model = try Model.load(ctx, file);
         errdefer model.deinit();
         var kv = try Kv.init(allocator, model.layers, 4096, model.heads, model.hd);

@@ -414,8 +414,8 @@ fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
     // inner > 1: vector lanes across `inner`, every pass streamed row-major;
     // per-lane accumulation order along the axis is the strided scalar
     // loop's, so the lane split is bitwise-neutral.
-    const scratch = try ctx.allocator.alloc(f32, 2 * inner);
-    defer ctx.allocator.free(scratch);
+    const scratch = try ctx.allocator().alloc(f32, 2 * inner);
+    defer ctx.allocator().free(scratch);
     ctx.dispatchInnerLanes(exec_row_ops.VarianceInnerTask, .{
         .input = input,
         .output = output,
@@ -512,8 +512,8 @@ fn standardizeAccum(
     if (inner > 1) {
         // Non-last axis: the inner-lane kernel (lane ranges split across
         // the pool; per-lane order equals the scalar loop below).
-        const scratch = try ctx.allocator.alloc(Acc, 2 * inner);
-        defer ctx.allocator.free(scratch);
+        const scratch = try ctx.allocator().alloc(Acc, 2 * inner);
+        defer ctx.allocator().free(scratch);
         ctx.dispatchInnerLanes(exec_row_ops.StandardizeInnerTask(Acc), .{
             .input = input,
             .output = output,
@@ -626,8 +626,8 @@ fn standardizeBackwardAccum(
     const ddof_count: usize = options.ddof;
     const eps: Acc = @floatCast(options.eps);
     if (inner > 1) {
-        const scratch = try ctx.allocator.alloc(Acc, 5 * inner);
-        defer ctx.allocator.free(scratch);
+        const scratch = try ctx.allocator().alloc(Acc, 5 * inner);
+        defer ctx.allocator().free(scratch);
         ctx.dispatchInnerLanes(exec_row_ops.StandardizeBackwardInnerTask(Acc), .{
             .input = input,
             .grad = upstream,
@@ -817,8 +817,8 @@ pub fn sort(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
 
-    const scratch = try ctx.allocator.alloc(SortPair, axis_dim);
-    defer ctx.allocator.free(scratch);
+    const scratch = try ctx.allocator().alloc(SortPair, axis_dim);
+    defer ctx.allocator().free(scratch);
 
     for (0..outer) |outer_i| {
         const base = outer_i * axis_dim * inner;

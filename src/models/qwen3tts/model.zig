@@ -235,11 +235,11 @@ pub const Stack = struct {
 
     fn load(ctx: *ExecContext, file: *const gguf.File, comptime prefix: []const u8, max_seq: usize) !Stack {
         const cfg = try Config.load(file, prefix, max_seq);
-        const layers = try ctx.allocator.alloc(Layer, cfg.n_layers);
+        const layers = try ctx.allocator().alloc(Layer, cfg.n_layers);
         var built: usize = 0;
         errdefer {
             for (layers[0..built]) |*l| l.deinit();
-            ctx.allocator.free(layers);
+            ctx.allocator().free(layers);
         }
         for (layers, 0..) |*l, i| {
             l.* = try loadLayer(ctx, file, prefix, i, &cfg);
@@ -247,10 +247,10 @@ pub const Stack = struct {
         }
         var output_norm = try loadVec(VecEmbed, ctx, file, prefix ++ ".output_norm.weight", cfg.hidden);
         errdefer output_norm.deinit();
-        const map = try ctx.allocator.alloc(usize, cfg.n_heads);
+        const map = try ctx.allocator().alloc(usize, cfg.n_heads);
         const group = cfg.n_heads / cfg.n_kv_heads;
         for (map, 0..) |*m, h| m.* = h / group;
-        return .{ .cfg = cfg, .layers = layers, .output_norm = output_norm, .kv_head_for_head = map, .allocator = ctx.allocator };
+        return .{ .cfg = cfg, .layers = layers, .output_norm = output_norm, .kv_head_for_head = map, .allocator = ctx.allocator() };
     }
 
     fn deinit(self: *Stack) void {
@@ -413,7 +413,7 @@ pub const Model = struct {
     speaker_dialects: std.StringHashMap([]const u8),
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         var talker = try Stack.load(ctx, file, "talker", 4096);
         errdefer talker.deinit();
         var predictor = try Stack.load(ctx, file, "code_pred", 16);

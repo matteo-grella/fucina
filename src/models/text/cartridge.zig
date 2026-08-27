@@ -497,8 +497,8 @@ fn composedCat(
     comptime side: enum { k, v },
 ) !Kv {
     std.debug.assert(parts.len > 0);
-    const list = try ctx.allocator.alloc(*const Kv, 2 * parts.len + 1);
-    defer ctx.allocator.free(list);
+    const list = try ctx.allocator().alloc(*const Kv, 2 * parts.len + 1);
+    defer ctx.allocator().free(list);
     var n: usize = 0;
     for (parts) |part| {
         const layer = &part.layers[layer_i];
@@ -730,8 +730,8 @@ pub fn distillLoss(
         if (token >= vocab) return Error.InvalidTargets;
     }
 
-    const flat_indices = try ctx.allocator.alloc(usize, n);
-    defer ctx.allocator.free(flat_indices);
+    const flat_indices = try ctx.allocator().alloc(usize, n);
+    defer ctx.allocator().free(flat_indices);
     var weights = try fucina.Tensor(.{.entry}).empty(ctx, .{n});
     defer weights.deinit();
     for (flat_indices, try weights.data(), targets.positions, targets.tokens, targets.logprobs) |*idx, *w, pos, token, logprob| {

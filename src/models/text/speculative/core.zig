@@ -566,7 +566,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
         /// `history` holds every committed token (prompt + generated) and its
         /// LAST element is the token just committed but not yet in `kv`, i.e.
         /// `history.items.len == kv.len() + 1`. `history` must be allocated with
-        /// `ctx.allocator` (the decoder appends committed tokens to it).
+        /// `ctx.allocator()` (the decoder appends committed tokens to it).
         /// Emits each committed token through `sink`, updates `stats`, feeds
         /// `observe`/`observeTopK`. Returns the number of tokens committed
         /// this iteration (>= 1).
@@ -645,7 +645,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
                 try hook.func(hook.ptr, history.items.len, 0, try logits.dataConst());
             }
             const next = try sampler.next(ctx, logits, history.items);
-            try history.append(ctx.allocator, next);
+            try history.append(ctx.allocator(), next);
             try sink.emit(next);
             self.source.observe(history.items[history.items.len - 1 ..]);
             self.stats.committed += 1;
@@ -689,7 +689,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
                 try hook.func(hook.ptr, history.items.len, 0, try logits.dataConst());
             }
             const next = try sampler.next(ctx, &logits, history.items);
-            try history.append(ctx.allocator, next);
+            try history.append(ctx.allocator(), next);
             try sink.emit(next);
             self.source.observe(history.items[history.items.len - 1 ..]);
             return 1;
@@ -755,7 +755,7 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
                 // mutate the row in place; each row is sampled exactly once.
                 const sampled = try sampler.next(ctx, &row, history.items);
                 verified += 1;
-                try history.append(ctx.allocator, sampled);
+                try history.append(ctx.allocator(), sampled);
                 try sink.emit(sampled);
                 const matched = i < draft_len and sampled == verify[i + 1];
                 if (matched) {

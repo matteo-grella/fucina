@@ -297,7 +297,7 @@ fn plainRun(
     defer kv.deinit();
     var sampler = Sampler.init(sampler_cfg);
 
-    try out.appendSlice(ctx.allocator, prompt);
+    try out.appendSlice(ctx.allocator(), prompt);
     if (prompt.len > 1) {
         var pre = try model.forwardStep(ctx, &kv, prompt[0 .. prompt.len - 1], 0);
         pre.deinit();
@@ -308,7 +308,7 @@ fn plainRun(
         defer logits.deinit();
         if (rows) |store| try RowStore.capture(store, out.items.len, 0, try logits.dataConst());
         const next = try sampler.next(ctx, &logits, out.items);
-        try out.append(ctx.allocator, next);
+        try out.append(ctx.allocator(), next);
     }
 }
 
@@ -332,11 +332,11 @@ fn specRun(
     defer kv.deinit();
     var sampler = Sampler.init(sampler_cfg);
 
-    var decoder = try SpeculativeDecoder(qwen3.Model).init(ctx.allocator, source, options);
+    var decoder = try SpeculativeDecoder(qwen3.Model).init(ctx.allocator(), source, options);
     defer decoder.deinit();
     if (rows) |store| decoder.on_verify_row = store.hook();
 
-    try out.appendSlice(ctx.allocator, prompt);
+    try out.appendSlice(ctx.allocator(), prompt);
     if (prompt.len > 1) {
         var pre = try model.forwardStep(ctx, &kv, prompt[0 .. prompt.len - 1], 0);
         pre.deinit();

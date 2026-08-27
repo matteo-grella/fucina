@@ -3280,7 +3280,7 @@ fn buildGoldenLayer(ctx: *ExecContext, data: *const LayerGolden) !Layer {
 /// down with the public `Model.deinit`.
 fn buildGoldenModel(ctx: *ExecContext) !qwen3.Model {
     const cfg = golden_config;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var token_embedding = try goldenLinear(ctx, &golden_token_embedding, cfg.vocab_size, cfg.hidden_size);
     errdefer token_embedding.deinit();

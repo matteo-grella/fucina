@@ -294,10 +294,10 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
     const source_strides = contiguousStridesArray(rank, source.shape);
     const head_log2 = floorPowerOfTwo(head_count);
     var slopes: ?[]f32 = null;
-    defer if (slopes) |values| ctx.allocator.free(values);
+    defer if (slopes) |values| ctx.allocator().free(values);
     if (options.max_bias > 0) {
-        const values = try ctx.allocator.alloc(f32, head_count);
-        errdefer ctx.allocator.free(values);
+        const values = try ctx.allocator().alloc(f32, head_count);
+        errdefer ctx.allocator().free(values);
         for (values, 0..) |*value, head_i| {
             value.* = alibiSlope(head_i, head_log2, options.max_bias);
         }

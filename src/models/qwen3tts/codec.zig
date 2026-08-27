@@ -360,7 +360,7 @@ const dac_strides = [4]usize{ 8, 5, 4, 3 };
 const res_dilations = [3]usize{ 1, 3, 9 };
 
 pub fn load(ctx: *ExecContext, file: *const gguf.File) !Decoder {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const cfg = try Config.fromGguf(file);
     var buf: [128]u8 = undefined;
 
@@ -531,8 +531,8 @@ fn transConvBias(ctx: *ExecContext, x: *const Act, w: *const TConvW, bias: []con
 /// RVQ dequant: codes `[K, T]` row-major (T fastest) → `[T, 512]`.
 fn rvqDecode(ctx: *ExecContext, dec: *const Decoder, codes: []const i32, t: usize) !Act {
     const cfg = &dec.cfg;
-    const indices = try ctx.allocator.alloc(usize, t);
-    defer ctx.allocator.free(indices);
+    const indices = try ctx.allocator().alloc(usize, t);
+    defer ctx.allocator().free(indices);
 
     var group_out: ?Act = null;
     errdefer if (group_out) |*g| g.deinit();
@@ -685,7 +685,7 @@ pub const Taps = struct {
 };
 
 fn capture(ctx: *ExecContext, slot: *?[]f32, x: *const Act) !void {
-    slot.* = try ctx.allocator.dupe(f32, try x.dataConst());
+    slot.* = try ctx.allocator().dupe(f32, try x.dataConst());
 }
 
 /// Decode `codes` (`[K=16, T]` row-major, T fastest) → `[T*1920]` samples,
@@ -745,7 +745,7 @@ pub fn decodeWithTaps(ctx: *ExecContext, dec: *const Decoder, codes: []const i32
     defer wave.deinit();
 
     const rows = try wave.dataConst();
-    const out = try ctx.allocator.alloc(f32, rows.len);
+    const out = try ctx.allocator().alloc(f32, rows.len);
     for (out, rows) |*o, s| o.* = std.math.clamp(s, -1.0, 1.0);
     return out;
 }
@@ -757,8 +757,8 @@ pub fn decodeChunked(ctx: *ExecContext, dec: *const Decoder, codes: []const i32,
     const chunk_frames = @max(1, chunk_frames_in);
     const kq = dec.cfg.n_quantizers;
     if (t == 0 or codes.len != kq * t) return Error.InvalidCodes;
-    const scratch = try ctx.allocator.alloc(i32, kq * @min(t, chunk_frames + left_ctx));
-    defer ctx.allocator.free(scratch);
+    const scratch = try ctx.allocator().alloc(i32, kq * @min(t, chunk_frames + left_ctx));
+    defer ctx.allocator().free(scratch);
     var start: usize = 0;
     while (start < t) {
         const end = @min(start + chunk_frames, t);
@@ -769,8 +769,8 @@ pub fn decodeChunked(ctx: *ExecContext, dec: *const Decoder, codes: []const i32,
             @memcpy(scratch[k * span ..][0..span], codes[k * t + s0 ..][0..span]);
         }
         const audio = try decode(ctx, dec, scratch[0 .. kq * span], span);
-        defer ctx.allocator.free(audio);
-        try out.appendSlice(ctx.allocator, audio[ctx_frames * hop_length ..]);
+        defer ctx.allocator().free(audio);
+        try out.appendSlice(ctx.allocator(), audio[ctx_frames * hop_length ..]);
         start = end;
     }
 }
@@ -1083,7 +1083,7 @@ pub const Streaming = struct {
         defer wave.deinit();
 
         const rows = try wave.dataConst();
-        const out = try ctx.allocator.alloc(f32, rows.len);
+        const out = try ctx.allocator().alloc(f32, rows.len);
         for (out, rows) |*o, sv| o.* = std.math.clamp(sv, -1.0, 1.0);
         return out;
     }

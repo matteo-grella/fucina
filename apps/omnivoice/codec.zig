@@ -1240,16 +1240,16 @@ pub const Encoder = struct {
     /// `Codec.load`: keep `file` open while the `Encoder` lives.
     pub fn load(ctx: *ExecContext, file: *const gguf.File) !Encoder {
         var hubert = try loadHubert(ctx, file);
-        errdefer hubert.deinit(ctx.allocator);
+        errdefer hubert.deinit(ctx.allocator());
         var semantic = try loadSemanticEncoder(ctx, file);
-        errdefer semantic.deinit(ctx.allocator);
+        errdefer semantic.deinit(ctx.allocator());
         var dac_enc = try loadDacEncoder(ctx, file);
-        errdefer dac_enc.deinit(ctx.allocator);
+        errdefer dac_enc.deinit(ctx.allocator());
 
         var name_buf: [128]u8 = undefined;
         var project_in: [n_codebooks]ProjectIn = undefined;
         var loaded: usize = 0;
-        errdefer for (project_in[0..loaded]) |*p| p.deinit(ctx.allocator);
+        errdefer for (project_in[0..loaded]) |*p| p.deinit(ctx.allocator());
         for (0..n_codebooks) |k| {
             project_in[k] = try loadProjectIn(ctx, file, &name_buf, k);
             loaded = k + 1;
@@ -1258,11 +1258,11 @@ pub const Encoder = struct {
         const fc_info = try file.get("fc.weight");
         var fc = try fucina.weights.LinearWeight.load(ctx, fc_info, 1024, 1024);
         errdefer fc.deinit();
-        const fc_bias = try loadVectorF32(ctx.allocator, file, "fc.bias", 1024);
-        errdefer ctx.allocator.free(fc_bias);
+        const fc_bias = try loadVectorF32(ctx.allocator(), file, "fc.bias", 1024);
+        errdefer ctx.allocator().free(fc_bias);
 
         return .{
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
             .hubert = hubert,
             .semantic = semantic,
             .dac = dac_enc,
@@ -1292,15 +1292,15 @@ pub const Codec = struct {
 
     /// Parses + asserts the KV metadata and loads the decode-side weights.
     /// All slices/tensors are owned by the returned `Codec` (allocated from
-    /// `ctx.allocator`); keep `file` open while the `Codec` lives (quantized
+    /// `ctx.allocator()`); keep `file` open while the `Codec` lives (quantized
     /// linears may borrow mmapped bytes).
     pub fn load(ctx: *ExecContext, file: *const gguf.File) !Codec {
         const config = try parseConfig(file);
         var rvq = try loadRvqDecoder(ctx, file, config);
-        errdefer rvq.deinit(ctx.allocator);
+        errdefer rvq.deinit(ctx.allocator());
         var dac = try loadDacDecoder(ctx, file);
-        errdefer dac.deinit(ctx.allocator);
-        return .{ .allocator = ctx.allocator, .config = config, .rvq = rvq, .dac = dac };
+        errdefer dac.deinit(ctx.allocator());
+        return .{ .allocator = ctx.allocator(), .config = config, .rvq = rvq, .dac = dac };
     }
 
     pub fn deinit(self: *Codec) void {
@@ -1424,10 +1424,10 @@ fn loadSnakeRaw(allocator: Allocator, file: *const gguf.File, name: []const u8, 
 /// Loads `*.snake*.alpha` ne=(1, C, 1) as the two per-channel f32 vectors
 /// `a[c] = alpha[c]` and `inv_b[c] = 1/(alpha[c] + 1e-9)`.
 fn loadSnake(ctx: *ExecContext, file: *const gguf.File, name: []const u8, channels: usize) !SnakeParams {
-    const alpha = try loadVectorF32(ctx.allocator, file, name, channels);
-    defer ctx.allocator.free(alpha);
-    const inv = try ctx.allocator.alloc(f32, channels);
-    defer ctx.allocator.free(inv);
+    const alpha = try loadVectorF32(ctx.allocator(), file, name, channels);
+    defer ctx.allocator().free(alpha);
+    const inv = try ctx.allocator().alloc(f32, channels);
+    defer ctx.allocator().free(inv);
     for (inv, alpha) |*dst, a| dst.* = snakeInvB(a);
 
     var a_t = try ChannelVec.fromSlice(ctx, .{channels}, alpha);
@@ -1450,10 +1450,10 @@ fn loadConv1dWeightPair(ctx: *ExecContext, file: *const gguf.File, name: []const
     const info = try file.get(name);
     if (info.n_dims < 1 or info.dims[0] != taps) return Error.InvalidTensorShape;
     const numel = taps * in_ch * out_ch;
-    const src = try decodeTensorF32(ctx.allocator, info, numel);
-    defer ctx.allocator.free(src);
-    const dst = try ctx.allocator.alloc(f32, numel);
-    defer ctx.allocator.free(dst);
+    const src = try decodeTensorF32(ctx.allocator(), info, numel);
+    defer ctx.allocator().free(src);
+    const dst = try ctx.allocator().alloc(f32, numel);
+    defer ctx.allocator().free(dst);
 
     repackConv1dWeight(dst, src, taps, in_ch, out_ch);
     var direct = try ConvWeight.fromSlice(ctx, .{ taps, in_ch, out_ch }, dst);
@@ -1472,10 +1472,10 @@ fn loadConvT1dWeight(ctx: *ExecContext, file: *const gguf.File, name: []const u8
     const info = try file.get(name);
     if (info.n_dims < 1 or info.dims[0] != taps) return Error.InvalidTensorShape;
     const numel = taps * out_ch * in_ch;
-    const src = try decodeTensorF32(ctx.allocator, info, numel);
-    defer ctx.allocator.free(src);
-    const dst = try ctx.allocator.alloc(f32, numel);
-    defer ctx.allocator.free(dst);
+    const src = try decodeTensorF32(ctx.allocator(), info, numel);
+    defer ctx.allocator().free(src);
+    const dst = try ctx.allocator().alloc(f32, numel);
+    defer ctx.allocator().free(dst);
     repackConvT1dWeight(dst, src, taps, out_ch, in_ch);
     return ConvTWeight.fromSlice(ctx, .{ taps * out_ch, in_ch }, dst);
 }
@@ -1484,7 +1484,7 @@ fn loadConvT1dWeight(ctx: *ExecContext, file: *const gguf.File, name: []const u8
 /// encode-only CLI path can skip the (much larger) DAC decoder load — RVQ
 /// encode reads the decode-side codebooks/project_out but never `Codec.dac`.
 pub fn loadRvqDecoder(ctx: *ExecContext, file: *const gguf.File, config: Config) !RvqDecoder {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [128]u8 = undefined;
 
     var quantizers: [n_codebooks]Quantizer = undefined;
@@ -1505,7 +1505,7 @@ pub fn loadRvqDecoder(ctx: *ExecContext, file: *const gguf.File, config: Config)
 }
 
 fn loadQuantizer(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, k: usize, config: Config) !Quantizer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const v = config.codebook_size;
     const d = config.codebook_dim;
 
@@ -1546,7 +1546,7 @@ fn loadQuantizer(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, k: u
 }
 
 fn loadDacDecoder(ctx: *ExecContext, file: *const gguf.File) !DacDecoder {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [128]u8 = undefined;
 
     var conv1 = try loadConv1dWeightPair(ctx, file, "acoustic_decoder.conv1.weight", 7, 256, 1024);
@@ -1592,7 +1592,7 @@ fn loadDacDecoder(ctx: *ExecContext, file: *const gguf.File) !DacDecoder {
 }
 
 fn loadUpBlock(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i: usize) !UpBlock {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const spec = dac_block_specs[i];
 
     const snake_name = try std.fmt.bufPrint(name_buf, "acoustic_decoder.block.{d}.snake1.alpha", .{i});
@@ -1631,7 +1631,7 @@ fn loadUpBlock(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i: usi
 }
 
 fn loadResUnit(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, block_i: usize, r: usize, channels: usize) !ResUnit {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     // Res units are ONE-indexed with no dot: res_unit1..res_unit3.
     const unit = r + 1;
 
@@ -1697,7 +1697,7 @@ fn loadGgmlConvWeight(
     out_ch: usize,
     groups: usize,
 ) !GgmlConvWeight {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const info = try file.get(name);
     if (info.n_dims < 1 or info.dims[0] != taps) return Error.InvalidTensorShape;
     const numel = taps * in_per_group * out_ch;
@@ -1744,7 +1744,7 @@ fn castF16Rows(data: []f16, src: []const f32) void {
 }
 
 fn loadHubert(ctx: *ExecContext, file: *const gguf.File) !Hubert {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [128]u8 = undefined;
 
     var feat: [hubert_feat_num_layers]HubertFeatLayer = undefined;
@@ -1824,16 +1824,16 @@ fn loadHubertLinear(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, l
 
 fn loadHubertBias(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, layer_i: usize, suffix: []const u8, len: usize) ![]f32 {
     const name = try std.fmt.bufPrint(name_buf, "semantic_model.encoder.layers.{d}.{s}.bias", .{ layer_i, suffix });
-    return loadVectorF32(ctx.allocator, file, name, len);
+    return loadVectorF32(ctx.allocator(), file, name, len);
 }
 
 fn loadHubertLn(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, layer_i: usize, suffix: []const u8) ![]f32 {
     const name = try std.fmt.bufPrint(name_buf, "semantic_model.encoder.layers.{d}.{s}", .{ layer_i, suffix });
-    return loadVectorF32(ctx.allocator, file, name, hubert_hidden);
+    return loadVectorF32(ctx.allocator(), file, name, hubert_hidden);
 }
 
 fn loadHubertLayer(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i: usize) !HubertLayer {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const h = hubert_hidden;
 
     var q_proj = try loadHubertLinear(ctx, file, name_buf, i, "attention.q_proj", h, h);
@@ -1892,7 +1892,7 @@ fn loadHubertLayer(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i:
 }
 
 fn loadSemanticEncoder(ctx: *ExecContext, file: *const gguf.File) !SemanticEncoder {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const c = semantic_hidden;
     var name_buf: [128]u8 = undefined;
 
@@ -1934,7 +1934,7 @@ fn loadSemanticEncoder(ctx: *ExecContext, file: *const gguf.File) !SemanticEncod
 }
 
 fn loadDacEncoder(ctx: *ExecContext, file: *const gguf.File) !DacEncoder {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     var name_buf: [128]u8 = undefined;
 
     var conv1_w = try loadGgmlConvWeight(ctx, file, "acoustic_encoder.conv1.weight", 7, 1, 64, 1);
@@ -1972,7 +1972,7 @@ fn loadDacEncoder(ctx: *ExecContext, file: *const gguf.File) !DacEncoder {
 }
 
 fn loadDacEncBlock(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i: usize) !DacEncBlock {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const spec = dac_enc_block_specs[i];
 
     // Res units operate on in_ch; naming trap: `block.{i}.snake1.alpha` and
@@ -2013,7 +2013,7 @@ fn loadDacEncBlock(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, i:
 /// Loads one DAC ENCODER res unit (`acoustic_encoder.block.{i}.res_unit{r+1}`,
 /// one-indexed no dot) with ggml-parity conv weights.
 fn loadEncResUnit(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, block_i: usize, r: usize, channels: usize) !EncResUnit {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const unit = r + 1;
 
     const s1_name = try std.fmt.bufPrint(name_buf, "acoustic_encoder.block.{d}.res_unit{d}.snake1.alpha", .{ block_i, unit });
@@ -2064,8 +2064,8 @@ fn loadProjectIn(ctx: *ExecContext, file: *const gguf.File, name_buf: []u8, k: u
     errdefer weight.deinit();
 
     const b_name = try std.fmt.bufPrint(name_buf, "quantizer.quantizers.{d}.project_in.bias", .{k});
-    const bias = try loadVectorF32(ctx.allocator, file, b_name, 64);
-    errdefer ctx.allocator.free(bias);
+    const bias = try loadVectorF32(ctx.allocator(), file, b_name, 64);
+    errdefer ctx.allocator().free(bias);
 
     return .{ .weight = weight, .bias = bias };
 }

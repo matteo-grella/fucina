@@ -75,13 +75,13 @@ pub const MmProj = struct {
     n_embd: usize,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8) !MmProj {
-        var file = try gguf.File.loadMmapAuto(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmapAuto(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file);
     }
 
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *gguf.File) !MmProj {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const arch = file.getString("general.architecture") orelse return Error.InvalidConfig;
         if (!std.mem.eql(u8, arch, "clip")) return Error.InvalidConfig;
         const vproj = file.getString("clip.vision.projector_type") orelse return Error.InvalidConfig;
@@ -184,7 +184,7 @@ pub const MmProj = struct {
     /// Encode preprocessed patches (from `preprocessImage`) into one
     /// embedding row per patch: [n_patches * n_embd], final-normed.
     pub fn visionEncode(self: *const MmProj, ctx: *ExecContext, patches: []const f32, n_patches: usize) ![]f32 {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const p = patch_size;
         std.debug.assert(patches.len == n_patches * p * p * 3);
 
@@ -314,7 +314,7 @@ pub const MmProj = struct {
 
     /// Dense tower linear through the public load-time packed operation.
     fn packedLinear(ctx: *ExecContext, dense_rhs: *const fucina.PackedRhs(.f32), x: []const f32, rows: usize, in_dim: usize) ![]f32 {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         std.debug.assert(dense_rhs.k == in_dim);
         var input = try ctx.fromBorrowedSlice(.f32, .{ rows, in_dim }, @constCast(x));
         defer input.deinit();
@@ -336,7 +336,7 @@ pub const MmProj = struct {
         profile: *VisionProfile,
         profile_io: ?std.Io,
     ) ![]f32 {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const d = self.hmlp_dims[l];
 
         const linear_start = clockStart(profile_io);
@@ -414,7 +414,7 @@ pub const MmProj = struct {
     /// All frames' table rows resolve in ONE batched lookup; the per-frame
     /// sum stays in mel-bin order (matches the reference's sequential sum).
     pub fn audioEncode(self: *const MmProj, ctx: *ExecContext, dmel: []const u8, n_frames: usize) ![]f32 {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         std.debug.assert(dmel.len == n_frames * n_mels);
 
         const ids = try allocator.alloc(usize, n_frames * n_mels);
@@ -976,7 +976,7 @@ fn dftReal(sin_vals: []const f32, cos_vals: []const f32, in: []const f32, out: [
 /// out[j][i] = W3[j][i] + W3[j][i + in/2] (exact restructuring for the
 /// duplicated still-image pair; see MmProj.s3_folded).
 fn loadFoldedS3(ctx: *ExecContext, info: *const gguf.TensorInfo, out_dim: usize, in_dim: usize) !LinearWeight {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const half = in_dim / 2;
     const folded = try allocator.alloc(f32, out_dim * half);
     defer allocator.free(folded);
@@ -1011,7 +1011,7 @@ fn loadTowerLinear(ctx: *ExecContext, info: *const gguf.TensorInfo, out_dim: usi
     if (info.ggml_type != .bf16 or !materialize_bf16) {
         return LinearWeight.load(ctx, info, out_dim, in_dim);
     }
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const len = out_dim * in_dim;
     if (info.data.len != len * 2) return Error.InvalidWeightShape;
     const f32_vals = try allocator.alloc(f32, len);

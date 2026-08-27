@@ -33,14 +33,14 @@ pub const Engine = struct {
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File) !Engine {
         const config = try Config.load(file);
-        var tok = try tokenizer_mod.Tokenizer.initFromGguf(ctx.allocator, file);
+        var tok = try tokenizer_mod.Tokenizer.initFromGguf(ctx.allocator(), file);
         errdefer tok.deinit();
         var vit = try vit_mod.Vit.load(ctx, file, config);
         errdefer vit.deinit();
         var lm = try lm_mod.Lm.load(ctx, file, config);
         errdefer lm.deinit();
         return .{
-            .allocator = ctx.allocator,
+            .allocator = ctx.allocator(),
             .ctx = ctx,
             .config = config,
             .tok = tok,

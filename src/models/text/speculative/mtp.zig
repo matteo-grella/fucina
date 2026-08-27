@@ -62,7 +62,7 @@ pub fn MtpDraftSource(comptime Model: type) type {
         err: ?anyerror = null,
 
         pub fn init(ctx: *ExecContext, model: *Model, capacity: usize, depth: usize) !Self {
-            const allocator = ctx.allocator;
+            const allocator = ctx.allocator();
             var mtp_cache = try model.initMtpCache(capacity);
             errdefer mtp_cache.deinit();
             const hidden = model.config.hidden_size;

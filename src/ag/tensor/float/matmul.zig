@@ -371,7 +371,7 @@ pub fn Ops(comptime Self: type) type {
             defer weight_ready.deinit();
 
             // Per-tensor absmean scale + round-clip encode of the latent weight.
-            var rhs = try backend_mod.kernels.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator, k, n, weight_ready.dataConst());
+            var rhs = try backend_mod.kernels.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator(), k, n, weight_ready.dataConst());
             var rhs_owned = true;
             errdefer if (rhs_owned) rhs.deinit();
 

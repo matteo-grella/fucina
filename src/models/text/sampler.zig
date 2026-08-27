@@ -121,7 +121,7 @@ pub const Sampler = struct {
 
         var probs_buf: [max_candidates]f32 = undefined;
         var heap_probs: ?[]f32 = null;
-        defer if (heap_probs) |hp| ctx.allocator.free(hp);
+        defer if (heap_probs) |hp| ctx.allocator().free(hp);
         var probs: []f32 = probs_buf[0..k];
         var keep = k;
 
@@ -180,8 +180,8 @@ pub const Sampler = struct {
                 if (k <= max_candidates) {
                     probs = probs_buf[0..k];
                 } else {
-                    if (heap_probs) |hp| ctx.allocator.free(hp);
-                    heap_probs = try ctx.allocator.alloc(f32, k);
+                    if (heap_probs) |hp| ctx.allocator().free(hp);
+                    heap_probs = try ctx.allocator().alloc(f32, k);
                     probs = heap_probs.?;
                 }
             }

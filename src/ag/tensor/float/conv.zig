@@ -285,8 +285,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_input.deinit();
             var saved_kernel = try kernel.asRawTensor().cloneView();
             errdefer saved_kernel.deinit();
-            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
-            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator().dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator().free(s);
             return finishOp(tags, ctx, value, Record{
                 .parents = .{ self.grad_state, kernel.grad_state },
                 .input_shape = rawShapeArray(tags, self.asRawTensor()),
@@ -336,8 +336,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_input.deinit();
             var saved_weight = try weight.asRawTensor().cloneView();
             errdefer saved_weight.deinit();
-            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
-            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator().dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator().free(s);
             return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
                 .parents = .{ self.grad_state, weight.grad_state },
                 .input_shape = rawShapeArray(tags, self.asRawTensor()),
@@ -384,8 +384,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer saved_input.deinit();
             var saved_weight = try weight.asRawTensor().cloneView();
             errdefer saved_weight.deinit();
-            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator.dupe(f32, s) else null;
-            errdefer if (owned_state) |s| ctx.allocator.free(s);
+            const owned_state: ?[]f32 = if (state) |s| try ctx.allocator().dupe(f32, s) else null;
+            errdefer if (owned_state) |s| ctx.allocator().free(s);
             return finishOp(.{ time_tag, out_tag }, ctx, value, Record{
                 .parents = .{ self.grad_state, weight.grad_state },
                 .input_shape = rawShapeArray(tags, self.asRawTensor()),

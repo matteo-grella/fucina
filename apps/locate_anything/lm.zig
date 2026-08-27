@@ -72,16 +72,16 @@ const Layer = struct {
         errdefer attn_norm.deinit();
         var q_proj = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "attn_q.weight")), q_dim, hid);
         errdefer q_proj.deinit();
-        const q_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "attn_q.bias")), q_dim);
-        errdefer ctx.allocator.free(q_b);
+        const q_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "attn_q.bias")), q_dim);
+        errdefer ctx.allocator().free(q_b);
         var k_proj = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "attn_k.weight")), kv_dim, hid);
         errdefer k_proj.deinit();
-        const k_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "attn_k.bias")), kv_dim);
-        errdefer ctx.allocator.free(k_b);
+        const k_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "attn_k.bias")), kv_dim);
+        errdefer ctx.allocator().free(k_b);
         var v_proj = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "attn_v.weight")), kv_dim, hid);
         errdefer v_proj.deinit();
-        const v_b = try loadRawVector(ctx.allocator, try file.get(try t(&name_buf, layer_i, "attn_v.bias")), kv_dim);
-        errdefer ctx.allocator.free(v_b);
+        const v_b = try loadRawVector(ctx.allocator(), try file.get(try t(&name_buf, layer_i, "attn_v.bias")), kv_dim);
+        errdefer ctx.allocator().free(v_b);
         var o_proj = try LinearWeight.load(ctx, try file.get(try t(&name_buf, layer_i, "attn_o.weight")), hid, q_dim);
         errdefer o_proj.deinit();
         var ffn_norm = try weights.loadVector(ctx, try file.get(try t(&name_buf, layer_i, "ffn_norm.weight")), hid, .embed);
@@ -136,7 +136,7 @@ const LayerLoader = struct {
     }
 
     pub fn deinitLayer(self: LayerLoader, layer: *Layer) void {
-        layer.deinit(self.ctx.allocator);
+        layer.deinit(self.ctx.allocator());
     }
 };
 
@@ -178,7 +178,7 @@ pub const Lm = struct {
     kv_head_for_head: []usize,
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File, config: Config) !Lm {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         const tok_embd_info = try file.get("lm.tok_embd.weight");
         if (tok_embd_info.ggml_type != .f32) return weights.Error.UnsupportedWeightType;
@@ -247,7 +247,7 @@ pub const Lm = struct {
     }
 
     pub fn initCache(self: *const Lm, ctx: *ExecContext, capacity: usize) !Cache {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const n_layers = self.config.lm_n_layers;
         const k = try allocator.alloc(KvTensor, n_layers);
         errdefer allocator.free(k);
@@ -427,7 +427,7 @@ pub const Lm = struct {
         pos0: usize,
         logits_out: []f32,
     ) !void {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const positions = try allocator.alloc(i32, n_new);
         defer allocator.free(positions);
         for (positions, 0..) |*p, i| p.* = @intCast(pos0 + i);
@@ -486,7 +486,7 @@ pub const Lm = struct {
         n_recompute: usize,
         logits_block_out: []f32,
     ) !void {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
         const block = self.config.lm_block_size;
         const n_new = n_recompute + block;
         const cached_len = cache.len;

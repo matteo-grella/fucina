@@ -182,7 +182,7 @@ pub fn featOutputLength(n_samples: usize) ?usize {
 /// features `[T_s, 768]` tagged `[.seq, .in]`, ready for the SemanticEncoder
 /// conv stack.
 pub fn forward(ctx: *ExecContext, hub: *const codec.Hubert, audio_16k: []const f32, taps: ?*Taps) !Act {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const eps = codec.hubert_ln_eps;
 
     // --- input prep: zero-pad 160 samples on each side --------------------
@@ -254,7 +254,7 @@ pub fn forward(ctx: *ExecContext, hub: *const codec.Hubert, audio_16k: []const f
 /// pos_conv_embed(x) → residual add → encoder LayerNorm (states[0]).
 /// Returns a new owned `[t, 768]` buffer.
 fn encInit(ctx: *ExecContext, hub: *const codec.Hubert, x: []const f32, t: usize) ![]f32 {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     // Grouped pos conv (k=128, groups=16, pad=64, WITH bias): the even
     // kernel yields T+1 frames; SamePad drops the LAST frame; GELU-erf.
@@ -277,7 +277,7 @@ fn encInit(ctx: *ExecContext, hub: *const codec.Hubert, x: []const f32, t: usize
 /// One Post-LN layer: x = LN(r + MHA(x)); x = LN(x + FFN(x)). Returns a new
 /// owned `[t, 768]` buffer.
 fn layerForward(ctx: *ExecContext, layer: *const codec.HubertLayer, x: []const f32, t: usize) ![]f32 {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const eps = codec.hubert_ln_eps;
 
     const cur = try attention(ctx, layer, x, t);
@@ -297,7 +297,7 @@ fn layerForward(ctx: *ExecContext, layer: *const codec.HubertLayer, x: []const f
 /// ggml-parity softmax → out = scores·v (sgemm), exactly the reference's
 /// per-head mul_mat decomposition on the BLAS backend.
 fn attention(ctx: *ExecContext, layer: *const codec.HubertLayer, x: []const f32, t: usize) ![]f32 {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const heads = codec.hubert_num_heads;
     const d = codec.hubert_head_dim;
 
@@ -388,7 +388,7 @@ const AttnHeadTask = struct {
 /// Returns a new owned `[t, 768]` buffer.
 fn ffn(ctx: *ExecContext, layer: *const codec.HubertLayer, x: []const f32, t: usize) ![]f32 {
     const f = try linearHost(ctx, &layer.fc1, x, t, hidden, .embed, .ffn, layer.fc1_bias);
-    defer ctx.allocator.free(f);
+    defer ctx.allocator().free(f);
     codec.geluErfGgml(f);
     return linearHost(ctx, &layer.fc2, f, t, codec.hubert_ffn_inner, .ffn, .embed, layer.fc2_bias);
 }
@@ -411,7 +411,7 @@ fn linearHost(
     var y = try weight.linearSeq(ctx, &xt, in_tag, out_tag);
     defer y.deinit();
     try y.addAxisVectorInPlace(ctx, bias, out_tag);
-    return ctx.allocator.dupe(f32, try y.dataConst());
+    return ctx.allocator().dupe(f32, try y.dataConst());
 }
 
 fn captureTap(allocator: Allocator, data: []const f32, t: usize, c: usize) !Tap {

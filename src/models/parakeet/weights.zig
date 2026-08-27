@@ -46,7 +46,7 @@ pub const ParakeetWeights = struct {
     resident: weights.ResidentByteRegistry,
 
     pub fn init(ctx: *ExecContext, file: *const gguf.File) ParakeetWeights {
-        return .{ .ctx = ctx, .file = file, .allocator = ctx.allocator, .resident = weights.ResidentByteRegistry.init(ctx.allocator) };
+        return .{ .ctx = ctx, .file = file, .allocator = ctx.allocator(), .resident = weights.ResidentByteRegistry.init(ctx.allocator()) };
     }
 
     pub fn deinit(self: *ParakeetWeights) void {

@@ -215,8 +215,8 @@ pub const UncondBias = fucina.Tensor(.{ .sq, .skv });
 /// MaskGIT steps of a chunk, mirroring the reference MaskgitBatchedCtx).
 pub fn buildUncondBias(ctx: *ExecContext, seq_len: usize, u_len: usize) !UncondBias {
     if (u_len > seq_len or seq_len == 0) return Error.InvalidSequenceLength;
-    const data = try ctx.allocator.alloc(f32, seq_len * seq_len);
-    defer ctx.allocator.free(data);
+    const data = try ctx.allocator().alloc(f32, seq_len * seq_len);
+    defer ctx.allocator().free(data);
     @memset(data, 0.0);
     for (0..u_len) |sq| {
         @memset(data[sq * seq_len ..][0..u_len], 1.0);
@@ -264,7 +264,7 @@ pub const Model = struct {
     kv_head_for_head: []usize,
 
     pub fn load(ctx: *ExecContext, file: *const gguf.File, config: Config) !Model {
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var embed_tokens = try LinearWeight.load(ctx, try file.get("llm.embed_tokens.weight"), config.vocab_size, config.hidden_size);
         errdefer embed_tokens.deinit();
@@ -453,7 +453,7 @@ pub const Model = struct {
         const cfg = &self.config;
         const seq_len = audio_mask.len;
         const hidden = cfg.hidden_size;
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         // Text rows: row k=0 of ids, gathered UNMASKED (audio positions look
         // up their in-range audio id in the text table; the row is discarded
@@ -782,8 +782,8 @@ fn biasedAttentionPerHead(
     const head_dim = q.dim(.d);
     const attn_dim = num_heads * head_dim;
 
-    const out_buf = try ctx.allocator.alloc(f32, seq_len * attn_dim);
-    defer ctx.allocator.free(out_buf);
+    const out_buf = try ctx.allocator().alloc(f32, seq_len * attn_dim);
+    defer ctx.allocator().free(out_buf);
 
     for (0..num_heads) |head_i| {
         const kv_i = kv_head_for_head[head_i];

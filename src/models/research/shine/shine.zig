@@ -279,7 +279,7 @@ pub const Shine = struct {
     metalora: LoraSet,
 
     pub fn loadGguf(ctx: *ExecContext, io: std.Io, path: []const u8, base: qwen3.Config) !Shine {
-        var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+        var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
         defer file.deinit();
         return loadGgufFromFile(ctx, &file, base);
     }
@@ -287,7 +287,7 @@ pub const Shine = struct {
     pub fn loadGgufFromFile(ctx: *ExecContext, file: *const gguf.File, base: qwen3.Config) !Shine {
         const config = try Config.fromGguf(file);
         try config.validate(base);
-        const allocator = ctx.allocator;
+        const allocator = ctx.allocator();
 
         var mem_tokens = try loadMatrix(ctx, file, "mem_tokens", config.num_mem_token, config.hidden_size, .{ .mem, .embed });
         errdefer mem_tokens.deinit();
@@ -359,7 +359,7 @@ fn loadPair(ctx: *ExecContext, file: *const gguf.File, base: qwen3.Config, r: us
 }
 
 fn loadLoraSet(ctx: *ExecContext, file: *const gguf.File, base: qwen3.Config, r: usize, num_layers: usize, comptime prefix: []const u8) !LoraSet {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const layers = try allocator.alloc(LayerLora, num_layers);
     var loaded: usize = 0;
     errdefer {
@@ -438,7 +438,7 @@ pub fn loadLoraFromFile(ctx: *ExecContext, file: *const gguf.File, base: qwen3.C
 }
 
 pub fn loadLoraGguf(ctx: *ExecContext, io: std.Io, path: []const u8, base: qwen3.Config) !LoraSet {
-    var file = try gguf.File.loadMmap(ctx.allocator, io, path);
+    var file = try gguf.File.loadMmap(ctx.allocator(), io, path);
     defer file.deinit();
     return loadLoraFromFile(ctx, &file, base);
 }
@@ -595,8 +595,8 @@ pub fn encodeMemoryStates(
     var x_released = false;
     errdefer if (!x_released) x.deinit();
 
-    const capture = try ctx.allocator.alloc(f32, base.num_layers * mem * hidden);
-    defer ctx.allocator.free(capture);
+    const capture = try ctx.allocator().alloc(f32, base.num_layers * mem * hidden);
+    defer ctx.allocator().free(capture);
 
     for (model.layers, 0..) |*layer, layer_i| {
         x = try ctx.replace(x, loraLayerForward(ctx, base, layer, &sh.metalora.layers[layer_i], &x, &rope_table, model.kv_head_for_head, null, layer_i));
@@ -704,8 +704,8 @@ pub fn m2pInput(
     const layers = sh.config.num_layers;
     const mem = sh.config.num_mem_token;
     const hidden = sh.config.hidden_size;
-    const pe = try ctx.allocator.alloc(f32, layers * mem * hidden);
-    defer ctx.allocator.free(pe);
+    const pe = try ctx.allocator().alloc(f32, layers * mem * hidden);
+    defer ctx.allocator().free(pe);
     const layer_pe = try sh.layer_pe.dataConst();
     const token_pe = try sh.token_pe.dataConst();
     for (0..layers) |l| {
@@ -760,7 +760,7 @@ pub fn sliceLora(
     scale: f32,
     plain: *const fucina.Tensor(.{ .layer, .mem, .embed }),
 ) !LoraSet {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var scaled = try plain.scale(ctx, @sqrt(scale));
     defer scaled.deinit();

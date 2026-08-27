@@ -104,7 +104,7 @@ pub fn parallelLoadLayers(
         return;
     };
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const slots = try allocator.alloc(?anyerror, layers.len);
     defer allocator.free(slots);
     @memset(slots, null);

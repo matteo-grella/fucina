@@ -65,8 +65,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = ZeroRowsBackward(tags, zero_axis);
-            const owned_indices = try ctx.allocator.dupe(usize, indices);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, indices);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .indices = owned_indices });
         }
 
@@ -109,7 +109,7 @@ pub fn Ops(comptime Self: type) type {
             }
             const idx_raw = indices.asRawTensor();
             const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), self.asRawTensor().shape.at(comptime axis(tag)));
-            defer ctx.allocator.free(idx_buf);
+            defer ctx.allocator().free(idx_buf);
             return self.gather(ctx, tag, idx_buf, out_tag);
         }
 
@@ -141,8 +141,8 @@ pub fn Ops(comptime Self: type) type {
             for (mask_values) |mv| count += @intFromBool(dtype_mod.isTruthy(Mask.dtype, mv));
             if (count == 0) return TensorError.EmptySelection;
 
-            const indices = try ctx.allocator.alloc(usize, count);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, count);
+            defer ctx.allocator().free(indices);
             var slot: usize = 0;
             for (mask_values, 0..) |mv, i| {
                 if (dtype_mod.isTruthy(Mask.dtype, mv)) {
@@ -158,7 +158,7 @@ pub fn Ops(comptime Self: type) type {
 
         /// Row-major flat indices of the nonzero elements (torch.nonzero
         /// over the flattened tensor; NaN counts as nonzero), returned as
-        /// a HOST slice the caller owns and frees with `ctx.allocator` —
+        /// a HOST slice the caller owns and frees with `ctx.allocator()` —
         /// the design keeps data-dependent cardinality host-side, where
         /// `[]usize` pairs directly with `gather`/`setRows`/`indexAdd`/
         /// `oneHot`, so a no-match result is just an empty slice (no
@@ -168,7 +168,7 @@ pub fn Ops(comptime Self: type) type {
             const values = try self.asRawTensor().dataConstChecked();
             var count: usize = 0;
             for (values) |v| count += @intFromBool(v != 0);
-            const indices = try ctx.allocator.alloc(usize, count);
+            const indices = try ctx.allocator().alloc(usize, count);
             var slot: usize = 0;
             for (values, 0..) |v, i| {
                 if (v != 0) {
@@ -218,8 +218,8 @@ pub fn Ops(comptime Self: type) type {
             // Selected position i gathers values[k(i)]; unselected positions
             // gather values[0] as a placeholder that `where` discards — its
             // gradient contribution is exactly the zeros `where` routes there.
-            const indices = try ctx.allocator.alloc(usize, mask_values.len);
-            defer ctx.allocator.free(indices);
+            const indices = try ctx.allocator().alloc(usize, mask_values.len);
+            defer ctx.allocator().free(indices);
             var slot: usize = 0;
             for (mask_values, indices) |mv, *index| {
                 if (dtype_mod.isTruthy(Mask.dtype, mv)) {
@@ -252,8 +252,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or update.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = IndexAddBackward(tags, add_axis);
-            const owned_indices = try ctx.allocator.dupe(usize, indices);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, indices);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(tags, ctx, value, Record{ .parents = .{ self.grad_state, update.grad_state }, .indices = owned_indices });
         }
 
@@ -262,8 +262,8 @@ pub fn Ops(comptime Self: type) type {
         /// out-of-range values error with `IndexOutOfBounds`). Caller
         /// frees.
         fn hostIndexBuffer(ctx: *ExecContext, values: []const i64, limit: usize) ![]usize {
-            const out = try ctx.allocator.alloc(usize, values.len);
-            errdefer ctx.allocator.free(out);
+            const out = try ctx.allocator().alloc(usize, values.len);
+            errdefer ctx.allocator().free(out);
             for (values, out) |v, *slot| {
                 if (v < 0 or v >= limit) return TensorError.IndexOutOfBounds;
                 slot.* = @intCast(v);
@@ -291,13 +291,13 @@ pub fn Ops(comptime Self: type) type {
                 if (i != take_axis and idx_raw.shape.at(i) != raw.shape.at(i)) return TensorError.ShapeMismatch;
             }
             const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), raw.shape.at(take_axis));
-            defer ctx.allocator.free(idx_buf);
+            defer ctx.allocator().free(idx_buf);
             var value = try ctx.takeAlong(tag_rank, raw, take_axis, idx_buf, idx_raw.shape.at(take_axis));
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = TakeAlongBackward(tags, take_axis);
-            const owned_indices = try ctx.allocator.dupe(usize, idx_buf);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, idx_buf);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(tags, ctx, value, Record{
                 .parents = .{self.grad_state},
                 .indices = owned_indices,
@@ -342,7 +342,7 @@ pub fn Ops(comptime Self: type) type {
                 if (idx_raw.shape.at(i) != src_raw.shape.at(i)) return TensorError.ShapeMismatch;
             }
             const idx_buf = try hostIndexBuffer(ctx, try idx_raw.dataConstChecked(), raw.shape.at(scatter_axis));
-            defer ctx.allocator.free(idx_buf);
+            defer ctx.allocator().free(idx_buf);
             var value = if (comptime accumulate)
                 try ctx.scatterAddAlong(tag_rank, raw, src_raw, scatter_axis, idx_buf)
             else
@@ -350,8 +350,8 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or src.requiresGrad())) return finishNoGrad(tags, ctx, value);
             const Record = ScatterAlongBackward(tags, scatter_axis, accumulate);
-            const owned_indices = try ctx.allocator.dupe(usize, idx_buf);
-            errdefer ctx.allocator.free(owned_indices);
+            const owned_indices = try ctx.allocator().dupe(usize, idx_buf);
+            errdefer ctx.allocator().free(owned_indices);
             return finishOp(tags, ctx, value, Record{
                 .parents = .{ self.grad_state, src.grad_state },
                 .indices = owned_indices,

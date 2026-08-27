@@ -80,8 +80,8 @@ pub fn Ops(comptime Self: type) type {
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
                 const Record = RopeBackward(tags, position_axis, feature_axis, mode);
-                const owned_positions = try ctx.allocator.dupe(i32, theta.positions);
-                errdefer ctx.allocator.free(owned_positions);
+                const owned_positions = try ctx.allocator().dupe(i32, theta.positions);
+                errdefer ctx.allocator().free(owned_positions);
                 return finishOp(tags, ctx, value, Record{
                     .parents = .{self.grad_state},
                     .positions = owned_positions,

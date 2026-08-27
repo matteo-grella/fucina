@@ -45,7 +45,7 @@ pub fn Ops(comptime Self: type) type {
             comptime requireGradDtype("variable");
             var v = value;
             try validateTensorRank(dtype, tags, &v);
-            const state = try GradState.leaf(ctx.allocator);
+            const state = try GradState.leaf(ctx.allocator());
             errdefer state.release();
             return .{ .value = v, .grad_state = state };
         }
@@ -71,7 +71,7 @@ pub fn Ops(comptime Self: type) type {
         pub fn grad(self: *const Self, ctx: *ExecContext) !?Grad {
             comptime requireGradDtype("grad");
             const state = self.grad_state orelse return null;
-            var value = (try state.gradClone(ctx.allocator)) orelse return null;
+            var value = (try state.gradClone(ctx.allocator())) orelse return null;
             errdefer value.deinit();
             return try Grad.constant(ctx, value);
         }

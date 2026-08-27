@@ -20,8 +20,8 @@ const ExecContext = fucina.ExecContext;
 /// rope families. Caller frees the returned slice.
 pub fn yarnBlendInvFreqsF64(ctx: *ExecContext, dim: usize, base: f64, factor: f64, orig_ctx: usize) ![]f64 {
     const pairs = dim / 2;
-    const inv_freq = try ctx.allocator.alloc(f64, pairs);
-    errdefer ctx.allocator.free(inv_freq);
+    const inv_freq = try ctx.allocator().alloc(f64, pairs);
+    errdefer ctx.allocator().free(inv_freq);
     for (inv_freq, 0..) |*f, i| {
         f.* = std.math.pow(f64, base, -(@as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(dim))));
     }

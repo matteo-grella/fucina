@@ -95,7 +95,7 @@ pub fn Engine(comptime TokMod: type) type {
         /// reply text streams to `sink` (flushed per token). The cache is
         /// created for this call and dropped with it.
         pub fn generate(self: *Self, prompt: []const usize, opts: GenerateOptions, sink: *std.Io.Writer) !GenerateResult {
-            const a = self.ctx.allocator;
+            const a = self.ctx.allocator();
             const capacity = @min(opts.capacity, prompt.len + opts.max_tokens + 1);
             var cache = try self.model.initCache(self.ctx, capacity);
             defer cache.deinit();

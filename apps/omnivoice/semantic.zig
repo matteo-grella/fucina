@@ -24,7 +24,7 @@ pub const Act = fucina.Tensor(.{ .seq, .in });
 /// The whole stack runs host-side with the reference's exact arithmetic
 /// (ggml-parity f16 convs + libm-parity ELU).
 pub fn forward(ctx: *ExecContext, sem: *const codec.SemanticEncoder, features: *const Act) !Act {
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var x = try codec.ggmlConv1d(allocator, try features.dataConst(), features.dim(.seq), features.dim(.in), &sem.conv_w, null, 1, 1, 1);
     errdefer allocator.free(x.data);

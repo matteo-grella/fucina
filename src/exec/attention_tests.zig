@@ -473,7 +473,7 @@ test "tiled attention pool gate: small jobs stay serial and match the parallel s
         defer v.deinit();
         var out = try ctx.groupedAttention(&q, .{ .f32 = .{ .k = &k, .v = &v } }, &kv_head_for_head, 0.25, .{});
         defer out.deinit();
-        try std.testing.expect(!ctx.work_pool_ready);
+        try std.testing.expect(!ctx.rt.work_pool_ready);
     }
 
     // Above the gate (48*48*8*64 = 1179648) the job splits across the pool.

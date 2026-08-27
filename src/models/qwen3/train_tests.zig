@@ -50,8 +50,8 @@ const long_inputs = long_tokens[0..long_seq];
 const long_labels = long_tokens[1..];
 
 fn randLinear(ctx: *ExecContext, seed: u64, out_dim: usize, in_dim: usize, bound: f32) !weights.LinearWeight {
-    const values = try ctx.allocator.alloc(f32, out_dim * in_dim);
-    defer ctx.allocator.free(values);
+    const values = try ctx.allocator().alloc(f32, out_dim * in_dim);
+    defer ctx.allocator().free(values);
     rng.uniformFill(seed, values, -bound, bound);
     return .{ .dense = .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) } };
 }
@@ -100,8 +100,8 @@ fn toServingQuant(ctx: *ExecContext, w: *weights.LinearWeight, comptime format: 
     const in_dim = src.dim(.in);
     std.debug.assert(in_dim % block_len == 0);
     const values = try src.dataConst();
-    const blocks = try ctx.allocator.alloc(Block, values.len / block_len);
-    defer ctx.allocator.free(blocks);
+    const blocks = try ctx.allocator().alloc(Block, values.len / block_len);
+    defer ctx.allocator().free(blocks);
     switch (format) {
         .q8_0 => try quant_encode.q8k.quantizeRowQ8_0Into(blocks, values),
         .q4_k => try quant_encode.q4_k.quantizeRowQ4_KInto(blocks, values),
@@ -180,8 +180,8 @@ fn zeroDeltaMaxDiff(ctx: *ExecContext, model: *const qwen3.Model, tokens: []cons
 }
 
 fn randVector(ctx: *ExecContext, seed: u64, comptime tag: @TypeOf(.tag), len: usize) !fucina.Tensor(.{tag}) {
-    const values = try ctx.allocator.alloc(f32, len);
-    defer ctx.allocator.free(values);
+    const values = try ctx.allocator().alloc(f32, len);
+    defer ctx.allocator().free(values);
     rng.uniformFill(seed, values, 0.8, 1.2); // norm-weight-shaped: near one
     return fucina.Tensor(.{tag}).fromSlice(ctx, .{len}, values);
 }
@@ -243,8 +243,8 @@ pub fn buildTinyModel(ctx: *ExecContext, seed: u64) !qwen3.Model {
 /// `num_attention_heads != 2 * num_key_value_heads`. Layer count comes
 /// from `cfg.num_layers`.
 pub fn buildTinyModelWithConfig(ctx: *ExecContext, cfg: qwen3.Config, seed: u64) !qwen3.Model {
-    const indices = try ctx.allocator.alloc(usize, cfg.num_layers);
-    defer ctx.allocator.free(indices);
+    const indices = try ctx.allocator().alloc(usize, cfg.num_layers);
+    defer ctx.allocator().free(indices);
     for (indices, 0..) |*x, i| x.* = i;
     return buildTinyModelPicked(ctx, cfg, seed, indices);
 }
@@ -256,7 +256,7 @@ pub fn buildTinyModelWithConfig(ctx: *ExecContext, cfg: qwen3.Config, seed: u64)
 fn buildTinyModelPicked(ctx: *ExecContext, cfg_in: qwen3.Config, seed: u64, layer_indices: []const usize) !qwen3.Model {
     var cfg = cfg_in;
     cfg.num_layers = layer_indices.len;
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     var token_embedding = try randLinear(ctx, rng.at(seed, 100), cfg.vocab_size, cfg.hidden_size, 0.5);
     errdefer token_embedding.deinit();

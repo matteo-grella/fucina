@@ -287,7 +287,7 @@ pub fn maybeLoadPlanes(ctx: *ExecContext, file: *const gguf.File, base_name: []c
         p3 = try loadPlane(ctx, info, expected_rows, expected_cols);
     }
     const tied = (file.getInt(tie_key) orelse 0) == 1;
-    return .{ .ptqtp = weights.WeightPtqtp.init(ctx.allocator, p1, p2, p3, tied) };
+    return .{ .ptqtp = weights.WeightPtqtp.init(ctx.allocator(), p1, p2, p3, tied) };
 }
 
 /// MoE pair-detection, the expert-stack counterpart of `maybeLoadPlanes`:
@@ -402,7 +402,7 @@ pub fn quantizeMoeStack(
     const expert_bytes = try gguf.tensorByteLen(ggml_type, &.{ in_dim, out_dim });
     if (data.len != expert_bytes * n_expert) return ptqtp.Error.InvalidShape;
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const blocks_per_expert = out_dim * (in_dim / ptqtp.block_len);
 
     var result = MoeStackPlanes{

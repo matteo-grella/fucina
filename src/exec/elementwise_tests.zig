@@ -555,7 +555,7 @@ test "exec context reduces higher-rank and scalar broadcast gradients" {
     var exact = try exec_elementwise.reduceBroadcast(&ctx, &gy, .{ 2, 2, 3 });
     defer exact.deinit();
     try std.testing.expectEqualSlices(f32, gy.dataConst(), exact.dataConst());
-    try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
+    try std.testing.expectEqual(@as(usize, 2), ctx.rt.buffers.outstandingBuffers());
 
     var scalar_reduced = try ctx.reduceBroadcast(&gy, &.{1});
     defer scalar_reduced.deinit();

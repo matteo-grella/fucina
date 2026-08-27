@@ -95,7 +95,7 @@ pub fn groupedQ8_0GemvFusedInto(
     const bpr = group_dim / 32;
     if (x.len != n_groups * group_dim or out.len != n_groups * rank) return Error.InvalidWeightShape;
 
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
     const lhs = try allocator.alloc(dtype_mod.BlockQ8_0, n_groups * bpr);
     defer allocator.free(lhs);
     for (0..n_groups) |g| {

@@ -266,7 +266,7 @@ fn expectQ8AttentionParity(
     window: usize,
 ) !void {
     const scale = 1.0 / @sqrt(@as(f32, D));
-    const allocator = ctx.allocator;
+    const allocator = ctx.allocator();
 
     const q_values = try allocator.alloc(f32, S * H * D);
     defer allocator.free(q_values);

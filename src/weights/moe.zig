@@ -72,10 +72,10 @@ pub fn loadMoeRhs(
                 break :blk .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = src, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
             }
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(dtype_mod.BlockQ8_0, src.len);
-            errdefer ctx.allocator.free(owned);
+            const owned = try ctx.allocator().alloc(dtype_mod.BlockQ8_0, src.len);
+            errdefer ctx.allocator().free(owned);
             @memcpy(owned, src);
-            break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+            break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator(), .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
         },
         // IQ*/ternary experts: nested-rows containers, one shared
         // copy-or-borrow (copyOrBorrowMoeRhsRows).
@@ -92,10 +92,10 @@ pub fn loadMoeRhs(
             var folded_allocator: ?Allocator = null;
             if (!borrow) {
                 gguf.prefetch(info.data);
-                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
                 @memcpy(owned, src);
                 folded = owned;
-                folded_allocator = ctx.allocator;
+                folded_allocator = ctx.allocator();
             }
             break :blk .{ .ptqtp = .{
                 .allocator = null,
@@ -134,7 +134,7 @@ pub fn loadMoeRhsPtqtp(
 
     var planes: [3][]const dtype_mod.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
     var owned_count: usize = 0;
-    errdefer for (planes[0..owned_count]) |plane| ctx.allocator.free(@constCast(plane));
+    errdefer for (planes[0..owned_count]) |plane| ctx.allocator().free(@constCast(plane));
     for (plane_infos, 0..) |info, p| {
         if (info.ggml_type != .tq2_0) return Error.UnsupportedWeightType;
         if (info.n_dims != 3) return Error.InvalidWeightShape;
@@ -145,7 +145,7 @@ pub fn loadMoeRhsPtqtp(
             planes[p] = src;
         } else {
             gguf.prefetch(info.data);
-            const owned = try ctx.allocator.alloc(dtype_mod.BlockTQ2_0, src.len);
+            const owned = try ctx.allocator().alloc(dtype_mod.BlockTQ2_0, src.len);
             @memcpy(owned, src);
             planes[p] = owned;
             owned_count += 1;
@@ -162,8 +162,8 @@ pub fn loadMoeRhsPtqtp(
     var folded_allocator: ?Allocator = null;
     if (tied and plane_infos.len == 2 and expected_out_dim % 4 == 0) {
         const fg = (expected_out_dim / 4) * bpc;
-        const buf = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, expected_n_expert * fg);
-        errdefer ctx.allocator.free(buf);
+        const buf = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, expected_n_expert * fg);
+        errdefer ctx.allocator().free(buf);
         const expert_blocks = expected_out_dim * bpc;
         for (0..expected_n_expert) |e| {
             var views: [2]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
@@ -174,10 +174,10 @@ pub fn loadMoeRhsPtqtp(
             try backend_mod.kernels.packMatmulRhsTQ2_0Foldedx4Into(buf[e * fg ..][0..fg], &views[0], &views[1]);
         }
         folded = buf;
-        folded_allocator = ctx.allocator;
+        folded_allocator = ctx.allocator();
     }
     return .{ .ptqtp = .{
-        .allocator = if (borrow) null else ctx.allocator,
+        .allocator = if (borrow) null else ctx.allocator(),
         .planes = planes,
         .plane_count = plane_infos.len,
         .k = expected_in_dim,
@@ -445,10 +445,10 @@ fn copyOrBorrowMoeRhs(comptime Rhs: type, comptime Block: type, ctx: *ExecContex
         return .{ .allocator = null, .blocks = src, .k = in_dim, .n = rows, .blocks_per_column = blocks_per_column };
     }
     gguf.prefetch(info.data); // about to copy the whole stack — warm it first
-    const owned = try ctx.allocator.alloc(Block, src.len);
-    errdefer ctx.allocator.free(owned);
+    const owned = try ctx.allocator().alloc(Block, src.len);
+    errdefer ctx.allocator().free(owned);
     @memcpy(owned, src);
-    return .{ .allocator = ctx.allocator, .blocks = owned, .k = in_dim, .n = rows, .blocks_per_column = blocks_per_column };
+    return .{ .allocator = ctx.allocator(), .blocks = owned, .k = in_dim, .n = rows, .blocks_per_column = blocks_per_column };
 }
 
 /// `copyOrBorrowMoeRhs` for the nested-rows expert containers
@@ -481,8 +481,8 @@ fn copyOrBorrowMoeRhsRows(
         return .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
     }
     gguf.prefetch(info.data);
-    const owned = try ctx.allocator.alloc(Block, src.len);
-    errdefer ctx.allocator.free(owned);
+    const owned = try ctx.allocator().alloc(Block, src.len);
+    errdefer ctx.allocator().free(owned);
     @memcpy(owned, src);
-    return .{ .rows = .{ .allocator = ctx.allocator, .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
+    return .{ .rows = .{ .allocator = ctx.allocator(), .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
 }
