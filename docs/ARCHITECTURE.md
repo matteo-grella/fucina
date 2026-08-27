@@ -205,6 +205,9 @@ Backends:
   `rows.zig` — the fused row kernels (softmax/logsumexp, layer/RMS norm,
   cross-entropy, dropout, scatter-add, gated activations, the inner-lane
   strided-axis family) with their Task payloads and `run*Task` adapters,
+  `attention.zig` — the grouped-causal attention kernels (per-query units,
+  query-tiled online-softmax prefill, tiled backward + BLAS strips,
+  multi-stream decode) with their Task payloads and adapters,
   `batched.zig`; `common.zig` holds `ParallelConfig`, the vector-width aliases
   and the thread-count gates. Every pool-taking kernel takes `pc` first.
 - `src/backend/quant.zig` + `src/backend/quant/`: GGML-compatible block

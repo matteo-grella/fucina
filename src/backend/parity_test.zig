@@ -1370,6 +1370,305 @@ const Impl = struct {
         try expectClose(dw_b, dw_a, inner_tol);
         try expectClose(db_b, db_a, inner_tol);
     }
+
+    // ---- Attention-kernel parity: the vector/attention.zig entries against
+    // the serial three-pass twins. The per-query entries differ from the
+    // twins in reduction order only; the query-tiled entry additionally
+    // carries its documented online-softmax summation-order class.
+    const attn_impl = @import("vector/attention.zig");
+
+    fn attnParityCase(comptime KvElem: type, causal: bool, window: usize) !void {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xa77e57);
+        const rng = prng.random();
+        const q_seq: usize = 5;
+        const kv_seq: usize = 9;
+        const heads: usize = 4;
+        const kv_heads: usize = 2;
+        const d: usize = 20;
+        const scale: f32 = 0.25;
+        const map = [_]usize{ 0, 0, 1, 1 };
+
+        const q = try allocator.alloc(f32, q_seq * heads * d);
+        defer allocator.free(q);
+        fillRandom(rng, q);
+        const kf = try allocator.alloc(f32, kv_seq * kv_heads * d);
+        defer allocator.free(kf);
+        fillRandom(rng, kf);
+        const vf = try allocator.alloc(f32, kv_seq * kv_heads * d);
+        defer allocator.free(vf);
+        fillRandom(rng, vf);
+
+        const k = try allocator.alloc(KvElem, kv_seq * kv_heads * d);
+        defer allocator.free(k);
+        const v = try allocator.alloc(KvElem, kv_seq * kv_heads * d);
+        defer allocator.free(v);
+        for (k, kf) |*dst, x| dst.* = if (KvElem == f32) x else @floatCast(x);
+        for (v, vf) |*dst, x| dst.* = if (KvElem == f32) x else @floatCast(x);
+
+        const out_a = try allocator.alloc(f32, q_seq * heads * d);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, q_seq * heads * d);
+        defer allocator.free(out_b);
+        const scores = try allocator.alloc(f32, kv_seq * 2);
+        defer allocator.free(scores);
+        const stats_a = try allocator.alloc(f32, heads * q_seq * 2);
+        defer allocator.free(stats_a);
+        const stats_b = try allocator.alloc(f32, heads * q_seq * 2);
+        defer allocator.free(stats_b);
+        const tol: f32 = 1e-5;
+
+        const base = attn_impl.GroupedCausalAttentionTask(KvElem){
+            .q_data = q,
+            .k_data = k,
+            .v_data = v,
+            .out_data = out_a,
+            .kv_head_for_head = &map,
+            .q_seq = q_seq,
+            .kv_seq = kv_seq,
+            .source_offset = kv_seq - q_seq,
+            .heads = heads,
+            .d = d,
+            .kv_heads = kv_heads,
+            .scale_value = scale,
+            .window = window,
+            .causal = causal,
+            .head_start = 0,
+            .head_end = heads,
+            .scores = scores,
+            .stats = stats_a,
+        };
+        attn_impl.groupedCausalAttentionHeads(KvElem, base);
+        var twin = base;
+        twin.out_data = out_b;
+        twin.stats = stats_b;
+        attn_twins.attnHeadsTwin(KvElem, twin);
+        try expectClose(out_b, out_a, tol);
+        try expectClose(stats_b, stats_a, tol * @as(f32, @floatFromInt(kv_seq)));
+
+        // Adjacent-pair form on the same data.
+        const pair = attn_impl.GroupedCausalAttentionPairTask(KvElem){
+            .q_data = q,
+            .k_data = k,
+            .v_data = v,
+            .out_data = out_a,
+            .q_seq = q_seq,
+            .kv_seq = kv_seq,
+            .source_offset = kv_seq - q_seq,
+            .heads = heads,
+            .d = d,
+            .kv_heads = kv_heads,
+            .scale_value = scale,
+            .window = window,
+            .causal = causal,
+            .kv_head_start = 0,
+            .kv_head_end = kv_heads,
+            .scores = scores,
+        };
+        attn_impl.groupedCausalAttentionHeadPairs(KvElem, pair);
+        var pair_twin = pair;
+        pair_twin.out_data = out_b;
+        attn_twins.attnPairsTwin(KvElem, pair_twin);
+        try expectClose(out_b, out_a, tol);
+
+        // Query-tiled entry (head_group 1) over the full flattened work.
+        const q_tile = attn_impl.attention_tile_rows;
+        const n_tiles = (q_seq + q_tile - 1) / q_tile;
+        const tiled = attn_impl.GroupedCausalAttentionTiledTask(KvElem){
+            .q_data = q,
+            .k_data = k,
+            .v_data = v,
+            .out_data = out_a,
+            .kv_head_for_head = &map,
+            .q_seq = q_seq,
+            .kv_seq = kv_seq,
+            .source_offset = kv_seq - q_seq,
+            .heads = heads,
+            .d = d,
+            .kv_heads = kv_heads,
+            .scale_value = scale,
+            .window = window,
+            .causal = causal,
+            .n_tiles = n_tiles,
+            .work_start = 0,
+            .work_end = heads * n_tiles,
+        };
+        attn_impl.groupedCausalAttentionQueryTiles(KvElem, 1, tiled);
+        var tiled_twin = tiled;
+        tiled_twin.out_data = out_b;
+        attn_twins.attnTilesTwin(KvElem, tiled_twin);
+        try expectClose(out_b, out_a, tol * 10);
+    }
+
+    // Thin comptime shims so the case body above stays readable.
+    const attn_twins = struct {
+        fn attnHeadsTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionTask(KvElem)) void {
+            attn_impl.scalar.groupedCausalAttentionHeads(KvElem, task);
+        }
+        fn attnPairsTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionPairTask(KvElem)) void {
+            attn_impl.scalar.groupedCausalAttentionHeadPairs(KvElem, task);
+        }
+        fn attnTilesTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionTiledTask(KvElem)) void {
+            attn_impl.scalar.groupedCausalAttentionQueryTiles(KvElem, 1, task);
+        }
+    };
+
+    test "parity: attention forward kernels vs scalar twins" {
+        try attnParityCase(f32, true, 0);
+        try attnParityCase(f32, true, 4);
+        try attnParityCase(f32, false, 0);
+        try attnParityCase(f16, true, 0);
+        try attnParityCase(f16, false, 0);
+    }
+
+    test "parity: attention backward kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xba77e5);
+        const rng = prng.random();
+        const q_seq: usize = 6;
+        const kv_seq: usize = 10;
+        const heads: usize = 4;
+        const kv_heads: usize = 2;
+        const d: usize = 20;
+        const scale: f32 = 0.25;
+        const map = [_]usize{ 0, 0, 1, 1 };
+        const len_q = q_seq * heads * d;
+        const len_kv = kv_seq * kv_heads * d;
+
+        const q = try allocator.alloc(f32, len_q);
+        defer allocator.free(q);
+        fillRandom(rng, q);
+        const k = try allocator.alloc(f32, len_kv);
+        defer allocator.free(k);
+        fillRandom(rng, k);
+        const v = try allocator.alloc(f32, len_kv);
+        defer allocator.free(v);
+        fillRandom(rng, v);
+        const gy = try allocator.alloc(f32, len_q);
+        defer allocator.free(gy);
+        fillRandom(rng, gy);
+        const tol: f32 = 1e-5 * @as(f32, @floatFromInt(kv_seq));
+
+        // Per-query backward kernel vs twin.
+        {
+            const scores = try allocator.alloc(f32, kv_seq);
+            defer allocator.free(scores);
+            const dprob = try allocator.alloc(f32, kv_seq);
+            defer allocator.free(dprob);
+            const dq_a = try allocator.alloc(f32, len_q);
+            defer allocator.free(dq_a);
+            const dq_b = try allocator.alloc(f32, len_q);
+            defer allocator.free(dq_b);
+            const dk_a = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dk_a);
+            const dk_b = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dk_b);
+            const dv_a = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dv_a);
+            const dv_b = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dv_b);
+            @memset(dq_a, 0);
+            @memset(dq_b, 0);
+            @memset(dk_a, 0);
+            @memset(dk_b, 0);
+            @memset(dv_a, 0);
+            @memset(dv_b, 0);
+            const base = attn_impl.GroupedCausalAttentionBackwardTask{
+                .q_data = q,
+                .k_data = k,
+                .v_data = v,
+                .gy_data = gy,
+                .q_grad = dq_a,
+                .k_grad = dk_a,
+                .v_grad = dv_a,
+                .kv_head_for_head = &map,
+                .q_seq = q_seq,
+                .kv_seq = kv_seq,
+                .source_offset = kv_seq - q_seq,
+                .heads = heads,
+                .d = d,
+                .kv_heads = kv_heads,
+                .scale_value = scale,
+                .window = 0,
+                .causal = true,
+                .kv_head_start = 0,
+                .kv_head_end = kv_heads,
+                .scores = scores,
+                .dprob = dprob,
+            };
+            attn_impl.groupedCausalAttentionBackwardKvHeads(base);
+            var twin = base;
+            twin.q_grad = dq_b;
+            twin.k_grad = dk_b;
+            twin.v_grad = dv_b;
+            attn_impl.scalar.groupedCausalAttentionBackwardKvHeads(twin);
+            try expectClose(dq_b, dq_a, tol);
+            try expectClose(dk_b, dk_a, tol);
+            try expectClose(dv_b, dv_a, tol);
+        }
+
+        // Tiled backward (direct mode over an identity head map) vs twin.
+        {
+            const id_map = [_]usize{ 0, 1 };
+            const d_heads: usize = 2;
+            const dlen_q = q_seq * d_heads * d;
+            const qd = q[0..dlen_q];
+            const gyd = gy[0..dlen_q];
+            const scratch = try allocator.alloc(f32, 2 * attn_impl.attention_bwd_tile_rows * kv_seq);
+            defer allocator.free(scratch);
+            const dq_a = try allocator.alloc(f32, dlen_q);
+            defer allocator.free(dq_a);
+            const dq_b = try allocator.alloc(f32, dlen_q);
+            defer allocator.free(dq_b);
+            const dk_a = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dk_a);
+            const dk_b = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dk_b);
+            const dv_a = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dv_a);
+            const dv_b = try allocator.alloc(f32, len_kv);
+            defer allocator.free(dv_b);
+            @memset(dq_a, 0);
+            @memset(dq_b, 0);
+            @memset(dk_a, 0);
+            @memset(dk_b, 0);
+            @memset(dv_a, 0);
+            @memset(dv_b, 0);
+            const base = attn_impl.GroupedCausalAttentionBackwardTiledTask{
+                .q_data = qd,
+                .k_data = k,
+                .v_data = v,
+                .gy_data = gyd,
+                .stats = null,
+                .q_grad = dq_a,
+                .dk_target = dk_a,
+                .dv_target = dv_a,
+                .partial_mode = false,
+                .kv_head_for_head = &id_map,
+                .q_seq = q_seq,
+                .kv_seq = kv_seq,
+                .source_offset = kv_seq - q_seq,
+                .heads = d_heads,
+                .d = d,
+                .kv_heads = kv_heads,
+                .scale_value = scale,
+                .window = 0,
+                .causal = true,
+                .scratch = scratch,
+                .head_start = 0,
+                .head_end = d_heads,
+            };
+            attn_impl.groupedCausalAttentionBackwardTiles(base);
+            var twin = base;
+            twin.q_grad = dq_b;
+            twin.dk_target = dk_b;
+            twin.dv_target = dv_b;
+            attn_impl.scalar.groupedCausalAttentionBackwardTiles(twin);
+            try expectClose(dq_b, dq_a, tol);
+            try expectClose(dk_b, dk_a, tol);
+            try expectClose(dv_b, dv_a, tol);
+        }
+    }
 };
 
 test {

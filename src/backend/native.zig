@@ -299,6 +299,24 @@ pub const kernels = struct {
     pub const pool_free_dropoutRange = true;
     pub const scatterAddRows = vector.rows.scatterAddRows;
     pub const pool_free_scatterAddRows = true;
+    // The grouped-causal attention kernels (vector/attention.zig):
+    // task-carrying serial entries, pool-free like the row kernels.
+    pub const groupedCausalAttentionHeads = vector.attention.groupedCausalAttentionHeads;
+    pub const pool_free_groupedCausalAttentionHeads = true;
+    pub const groupedCausalAttentionHeadPairs = vector.attention.groupedCausalAttentionHeadPairs;
+    pub const pool_free_groupedCausalAttentionHeadPairs = true;
+    pub const groupedCausalAttentionQueryTiles = vector.attention.groupedCausalAttentionQueryTiles;
+    pub const pool_free_groupedCausalAttentionQueryTiles = true;
+    pub const groupedCausalAttentionMultiUnits = vector.attention.groupedCausalAttentionMultiUnits;
+    pub const pool_free_groupedCausalAttentionMultiUnits = true;
+    pub const groupedCausalAttentionBackwardKvHeads = vector.attention.groupedCausalAttentionBackwardKvHeads;
+    pub const pool_free_groupedCausalAttentionBackwardKvHeads = true;
+    pub const groupedCausalAttentionBackwardTiles = vector.attention.groupedCausalAttentionBackwardTiles;
+    pub const pool_free_groupedCausalAttentionBackwardTiles = true;
+    pub const groupedCausalAttentionBackwardBlasTiles = vector.attention.groupedCausalAttentionBackwardBlasTiles;
+    pub const pool_free_groupedCausalAttentionBackwardBlasTiles = true;
+    pub const attentionBackwardReduceRows = vector.attention.attentionBackwardReduceRows;
+    pub const pool_free_attentionBackwardReduceRows = true;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32

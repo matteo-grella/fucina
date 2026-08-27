@@ -6,9 +6,9 @@
 //! does not select a second provider: it sets `backend/isa.zig`'s
 //! `reference` flag, and every kernel entry then selects its scalar
 //! reference arm internally (the `scalar` namespaces in `vector/` and the
-//! `.scalar` tier in `quant/`). The fused attention/fakequant kernels
-//! beside their orchestration in `exec/` are backend-independent. Layer
-//! stack: docs/ARCHITECTURE.md.
+//! `.scalar` tier in `quant/`). The fused fakequant kernels beside their
+//! orchestration in `exec/` are backend-independent. Layer stack:
+//! docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");
@@ -103,6 +103,11 @@ pub const vector_impl = @import("backend/vector.zig");
 // entries themselves are reached through `kernels`, never through this
 // namespace by name.
 pub const rows = @import("backend/vector/rows.zig");
+// Attention-kernel vocabulary seam: the Task payloads, `run*Task` pool
+// adapters and tile constants of the grouped-causal attention family.
+// Single implementation, `backend/vector/attention.zig`; the kernel
+// entries themselves are reached through `kernels`.
+pub const attention = @import("backend/vector/attention.zig");
 
 /// Provider extension: strided-view BLAS GEMM plus the nested-scope guard
 /// and the folded-ternary BLAS arm, available only on BLAS-backed native

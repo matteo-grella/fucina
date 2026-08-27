@@ -9,15 +9,16 @@ const std = @import("std");
 
 const exec_mod = @import("../exec.zig");
 const exec_attention = @import("attention.zig");
+const backend_attn = @import("../backend.zig").attention;
 
 const ExecContext = exec_mod.ExecContext;
 
-const attention_tiled_min_q_seq = exec_attention.attention_tiled_min_q_seq;
-const attention_tile_rows = exec_attention.attention_tile_rows;
-const GroupedCausalAttentionTiledTask = exec_attention.GroupedCausalAttentionTiledTask;
-const runGroupedCausalAttentionTiledTask = exec_attention.runGroupedCausalAttentionTiledTask;
-const groupedCausalAttentionHeadPairs = exec_attention.groupedCausalAttentionHeadPairs;
-const hasAdjacentKvHeadPairs = exec_attention.hasAdjacentKvHeadPairs;
+const attention_tiled_min_q_seq = backend_attn.attention_tiled_min_q_seq;
+const attention_tile_rows = backend_attn.attention_tile_rows;
+const GroupedCausalAttentionTiledTask = backend_attn.GroupedCausalAttentionTiledTask;
+const runGroupedCausalAttentionTiledTask = backend_attn.runGroupedCausalAttentionTiledTask;
+const groupedCausalAttentionHeadPairs = backend_attn.groupedCausalAttentionHeadPairs;
+const hasAdjacentKvHeadPairs = backend_attn.hasAdjacentKvHeadPairs;
 
 // Tiled-vs-per-query parity is relative (1e-5), not bitwise: the online
 // softmax visits keys in the same order but groups the summation differently
@@ -202,13 +203,13 @@ test "BLAS-strip attention backward matches the register-tiled route" {
             @memset(dk, 0);
             @memset(dv, 0);
             const tile_rows = if (route_i == 0)
-                exec_attention.attention_bwd_tile_rows
+                backend_attn.attention_bwd_tile_rows
             else
-                exec_attention.attention_bwd_blas_tile_rows;
+                backend_attn.attention_bwd_blas_tile_rows;
             const scratch = try allocator.alloc(f32, 2 * tile_rows * case.kv_seq);
             defer allocator.free(scratch);
 
-            const task = exec_attention.GroupedCausalAttentionBackwardTiledTask{
+            const task = backend_attn.GroupedCausalAttentionBackwardTiledTask{
                 .q_data = q_data,
                 .k_data = k_data,
                 .v_data = v_data,
@@ -233,9 +234,9 @@ test "BLAS-strip attention backward matches the register-tiled route" {
                 .head_end = case.heads,
             };
             if (route_i == 0) {
-                exec_attention.groupedCausalAttentionBackwardTiles(task);
+                backend_attn.groupedCausalAttentionBackwardTiles(task);
             } else {
-                exec_attention.groupedCausalAttentionBackwardBlasTiles(task);
+                backend_attn.groupedCausalAttentionBackwardBlasTiles(task);
             }
             outs[route_i] = .{ .dq = dq, .dk = dk, .dv = dv };
         }
@@ -555,7 +556,7 @@ fn checkMultiKvAttentionParity(
     seed: u64,
 ) !void {
     const allocator = std.testing.allocator;
-    const BlockQ8_0 = exec_attention.BlockQ8_0;
+    const BlockQ8_0 = backend_attn.BlockQ8_0;
     const n = lens.len;
     const scale_value: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(d)));
 
@@ -569,7 +570,7 @@ fn checkMultiKvAttentionParity(
     defer q.deinit();
 
     const KvElem = if (q8) BlockQ8_0 else f16;
-    const row_elems = if (q8) kv_heads * (d / exec_attention.q8_0_block_size) else kv_heads * d;
+    const row_elems = if (q8) kv_heads * (d / backend_attn.q8_0_block_size) else kv_heads * d;
 
     const k_owned = try allocator.alloc([]KvElem, n);
     defer allocator.free(k_owned);
@@ -1120,9 +1121,13 @@ test "grouped bidirectional attention matches a naive full-range reference" {
                     for (0..case.kv) |j| acc += (weights[j] / sum) * @as(f64, v_vals[(j * case.kvh + kvh) * case.d + f]);
                     // Tolerance covers f32-vs-f64 accumulation order at the
                     // widest case (d=288, 60 keys); a mask bug is O(0.1).
+                    // The scalar reference leg runs the serial three-pass
+                    // twin, whose plain serial dots roughly double the f32
+                    // spread at d=288 (measured 7.3e-6), so its floor widens.
                     const e: f32 = @floatCast(acc);
                     const g = got.dataConst()[(qi * case.h + h) * case.d + f];
-                    const tol = @max(5e-5 * @max(@abs(e), @abs(g)), 5e-6);
+                    const tol_floor: f32 = if (@import("../backend.zig").active_kind == .scalar) 2e-5 else 5e-6;
+                    const tol = @max(5e-5 * @max(@abs(e), @abs(g)), tol_floor);
                     try std.testing.expect(@abs(e - g) <= tol);
                     // f16 K/V: logit noise (~1e-3) shifts softmax weights, so
                     // the f16 lane check is for mask correctness (a causal

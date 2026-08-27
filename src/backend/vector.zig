@@ -28,6 +28,10 @@
 //!                  norm, cross-entropy, dropout, scatter-add, gated
 //!                  activations, the inner-lane strided-axis family) with
 //!                  their Task payloads and run adapters.
+//!   attention    - the grouped-causal attention kernels (per-query units,
+//!                  query-tiled online-softmax prefill, tiled backward +
+//!                  BLAS strips, multi-stream decode) with their Task
+//!                  payloads and run adapters.
 pub const common = @import("vector/common.zig");
 
 pub const primitives = @import("vector/primitives.zig");
@@ -41,6 +45,7 @@ pub const conv = @import("vector/conv.zig");
 pub const pool = @import("vector/pool.zig");
 pub const winograd = @import("vector/winograd.zig");
 pub const rows = @import("vector/rows.zig");
+pub const attention = @import("vector/attention.zig");
 
 pub const ParallelConfig = common.ParallelConfig;
 pub const Vf32 = common.Vf32;

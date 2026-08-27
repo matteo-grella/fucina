@@ -272,6 +272,20 @@ this point; earlier history is `git log`.
   and dispatch only. Native builds are bitwise-unchanged (the moved
   bodies are textually identical; codegen histograms are identical on
   `softmaxRows` and the attention decode head kernel).
+- The attention kernel bodies (the per-query head/pair units over
+  f32/f16/q8_0 KV, the query-tiled online-softmax prefill kernel, the
+  tiled backward and its BLAS-strip variant, the multi-stream ragged
+  decode walker, the dK/dV plane reduction) live in
+  `backend/vector/attention.zig`, no longer in `exec/attention.zig`: the
+  kernel entries join the conformed `backend.kernels` table, the Task
+  payloads/adapters/tile constants are the `backend.attention` seam, and
+  on `-Dbackend=scalar` builds the f32/f16 forward entries and both
+  backward routes select serial three-pass twins in `attention.scalar`
+  (the q8_0 per-query arms compose the quant kernels' own scalar tiers);
+  `backend/parity_test.zig` holds entries and twins together.
+  `exec/attention.zig` keeps `groupedAttention`/`groupedAttentionBackward`
+  and the dispatch/validation tier. Native builds are bitwise-unchanged
+  (identical codegen histograms on the decode head kernel).
 - `store/expert_store.zig` is now the facade over five concern files —
   `store/io.zig` (platform I/O shims + the store error set),
   `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout

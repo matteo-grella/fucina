@@ -184,6 +184,7 @@ op, request, or container type):
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | fused row kernels (`vector/rows.zig`; task-carrying, all pool-free — the exec domain modules split the task ranges themselves) | `softmaxRows`*, `softmaxExtRows`*†, `softmaxBackwardRows`*, `logsumexpRows`*, `logSoftmaxRows`*, `softmaxInner`*, `logsumexpInner`*, `logSoftmaxInner`*, `softmaxBackwardInner`*, `splitSwiGluRows`*, `splitGluRows`*, `splitSwiGluBackwardRows`*, `splitGluBackwardRows`*, `rmsNormMulRopeHalfVectors`*, `rmsNormMulRows`*, `rmsNormMulAddRows`*, `rmsNormMulBackwardInputRows`*, `rmsNormMulBackwardWeightRows`*, `rmsNormWeightGradBlocks`*, `rmsNormWeightGradReduce`*, `rmsNormInner`*, `rmsNormBackwardInputInner`*, `rmsNormBackwardWeightInner`*, `layerNormRows`*, `layerNormBackwardInputRows`*, `layerNormAffineParamGradRows`*, `layerNormRowStats`*, `layerNormParamGradColumns`*, `layerNormInner`*, `layerNormBackwardInner`*, `varianceInner`*, `standardizeInner`*†, `standardizeBackwardInner`*†, `crossEntropyLossRows`*, `crossEntropyBackwardRows`*, `distillStatsRows`*, `distillBackwardRows`*, `dropoutRange`*, `scatterAddRows`* (Task payloads and `run*Task` pool adapters: the `backend.rows` seam) |
+| attention kernels (`vector/attention.zig`; task-carrying, pool-free) | `groupedCausalAttentionHeads`*†, `groupedCausalAttentionHeadPairs`*†, `groupedCausalAttentionQueryTiles`*†, `groupedCausalAttentionMultiUnits`*†, `groupedCausalAttentionBackwardKvHeads`*, `groupedCausalAttentionBackwardTiles`*, `groupedCausalAttentionBackwardBlasTiles`*, `attentionBackwardReduceRows`* (Task payloads, adapters and tile constants: the `backend.attention` seam) |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. The provider additionally exports `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
@@ -209,9 +210,9 @@ test "kernel interface inventory" {
                 generic_count += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 114), kernel_count);
-    try std.testing.expectEqual(@as(usize, 52), pool_free_count);
-    try std.testing.expectEqual(@as(usize, 16), generic_count);
+    try std.testing.expectEqual(@as(usize, 122), kernel_count);
+    try std.testing.expectEqual(@as(usize, 60), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 20), generic_count);
 }
 ```
 
