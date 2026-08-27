@@ -268,6 +268,13 @@ this point; earlier history is `git log`.
   `std.math.expm1`, swept over every finite f16, the saturation cut, and
   the specials).
 
+- The elementwise VJP map splitter (`ag/backward/elementwise.zig`) rides
+  `backend.tile.forRange` instead of its own hand-rolled Task array: the
+  gate (length threshold, pool presence, thread count) stays with the VJP
+  helper, the proportional `i * total / n` boundaries are unchanged, so
+  the split is bitwise-neutral. `backend.tile` is the range splitter's
+  exported seam.
+
 - The fused row kernels (softmax/logsumexp/log-softmax rows and their
   strided inner-lane arms, layer/RMS-norm rows and backward stats,
   cross-entropy and distillation rows, dropout, scatter-add, the gated

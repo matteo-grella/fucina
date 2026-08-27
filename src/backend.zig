@@ -108,6 +108,11 @@ pub const rows = @import("backend/vector/rows.zig");
 // Single implementation, `backend/vector/attention.zig`; the kernel
 // entries themselves are reached through `kernels`.
 pub const attention = @import("backend/vector/attention.zig");
+// The one proportional range splitter (`forRange`/`reduceRange`) behind
+// the vector kernels' parallel dispatch, exported for the upper bands'
+// own chunked loops (the ag elementwise VJP maps ride `forRange`): the
+// boundary formula `i * total / n` is the shared bitwise contract.
+pub const tile = @import("backend/vector/tile.zig");
 
 /// Provider extension: strided-view BLAS GEMM plus the nested-scope guard
 /// and the folded-ternary BLAS arm, available only on BLAS-backed native
