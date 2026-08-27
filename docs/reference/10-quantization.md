@@ -463,7 +463,7 @@ pooled-storage prohibition are [§6.7](06-the-execution-runtime-execcontext-and-
 rides through quantized matmul.
 
 The lifetime rides on the `QuantMatmul` request
-(`matmulQuant`/`matmulQuantInto`, §10.3) and on the `try*` GPU attempts.
+(`matmulQuant`/`matmulQuantInto`, [§10.3](10-quantization.md#103-rhs-containers-and-packed-layouts-srcbackendquanttypeszig-srcexecquant_matmulzig)) and on the `try*` GPU attempts.
 The facade `dot` always uses the default
 transient/GPU-when-not-training request — a `.transient` RHS may
 still use the provider's blocking GPU path, but no address-keyed wrap survives

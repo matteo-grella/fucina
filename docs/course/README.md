@@ -196,7 +196,7 @@ looking at:
 - **Cross-links are relative.** Chapters link to each other as sibling
   files, so the course reads the same on GitHub and in a local clone.
 - **Citations are pinned to a moment.** This edition of the course was
-  reconciled against the tree at commit `14fa754` (2026-08-27): every
+  reconciled against the tree at commit `3565985` (2026-08-27, the 0.4.0 roll): every
   `path:line` reference was verified there. The library moves; line
   numbers drift first, then signatures. If the text and the source ever
   disagree, **the source wins** — diff against that commit to see what
