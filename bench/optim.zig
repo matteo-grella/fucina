@@ -123,7 +123,7 @@ fn benchOptimizer(
     // params-outlive-optimizer contract.
     var params = try BlockParams.init(ctx, allocator);
     defer params.deinit();
-    var opt = Opt.init(allocator, config);
+    var opt = try Opt.init(allocator, config);
     defer opt.deinit();
     try params.register(&opt);
 

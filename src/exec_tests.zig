@@ -593,7 +593,7 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());
     try std.testing.expectEqual(@as(usize, 0), ctx.buffers.cachedBuffers());
 
-    var first = try ctx.add(.f32, 3, &x, &middle_b);
+    var first = try ctx.elementwise(.f32, .add, &x, &middle_b);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3,
         4, 5, 6, 4, 5, 6, 4, 5, 6, 4, 5, 6,
@@ -606,7 +606,7 @@ test "exec context reuses buffers for arbitrary broadcast materialization" {
     const cached_after_first = ctx.buffers.cachedBuffers();
     try std.testing.expect(cached_after_first >= 2);
 
-    var second = try ctx.add(.f32, 3, &x, &middle_b);
+    var second = try ctx.elementwise(.f32, .add, &x, &middle_b);
     second.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), ctx.buffers.outstandingBuffers());

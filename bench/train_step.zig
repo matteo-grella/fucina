@@ -374,7 +374,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const scope = ctx.openExecScope();
-        const loss = try forwardLoss(&ctx, &model, input_ids, labels);
+        var loss = try forwardLoss(&ctx, &model, input_ids, labels);
         const fwd_value = try loss.item(); // forces the forward to settle
         const fwd_ns = timer.read();
         try loss.backward(&ctx);

@@ -146,7 +146,7 @@ fn runRawAdd(n: usize, iterations: usize) !Result {
     fillPattern(&b, 2);
 
     for (0..4) |_| {
-        var y = try ctx.add(.f32, 1, &a, &b);
+        var y = try ctx.elementwise(.f32, .add, &a, &b);
         y.deinit();
     }
 
@@ -154,7 +154,7 @@ fn runRawAdd(n: usize, iterations: usize) !Result {
     var checksum: f64 = 0;
     var timer = try Timer.start(benchmark_io);
     for (0..iterations) |_| {
-        var y = try ctx.add(.f32, 1, &a, &b);
+        var y = try ctx.elementwise(.f32, .add, &a, &b);
         checksum += @as(f64, @floatCast(y.dataConst()[0]));
         y.deinit();
     }

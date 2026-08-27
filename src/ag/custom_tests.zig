@@ -19,7 +19,7 @@ const ScaledMul = struct {
     pub const Output = Tensor(.{.d});
 
     pub fn forward(ctx: *ExecContext, extra: Scale, inputs: []const *const RawTensor) !RawTensor {
-        var product = try ctx.mul(.f32, 1, inputs[0], inputs[1]);
+        var product = try ctx.elementwise(.f32, .mul, inputs[0], inputs[1]);
         defer product.deinit();
         return ctx.scale(.f32, &product, extra.value);
     }
@@ -37,12 +37,12 @@ const ScaledMul = struct {
         if (needs_grad[0]) {
             var scaled_rhs = try ctx.scale(.f32, inputs[1], extra.value);
             defer scaled_rhs.deinit();
-            out[0] = try ctx.mul(.f32, 1, gy, &scaled_rhs);
+            out[0] = try ctx.elementwise(.f32, .mul, gy, &scaled_rhs);
         }
         if (needs_grad[1]) {
             var scaled_lhs = try ctx.scale(.f32, inputs[0], extra.value);
             defer scaled_lhs.deinit();
-            out[1] = try ctx.mul(.f32, 1, gy, &scaled_lhs);
+            out[1] = try ctx.elementwise(.f32, .mul, gy, &scaled_lhs);
         }
     }
 };

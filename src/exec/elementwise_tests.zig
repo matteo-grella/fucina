@@ -60,12 +60,14 @@ test "exec context exposes fixed-rank construction and elementwise execution" {
     var b = try ctx.fromSlice(.f32, .{ 2, 1, 3 }, &.{ 10, 20, 30, 40, 50, 60 });
     defer b.deinit();
 
-    var c = try ctx.add(.f32, 3, &a, &b);
+    var c = try ctx.elementwise(.f32, .add, &a, &b);
     defer c.deinit();
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 1, 3 }, c.shape.slice());
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 44, 55, 66 }, c.dataConst());
-    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.add(.f32, 2, &a, &b));
+    var mismatched = try ctx.fromSlice(.f32, .{ 3, 1, 2 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer mismatched.deinit();
+    try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.elementwise(.f32, .add, &a, &mismatched));
 }
 
 test "exec context applies explicit tail broadcast without materializing the view" {
@@ -217,7 +219,7 @@ test "exec context combines fixed-rank ops with explicit broadcast views" {
     var broadcast = try ctx.broadcastTo(&bias, .{ 2, 3 });
     defer broadcast.deinit();
 
-    var y = try ctx.add(.f32, 2, &x, &broadcast);
+    var y = try ctx.elementwise(.f32, .add, &x, &broadcast);
     defer y.deinit();
 
     try std.testing.expect(broadcast.buffer == bias.buffer);
@@ -241,19 +243,19 @@ test "exec context handles broadcast operands on both sides of elementwise ops" 
     var scalar_b = try ctx.broadcastTo(&scalar_value, .{ 2, 3 });
     defer scalar_b.deinit();
 
-    var left_sub = try ctx.sub(.f32, 2, &bias_b, &x);
+    var left_sub = try ctx.elementwise(.f32, .sub, &bias_b, &x);
     defer left_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 9, 18, 27, 6, 15, 24 }, left_sub.dataConst());
 
-    var right_sub = try ctx.sub(.f32, 2, &x, &bias_b);
+    var right_sub = try ctx.elementwise(.f32, .sub, &x, &bias_b);
     defer right_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ -9, -18, -27, -6, -15, -24 }, right_sub.dataConst());
 
-    var both_broadcast_sub = try ctx.sub(.f32, 2, &bias_b, &scalar_b);
+    var both_broadcast_sub = try ctx.elementwise(.f32, .sub, &bias_b, &scalar_b);
     defer both_broadcast_sub.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 8, 18, 28, 8, 18, 28 }, both_broadcast_sub.dataConst());
 
-    var both_broadcast_mul = try ctx.mul(.f32, 2, &bias_b, &scalar_b);
+    var both_broadcast_mul = try ctx.elementwise(.f32, .mul, &bias_b, &scalar_b);
     defer both_broadcast_mul.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 20, 40, 60, 20, 40, 60 }, both_broadcast_mul.dataConst());
 }
@@ -273,11 +275,11 @@ test "exec context rank-specializes elementwise ops above rank four" {
     defer sum.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 11, 22, 33, 44, 55, 66 }, sum.dataConst());
 
-    var diff = try ctx.sub(.f32, 5, &b, &a);
+    var diff = try ctx.elementwise(.f32, .sub, &b, &a);
     defer diff.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 9, 18, 27, 36, 45, 54 }, diff.dataConst());
 
-    var product = try ctx.mul(.f32, 5, &a, &b);
+    var product = try ctx.elementwise(.f32, .mul, &a, &b);
     defer product.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 10, 40, 90, 160, 250, 360 }, product.dataConst());
 }
@@ -340,7 +342,7 @@ test "exec context runs typed float forward math kernels" {
     var b = try ctx.fromSlice(.f64, .{ 2, 2 }, &.{ 10, 20, 30, 40 });
     defer b.deinit();
 
-    var sum = try ctx.add(.f64, 2, &a, &b);
+    var sum = try ctx.elementwise(.f64, .add, &a, &b);
     defer sum.deinit();
     try std.testing.expectEqualSlices(f64, &.{ 11, 22, 33, 44 }, sum.dataConst());
 
@@ -360,7 +362,7 @@ test "exec context runs typed float forward math kernels" {
     defer h1.deinit();
     var h2 = try ctx.fromSlice(.f16, .{ 2, 2 }, &.{ 2, 3, 4, 5 });
     defer h2.deinit();
-    var hmul = try ctx.mul(.f16, 2, &h1, &h2);
+    var hmul = try ctx.elementwise(.f16, .mul, &h1, &h2);
     defer hmul.deinit();
     try std.testing.expectEqualSlices(f16, &.{ 2, 6, 12, 20 }, hmul.dataConst());
 

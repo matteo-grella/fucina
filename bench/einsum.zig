@@ -344,7 +344,7 @@ const bw_j = 32;
 const bw_k = 128;
 const bw_n = 128;
 
-fn multiFreeBackwardDotStep(ctx: *fucina.ExecContext, x: *const fucina.Tensor(.{ .i, .j, .k }), w: *const fucina.Tensor(.{ .n, .k })) !f64 {
+fn multiFreeBackwardDotStep(ctx: *fucina.ExecContext, x: *fucina.Tensor(.{ .i, .j, .k }), w: *fucina.Tensor(.{ .n, .k })) !f64 {
     var y = try x.dot(ctx, w, .k);
     defer y.deinit();
     var loss = try y.sumAll(ctx);
@@ -359,7 +359,7 @@ fn multiFreeBackwardDotStep(ctx: *fucina.ExecContext, x: *const fucina.Tensor(.{
     return checksum;
 }
 
-fn multiFreeBackwardEinsumStep(ctx: *fucina.ExecContext, x: *const fucina.Tensor(.{ .i, .j, .k }), w: *const fucina.Tensor(.{ .n, .k })) !f64 {
+fn multiFreeBackwardEinsumStep(ctx: *fucina.ExecContext, x: *fucina.Tensor(.{ .i, .j, .k }), w: *fucina.Tensor(.{ .n, .k })) !f64 {
     var y = try x.einsum(ctx, w, .{ .i, .j, .n });
     defer y.deinit();
     var loss = try y.sumAll(ctx);

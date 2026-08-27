@@ -13,6 +13,7 @@
 //! ExecContext ops, weight unions) is built on.
 const std = @import("std");
 const tensor_mod = @import("tensor.zig");
+const backend_ops = @import("backend.zig").ops;
 const dtype_mod = @import("dtype.zig");
 const exec_mod = @import("exec.zig");
 const tags_mod = @import("tags.zig");
@@ -79,15 +80,13 @@ pub fn pointwise(
     var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
-    const rank = comptime rawRank(result_tags.len);
-    return switch (op) {
-        .add => ctx.add(tensor_dtype, rank, &left_view, &right_view),
-        .sub => ctx.sub(tensor_dtype, rank, &left_view, &right_view),
-        .mul => ctx.mul(tensor_dtype, rank, &left_view, &right_view),
-        .div => ctx.div(tensor_dtype, rank, &left_view, &right_view),
-        .max => ctx.max(tensor_dtype, rank, &left_view, &right_view),
-        .min => ctx.min(tensor_dtype, rank, &left_view, &right_view),
-    };
+    return ctx.elementwise(tensor_dtype, comptime elementwiseOp(op), &left_view, &right_view);
+}
+
+/// The backend spelling of a pointwise op (same member set; bridged by name
+/// so the two enums cannot drift silently).
+pub fn elementwiseOp(comptime op: PointwiseOp) backend_ops.ElementwiseOp {
+    return @field(backend_ops.ElementwiseOp, @tagName(op));
 }
 
 /// Tag-driven broadcasting gated op (`glu`/`swiglu`/`geglu`/...).

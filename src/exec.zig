@@ -285,12 +285,6 @@ pub const ExecContext = struct {
     // elementwise: pointwise arithmetic, activations, masks (exec/elementwise.zig)
     // ----------------------------------------------------------------------
     pub const elementwise = exec_elementwise.elementwise;
-    pub const add = exec_elementwise.add;
-    pub const sub = exec_elementwise.sub;
-    pub const mul = exec_elementwise.mul;
-    pub const div = exec_elementwise.div;
-    pub const max = exec_elementwise.max;
-    pub const min = exec_elementwise.min;
     pub const divTrunc = exec_elementwise.divTrunc;
     pub const divFloor = exec_elementwise.divFloor;
     pub const rem = exec_elementwise.rem;

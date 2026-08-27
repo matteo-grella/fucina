@@ -480,69 +480,9 @@ pub fn elementwise(
     };
 }
 
-pub fn add(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .add, a, b);
-}
-
-pub fn sub(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .sub, a, b);
-}
-
-pub fn mul(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .mul, a, b);
-}
-
-pub fn div(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .div, a, b);
-}
-
 /// Elementwise maximum: the f32 kernel, the exact integer path, or the
 /// `.widened` policy for 16-bit floats (no typed max kernel exists).
-pub fn max(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .max, a, b);
-}
-
 /// Elementwise minimum (see `max`).
-pub fn min(
-    ctx: *ExecContext,
-    comptime dtype: DType,
-    comptime rank: usize,
-    a: *const tensor.TensorOf(dtype),
-    b: *const tensor.TensorOf(dtype),
-) !tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)) {
-    return elementwiseRankTyped(ctx, dtype, rank, .min, a, b);
-}
-
 /// Gated product of two same-shape tensors (`op` picks the gate). One f32
 /// kernel; 16-bit inputs follow the `.widened` policy.
 pub fn gated(

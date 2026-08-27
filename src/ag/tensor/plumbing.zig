@@ -141,14 +141,7 @@ pub fn Mod(comptime ag_tensor: type) type {
 
             if (comptime tagsEqual(left_tags, right_tags)) {
                 if (std.mem.eql(usize, left_tensor.shape.slice(), right_tensor.shape.slice())) {
-                    var value = switch (op) {
-                        .add => try ctx.add(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .sub => try ctx.sub(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .mul => try ctx.mul(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .div => try ctx.div(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .max => try ctx.max(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                        .min => try ctx.min(dtype, rawRank(result_tags.len), left_tensor, right_tensor),
-                    };
+                    var value = try ctx.elementwise(dtype, comptime tag_ops.elementwiseOp(op), left_tensor, right_tensor);
                     errdefer value.deinit();
                     if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
                     if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
