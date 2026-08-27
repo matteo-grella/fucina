@@ -659,7 +659,7 @@ Portable `@Vector` covers almost everything — but "almost" matters when a spec
 
 ```zig
 pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
-    if (comptime builtin.cpu.arch == .aarch64) {
+    if (comptime isa.has_neon) {
         var out = acc;
         asm ("sdot %[out].4s, %[a].16b, %[b].16b"
             : [out] "+w" (out),

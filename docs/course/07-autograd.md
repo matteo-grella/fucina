@@ -48,10 +48,10 @@ An op never sees the whole network; it knows exactly one local rule:
 
 For `y = relu(x)` that rule is one line — the gradient passes where the
 input was positive and dies where it was not — and here it is in the real
-engine, from `src/ag/backward/elementwise.zig`:
+engine, from `src/ag/backward/elementwise.zig:190`:
 
 ```zig
-dst.* = if (value > 0) grad else 0;
+return if (value > 0) grad else 0;
 ```
 
 That single line is the entire calculus of ReLU. For `z = x * y` it is the

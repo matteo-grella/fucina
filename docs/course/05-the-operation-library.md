@@ -118,10 +118,12 @@ Behind the contract sits an equally uniform implementation shape:
 The facade checks everything checkable, exactly once; below it, kernels are
 tight loops that trust their inputs and never re-validate. Three views of
 the real thing show the whole architecture. First, the facade methods are
-startlingly small. `add`, in its entirety (from `src/ag/tensor.zig:1241`):
+startlingly small. `add`, in its entirety (from the shared elementwise
+mixin, `src/ag/tensor/elementwise.zig:316`; `Out(result_tags)` is the
+branch's shorthand for `Tensor(.{ .dtype = dtype, .tags = result_tags })`):
 
 ```zig
-pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
+pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseResultTags(tags, TensorObject(@TypeOf(other)).axis_tags)) {
     return pointwise(.add, self, ctx, other);
 }
 ```
@@ -129,44 +131,48 @@ pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Tensor(pointwi
 The return *type* is computed at comptime from both operands' tag sets —
 that is Chapter 4's `pointwiseResultTags` doing its job. And the full
 pattern, for an op that carries its own backward record (from
-`src/ag/tensor.zig:1257`):
+`src/ag/tensor/elementwise.zig:334`):
 
 ```zig
-pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: f32) !Self {
-    var value = try ctx.scale(.f32, self.asRawTensor(), scalar_value);
+pub fn scale(self: *const Self, ctx: *ExecContext, scalar_value: dtype_mod.Accumulator(dtype)) !Self {
+    var value = try ctx.scale(dtype, self.asRawTensor(), scalar_value);
     errdefer value.deinit();
-    return finishOp(tags, ctx, value, self.requiresGrad(), ScaleBackward(tags), .{ ctx.allocator, self.grad_state, scalar_value });
+    if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
+    if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+    const Record = ScaleBackward(tags);
+    return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .scalar_value = scalar_value });
 }
 ```
 
-Run the kernel, `errdefer` the value, hand off to `finishOp` naming the
-backward type. Every differentiable op in the library ends in one of two
-shared tails — `finishOp` (attach a backward record if wanted) or
-`finishNoGrad` — so the contract is implemented in exactly one place, not
-re-derived per op (`src/ag/tensor.zig`).
+Run the kernel, `errdefer` the value, then the shared tails: `finishNoGrad`
+when no gradient will be recorded, `finishOp` with a **typed record
+literal** — the record names its parents and saved values as fields, so a
+swapped pair of parents no longer compiles. Every differentiable op in the
+library ends in one of these shared tails, so the contract is implemented
+in exactly one place, not re-derived per op (`src/ag/tensor/plumbing.zig`).
 
 Second, the lowering tier shows "validate once" concretely. This is the
-entire tag-broadcast pointwise lowering (from `src/tag_ops.zig:53`):
+entire tag-broadcast pointwise lowering (from `src/tag_ops.zig:64`; the
+leading comptime dtype selects the storage, `.f32` for the default facade):
 
 ```zig
-/// Tag-driven broadcasting pointwise op: broadcasts both operands to the
-/// pointwise result tags, then dispatches the rank-matched kernel.
 pub fn pointwise(
+    comptime tensor_dtype: DType,
     comptime op: PointwiseOp,
     comptime left_tags: anytype,
-    left: *const RawTensor,
+    left: *const tensor_mod.TensorOf(tensor_dtype),
     ctx: *ExecContext,
     comptime right_tags: anytype,
-    right: *const RawTensor,
-) !RawTensor {
-    try validateTensorRank(left_tags, left);
-    try validateTensorRank(right_tags, right);
+    right: *const tensor_mod.TensorOf(tensor_dtype),
+) !tensor_mod.TensorOf(dtype_mod.outputDType(.pointwise, tensor_dtype)) {
+    try validateTensorRank(tensor_dtype, left_tags, left);
+    try validateTensorRank(tensor_dtype, right_tags, right);
     const result_tags = pointwiseResultTags(left_tags, right_tags);
-    const result_shape = try broadcastResultShape(result_tags, left_tags, left, right_tags, right);
+    const result_shape = try broadcastResultShape(tensor_dtype, result_tags, left_tags, left, right_tags, right);
 
-    var left_view = try broadcastTensorTo(left_tags, left, result_tags, result_shape);
+    var left_view = try broadcastTensorTo(tensor_dtype, left_tags, left, result_tags, result_shape);
     defer left_view.deinit();
-    var right_view = try broadcastTensorTo(right_tags, right, result_tags, result_shape);
+    var right_view = try broadcastTensorTo(tensor_dtype, right_tags, right, result_tags, result_shape);
     defer right_view.deinit();
 
     return ctx.elementwise(tensor_dtype, comptime elementwiseOp(op), &left_view, &right_view);
@@ -486,7 +492,7 @@ pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contra
     !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag))
 ```
 
-*(signature from `src/ag/tensor.zig:3747`)*
+*(signature from `src/ag/tensor/float/matmul.zig:122`)*
 
 At comptime every tag falls into one of three roles (`docs/reference/04-tensor-operations.md` §4.8):
 the **contract** tag (named by you, removed from the result), **batch** tags
@@ -885,7 +891,7 @@ resident quantized formats — `q4_k`, `q5_k`, `q6_k`, `q8_0`, `tq2_0`,
 `ptqtp`, `q2_k`, `iq2_xxs`, `iq3_xxs`, `iq2_s`, `iq4_xs`, `q3_k` — plus a
 `streamed` arm resolving expert blocks from disk through
 `fucina.expert_store`: models larger than RAM decode through it
-(`src/exec/moe.zig:77`; [Chapter 13](13-inference-tricks.md)).
+(`src/exec/moe.zig:105`; [Chapter 13](13-inference-tricks.md)).
 
 > **Zig note** — `MoeRhs` is a `union(enum)`: a tagged union, Zig's sum
 > type. One op fans out over many storage formats with a single `switch`,
@@ -960,11 +966,17 @@ pub fn dropout(self: *const Self, ctx: *ExecContext, p: f32, seed: u64) !Self {
     if (p == 0) return self.withTags(ctx, tags);
     var value = try ctx.dropoutForward(self.asRawTensor(), p, seed);
     errdefer value.deinit();
-    return finishOp(tags, ctx, value, self.requiresGrad(), DropoutBackward(tags), .{ ctx.allocator, self.grad_state, p, seed });
+    if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
+    const Record = DropoutBackward(tags);
+    return finishOp(tags, ctx, value, Record{
+        .parents = .{self.grad_state},
+        .p = p,
+        .seed = seed,
+    });
 }
 ```
 
-*(from `src/ag/tensor.zig:1330`)*
+*(from `src/ag/tensor/elementwise.zig:422`)*
 
 Element `i` survives iff the uniform draw of `rng.at(seed, i)` falls below
 `1 − p`; "the mask is never stored: forward, backward, and checkpoint
