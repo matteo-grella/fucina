@@ -33,9 +33,9 @@ functions that return types, array lengths computed by other functions, and
 
 Fucina's answer is that an axis is identified by a **tag** — a name like
 `.batch`, `.seq`, `.d_model` — and the name lives in the tensor's *type*.
-Here is the destination, the README's own condensed example (README.md:24–41;
-the full-size version is `examples/spirals/main.zig:133–142`, and the same
-pattern runs the production trainer in `src/llm/qwen3/train.zig`):
+Here is the destination, the README's own condensed example (README.md:43-59;
+the full-size version is `examples/spirals/main.zig:141-150`, and the same
+pattern runs the production trainer in `src/models/qwen3/train.zig`):
 
 ```zig
 const Model = struct {
@@ -70,7 +70,7 @@ frames it with a deliberately old-fashioned analogy (README.md:56–60):
 
 Every axis-level decision in the library — broadcasting, contraction,
 reduction, permutation — is "made by tag identity, never by axis position at
-the call site" (docs/REFERENCE.md, §7 opening). The approach is credited:
+the call site" (`docs/reference/07-named-axes-the-tag-algebra.md`, §7 opening). The approach is credited:
 "the tagged-tensor approach (axis tags carried in the type, operands aligned
 by name) was inspired by [ZML](https://github.com/zml/zml)"
 (README.md:386–387). What Fucina adds is the particular split this chapter
@@ -80,8 +80,7 @@ Two internal modules implement the machinery: `src/tags.zig` (a pure
 comptime tuple algebra) and `src/tag_ops.zig` (runtime ops directed by
 comptime tags). **Neither is public API** — they are not re-exported at the
 module root; user code consumes all of this through `Tensor` methods, and
-the autograd VJPs call the same library on raw gradients (docs/REFERENCE.md
-§7). We will read them anyway — they are the best comptime tutorial in the
+the autograd VJPs call the same library on raw gradients (`docs/reference/07-named-axes-the-tag-algebra.md` §7). We will read them anyway — they are the best comptime tutorial in the
 tree — and build a miniature version first, as always. One caveat for
 everything that follows: Fucina's public API is explicitly young (no
 semver, no package manifest), so every signature in this chapter is
@@ -89,7 +88,7 @@ semver, no package manifest), so every signature in this chapter is
 
 ## 4.2 A name you can hold: enum literals and `Tag`
 
-The entire type system rests on two lines (src/tags.zig:4–5):
+The entire type system rests on two lines (src/tags.zig:8-9):
 
 ```zig
 pub const Tag = @TypeOf(.tag);
@@ -110,7 +109,7 @@ Ignore the second line for now (it returns in §4.5); the first deserves a slow 
 
 So a `Tag` is any identifier you like — `.batch`, `.qkv`, `._0` — with no
 registry of valid names. "Two tags are equal iff their spellings are equal"
-(docs/REFERENCE.md §7.1); equality is a compile-time string comparison of
+(`docs/reference/07-named-axes-the-tag-algebra.md` §7.1); equality is a compile-time string comparison of
 `@tagName` (src/tags.zig:190–201):
 
 ```zig
@@ -133,7 +132,7 @@ compiler: the `comptime blk:` label forces the computation to compile time,
 and the result is a plain `bool` the caller can branch on — also at compile
 time. Names carry no built-in meaning; there is no blessed `.batch`
 semantics anywhere in the library — "`._0`…`._7` are ordinary tags that
-happen to be generated for rank specs" (docs/REFERENCE.md §7.1). Identity
+happen to be generated for rank specs" (`docs/reference/07-named-axes-the-tag-algebra.md` §7.1). Identity
 is all a tag is.
 
 Let's start the chapter's build-it-yourself layer. All course code in this
@@ -245,14 +244,13 @@ compile away entirely", and §4.10 will squeeze the last drop out of it.
 
 The dtype dispatch adds a design point worth noticing: each branch's method
 set is decided at compile time, so calling an operation a dtype doesn't
-support "is a compile error, never a runtime failure" (docs/REFERENCE.md
-§3.2) — an i64 tensor simply *has no* `tanh` method.
+support "is a compile error, never a runtime failure" (`docs/reference/03-tensors-types-construction-and-data-access.md` §3.2) — an i64 tensor simply *has no* `tanh` method.
 [Chapter 5](05-the-operation-library.md) tours what each branch can do.
 
 ### Spec forms and normalization
 
 `Tensor(spec)` accepts five spellings, all normalized by `src/tags.zig`
-(table from docs/REFERENCE.md §3.1):
+(table from `docs/reference/03-tensors-types-construction-and-data-access.md` §3.1):
 
 | Spec form | Example | Meaning |
 |---|---|---|
@@ -307,11 +305,11 @@ API: a helper that returns `Tensor(2)` couldn't hand its result to a
 function expecting `Tensor(.{ ._0, ._1 })`.
 
 The documented contract says no fragmentation: "Specs that normalize to the
-same (dtype, tag list) produce the *same* type" (docs/REFERENCE.md §3.1).
+same (dtype, tag list) produce the *same* type" (`docs/reference/03-tensors-types-construction-and-data-access.md` §3.1).
 It is pinned by a machine-verified snippet — every runnable snippet in
-REFERENCE.md is compiled and run against the tree by the `zig build
-snippet-check` CI gate — and this one asserts type equality directly
-(docs/REFERENCE.md §3.1):
+the reference chapters is compiled and run against the tree by the
+`zig build snippet-check` CI gate — and this one asserts type equality directly
+(`docs/reference/03-tensors-types-construction-and-data-access.md` §3.1):
 
 ```zig
 test "Tensor spec forms and comptime introspection" {
@@ -349,7 +347,7 @@ One more corner from the table: `Tensor(.{})` has `tag_count == 0` but
 `tensor_rank == 1` — Fucina has no rank-0 tensors, so a scalar is stored as
 a rank-1, one-element tensor of shape `{1}`, bridged by `rawRank(0) == 1`
 (src/tags.zig:203–205; the no-zero-size/no-rank-0 stance is documented in
-REFERENCE.md §3.1). Full reductions like `sumAll` return exactly this type.
+`docs/reference/03-tensors-types-construction-and-data-access.md` §3.1). Full reductions like `sumAll` return exactly this type.
 
 ### The mini version
 
@@ -427,7 +425,7 @@ one line is the whole philosophy of the subsystem.
 
 Before the payoff sections, the boundary — overselling this type system is
 the easiest mistake to make, and the docs are careful not to. "Rank, tags,
-and dtype are comptime; sizes are runtime" (docs/REFERENCE.md §3.1). The
+and dtype are comptime; sizes are runtime" (`docs/reference/03-tensors-types-construction-and-data-access.md` §3.1). The
 type knows *what the axes are called* and *how many there are*, not *how
 long* they are. There are two failure worlds, and you must keep them
 straight:
@@ -443,13 +441,12 @@ straight:
 | Merge over stride-incompatible layout | merge across a transposed view | **runtime**, `error.UnsupportedView` |
 
 The top half is the tag algebra: "Every function here runs at compile time
-and violations are compile errors" (docs/REFERENCE.md §7 on `src/tags.zig`).
+and violations are compile errors" (`docs/reference/07-named-axes-the-tag-algebra.md` §7 on `src/tags.zig`).
 The bottom half is the size world, where errors are ordinary recoverable Zig
 errors — "All failures are recoverable Zig errors; nothing in this layer
-panics" (docs/REFERENCE.md §7.5, which also tabulates the runtime errors).
+panics" (`docs/reference/07-named-axes-the-tag-algebra.md` §7.5, which also tabulates the runtime errors).
 
-Here is the runtime half in a machine-verified snippet (docs/REFERENCE.md
-§7.7, context setup elided). Two tensors agree perfectly on names — both are
+Here is the runtime half in a machine-verified snippet (`docs/reference/07-named-axes-the-tag-algebra.md` §7.7, context setup elided). Two tensors agree perfectly on names — both are
 `{.d}` — and disagree on size, 3 versus 2:
 
 ```zig
@@ -492,7 +489,7 @@ another's order.
 A view ([Chapter 3](03-tensors-from-scratch.md)) is a shape and strides
 over a shared buffer; the tag layer adds that you never permute *by
 position*, you align *to a target tag order*. Here is the real
-implementation, short enough to read whole (src/tag_ops.zig:302,
+implementation, short enough to read whole (src/tag_ops.zig:555,
 `alignTensorTo`; the leading comptime dtype selects the storage, `.f32`
 for the default facade):
 
@@ -505,7 +502,7 @@ pub fn alignTensorTo(
 ) !tensor_mod.TensorOf(tensor_dtype) {
     comptime {
         validateUniqueTags(target_tags);
-        if (target_tags.len > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (target_tags.len > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         for (source_tags) |tag| {
             if (tagIndex(target_tags, tag) == null) @compileError("target tags must include all source tags");
         }
@@ -541,7 +538,7 @@ source *lacks* gets **size 1, stride 0**.
 That size-1/stride-0 axis is the most important trick in the chapter. A
 stride of 0 means "advancing along this axis doesn't move through memory" —
 the same element read again. It makes alignment (and, next section,
-broadcasting) **zero-copy always** (docs/REFERENCE.md §7.6): no buffer is
+broadcasting) **zero-copy always** (`docs/reference/07-named-axes-the-tag-algebra.md` §7.6): no buffer is
 allocated, no element is touched; we only describe the old buffer with new
 geometry. (And here `inserted_axis`, the `maxInt(usize)` sentinel from
 §4.2, earns its keep: the comptime axis-map helper `alignAxes` marks
@@ -569,12 +566,13 @@ result *type* is computed from its comptime argument, so downstream code is
 typed by the new order automatically. Every view method on the real facade
 has this shape: `alignTo`, `permuteTo`, `transpose`, `withTags` (relabel),
 `insertAxis`, `squeeze`, `broadcastTo` all return
-`Tensor(<some tag computation>)` (signatures in src/ag/tensor.zig:1128–1239).
+`Tensor(<some tag computation>)` (signatures in `src/ag/tensor/views.zig`,
+the shared view mixin every branch aliases).
 `permuteTo` is `alignTo` plus the constraint that the target is a
 permutation — same length, same membership (`validateSameTagSet`,
 src/tags.zig:166–170) — so no axis can be injected.
 
-The facade twin of our test is machine-verified in docs/REFERENCE.md §7.6:
+The facade twin of our test is machine-verified in `docs/reference/07-named-axes-the-tag-algebra.md` §7.6:
 the same `{2,3}` tensor, `x.alignTo(&ctx, .{ .d, .batch, .channel })`, the
 same `{3,2,1}` shape, and a `copyTo` reading out the transposed traversal
 `1, 4, 2, 5, 3, 6` from the untouched original buffer.
@@ -582,12 +580,12 @@ same `{3,2,1}` shape, and a `copyTo` reading out the transposed traversal
 One ownership note, carried over from Chapter 3: view results share storage
 with their source ("writing through one aliases the other") but are owned
 values — the caller must `deinit` them, and buffer refcounting keeps the
-view valid even after the source value is gone (docs/REFERENCE.md §7.5).
+view valid even after the source value is gone (`docs/reference/07-named-axes-the-tag-algebra.md` §7.5).
 
 ## 4.6 Pointwise: broadcasting by name
 
 Now the first *result-tag computation* — the comptime function deciding
-what type `x.add(ctx, &bias)` returns (src/tags.zig:323–341):
+what type `x.add(ctx, &bias)` returns (src/tags.zig:323-341):
 
 ```zig
 pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_tags: anytype) []const Tag {
@@ -604,7 +602,7 @@ pub inline fn pointwiseResultTags(comptime left_tags: anytype, comptime right_ta
                 out_i += 1;
             }
         }
-        if (out_i > tensor_mod.max_rank) @compileError("too many tensor tags");
+        if (out_i > tensor_mod.max_rank) @compileError(tensor_mod.too_many_tags_msg);
         const final = out[0..out_i].*;
         return &final;
     }
@@ -618,7 +616,7 @@ order, then every right-only tag appended in right order, capped at
 idiom: copy the filled prefix into a const array and return a pointer to
 it — comptime memory persists, so the slice outlives the call. And the
 facade `add` puts the computation directly in its return type
-(src/ag/tensor/elementwise.zig:318; `sub`/`mul`/`div`/`maximum`/`minimum`
+(src/ag/tensor/elementwise.zig:316; `sub`/`mul`/`div`/`maximum`/`minimum`
 are identical in shape — `Out(result_tags)` is the mixin's shorthand for
 `Tensor(.{ .dtype = dtype, .tags = result_tags })`, the branch's own
 dtype):
@@ -633,7 +631,7 @@ pub fn add(self: *const Self, ctx: *ExecContext, other: anytype) !Out(pointwiseR
 > getting comfortable with return types that are function calls.
 
 Given the result tags, broadcasting is one rule applied per axis
-(docs/REFERENCE.md §7.7): an operand missing the tag contributes size 1
+(`docs/reference/07-named-axes-the-tag-algebra.md` §7.7): an operand missing the tag contributes size 1
 (`alignTo`'s injected phantom axis); equal sizes pass through; a size of 1
 stretches to the other's size — zero-stride, no copy; two unequal non-1
 sizes return `TensorError.ShapeMismatch`.
@@ -641,7 +639,7 @@ sizes return `TensorError.ShapeMismatch`.
 Both operands are aligned to the result tags as views, stretched, and the
 rank-matched kernel from [Chapter 5](05-the-operation-library.md) runs once
 over the result. Bias-add — the eternal shape puzzle of positional APIs —
-falls out with no ceremony (machine-verified, docs/REFERENCE.md §7.7,
+falls out with no ceremony (machine-verified, `docs/reference/07-named-axes-the-tag-algebra.md` §7.7,
 context setup elided):
 
 ```zig
@@ -661,12 +659,12 @@ test "pointwise broadcasts by tag" {
 And because "compatible" means "union fits `max_rank`", *disjoint* tag sets
 broadcast too: `rows.mul(&ctx, &cols)` for `rows: Tensor(.{.batch})` and
 `cols: Tensor(.{.d})` yields result tags `{.batch, .d}` — "an outer product
-without any reshape ceremony", machine-verified in docs/REFERENCE.md §7.7.
+without any reshape ceremony", machine-verified in `docs/reference/07-named-axes-the-tag-algebra.md` §7.7.
 
 **The operand-order gotcha.** "Union in operand order" means the *left*
 operand's tags come first, so operand order determines the physical layout
 of the result: `{.d}` + `{.batch, .d}` produces tags `{.d, .batch}`, *not*
-`{.batch, .d}` (docs/REFERENCE.md §7.4). `bias.add(ctx, &x)` and
+`{.batch, .d}` (`docs/reference/07-named-axes-the-tag-algebra.md` §7.4). `bias.add(ctx, &x)` and
 `x.add(ctx, &bias)` compute the same numbers into two different layouts —
 and two different *types*. Mathematically harmless, occasionally a
 performance decision, always visible in the type. Say it once and remember
@@ -679,7 +677,7 @@ error.ShapeMismatch` — names matched, sizes did not), then one flat loop
 with broadcast axes clamped to coordinate 0. The full ~45-line
 implementation is compile-checked, with tests pinning the bias-add, the
 disjoint-tag union (an outer *sum*, since our mini op is add), and the
-runtime `ShapeMismatch` — the same three behaviors the REFERENCE.md
+runtime `ShapeMismatch` — the same three behaviors the reference's
 snippets pin for the real library.
 
 ## 4.7 Contraction by name: `dot` and the compile error you came for
@@ -687,7 +685,7 @@ snippets pin for the real library.
 Matrix multiplication is where positional shape discipline actually hurts,
 so it is where the tag algebra pays out hardest. Fucina's `dot` takes one
 **contract tag** and derives everything else: the operands' tags partition
-into three comptime classes (docs/REFERENCE.md §7.4):
+into three comptime classes (`docs/reference/07-named-axes-the-tag-algebra.md` §7.4):
 
 - **batch tags** — present in both operands, not the contract tag;
 - **left free tags** — left-only, non-contract;
@@ -709,7 +707,7 @@ pub inline fn dotResultTags(comptime left_tags: anytype, comptime right_tags: an
 
 The contract tag must exist in **both** operands before the function will
 even start assembling the result. And because the facade `dot` calls it in
-the *return type position* (src/ag/tensor/float/matmul.zig:130):
+the *return type position* (src/ag/tensor/float/matmul.zig:122):
 
 ```zig
 pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag))
@@ -747,7 +745,7 @@ src/tags.zig:187:5: error: tensor tag not found
 src/tags.zig:346:35: note: called at comptime here
         _ = tagIndexOrCompileError(right_tags, contract_tag);
             ~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~
-src/ag/tensor/float/matmul.zig:130:123: note: called at comptime here
+src/ag/tensor/float/matmul.zig:122:123: note: called at comptime here
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag)) {
                                                                                                              ~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 repro_facade_error.zig:8:22: note: generic function instantiated here
@@ -861,8 +859,8 @@ guarantee as the real library.
 
 Because the contraction is *named*, "the operands' physical axis order never
 changes the mathematical result — it only selects the kernel"
-(docs/REFERENCE.md §7.9). The canonical example, machine-verified
-(docs/REFERENCE.md §7.9): weights stored `{.n, .k}` — output-major, the way
+(`docs/reference/07-named-axes-the-tag-algebra.md` §7.9). The canonical example, machine-verified
+(`docs/reference/07-named-axes-the-tag-algebra.md` §7.9): weights stored `{.n, .k}` — output-major, the way
 linear layers usually keep them — contract against `{.m, .k}` with no
 transpose in sight:
 
@@ -879,22 +877,24 @@ test "dot contracts by tag regardless of physical axis order" {
 }
 ```
 
-(Context setup elided; full block in REFERENCE.md §7.9.) In a positional
+(Context setup elided; full block in
+`docs/reference/07-named-axes-the-tag-algebra.md` §7.9.) In a positional
 API, that call requires you to transpose `b` — and getting it silently
 wrong is the classic shape bug. Here `.k` finds itself on both sides; the
 layout difference merely routes to `matmulTransB` instead of `matmul2D`.
 Shared non-contract tags ride along as batch axes, and contracting the only
 tag of two vectors yields `Tensor(.{})` — both pinned by machine-verified
-snippets in REFERENCE.md §7.9.
+snippets in `docs/reference/07-named-axes-the-tag-algebra.md` §7.9.
 
 Two boundaries to keep straight, both documented:
 
 - **Dot batching is exact-match, not broadcast.** Batch sizes must be equal
   on both sides — they "do **not** broadcast (unlike pointwise)"
-  (docs/REFERENCE.md §7.9). The escape hatch when you *do* want a stride-0
+  (`docs/reference/07-named-axes-the-tag-algebra.md` §7.9). The escape hatch when you *do* want a stride-0
   broadcast batch is the facade `matmul` with an explicit result spelled
-  out — `matmul(ctx, other, comptime kind, comptime out_tags) !Tensor(out_tags)`
-  (src/ag/tensor.zig:487): you name the output tags, the library obliges.
+  out — `matmul(ctx, other, comptime kind, comptime out_tags)`
+  (src/ag/tensor/float/matmul.zig:81): you name the output tags, the
+  library obliges.
 - **Sizes still fail at runtime.** Our mini `dot` returns
   `error.ShapeMismatch` when `.k` is 3 on the left and 2 on the right, and
   so does the real one (§4.4). Names were never going to catch that.
@@ -905,7 +905,7 @@ The multi-head attention reshape is the scariest line in most transformer
 implementations: `x.view(B, T, H, D // H).transpose(1, 2)` — four
 positional numbers and an axis swap, unchecked. With named axes it is one
 call that *factors an axis into named factors* (machine-verified,
-docs/REFERENCE.md §7.8, context setup elided):
+`docs/reference/07-named-axes-the-tag-algebra.md` §7.8, context setup elided):
 
 ```zig
 test "split and merge rename factor axes as views" {
@@ -931,7 +931,7 @@ qwen3). The tag halves are pure tuple rewrites in `src/tags.zig` —
 tag colliding with an existing name or merge tags that are not "contiguous
 and in tensor order". The size halves are where split and merge stop being
 symmetric, and the asymmetry is a design decision worth internalizing
-(docs/REFERENCE.md §7.8):
+(`docs/reference/07-named-axes-the-tag-algebra.md` §7.8):
 
 - **`split` is zero-copy on *any* source layout.** Factor strides derive
   from the split axis's own stride, so even a strided view splits fine. The
@@ -944,7 +944,7 @@ symmetric, and the asymmetry is a design decision worth internalizing
   materialization**; you make the copy explicit with the facade
   `materialize` first. Costly copies stay visible in the program text.
 
-The failing case is pinned too (machine-verified, docs/REFERENCE.md §7.8,
+The failing case is pinned too (machine-verified, `docs/reference/07-named-axes-the-tag-algebra.md` §7.8,
 context setup elided):
 
 ```zig
@@ -965,7 +965,8 @@ This is the chapter's two-worlds table (§4.4) in one op: *tag* contiguity
 the same rule.
 
 Rounding out the structural set (facade signatures in
-src/ag/tensor.zig:1964–1982): `flatten(ctx, out_tag)` returns
+`src/ag/tensor/views.zig:269` and `src/ag/tensor/float/reduce.zig:369-377`):
+`flatten(ctx, out_tag)` returns
 `Tensor(.{out_tag})` — zero-copy when contiguous, materializing otherwise —
 and `sumMany(ctx, reduce_tags)` reduces away several named axes at once,
 returning `Tensor(removeTags(tags, reduce_tags))`; `sumAll` collapses
@@ -973,7 +974,7 @@ everything to `Tensor(.{})`. One implementation detail of `sumMany` is a
 gem for the Zig audience: reduction strips one axis at a time, and removing
 axis 1 would shift axis 3's index, so the axis indices are pre-sorted
 *descending* — by a bubble sort that runs inside the compiler
-(src/tags.zig:17–35):
+(src/tags.zig:21-39):
 
 ```zig
 pub fn reduceAxesDescending(comptime tags: anytype, comptime reduce_tags: anytype) [reduce_tags.len]usize {
@@ -1006,7 +1007,7 @@ they mean: the sort you would write anyway, executed at another time.
 One level up, the chapter's machinery unifies. The general two-operand
 contraction — einsum — asks: given left tags, right tags, and *output*
 tags, what role does each axis play? Fucina answers with a 2×2 truth table
-(src/tags.zig:470–477):
+(src/tags.zig:430-437):
 
 ```zig
 pub const EinsumPart = enum { batch, contract, left_free, right_free, left_summed, right_summed };
@@ -1023,11 +1024,12 @@ Shared and kept: batch. Shared and dropped: contracted. Private and kept:
 free. Private and dropped: summed away first. Every matmul, batched matmul,
 inner product, outer product, and marginalization is a row of this table —
 and `dot`, our hero of §4.7, turns out to be a one-liner
-(src/tag_ops.zig:105–118, parameters elided):
+(src/tag_ops.zig:119-129, parameters elided; the leading comptime dtype
+selects the storage):
 
 ```zig
-pub fn taggedDot(...) !RawTensor {
-    return taggedEinsum(left_tags, left, ctx, right_tags, right, comptime dotResultTags(left_tags, right_tags, contract_tag));
+pub fn taggedDot(...) !tensor_mod.TensorOf(dtype_mod.outputDType(.matmul, tensor_dtype)) {
+    return taggedEinsum(tensor_dtype, left_tags, left, ctx, right_tags, right, comptime dotResultTags(left_tags, right_tags, contract_tag));
 }
 ```
 
@@ -1036,14 +1038,14 @@ right free) as the equation. "One einsum lowering serves every contraction
 (`einsum`, `dot`, and their backward records)" (docs/ARCHITECTURE.md,
 Current Strengths) — even the gradients: the backward branches of
 `EinsumBackward` "are einsums themselves — the gradient of a contraction is
-a contraction" (docs/REFERENCE.md §7.9). Hold that thought for
+a contraction" (`docs/reference/07-named-axes-the-tag-algebra.md` §7.9). Hold that thought for
 [Chapter 7](07-autograd.md).
 
 On the facade, `einsum` takes the output tags directly —
 `x.einsum(ctx, &y, .{ .batch, .m, .n })` — and its comptime guards speak in
 prose: a quantized RHS gets `@compileError("einsum does not take a
 quantized RHS; use dot, whose packed kernels require the [free, contract]
-weight layout")` (src/ag/tensor.zig:3790–3791) — the message carries both
+weight layout")` (src/ag/tensor/float/matmul.zig:273) — the message carries both
 the *why* and the fix.
 
 ### Comptime plans, runtime choices
@@ -1055,8 +1057,8 @@ The tag algebra fixed *which* axes are M, N, K at compile time. Which
 data physically lies — a runtime fact. So the lowering builds zero-copy
 aligned views of each operand against comptime tuple-concatenated targets —
 `const x_plain_target = comptime batch_ord ++ m_ord ++ k_ord;`
-(src/tag_ops.zig:624–627) — and *probes*, at runtime, which orientation is
-already contiguous (src/tag_ops.zig:629–652). A transposed-kernel flag costs
+(src/tag_ops.zig:836-839) — and *probes*, at runtime, which orientation is
+already contiguous (src/tag_ops.zig:840-868). A transposed-kernel flag costs
 nothing; a materialization costs a copy pass; the probe pays the flag
 whenever it can, and when *both* operands want the transposed kernel, the
 larger keeps it and the smaller materializes once. The batch group then
@@ -1091,7 +1093,7 @@ of assorted shapes — the autograd tape, a weight table, a KV cache — with
 either dynamic tag storage (per-instance memory, per-op comparisons) or
 generic containers fragmented per tag set. Instead, everything below the
 facade traffics in one concrete raw type, and the facade "re-attaches
-result tags at comptime after each op" (docs/REFERENCE.md §7): the typed
+result tags at comptime after each op" (`docs/reference/07-named-axes-the-tag-algebra.md` §7): the typed
 and untyped worlds meet at function boundaries, where comptime information
 is free.
 
@@ -1104,11 +1106,11 @@ remains are integer axis indices baked into the instructions.
 Two guard rails complete the picture. First, the raw tensor is sealed off:
 "a comptime guard in `src/fucina.zig` makes `fucina.RawTensor` a compile
 error; in-tree code that genuinely needs it names
-`fucina.internal.RawTensor`" (docs/REFERENCE.md §3) — you cannot
+`fucina.internal.RawTensor`" (`docs/reference/03-tensors-types-construction-and-data-access.md` §3) — you cannot
 accidentally drop below the named-axis discipline. Second, the facade is
 cheap enough to be the *only* public currency: "The no-grad facade has
 negligible forward overhead, so model and example code carries
-`fucina.Tensor(spec)` end-to-end" (docs/REFERENCE.md §3 — a qualitative
+`fucina.Tensor(spec)` end-to-end" (`docs/reference/03-tensors-types-construction-and-data-access.md` §3 — a qualitative
 statement; the docs publish no numeric overhead figure, so none is quoted
 here).
 
@@ -1127,7 +1129,7 @@ neither a tag nor a check for one.
 > each is ordinary Zig evaluated at compile time. (One pragmatic footnote:
 > heavy comptime work can exhaust the interpreter's default budget, which
 > is why the module occasionally calls `@setEvalBranchQuota` —
-> e.g. src/tags.zig:282.)
+> e.g. src/tags.zig:275.)
 
 ## What you now know
 
@@ -1135,7 +1137,7 @@ neither a tag nor a check for one.
   value with spelling equality (`Tag = @TypeOf(.tag)`, src/tags.zig:4).
 - `Tensor(spec)` is a **function returning a type**; specs that normalize to
   the same (dtype, tag list) are the *same* type across spellings, while
-  reordered tags are a *different* type (docs/REFERENCE.md §3.1,
+  reordered tags are a *different* type (`docs/reference/03-tensors-types-construction-and-data-access.md` §3.1,
   machine-verified).
 - The type carries **names, not extents**: missing/duplicate tags, rank
   overflow (> 8), and wrong contraction axes fail at **compile time**;
@@ -1168,9 +1170,10 @@ neither a tag nor a check for one.
 - `src/tag_ops.zig` — the runtime half: `alignTensorTo` (the workhorse
   view), `pointwise`, `taggedDot`/`taggedEinsum` with the orientation probe.
   Remember: internal — user code goes through `Tensor` methods.
-- `src/ag/tensor.zig:189–215` — the facade constructor: normalize, validate,
-  `return struct`; then skim any view method's return type.
-- `docs/REFERENCE.md` §3.1–3.2 and §7 — the semantics contract, with
+- `src/ag/tensor.zig:98-105` — the facade dispatcher: normalize the spec,
+  then pick the branch; skim any view method's return type in
+  `src/ag/tensor/views.zig`.
+- `docs/reference/03-tensors-types-construction-and-data-access.md` §3.1–3.2 and §7 — the semantics contract, with
   machine-verified snippets for every behavior this chapter claimed.
 - `examples/spirals/main.zig` — the tags at work in a full training program
   you can run.
@@ -1195,12 +1198,13 @@ neither a tag nor a check for one.
    non-contract tags: implement `dotBatchTags` (shared, non-contract, in
    left order), make the result `batch ++ left free ++ right free`, and
    extend the odometer loop so batch coordinates index *both* operands.
-   Check against the machine-verified batch example in REFERENCE.md §7.9.
+   Check against the machine-verified batch example in
+   `docs/reference/07-named-axes-the-tag-algebra.md` §7.9.
 5. **Merge, both halves (hard).** Give the mini `View` a `merge(out_tag,
    merge_tags)`: comptime-check the merge tags are adjacent and in order in
    `axis_tags`, then runtime-check `stride(i) == shape(i+1) × stride(i+1)`
    per adjacent pair, returning `error.UnsupportedView` on failure — and
-   confirm a transposed view refuses, like docs/REFERENCE.md §7.8's snippet.
+   confirm a transposed view refuses, like `docs/reference/07-named-axes-the-tag-algebra.md` §7.8's snippet.
 
 ---
 
