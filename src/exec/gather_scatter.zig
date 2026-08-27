@@ -3,7 +3,7 @@
 //! scatter-add, and the relative-position shift.
 //!
 //! Domain module: every op receives an explicit `*ExecContext`. The scatter-add
-//! embedding-gradient kernel + Task stay in the `row_ops` leaf; the private
+//! embedding-gradient kernel + Task live in the backend row-kernel leaf; the private
 //! `writeSlice*`/`writeRows*`/`validateUniqueIndices` helpers move here with
 //! their callers.
 
@@ -13,7 +13,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
-const exec_row_ops = @import("row_ops.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 

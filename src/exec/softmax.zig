@@ -1,15 +1,17 @@
 //! Softmax (plain + masked/sink/ALiBi/causal "ext") forward and backward.
 //!
 //! Domain module: every op receives an explicit `*ExecContext`; the per-row SIMD
-//! kernels + Task structs stay in the `row_ops` leaf (imported), so the hot
-//! loops are untouched. Home of `SoftmaxExtOptions` (re-exported by `exec.zig`).
+//! kernels + Task structs live in the backend row-kernel leaf (`backend.rows`,
+//! dispatched through `backend.kernels`). Home of `SoftmaxExtOptions`
+//! (re-exported by `exec.zig`).
 
 const std = @import("std");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 const dtype_mod = @import("../dtype.zig");
 
-const exec_row_ops = @import("row_ops.zig");
+const backend_mod = @import("../backend.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
@@ -26,8 +28,8 @@ const SoftmaxRowsTask = exec_row_ops.SoftmaxRowsTask;
 const LogRowsTask = exec_row_ops.LogRowsTask;
 const runLogsumexpRowsTask = exec_row_ops.runLogsumexpRowsTask;
 const runLogSoftmaxRowsTask = exec_row_ops.runLogSoftmaxRowsTask;
-const logsumexpRows = exec_row_ops.logsumexpRows;
-const logSoftmaxRows = exec_row_ops.logSoftmaxRows;
+const logsumexpRows = backend_mod.kernels.logsumexpRows;
+const logSoftmaxRows = backend_mod.kernels.logSoftmaxRows;
 const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
 const SoftmaxExtRowsTask = exec_row_ops.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = exec_row_ops.SoftmaxBackwardRowsTask;
@@ -41,9 +43,9 @@ const runSoftmaxBackwardInnerTask = exec_row_ops.runSoftmaxBackwardInnerTask;
 const runSoftmaxRowsTask = exec_row_ops.runSoftmaxRowsTask;
 const runSoftmaxExtRowsTask = exec_row_ops.runSoftmaxExtRowsTask;
 const runSoftmaxBackwardRowsTask = exec_row_ops.runSoftmaxBackwardRowsTask;
-const softmaxRows = exec_row_ops.softmaxRows;
-const softmaxExtRows = exec_row_ops.softmaxExtRows;
-const softmaxBackwardRows = exec_row_ops.softmaxBackwardRows;
+const softmaxRows = backend_mod.kernels.softmaxRows;
+const softmaxExtRows = backend_mod.kernels.softmaxExtRows;
+const softmaxBackwardRows = backend_mod.kernels.softmaxBackwardRows;
 
 pub const SoftmaxExtOptions = struct {
     mask: ?*const Tensor = null,

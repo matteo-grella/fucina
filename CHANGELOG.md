@@ -258,6 +258,20 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The fused row kernels (softmax/logsumexp/log-softmax rows and their
+  strided inner-lane arms, layer/RMS-norm rows and backward stats,
+  cross-entropy and distillation rows, dropout, scatter-add, the gated
+  activations and the fused activation+quantize workers) live in
+  `backend/vector/rows.zig`, no longer in `exec/row_ops.zig`: the serial
+  kernel entries are registered in the conformed `backend.kernels` table,
+  the Task payloads and `run*Task` pool adapters are the `backend.rows`
+  seam, and on `-Dbackend=scalar` builds every SIMD entry selects its
+  serial twin in `rows.scalar` (held to the entries by
+  `backend/parity_test.zig`; the inner-lane twins reproduce the entries'
+  bytes). The `exec` domain modules keep validation, layout, allocation
+  and dispatch only. Native builds are bitwise-unchanged (the moved
+  bodies are textually identical; codegen histograms are identical on
+  `softmaxRows` and the attention decode head kernel).
 - `store/expert_store.zig` is now the facade over five concern files —
   `store/io.zig` (platform I/O shims + the store error set),
   `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout

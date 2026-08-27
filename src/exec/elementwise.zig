@@ -11,7 +11,7 @@ const tensor = @import("../tensor.zig");
 
 const parallel = @import("../parallel.zig");
 const dtype_mod = @import("../dtype.zig");
-const exec_row_ops = @import("row_ops.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const exec_runtime = @import("runtime.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
@@ -41,11 +41,11 @@ const runSplitGluTask = exec_row_ops.runSplitGluTask;
 const runSplitSwiGluBackwardTask = exec_row_ops.runSplitSwiGluBackwardTask;
 const runSplitGluBackwardTask = exec_row_ops.runSplitGluBackwardTask;
 const runDropoutRangeTask = exec_row_ops.runDropoutRangeTask;
-const splitSwiGluRows = exec_row_ops.splitSwiGluRows;
-const splitGluRows = exec_row_ops.splitGluRows;
-const splitSwiGluBackwardRows = exec_row_ops.splitSwiGluBackwardRows;
-const splitGluBackwardRows = exec_row_ops.splitGluBackwardRows;
-const dropoutRange = exec_row_ops.dropoutRange;
+const splitSwiGluRows = backend_mod.kernels.splitSwiGluRows;
+const splitGluRows = backend_mod.kernels.splitGluRows;
+const splitSwiGluBackwardRows = backend_mod.kernels.splitSwiGluBackwardRows;
+const splitGluBackwardRows = backend_mod.kernels.splitGluBackwardRows;
+const dropoutRange = backend_mod.kernels.dropoutRange;
 const dropoutKeepCutoff = exec_row_ops.dropoutKeepCutoff;
 
 const CompareOp = backend_mod.ops.CompareOp;

@@ -5,7 +5,7 @@
 //! pair).
 //!
 //! Domain module: every op receives an explicit `*ExecContext`. Per-row SIMD
-//! kernels + Task structs stay in the `row_ops` leaf; the fused rms-norm+rope
+//! kernels + Task structs live in the backend row-kernel leaf (`backend.rows`); the fused rms-norm+rope
 //! kernel reads the rope table's pub `sinValues()`/`cosValues()`. Home of
 //! the options and result types (re-exported by `exec.zig`).
 
@@ -14,7 +14,7 @@ const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
-const exec_row_ops = @import("row_ops.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const exec_rope = @import("rope.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
@@ -56,15 +56,15 @@ const runLayerNormParamGradColumnsTask = exec_row_ops.runLayerNormParamGradColum
 const runRmsNormInnerTask = exec_row_ops.runRmsNormInnerTask;
 const runRmsNormBackwardInputInnerTask = exec_row_ops.runRmsNormBackwardInputInnerTask;
 const runLayerNormInnerTask = exec_row_ops.runLayerNormInnerTask;
-const rmsNormMulRopeHalfVectors = exec_row_ops.rmsNormMulRopeHalfVectors;
-const rmsNormMulRows = exec_row_ops.rmsNormMulRows;
-const rmsNormMulAddRows = exec_row_ops.rmsNormMulAddRows;
-const rmsNormMulBackwardInputRows = exec_row_ops.rmsNormMulBackwardInputRows;
-const rmsNormMulBackwardWeightRows = exec_row_ops.rmsNormMulBackwardWeightRows;
-const layerNormBackwardInputRows = exec_row_ops.layerNormBackwardInputRows;
-const layerNormAffineParamGradRows = exec_row_ops.layerNormAffineParamGradRows;
-const layerNormRowStats = exec_row_ops.layerNormRowStats;
-const layerNormParamGradColumns = exec_row_ops.layerNormParamGradColumns;
+const rmsNormMulRopeHalfVectors = backend_mod.kernels.rmsNormMulRopeHalfVectors;
+const rmsNormMulRows = backend_mod.kernels.rmsNormMulRows;
+const rmsNormMulAddRows = backend_mod.kernels.rmsNormMulAddRows;
+const rmsNormMulBackwardInputRows = backend_mod.kernels.rmsNormMulBackwardInputRows;
+const rmsNormMulBackwardWeightRows = backend_mod.kernels.rmsNormMulBackwardWeightRows;
+const layerNormBackwardInputRows = backend_mod.kernels.layerNormBackwardInputRows;
+const layerNormAffineParamGradRows = backend_mod.kernels.layerNormAffineParamGradRows;
+const layerNormRowStats = backend_mod.kernels.layerNormRowStats;
+const layerNormParamGradColumns = backend_mod.kernels.layerNormParamGradColumns;
 
 /// Optional per-feature affine terms of layerNorm and groupNorm: `weight`
 /// scales the normalized row, `bias` adds to it (each rank-1 `[axis_dim]`
@@ -607,7 +607,7 @@ fn rmsNormBackwardWeight(
             .block_end = block_count,
         };
         if (!ctx.dispatchRange(RmsNormWeightGradBlocksTask, "block_start", "block_end", blocks_task, block_count, runRmsNormWeightGradBlocksTask)) {
-            exec_row_ops.rmsNormWeightGradBlocks(blocks_task);
+            backend_mod.kernels.rmsNormWeightGradBlocks(blocks_task);
         }
         const reduce_task: RmsNormWeightGradReduceTask = .{
             .partials = partials,
@@ -619,7 +619,7 @@ fn rmsNormBackwardWeight(
         };
         const reduce_pooled = partials.len >= parallel.row_kernel_len_threshold and
             ctx.dispatchRange(RmsNormWeightGradReduceTask, "col_start", "col_end", reduce_task, axis_dim, runRmsNormWeightGradReduceTask);
-        if (!reduce_pooled) exec_row_ops.rmsNormWeightGradReduce(reduce_task);
+        if (!reduce_pooled) backend_mod.kernels.rmsNormWeightGradReduce(reduce_task);
         return out;
     }
 
@@ -629,7 +629,7 @@ fn rmsNormBackwardWeight(
         // loop's order, so this arm stays serial.
         var scratch = try ctx.empty(.f32, .{inner});
         defer scratch.deinit();
-        exec_row_ops.rmsNormBackwardWeightInner(.{
+        backend_mod.kernels.rmsNormBackwardWeightInner(.{
             .input = input,
             .grad = grad,
             .output = output,
@@ -940,7 +940,7 @@ pub fn layerNormRows(
             return out;
         }
     }
-    exec_row_ops.layerNormRows(base_task);
+    backend_mod.kernels.layerNormRows(base_task);
     return out;
 }
 
@@ -1033,7 +1033,7 @@ fn layerNormDispatchAxisRank(
             }
         }
 
-        exec_row_ops.layerNormRows(base_task);
+        backend_mod.kernels.layerNormRows(base_task);
         return out;
     }
 
@@ -1309,7 +1309,7 @@ fn layerNormBackwardDispatchAxisRank(
     // dweight/dbias accumulation crosses lanes).
     var scratch = try ctx.empty(.f32, .{4 * inner});
     defer scratch.deinit();
-    exec_row_ops.layerNormBackwardInner(.{
+    backend_mod.kernels.layerNormBackwardInner(.{
         .input = input,
         .grad = grad,
         .weights = weights,

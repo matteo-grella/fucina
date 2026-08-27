@@ -24,6 +24,10 @@
 //!   conv         - causal, depthwise, grouped and channel-last 2-D convolution.
 //!   pool         - channel-last 2-D pooling and nearest upsampling.
 //!   winograd     - the Winograd F(2x2,3x3) and F(4x4,3x3) transforms.
+//!   rows         - the fused row kernels (softmax/logsumexp, layer/RMS
+//!                  norm, cross-entropy, dropout, scatter-add, gated
+//!                  activations, the inner-lane strided-axis family) with
+//!                  their Task payloads and run adapters.
 pub const common = @import("vector/common.zig");
 
 pub const primitives = @import("vector/primitives.zig");
@@ -36,6 +40,7 @@ pub const matmul_quant = @import("vector/matmul_quant.zig");
 pub const conv = @import("vector/conv.zig");
 pub const pool = @import("vector/pool.zig");
 pub const winograd = @import("vector/winograd.zig");
+pub const rows = @import("vector/rows.zig");
 
 pub const ParallelConfig = common.ParallelConfig;
 pub const Vf32 = common.Vf32;

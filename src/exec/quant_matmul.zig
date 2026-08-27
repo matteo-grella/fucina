@@ -12,7 +12,7 @@ const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_buffer_pool = @import("buffer_pool.zig");
-const exec_row_ops = @import("row_ops.zig");
+const exec_row_ops = backend_mod.rows;
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;

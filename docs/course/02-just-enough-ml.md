@@ -445,7 +445,7 @@ by `e ≈ 2.718` again. Two properties worth noting now, cashed in later:
 - Adding a constant to *every* logit changes nothing (it cancels in the division).
   Production kernels exploit this by subtracting the max logit first so that `e^x`
   never overflows — you can see the three-pass max/exp-sum/normalize structure in
-  Fucina's SIMD row kernel (`softmaxRows`, `src/exec/row_ops.zig:1341`). Numerical
+  Fucina's SIMD row kernel (`softmaxRows`, `src/backend/vector/rows.zig:1517`). Numerical
   care of this kind is a recurring character in [Chapter 5](05-the-operation-library.md).
 - Only gaps matter. Softmax is a smooth argmax — hence the name.
 
@@ -741,7 +741,7 @@ Zig, with tests proving it right.
 - `docs/REFERENCE.md` §4.15 — the loss-function catalogue, including the
   machine-verified "crossEntropy on uniform logits is ln(K)" test you can now derive
   yourself.
-- `src/exec/row_ops.zig` (`softmaxRows`, line 1341) — softmax as production code:
+- `src/backend/vector/rows.zig` (`softmaxRows`, line 1517) — softmax as production code:
   find the max-subtraction trick from §2.7 inside the SIMD loops. Skim only; this is
   Chapter 5–6 territory.
 

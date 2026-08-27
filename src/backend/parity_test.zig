@@ -961,6 +961,415 @@ const Impl = struct {
         var prng = std.Random.DefaultPrng.init(0x9720);
         try checkTQ2_0Parity(std.testing.allocator, prng.random());
     }
+
+    // ---- Row-kernel parity: the vector/rows.zig entries against their
+    // scalar twins on the same task payloads. The rows kernels differ from
+    // the twins in reduction order only (per-element transcendentals are
+    // shared), so tolerances scale with the reduced length; the inner-lane
+    // kernels keep per-output accumulation order, so those comparisons are
+    // bitwise.
+    const rows_impl = @import("vector/rows.zig");
+
+    fn expectBitwise(expected: []const f32, actual: []const f32) !void {
+        try std.testing.expectEqualSlices(u32, @ptrCast(expected), @ptrCast(actual));
+    }
+
+    test "parity: softmax row kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x50f7a);
+        const rng = prng.random();
+        const n_rows: usize = 5;
+        for ([_]usize{ 7, 64, 257 }) |cols| {
+            const len = n_rows * cols;
+            const input = try allocator.alloc(f32, len);
+            defer allocator.free(input);
+            fillRandom(rng, input);
+            const out_a = try allocator.alloc(f32, len);
+            defer allocator.free(out_a);
+            const out_b = try allocator.alloc(f32, len);
+            defer allocator.free(out_b);
+            const tol = 1e-6 * @as(f32, @floatFromInt(cols));
+
+            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.softmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            try expectClose(out_b, out_a, tol);
+
+            rows_impl.logSoftmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.logSoftmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            try expectClose(out_b, out_a, tol);
+
+            rows_impl.logsumexpRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.logsumexpRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            try expectClose(out_b[0..n_rows], out_a[0..n_rows], tol);
+
+            // Backward over a softmax output.
+            const gy = try allocator.alloc(f32, len);
+            defer allocator.free(gy);
+            fillRandom(rng, gy);
+            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            const y = out_a;
+            const gx_a = try allocator.alloc(f32, len);
+            defer allocator.free(gx_a);
+            const gx_b = try allocator.alloc(f32, len);
+            defer allocator.free(gx_b);
+            rows_impl.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_a, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_b, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
+            try expectClose(gx_b, gx_a, tol);
+
+            // Distill statistics + backward share the CE stats layout.
+            const stats_a = try allocator.alloc(f32, 2 * n_rows);
+            defer allocator.free(stats_a);
+            const stats_b = try allocator.alloc(f32, 2 * n_rows);
+            defer allocator.free(stats_b);
+            rows_impl.distillStatsRows(.{ .input = input, .row_stats = stats_a, .class_count = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.distillStatsRows(.{ .input = input, .row_stats = stats_b, .class_count = cols, .row_start = 0, .row_end = n_rows });
+            try expectClose(stats_b, stats_a, tol);
+            const mass = try allocator.alloc(f32, n_rows);
+            defer allocator.free(mass);
+            fillRandom(rng, mass);
+            rows_impl.distillBackwardRows(.{ .input = input, .output = gx_a, .row_stats = stats_a, .row_mass = mass, .class_count = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.distillBackwardRows(.{ .input = input, .output = gx_b, .row_stats = stats_a, .row_mass = mass, .class_count = cols, .row_start = 0, .row_end = n_rows });
+            try expectClose(gx_b, gx_a, tol);
+        }
+    }
+
+    test "parity: cross-entropy row kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xce10);
+        const rng = prng.random();
+        const n_rows: usize = 6;
+        const cols: usize = 129;
+        const len = n_rows * cols;
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+        var labels: [n_rows]usize = .{ 3, 100, 7, 2, 128, 0 };
+        labels[3] = 42; // one row hits the ignore_index below
+        const tol = 1e-6 * @as(f32, @floatFromInt(cols));
+
+        for ([_]f32{ 0, 0.1 }) |smoothing| {
+            const losses_a = try allocator.alloc(f32, n_rows);
+            defer allocator.free(losses_a);
+            const losses_b = try allocator.alloc(f32, n_rows);
+            defer allocator.free(losses_b);
+            const stats_a = try allocator.alloc(f32, 2 * n_rows);
+            defer allocator.free(stats_a);
+            const stats_b = try allocator.alloc(f32, 2 * n_rows);
+            defer allocator.free(stats_b);
+            rows_impl.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_a, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_b, .row_stats = stats_b, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .row_start = 0, .row_end = n_rows });
+            try expectClose(losses_b, losses_a, tol);
+            try expectClose(stats_b, stats_a, tol);
+
+            const gx_a = try allocator.alloc(f32, len);
+            defer allocator.free(gx_a);
+            const gx_b = try allocator.alloc(f32, len);
+            defer allocator.free(gx_b);
+            // The forward-saved-stats one-pass arm (same stats for both sides).
+            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            try expectClose(gx_b, gx_a, tol);
+            // The recompute arm.
+            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            try expectClose(gx_b, gx_a, tol);
+        }
+    }
+
+    test "parity: gated-activation row kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x619d);
+        const rng = prng.random();
+        const outer: usize = 4;
+        const half: usize = 37;
+        const len = outer * 2 * half;
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+        const grad = try allocator.alloc(f32, outer * half);
+        defer allocator.free(grad);
+        fillRandom(rng, grad);
+        const out_a = try allocator.alloc(f32, len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, len);
+        defer allocator.free(out_b);
+
+        rows_impl.splitSwiGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.scalar.splitSwiGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        try expectClose(out_b[0 .. outer * half], out_a[0 .. outer * half], 1e-5);
+
+        rows_impl.splitGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.scalar.splitGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        try expectClose(out_b[0 .. outer * half], out_a[0 .. outer * half], 1e-5);
+
+        rows_impl.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.scalar.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        try expectClose(out_b, out_a, 1e-5);
+
+        rows_impl.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.scalar.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        try expectClose(out_b, out_a, 1e-5);
+    }
+
+    test "parity: rms-norm row kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x4a45);
+        const rng = prng.random();
+        const n_rows: usize = 5;
+        const cols: usize = 173;
+        const len = n_rows * cols;
+        const eps: f32 = 1e-5;
+        const inv_cols = 1 / @as(f32, @floatFromInt(cols));
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+        const weights = try allocator.alloc(f32, cols);
+        defer allocator.free(weights);
+        fillRandom(rng, weights);
+        const grad = try allocator.alloc(f32, len);
+        defer allocator.free(grad);
+        fillRandom(rng, grad);
+        const residual = try allocator.alloc(f32, len);
+        defer allocator.free(residual);
+        fillRandom(rng, residual);
+        const out_a = try allocator.alloc(f32, len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, len);
+        defer allocator.free(out_b);
+        const tol = 1e-6 * @as(f32, @floatFromInt(cols));
+
+        rows_impl.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.scalar.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        try expectClose(out_b, out_a, tol);
+
+        rows_impl.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.scalar.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        try expectClose(out_b, out_a, tol);
+
+        rows_impl.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.scalar.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        try expectClose(out_b, out_a, tol);
+
+        @memset(out_a[0..cols], 0);
+        @memset(out_b[0..cols], 0);
+        rows_impl.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_a[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.scalar.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_b[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        try expectClose(out_b[0..cols], out_a[0..cols], tol * @as(f32, @floatFromInt(n_rows)));
+
+        // The block-partial reduce: same partials, vector vs serial column walk.
+        const block_count: usize = 3;
+        const partials = try allocator.alloc(f32, block_count * cols);
+        defer allocator.free(partials);
+        fillRandom(rng, partials);
+        @memset(out_a[0..cols], 0);
+        @memset(out_b[0..cols], 0);
+        rows_impl.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_a[0..cols], .block_count = block_count, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        rows_impl.scalar.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_b[0..cols], .block_count = block_count, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        try expectBitwise(out_b[0..cols], out_a[0..cols]);
+    }
+
+    test "parity: layer-norm row kernels vs scalar twins" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x1a9e);
+        const rng = prng.random();
+        const n_rows: usize = 5;
+        const cols: usize = 173;
+        const len = n_rows * cols;
+        const eps: f32 = 1e-5;
+        const inv_cols = 1 / @as(f32, @floatFromInt(cols));
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+        const weights = try allocator.alloc(f32, cols);
+        defer allocator.free(weights);
+        fillRandom(rng, weights);
+        const biases = try allocator.alloc(f32, cols);
+        defer allocator.free(biases);
+        fillRandom(rng, biases);
+        const grad = try allocator.alloc(f32, len);
+        defer allocator.free(grad);
+        fillRandom(rng, grad);
+        const out_a = try allocator.alloc(f32, len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, len);
+        defer allocator.free(out_b);
+        const tol = 1e-6 * @as(f32, @floatFromInt(cols));
+        const grad_tol = tol * @as(f32, @floatFromInt(n_rows));
+
+        for ([_]bool{ false, true }) |affine| {
+            const w: ?[]const f32 = if (affine) weights else null;
+            const b: ?[]const f32 = if (affine) biases else null;
+            rows_impl.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            try expectClose(out_b, out_a, tol);
+
+            rows_impl.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            rows_impl.scalar.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            try expectClose(out_b, out_a, tol);
+        }
+
+        // Serial dweight/dbias fallback.
+        const dw_a = try allocator.alloc(f32, cols);
+        defer allocator.free(dw_a);
+        const dw_b = try allocator.alloc(f32, cols);
+        defer allocator.free(dw_b);
+        const db_a = try allocator.alloc(f32, cols);
+        defer allocator.free(db_a);
+        const db_b = try allocator.alloc(f32, cols);
+        defer allocator.free(db_b);
+        @memset(dw_a, 0);
+        @memset(dw_b, 0);
+        @memset(db_a, 0);
+        @memset(db_b, 0);
+        rows_impl.layerNormAffineParamGradRows(input, grad, dw_a, db_a, n_rows, cols, inv_cols, eps);
+        rows_impl.scalar.layerNormAffineParamGradRows(input, grad, dw_b, db_b, n_rows, cols, inv_cols, eps);
+        try expectClose(dw_b, dw_a, grad_tol);
+        try expectBitwise(db_b, db_a);
+
+        // Stats pass + the column-partitioned accumulation.
+        const stats_a = try allocator.alloc(f32, 2 * n_rows);
+        defer allocator.free(stats_a);
+        const stats_b = try allocator.alloc(f32, 2 * n_rows);
+        defer allocator.free(stats_b);
+        rows_impl.layerNormRowStats(.{ .input = input, .stats = stats_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.scalar.layerNormRowStats(.{ .input = input, .stats = stats_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        try expectClose(stats_b, stats_a, tol);
+        @memset(dw_a, 0);
+        @memset(dw_b, 0);
+        @memset(db_a, 0);
+        @memset(db_b, 0);
+        rows_impl.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_a, .dbias = db_a, .rows = n_rows, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        rows_impl.scalar.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_b, .dbias = db_b, .rows = n_rows, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        // Same per-column row-order accumulation on both sides: bitwise.
+        try expectBitwise(dw_b, dw_a);
+        try expectBitwise(db_b, db_a);
+    }
+
+    test "parity: scatter-add rows twin is the entry's bytes" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x5ca7);
+        const rng = prng.random();
+        const src_rows: usize = 9;
+        const dst_rows: usize = 4;
+        const row_len: usize = 21;
+        const grad = try allocator.alloc(f32, src_rows * row_len);
+        defer allocator.free(grad);
+        fillRandom(rng, grad);
+        const indices = [_]usize{ 0, 3, 1, 3, 0, 2, 1, 0, 3 };
+        const out_a = try allocator.alloc(f32, dst_rows * row_len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, dst_rows * row_len);
+        defer allocator.free(out_b);
+        rows_impl.scatterAddRows(.{ .grad = grad, .output = out_a, .indices = &indices, .row_len = row_len, .row_start = 0, .row_end = dst_rows });
+        rows_impl.scalar.scatterAddRows(.{ .grad = grad, .output = out_b, .indices = &indices, .row_len = row_len, .row_start = 0, .row_end = dst_rows });
+        try expectBitwise(out_b, out_a);
+    }
+
+    test "parity: inner-lane row kernels are the scalar twins' bytes" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x1a2e5);
+        const rng = prng.random();
+        const outer: usize = 3;
+        const axis_dim: usize = 19;
+        const inner: usize = 43; // odd: exercises the vector tails
+        const len = outer * axis_dim * inner;
+        const eps: f32 = 1e-5;
+        const inv_axis = 1 / @as(f32, @floatFromInt(axis_dim));
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+        const grad = try allocator.alloc(f32, len);
+        defer allocator.free(grad);
+        fillRandom(rng, grad);
+        const weights = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(weights);
+        fillRandom(rng, weights);
+        const out_a = try allocator.alloc(f32, len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, len);
+        defer allocator.free(out_b);
+        const scratch = try allocator.alloc(f32, 5 * inner);
+        defer allocator.free(scratch);
+
+        rows_impl.softmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.softmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b, out_a);
+
+        rows_impl.logsumexpInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.logsumexpInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b[0 .. outer * inner], out_a[0 .. outer * inner]);
+
+        rows_impl.logSoftmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.logSoftmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b, out_a);
+
+        rows_impl.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b, out_a);
+
+        rows_impl.varianceInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)), .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.varianceInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)), .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b[0 .. outer * inner], out_a[0 .. outer * inner]);
+
+        inline for ([_]type{ f32, f64 }) |Acc| {
+            const acc_scratch = try allocator.alloc(Acc, 5 * inner);
+            defer allocator.free(acc_scratch);
+            rows_impl.standardizeInner(Acc, .{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+            rows_impl.scalar.standardizeInner(Acc, .{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+            try expectBitwise(out_b, out_a);
+
+            @memset(out_a, 0);
+            @memset(out_b, 0);
+            rows_impl.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer, .inner_start = 0, .inner_end = inner });
+            rows_impl.scalar.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer, .inner_start = 0, .inner_end = inner });
+            try expectBitwise(out_b, out_a);
+        }
+
+        rows_impl.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b, out_a);
+
+        for ([_]bool{ false, true }) |weighted| {
+            const w: ?[]const f32 = if (weighted) weights else null;
+            rows_impl.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+            rows_impl.scalar.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+            try expectBitwise(out_b, out_a);
+        }
+
+        @memset(out_a[0..axis_dim], 0);
+        @memset(out_b[0..axis_dim], 0);
+        rows_impl.rmsNormBackwardWeightInner(.{ .input = input, .grad = grad, .output = out_a[0..axis_dim], .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps });
+        rows_impl.scalar.rmsNormBackwardWeightInner(.{ .input = input, .grad = grad, .output = out_b[0..axis_dim], .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps });
+        try expectBitwise(out_b[0..axis_dim], out_a[0..axis_dim]);
+
+        rows_impl.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        rows_impl.scalar.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        try expectBitwise(out_b, out_a);
+
+        // layerNormBackwardInner: dx keeps per-element order (bitwise); the
+        // per-axis dweight/dbias reduce is the one lane-vec reduction in the
+        // family, so those compare with tolerance.
+        const dw_a = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(dw_a);
+        const dw_b = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(dw_b);
+        const db_a = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(db_a);
+        const db_b = try allocator.alloc(f32, axis_dim);
+        defer allocator.free(db_b);
+        @memset(dw_a, 0);
+        @memset(dw_b, 0);
+        @memset(db_a, 0);
+        @memset(db_b, 0);
+        const ln_scratch = try allocator.alloc(f32, 4 * inner);
+        defer allocator.free(ln_scratch);
+        rows_impl.layerNormBackwardInner(.{ .input = input, .grad = grad, .weights = weights, .dx = out_a, .dweight = dw_a, .dbias = db_a, .axis_dim = axis_dim, .inner = inner, .scratch = ln_scratch, .inv_axis_dim = inv_axis, .eps = eps, .outer = outer });
+        rows_impl.scalar.layerNormBackwardInner(.{ .input = input, .grad = grad, .weights = weights, .dx = out_b, .dweight = dw_b, .dbias = db_b, .axis_dim = axis_dim, .inner = inner, .scratch = ln_scratch, .inv_axis_dim = inv_axis, .eps = eps, .outer = outer });
+        try expectBitwise(out_b, out_a);
+        const inner_tol = 1e-6 * @as(f32, @floatFromInt(outer * inner));
+        try expectClose(dw_b, dw_a, inner_tol);
+        try expectClose(db_b, db_a, inner_tol);
+    }
 };
 
 test {

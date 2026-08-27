@@ -3,7 +3,7 @@
 //!
 //! Domain module: every op receives an explicit `*ExecContext`. Pure Zig
 //! loops over prepared-contiguous inputs; the non-last-axis arms of
-//! variance/standardize run the inner-lane kernels of `row_ops.zig`
+//! variance/standardize run the backend inner-lane row kernels
 //! (lane ranges split across the pool). Home of `TopKResult` (returned by
 //! extrema + top-k) and the
 //! `Standardize*` option types (re-exported by `exec.zig`). `topK`
@@ -14,7 +14,8 @@ const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
-const exec_row_ops = @import("row_ops.zig");
+const backend_mod = @import("../backend.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 

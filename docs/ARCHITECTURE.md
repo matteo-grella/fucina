@@ -160,7 +160,7 @@ Execution runtime:
 - `src/exec/` domain modules: `attention.zig`, `matmul.zig`,
   `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`,
   `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
-  `row_ops.zig`, `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
+  `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
   the runtime boundary.
@@ -202,6 +202,9 @@ Backends:
   packed f32 GEMM for the no-BLAS path, `gemm_packed.zig`, `matmul_quant.zig`,
   `elementwise.zig`, `conv.zig`, `pool.zig` — channel-last pool2d/upsample2x,
   `winograd.zig` — F(2×2,3×3) conv transforms for the no-BLAS conv route,
+  `rows.zig` — the fused row kernels (softmax/logsumexp, layer/RMS norm,
+  cross-entropy, dropout, scatter-add, gated activations, the inner-lane
+  strided-axis family) with their Task payloads and `run*Task` adapters,
   `batched.zig`; `common.zig` holds `ParallelConfig`, the vector-width aliases
   and the thread-count gates. Every pool-taking kernel takes `pc` first.
 - `src/backend/quant.zig` + `src/backend/quant/`: GGML-compatible block

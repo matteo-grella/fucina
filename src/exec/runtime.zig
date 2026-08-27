@@ -333,7 +333,7 @@ const min_inner_lanes_per_task = 64;
 
 /// Split `base_task`'s `[0, inner)` lane range across the pool when the
 /// total work clears the row-kernel threshold; otherwise run it serially.
-/// The inner-lane kernels (`row_ops.zig`: softmax, the stats/norm
+/// The inner-lane kernels (`backend.rows`: softmax, the stats/norm
 /// non-last-axis arms) own disjoint lane sub-ranges and disjoint scratch
 /// columns, so the result is bitwise identical for any task count.
 pub fn dispatchInnerLanes(

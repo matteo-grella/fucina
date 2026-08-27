@@ -183,6 +183,7 @@ op, request, or container type):
 | 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
+| fused row kernels (`vector/rows.zig`; task-carrying, all pool-free — the exec domain modules split the task ranges themselves) | `softmaxRows`*, `softmaxExtRows`*†, `softmaxBackwardRows`*, `logsumexpRows`*, `logSoftmaxRows`*, `softmaxInner`*, `logsumexpInner`*, `logSoftmaxInner`*, `softmaxBackwardInner`*, `splitSwiGluRows`*, `splitGluRows`*, `splitSwiGluBackwardRows`*, `splitGluBackwardRows`*, `rmsNormMulRopeHalfVectors`*, `rmsNormMulRows`*, `rmsNormMulAddRows`*, `rmsNormMulBackwardInputRows`*, `rmsNormMulBackwardWeightRows`*, `rmsNormWeightGradBlocks`*, `rmsNormWeightGradReduce`*, `rmsNormInner`*, `rmsNormBackwardInputInner`*, `rmsNormBackwardWeightInner`*, `layerNormRows`*, `layerNormBackwardInputRows`*, `layerNormAffineParamGradRows`*, `layerNormRowStats`*, `layerNormParamGradColumns`*, `layerNormInner`*, `layerNormBackwardInner`*, `varianceInner`*, `standardizeInner`*†, `standardizeBackwardInner`*†, `crossEntropyLossRows`*, `crossEntropyBackwardRows`*, `distillStatsRows`*, `distillBackwardRows`*, `dropoutRange`*, `scatterAddRows`* (Task payloads and `run*Task` pool adapters: the `backend.rows` seam) |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. The provider additionally exports `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
@@ -196,6 +197,7 @@ test "kernel interface inventory" {
     comptime var kernel_count: usize = 0;
     comptime var pool_free_count: usize = 0;
     comptime var generic_count: usize = 0;
+    @setEvalBranchQuota(10_000);
     inline for (@typeInfo(backend.kernels).@"struct".decls) |d| {
         if (comptime std.mem.startsWith(u8, d.name, "pool_free_")) {
             // Marker beside its kernel; `conformKernels` pins the pairing.
@@ -207,9 +209,9 @@ test "kernel interface inventory" {
                 generic_count += 1;
         }
     }
-    try std.testing.expectEqual(@as(usize, 75), kernel_count);
-    try std.testing.expectEqual(@as(usize, 13), pool_free_count);
-    try std.testing.expectEqual(@as(usize, 13), generic_count);
+    try std.testing.expectEqual(@as(usize, 114), kernel_count);
+    try std.testing.expectEqual(@as(usize, 52), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 16), generic_count);
 }
 ```
 
@@ -335,6 +337,7 @@ first. Module map:
 | `vector/conv.zig` | causal depthwise/general/grouped 1-D conv, dense conv1d/col2im1d, channel-last conv2d + im2col, `Conv1dDims`/`Conv2dDims` |
 | `vector/pool.zig` | channel-last pool2d (max/avg/sum), pool backwards, `upsample2xNearest` |
 | `vector/winograd.zig` | F(2×2,3×3) and F(4×4,3×3) transform kernels |
+| `vector/rows.zig` | fused row kernels (softmax/logsumexp rows + strided inner-lane arms, layer/RMS-norm rows and backward stats, cross-entropy/distillation rows, dropout, scatter-add, gated activations, the fused activation+quantize workers) with their Task payloads and `run*Task` adapters (`backend.rows`) |
 
 `ParallelConfig` is one field: `pool: ?*thread.Pool = null`. Whether a kernel
 splits is decided by the thread-count gates in `common.zig`
@@ -374,8 +377,8 @@ threaded result is bit-identical to the serial path for elementwise, conv,
 pool, and Winograd kernels (reductions and GEMM state their reassociation
 tolerance instead — see [§9.3](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#93-the-scalar-reference-arms-and-the-parity-contract-srcbackendvector-srcbackendparity_testzig)).
 
-Above the backend seam, the exec tier builds streaming inner-lane kernels
-from the same primitives (`src/exec/row_ops.zig`): softmax, logsumexp,
+Beside them the backend row-kernel leaf builds streaming inner-lane kernels
+from the same primitives (`src/backend/vector/rows.zig`): softmax, logsumexp,
 logSoftmax, and softmax backward on non-last axes, the non-last-axis arms
 of variance, standardize (forward and backward, f32 or f64 accumulation),
 rmsNorm (forward, and backward's dx and dweight) and layerNorm forward,

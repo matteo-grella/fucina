@@ -6,9 +6,9 @@
 //! does not select a second provider: it sets `backend/isa.zig`'s
 //! `reference` flag, and every kernel entry then selects its scalar
 //! reference arm internally (the `scalar` namespaces in `vector/` and the
-//! `.scalar` tier in `quant/`). The fused op kernels beside their
-//! orchestration in `exec/` (attention, row_ops, fakequant) are
-//! backend-independent. Layer stack: docs/ARCHITECTURE.md.
+//! `.scalar` tier in `quant/`). The fused attention/fakequant kernels
+//! beside their orchestration in `exec/` are backend-independent. Layer
+//! stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");
@@ -96,6 +96,13 @@ pub const offload = @import("backend/offload.zig");
 // microbenches that compare its row-kernel and blocked paths directly; the
 // curated upper-band vocabulary is `simd` below.
 pub const vector_impl = @import("backend/vector.zig");
+// Row-kernel vocabulary seam: the Task payloads (pure slices/dims) the
+// fused row kernels in `kernels` take, their `run*Task` pool-adapter forms,
+// and the comptime task factories (the fused activation+quantize workers).
+// Single implementation, `backend/vector/rows.zig`; the serial kernel
+// entries themselves are reached through `kernels`, never through this
+// namespace by name.
+pub const rows = @import("backend/vector/rows.zig");
 
 /// Provider extension: strided-view BLAS GEMM plus the nested-scope guard
 /// and the folded-ternary BLAS arm, available only on BLAS-backed native

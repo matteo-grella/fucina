@@ -19,44 +19,9 @@ pub fn ensureForwardFloatMath(comptime dtype: DType) void {
     }
 }
 
-pub fn coordinateForLinear(comptime rank: usize, shape: [rank]usize, strides: [rank]usize, linear: usize, axis: usize) usize {
-    return (linear / strides[axis]) % shape[axis];
-}
-
-pub fn physicalOffsetExcludingAxis(
-    comptime rank: usize,
-    shape: [rank]usize,
-    source_strides: [rank]usize,
-    target_strides: [rank]usize,
-    target_offset: usize,
-    linear: usize,
-    comptime axis: usize,
-) usize {
-    var physical = target_offset;
-    inline for (0..rank) |dim| {
-        if (dim != axis) {
-            physical += coordinateForLinear(rank, shape, source_strides, linear, dim) * target_strides[dim];
-        }
-    }
-    return physical;
-}
-
-pub fn preSoftmaxValue(
-    comptime rank: usize,
-    value: f32,
-    scale_value: f32,
-    mask: ?tensor.RankedTensor(rank),
-    mask_base: usize,
-    mask_axis_stride: usize,
-    axis_i: usize,
-    slope: f32,
-) f32 {
-    var out = value * scale_value;
-    if (mask) |mask_view| {
-        out += slope * mask_view.tensor.buffer.data[mask_base + axis_i * mask_axis_stride];
-    }
-    return out;
-}
+// The strided-walk coordinate helper lives beside the strided row kernels
+// (`backend/vector/rows.zig`); re-exported for this band's own walks.
+pub const coordinateForLinear = @import("../backend.zig").rows.coordinateForLinear;
 
 pub fn dispatchRank(comptime F: anytype, rank: usize, args: anytype) !Tensor {
     return switch (rank) {

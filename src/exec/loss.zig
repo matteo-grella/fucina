@@ -2,7 +2,7 @@
 //! whole-tensor elementwise losses (MSE / Huber / BCE / KL divergence).
 //!
 //! Domain module: every op receives an explicit `*ExecContext`; per-row kernels +
-//! Task structs stay in the `row_ops` leaf. Home of `CrossEntropyOptions` +
+//! Task structs live in the backend row-kernel leaf (`backend.rows`). Home of `CrossEntropyOptions` +
 //! `Reduction` + the elementwise-loss options (re-exported by `exec.zig`).
 //! Softmax is deliberately NOT folded in (no shared dispatch code).
 
@@ -11,7 +11,8 @@ const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_matmul = @import("matmul.zig");
-const exec_row_ops = @import("row_ops.zig");
+const backend_mod = @import("../backend.zig");
+const exec_row_ops = backend_mod.rows;
 const exec_shape = @import("shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
@@ -25,14 +26,14 @@ const CrossEntropyLossRowsTask = exec_row_ops.CrossEntropyLossRowsTask;
 const CrossEntropyBackwardRowsTask = exec_row_ops.CrossEntropyBackwardRowsTask;
 const runCrossEntropyLossRowsTask = exec_row_ops.runCrossEntropyLossRowsTask;
 const runCrossEntropyBackwardRowsTask = exec_row_ops.runCrossEntropyBackwardRowsTask;
-const crossEntropyLossRows = exec_row_ops.crossEntropyLossRows;
-const crossEntropyBackwardRows = exec_row_ops.crossEntropyBackwardRows;
+const crossEntropyLossRows = backend_mod.kernels.crossEntropyLossRows;
+const crossEntropyBackwardRows = backend_mod.kernels.crossEntropyBackwardRows;
 const DistillStatsRowsTask = exec_row_ops.DistillStatsRowsTask;
 const DistillBackwardRowsTask = exec_row_ops.DistillBackwardRowsTask;
 const runDistillStatsRowsTask = exec_row_ops.runDistillStatsRowsTask;
 const runDistillBackwardRowsTask = exec_row_ops.runDistillBackwardRowsTask;
-const distillStatsRows = exec_row_ops.distillStatsRows;
-const distillBackwardRows = exec_row_ops.distillBackwardRows;
+const distillStatsRows = backend_mod.kernels.distillStatsRows;
+const distillBackwardRows = backend_mod.kernels.distillBackwardRows;
 
 pub const Reduction = enum { mean, sum, none };
 
