@@ -9,18 +9,18 @@ This chapter is a tour of the machinery Fucina builds *around* that loop to make
 1. **Speculative decoding without a draft model** — drafts retrieved from text the model has already seen, verified in one batched forward, gated by measured economics (`docs/SPECULATIVE.md`).
 2. **Batch-N multi-stream decode** — N conversations, one weight pass per step (`docs/BENCHMARK.md`).
 3. **Constrained decoding** — grammar masks on the logits, one seam, every decode path; and a composition that makes a grammar *accelerate* speculation (`docs/CONSTRAINED-DECODING.md`).
-4. **KV reuse across requests** — a slot pool plus a disk tier that turns a stateless API into a warm one (`examples/lmserve/`, `src/llm/kv_persist.zig`).
+4. **KV reuse across requests** — a slot pool plus a disk tier that turns a stateless API into a warm one (`apps/lmserve/`, `src/models/text/kv_persist.zig`).
 5. **MoE expert streaming** — a 142 GB mixture model decoding on a 64 GB machine by paging routed experts from disk (`docs/RUNNING-MODELS.md`).
 
 Plus one honest paragraph about the GPU offload seam, and a look at `lmserve`, the OpenAI-compatible server where several of these tricks meet. A reminder from the repo's own status notes: the public API is young and explicitly unstable — every signature in this chapter is today's code, not a frozen contract.
 
 ## 13.1 The loop, the invariant, and the rewindable cache
 
-Everything in this chapter is a transformation of one loop, so the loop's shape has to be stated precisely first. Fucina states it as an invariant, documented on the speculative decoder's `step` and enforced at runtime (`src/llm/speculative/core.zig:540-561`):
+Everything in this chapter is a transformation of one loop, so the loop's shape has to be stated precisely first. Fucina states it as an invariant, documented on the speculative decoder's `step` and enforced at runtime (`src/models/text/speculative/core.zig:573-590`):
 
 > `history` holds every committed token (prompt + generated) and its LAST element is the token just committed but not yet in `kv`, i.e. `history.items.len == kv.len + 1`.
 
-A violated invariant is not a debug assert but a real error, `error.InvalidDecodeState` — because "an empty or kv-desynced history would index out of bounds / corrupt the cache in ReleaseFast" (core.zig:557-560). Every trick below must preserve this invariant through every path, including error unwinds.
+A violated invariant is not a debug assert but a real error, `error.InvalidDecodeState` — because "an empty or kv-desynced history would index out of bounds / corrupt the cache in ReleaseFast" (core.zig:583-586). Every trick below must preserve this invariant through every path, including error unwinds.
 
 The second foundation is that the KV cache can **rewind**. Chapter 12 built the cache as per-position K/V rows; because every position occupies whole per-(position, kv-head) rows and every reader addresses rows strictly below `len`, dropping positions is one integer store. From the machine-verified snippet in `docs/reference/13-the-model-stack-fucina_models.md` §13.4:
 
@@ -33,7 +33,7 @@ cache.truncate(1); // speculative rewind: drop rejected positions
 try std.testing.expectEqual(@as(usize, 1), cache.len);
 ```
 
-`truncate(keep_len)` "rewinds to the first `keep_len` positions (a value at or above `len` is a no-op)" and is verified bitwise against a fresh cache by a truncate + re-append test (`docs/SPECULATIVE.md` §1, `src/llm/kv_cache_tests.zig`). This one primitive is what makes speculation, cross-request reuse, and turn trimming possible. It is also why one model family sits this chapter out: qwen35's Gated-DeltaNet keeps *recurrent* state, and "Gated-DeltaNet's recurrent state cannot rewind: rejecting a draft would require restoring conv/delta-scan state at an arbitrary earlier position, which the recurrence does not support" (`docs/SPECULATIVE.md` §11). Speculation there is out of scope structurally, not by omission.
+`truncate(keep_len)` "rewinds to the first `keep_len` positions (a value at or above `len` is a no-op)" and is verified bitwise against a fresh cache by a truncate + re-append test (`docs/SPECULATIVE.md` §1, `src/models/text/kv_cache_tests.zig`). This one primitive is what makes speculation, cross-request reuse, and turn trimming possible. It is also why one model family sits this chapter out: qwen35's Gated-DeltaNet keeps *recurrent* state, and "Gated-DeltaNet's recurrent state cannot rewind: rejecting a draft would require restoring conv/delta-scan state at an arbitrary earlier position, which the recurrence does not support" (`docs/SPECULATIVE.md` §11). Speculation there is out of scope structurally, not by omission.
 
 The third foundation is a single sentence from `docs/BENCHMARK.md` that explains half the chapter:
 
@@ -47,18 +47,18 @@ The third foundation is a single sentence from `docs/BENCHMARK.md` that explains
 
 **The idea.** Decode all N streams in lockstep: each step gathers one token per stream and runs a single m=N forward pass — one weight read amortized over N streams. Each stream keeps its own KV cache, its own sampler, its own history; only the GEMM is shared.
 
-**Where it lives.** The turnkey entry is `chat.Conversation.sendBatch` (`src/llm/chat.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.8.2):
+**Where it lives.** The turnkey entry is `chat.Conversation.sendBatch` (`src/models/text/chat.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.8.2):
 
 ```zig
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
                  writers: []const *std.Io.Writer, produced: []usize) !void
 ```
 
-It requires the model to expose `forwardStepBatch(ctx, caches: []const *KvCache, token_ids: []const usize)` — and here is a Zig-flavoured detail worth pausing on: the requirement is **comptime-gated**, "so families without it (gemma4 today) still instantiate the type and get `error.BatchDecodeUnsupported` at runtime" (REFERENCE.md §13.8.2).
+It requires the model to expose `forwardStepBatch(ctx, caches: []const *KvCache, token_ids: []const usize)` — and here is a Zig-flavoured detail worth pausing on: the requirement is **comptime-gated**, "so families without it (gemma4 today) still instantiate the type and get `error.BatchDecodeUnsupported` at runtime" (`docs/reference/13-the-model-stack-fucina_models.md` §13.8.2).
 
 > **Zig note** — `Conversation(Model, Tok)` is a comptime-generic type over a duck-typed `Model`. Zig lets the generic *inspect* its type parameter at compile time (`@hasDecl`-style checks), so a capability like `forwardStepBatch` can be optional: families that have it get lockstep batching, families that don't still compile and fail loudly at runtime only if you actually call it. This is interface-by-capability, resolved at compile time, with no vtable and no inheritance.
 
-Per-stream semantics are guaranteed to match a plain `send` exactly — each stream samples from its own logits row with its own sampler and history, because a `Sampler` is "single-stream mutable state (RNG + config): not thread-safe, one per decode stream" (REFERENCE.md §13.6). The batch validator rejects malformed batches up front (`error.EmptyBatch`, `error.BatchLengthMismatch`, `error.SpeculationWithBatch`, `error.MixedBatchModels`, `error.DuplicateBatchConversation` — REFERENCE.md §13.8.2). Note the third one: speculation and lockstep batching do not compose today; the decoder verifies one stream's drafts, not N. The ownership contract on error is also spelled out: the batch aborts and *every* stream's history is trimmed back to its KV cache, so healthy siblings of a failing stream stay usable.
+Per-stream semantics are guaranteed to match a plain `send` exactly — each stream samples from its own logits row with its own sampler and history, because a `Sampler` is "single-stream mutable state (RNG + config): not thread-safe, one per decode stream" (`docs/reference/13-the-model-stack-fucina_models.md` §13.6). The batch validator rejects malformed batches up front (`error.EmptyBatch`, `error.BatchLengthMismatch`, `error.SpeculationWithBatch`, `error.MixedBatchModels`, `error.DuplicateBatchConversation` — the same §13.8.2). Note the third one: speculation and lockstep batching do not compose today; the decoder verifies one stream's drafts, not N. The ownership contract on error is also spelled out: the batch aborts and *every* stream's history is trimmed back to its KV cache, so healthy siblings of a failing stream stay usable.
 
 **The measured effect.** From `docs/BENCHMARK.md`, "Batch-N multi-stream decode (M1 Max)" — M1 Max, ReleaseFast, 8 threads, cool machine, Qwen3-0.6B, 8-token prompt, 64 decode steps per stream, batch vs the same binary running the N generations back to back:
 
@@ -74,7 +74,7 @@ Per-stream semantics are guaranteed to match a plain `send` exactly — each str
 
 The README's one-line summary is "batch-N multi-stream decode (3.2x aggregate throughput at 8 streams)" (README.md). Two honest footnotes from the same benchmark section: the modest N=2 gain is the per-row (m<4) quantized kernels re-streaming packed weights — the weights-read-once kernels engage at m≥4; and that same m≥4 boundary is where quantized-weight logits can drift by ~1e-6 relative (reassociation in the multi-row kernels), while f32/f16 stay bitwise "verified to m=12". Outputs in the table were cross-checked token for token.
 
-Try it on the qwen3 runner (`examples/qwen3/README.md`):
+Try it on the qwen3 runner (`apps/qwen3/README.md`):
 
 ```sh
 zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
@@ -87,7 +87,7 @@ One stream still pays one weight pass per token. The next trick attacks that.
 
 **The problem.** A single decode stream reads all weights to produce one token. If you could *guess* the next k tokens cheaply and check the guesses in one batched forward, you would commit several tokens per weight pass.
 
-**The idea, upstream and here.** Classic speculative decoding (Leviathan et al., 2023 — cited at `src/llm/speculative/core.zig:10`) runs a small *draft model* ahead of the big one and accepts its guesses via rejection sampling. Fucina's twist: **no draft model at all**. From `docs/SPECULATIVE.md`:
+**The idea, upstream and here.** Classic speculative decoding (Leviathan et al., 2023 — cited at `src/models/text/speculative/core.zig:10`) runs a small *draft model* ahead of the big one and accepts its guesses via rejection sampling. Fucina's twist: **no draft model at all**. From `docs/SPECULATIVE.md`:
 
 > drafts come from cheap deterministic indexes over text the model has already seen (the conversation itself, injected reference documents, recycled verification logits) — **no draft model, no training, no extra weights**: a ~4.6 MiB recycling matrix plus a suffix-automaton (SAM) index that grows at ~110 B/token.
 
@@ -95,7 +95,7 @@ Why does that work at all? Because LLM workloads repeat themselves: a model aske
 
 ### Losslessness by degeneracy
 
-Determinism of the drafter is not a simplification; it is the *proof lever*. The normative header (`src/llm/speculative/core.zig:9-20`) is short enough to quote whole:
+Determinism of the drafter is not a simplification; it is the *proof lever*. The normative header (`src/models/text/speculative/core.zig:9-20`) is short enough to quote whole:
 
 ```zig
 //! Losslessness — one code path for greedy AND sampled: because the drafter is
@@ -114,13 +114,9 @@ Determinism of the drafter is not a simplification; it is the *proof lever*. The
 
 No probability-ratio acceptance test, no second distribution — token-ID equality, because a deterministic proposal is a one-hot q and the general rejection-sampling formula collapses. Greedy is the same code path (temperature ≤ 0 makes the sampler an argmax). The contract decomposes into proof obligations with tests behind each (`docs/SPECULATIVE.md` §2): exactly **one RNG draw per committed token** (positions past the first mismatch are never sampled); replay equivalence of every sampler input row against a plain run; penalties conditioned on the hypothetical prefix; adversarial draft sources unable to corrupt the stream; gating orthogonal to commitment.
 
-"Lossless" also has a precise, deliberately bounded definition (core.zig:44-46):
+"Lossless" also has a precise, deliberately bounded definition (core.zig:38-58): given bitwise-identical logits the output token stream is identical to the non-speculative run, and byte-identity with a plain run rests on two legs. (1) `Options.pin_kernels` (the default): the verify forward runs under `ExecContext.pinRowwiseKernels`, making every batched quant-matmul entry reproduce the m == 1 numerics bitwise — both the verify logits and the KV rows the verify leaves behind (qwen3's `--verify-batch` harness checks rows, post-batch continuation, and garbage-draft truncate-replay, all bitwise through m = 32). (2) Both runs must prefill identically — prefill kernels are batch-shape-dependent. With both legs in place, `--spec` is measured byte-identical to plain greedy on Qwen3-0.6B Q4_K_S; unpinned, the m-dependent kernel switches produce legally different batch numerics that can flip a near-tied sample — "same DISTRIBUTION always, byte-identity only while the logits happen to match" (core.zig:57-58). On BLAS-free builds the equivalence tests are literally bitwise (`batch_rows_bitwise`, `src/models/text/speculative/core_tests.zig`).
 
-> Lossless therefore means: same DISTRIBUTION always; same sample stream whenever the logits match bitwise (which the tests below verify for the small-m regime).
-
-The caveat is the m-dependent kernels from §13.2: verify batches compute logits at m = 1+draft rows, and rows are bitwise-independent through every kernel until the documented thresholds (fused K-quant FFN at seq ≥ 12, tiled attention at seq ≥ 48), beyond which ~1e-6 relative drift can flip a near-tied sample. Below the thresholds, on BLAS-free builds, the equivalence tests are literally bitwise (`batch_rows_bitwise`, `src/llm/speculative/core_tests.zig`).
-
-Stop tokens are part of the RNG contract too: when a committed token equals `Options.stop_token`, the verify row loop breaks *immediately* — a plain run stops there, so sampling any further row (the bonus row included) "would consume draws the plain run never makes and desync a persistent sampler for the rest of the conversation" (core.zig:32-39).
+Stop tokens are part of the RNG contract too: when a committed token equals `Options.stop_token`, the verify row loop breaks *immediately* — a plain run stops there, so sampling any further row (the bonus row included) "would consume draws the plain run never makes and desync a persistent sampler for the rest of the conversation" (core.zig:33-38).
 
 ### Build it yourself
 
@@ -212,14 +208,14 @@ test "lossless: any deterministic draft source commits the plain stream" {
 
 All three runs commit the identical stream; the perfect drafter merely commits 5 tokens per step (4 accepted + bonus) while the garbage drafter commits 1 (the correction). That is the whole idea, miniaturized: **drafts change how fast tokens commit, never which tokens commit.** What the toy leaves out is exactly what the rest of this chapter adds back: real sampling with RNG accounting (§13.3), drafters that earn their acceptance (§13.4), and the recognition that a verify batch costs more than a plain step (§13.5).
 
-The real thing is `SpeculativeDecoder(comptime Model: type)` (`src/llm/speculative/core.zig:486`), duck-typed over any model exposing `forwardStep` and `forwardStepAllLogits` over the shared `KvCache` — qwen3 and gemma4 today. One decode iteration is one call:
+The real thing is `SpeculativeDecoder(comptime Model: type)` (`src/models/text/speculative/core.zig:507`), asserted against the decoder contract (`models.decoder.assertDecoder`, which requires `caps.rewind` and `forwardStepAllLogits`) — driven by qwen3/gemma4's `--spec` and, through `fucina-run --spec`, every rewind-capable registered family. One decode iteration is one call:
 
 ```zig
 pub fn step(
     self: *Self,
     ctx: *ExecContext,
-    model: *const Model,
-    kv: *KvCache,
+    model: ModelPtr,
+    kv: *Cache,
     sampler: *Sampler,
     history: *std.ArrayList(usize),
     sink: TokenSink,
@@ -232,7 +228,7 @@ pub fn step(
 
 ### The DraftSource seam
 
-Proposers plug in through a vtable (`src/llm/speculative/core.zig:74-94`):
+Proposers plug in through a vtable (`src/models/text/speculative/core.zig:85-105`):
 
 ```zig
 pub const DraftSource = struct {
@@ -269,7 +265,7 @@ Three deterministic sources, composed behind one `DraftSource`.
 
 ### The suffix automaton
 
-`src/llm/speculative/sam_index.zig` builds an **online suffix automaton** (SAM) over the committed token stream (SAM-Decoding / SuffixDecoding lineage). The question it answers per step: *what is the longest suffix of the stream that has occurred before, and what followed that occurrence?* You can state that contract by brute force in a dozen lines — this is compile-checked course code, and it is exactly the oracle shape the repo property-tests its SAM against:
+`src/models/text/speculative/sam_index.zig` builds an **online suffix automaton** (SAM) over the committed token stream (SAM-Decoding / SuffixDecoding lineage). The question it answers per step: *what is the longest suffix of the stream that has occurred before, and what followed that occurrence?* You can state that contract by brute force in a dozen lines — this is compile-checked course code, and it is exactly the oracle shape the repo property-tests its SAM against:
 
 ```zig
 // Course code — the SAM's contract by brute force, O(n^2).
@@ -296,7 +292,7 @@ On the stream `{5, 6, 7, 5, 6}` this returns 2 (the suffix `[5,6]` occurred endi
 ```zig
 test "SamIndex: longest self-excluded suffix match drives the draft" {
     const alloc = std.testing.allocator;
-    var sam = try llm.speculative.sam_index.SamIndex.init(alloc);
+    var sam = try models.text.speculative.sam_index.SamIndex.init(alloc);
     defer sam.deinit();
     try sam.append(&.{ 5, 6, 7, 5, 6 });
     // Longest suffix with an occurrence ending strictly before the end: [5,6].
@@ -334,10 +330,10 @@ Frozen SAMs are the **RAG seam**: build an index per tokenized reference documen
 
 ### The Token-Recycling matrix
 
-When no index matches, `src/llm/speculative/recycling.zig` drafts from recycled verification logits (Token Recycling, Luo et al. 2024): verification already computes full logits for every draft position and throws away everything but the sampled token — recycle the top-K instead. One row per vocab token holds the most recently observed top-8 next-token candidates; drafting walks the top-1 chain from the last committed token. The whole thing is a `vocab × 8` u32 matrix — "≈4.6 MiB for the Qwen3 vocab at K=8" (`docs/reference/13-the-model-stack-fucina_models.md` §13.9.3) — fed through `observeTopK`. From the machine-verified snippet there:
+When no index matches, `src/models/text/speculative/recycling.zig` drafts from recycled verification logits (Token Recycling, Luo et al. 2024): verification already computes full logits for every draft position and throws away everything but the sampled token — recycle the top-K instead. One row per vocab token holds the most recently observed top-8 next-token candidates; drafting walks the top-1 chain from the last committed token. The whole thing is a `vocab × 8` u32 matrix — "≈4.6 MiB for the Qwen3 vocab at K=8" (`docs/reference/13-the-model-stack-fucina_models.md` §13.9.3) — fed through `observeTopK`. From the machine-verified snippet there:
 
 ```zig
-var rec = try llm.speculative.recycling.Recycling.init(alloc, 32); // vocab 32, K = 8
+var rec = try models.text.speculative.recycling.Recycling.init(alloc, 32); // vocab 32, K = 8
 defer rec.deinit();
 rec.update(3, &.{ 7, 9 }); // most recent top-K observed after token 3
 rec.update(7, &.{5});
@@ -347,13 +343,13 @@ try std.testing.expectEqual(@as(usize, 2), rec.draftChain(3, &buf)); // 3 -> 7 -
 
 ### The cascade
 
-`SpeculationIndex` (`src/llm/speculative/cascade.zig`) composes all of it behind one `asDraftSource()`: the conversation SAM, any number of frozen reference SAMs, and the recycling fallback. Selection: the source with the longest current match wins (ties break toward the conversation — recency in the live stream beats a static document); the draft budget grows with match confidence (`budget = 2·(1 + match_len)`); matches shorter than 2 fall through to the recycling chain. Each source keeps a rolling acceptance window over its last 64 drafted tokens — below 20% acceptance it is muted for 128 committed tokens, then re-probed, and muted sources *keep observing* so they are in sync when re-probed (`docs/SPECULATIVE.md` §7). This per-source gate handles *which* proposer to trust; the global economics belong to the next section.
+`SpeculationIndex` (`src/models/text/speculative/cascade.zig`) composes all of it behind one `asDraftSource()`: the conversation SAM, any number of frozen reference SAMs, and the recycling fallback. Selection: the source with the longest current match wins (ties break toward the conversation — recency in the live stream beats a static document); the draft budget grows with match confidence (`budget = 2·(1 + match_len)`); matches shorter than 2 fall through to the recycling chain. Each source keeps a rolling acceptance window over its last 64 drafted tokens — below 20% acceptance it is muted for 128 committed tokens, then re-probed, and muted sources *keep observing* so they are in sync when re-probed (`docs/SPECULATIVE.md` §7). This per-source gate handles *which* proposer to trust; the global economics belong to the next section.
 
 ## 13.5 The economics, the gate, and the honest numbers
 
 ### Verify passes are not free
 
-A verify over k drafts is an m=k+1 forward — and §13.2 already told you m>1 forwards cost more than m=1. Measured with the `--spec-bench` probe (M1 Max, ReleaseFast, best-of reps; the shipped `default_cost_table` at `src/llm/speculative/core.zig:230-235`), for dense Qwen3-0.6B-Q4_K_S, in plain-step equivalents:
+A verify over k drafts is an m=k+1 forward — and §13.2 already told you m>1 forwards cost more than m=1. Measured with the `--spec-bench` probe (M1 Max, ReleaseFast, best-of reps; the shipped `default_cost_table` at `src/models/text/speculative/core.zig:250-255`), for dense Qwen3-0.6B-Q4_K_S, in plain-step equivalents:
 
 | draft k | verify cost C(k) | conservative break-even acceptance ≈ C(k)/k |
 | --- | --- | --- |
@@ -368,7 +364,7 @@ And the counterexample that justifies the whole gate: **MoE**. On Qwen3-30B-A3B,
 
 ### The CostGate
 
-`CostGate` (`src/llm/speculative/core.zig:276`) gates on **estimated speedup**, not tokens per step:
+`CostGate` (`src/models/text/speculative/core.zig:296`) gates on **estimated speedup**, not tokens per step:
 
 ```text
 est_speedup = committed_tokens / verify_cost_in_plain_step_equivalents
@@ -424,7 +420,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
 
 **The idea.** Constrain the *distribution*, not the loop: before each sample, write `-inf` over every token the grammar forbids. The softmax renormalizes over what is left; sampling proceeds unchanged. The design question with all the leverage is *where* the mask hook lives, and Fucina's answer is: **inside the sampler**. Every decode path in the tree — plain chat, the speculative decoder's plain and verify steps, lockstep batch, hand-rolled runner loops — already funnels through `Sampler.next`, so "a single optional hook there — mask the logits row before the pipeline, observe the selected token after — gives every model family constrained decoding with zero decode-loop changes" (`docs/CONSTRAINED-DECODING.md`, intro). The rejected alternative (wiring a mask into each loop, llama.cpp's shape) is recorded in §8 of that document: Fucina has five-plus decode loops, and the sampler-hosted hook "keeps the invariant 'every path samples identically' a structural fact rather than a per-loop obligation."
 
-**Where it lives.** The seam is `LogitProcessor` (`src/llm/logit_processor.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.6) — the same vtable pattern as `DraftSource`:
+**Where it lives.** The seam is `LogitProcessor` (`src/models/text/logit_processor.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.6) — the same vtable pattern as `DraftSource`:
 
 ```zig
 pub const LogitProcessor = struct {
@@ -441,7 +437,7 @@ pub const LogitProcessor = struct {
 };
 ```
 
-Installed as `Sampler.processor`, `process` mutates the `[vocab]` row before the pipeline runs — the full order being "logit processor → penalties → greedy shortcut → top-k truncation → temperature softmax → top-p → min-p → categorical draw" (REFERENCE.md §13.6) — and `commit` observes the selected token exactly once per `next`, on every exit path, greedy included. A processor that masks out everything is `error.AllTokensMasked`: a broken constraint fails loudly. You do not need a grammar engine to use the seam; the machine-verified reference snippet is a complete 20-line processor that bans odd token ids:
+Installed as `Sampler.processor`, `process` mutates the `[vocab]` row before the pipeline runs — the full order being "logit processor → penalties → greedy shortcut → top-k truncation → temperature softmax → top-p → min-p → categorical draw" (`docs/reference/13-the-model-stack-fucina_models.md` §13.6) — and `commit` observes the selected token exactly once per `next`, on every exit path, greedy included. A processor that masks out everything is `error.AllTokensMasked`: a broken constraint fails loudly. You do not need a grammar engine to use the seam; the machine-verified reference snippet is a complete 20-line processor that bans odd token ids:
 
 ```zig
 const OddMask = struct {
@@ -463,7 +459,7 @@ const OddMask = struct {
 
 (from `docs/reference/13-the-model-stack-fucina_models.md` §13.6 — bias lists, banned tokens, or watermarking plug into the same seam with no grammar involvement.)
 
-**The engine.** For real grammars, `llm.llguidance.Constraint` (`src/llm/llguidance.zig`) compiles a JSON schema, regex, or Lark-variant grammar with the vendored [llguidance](https://github.com/guidance-ai/llguidance) engine — the one behind vLLM/SGLang-class structured output — into per-step token bitmasks (~10–50 µs of pure CPU mask work per token, CONSTRAINED-DECODING.md §3), off the model's ms-scale critical path. It is build-gated behind `-Dllguidance=true` (cargo builds the Rust staticlib, ~15 MB stripped); without the flag everything still compiles and `Constraint.init` returns `error.LlguidanceNotEnabled` — the seam itself is pure Zig and always available. One bridge detail that is a *correctness* feature, not bookkeeping: control tokens carry toktrie's `0xFF` special marker, so a JSON string that happens to contain the text `<|im_end|>` can never steer the sampler into emitting the actual control token and silently ending the turn mid-object (CONSTRAINED-DECODING.md §3). When the grammar completes, the mask forces the turn's stop token — termination rides the existing stop handling, no new mechanism.
+**The engine.** For real grammars, `models.text.llguidance.Constraint` (`src/models/text/llguidance.zig`) compiles a JSON schema, regex, or Lark-variant grammar with the vendored [llguidance](https://github.com/guidance-ai/llguidance) engine — the one behind vLLM/SGLang-class structured output — into per-step token bitmasks (~10–50 µs of pure CPU mask work per token, CONSTRAINED-DECODING.md §3), off the model's ms-scale critical path. It is build-gated behind `-Dllguidance=true` (cargo builds the Rust staticlib, ~15 MB stripped); without the flag everything still compiles and `Constraint.init` returns `error.LlguidanceNotEnabled` — the seam itself is pure Zig and always available. One bridge detail that is a *correctness* feature, not bookkeeping: control tokens carry toktrie's `0xFF` special marker, so a JSON string that happens to contain the text `<|im_end|>` can never steer the sampler into emitting the actual control token and silently ending the turn mid-object (CONSTRAINED-DECODING.md §3). When the grammar completes, the mask forces the turn's stop token — termination rides the existing stop handling, no new mechanism.
 
 **Composition with speculation — the good part.** The obvious worry: speculation samples hypothetical continuations and a grammar is stateful, so surely rejected drafts need a matcher *rollback* (llguidance even ships one). They don't, and the reason is a one-line property of the verify loop (CONSTRAINED-DECODING.md §4):
 
@@ -471,7 +467,7 @@ const OddMask = struct {
 
 Row *i* is sampled only after rows 0..i−1's tokens are in history, and the token sampled at row *i* is itself committed immediately — accepted draft, correction, or bonus. Since `commit` fires inside `next`, matcher state advances in lockstep with history *by construction*; there is nothing to roll back. A grammar-forbidden draft token is masked to `-inf` at its verify row, so the sampled token cannot equal it, the equality check fails, and the sample **is** the correction. Rejection-sampling semantics exactly preserved.
 
-But naively, a constraint *kills* speculation: the cascade drafts unconstrained text, the mask rejects it, acceptance collapses to 0% and the CostGate rightly mutes the feature. The fix turns the constraint into a *drafter*: `ConstrainedSource` (`src/llm/speculative/constrained.zig`) wraps any inner `DraftSource` with a structural processor — the entire public surface is two functions (REFERENCE.md §13.9.6):
+But naively, a constraint *kills* speculation: the cascade drafts unconstrained text, the mask rejects it, acceptance collapses to 0% and the CostGate rightly mutes the feature. The fix turns the constraint into a *drafter*: `ConstrainedSource` (`src/models/text/speculative/constrained.zig`) wraps any inner `DraftSource` with a structural processor — the entire public surface is two functions (`docs/reference/13-the-model-stack-fucina_models.md` §13.9.6):
 
 ```zig
 pub const ConstrainedSource = struct {
@@ -505,7 +501,7 @@ zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8
 
 **Where it lives — three layers.**
 
-*The persistence primitive*, `src/llm/kv_persist.zig`, is a self-contained systems exercise worth reading whole. Its header (kv_persist.zig:1-6):
+*The persistence primitive*, `src/models/text/kv_persist.zig`, is a self-contained systems exercise worth reading whole. Its header (kv_persist.zig:1-6):
 
 ```zig
 //! Crash-safe KV-cache persistence: conversations reopen WARM across
@@ -530,7 +526,7 @@ The layout stores per position one `u32` token plus each layer's K and V row byt
 
 > **Zig note** — the sidecar is a lesson in explicit binary I/O. Every integer is written with `std.mem.writeInt(u64, bytes[at..][0..8], nrec, .little)` — the endianness is a *parameter*, not an assumption, so the file format is identical on every host. And the crash-safety is pure write ordering: records first, the `nrec` counter last, positional writes throughout (`writePositionalAll`); a crash between the two leaves the old counter and the file remains a consistent prefix. No journal, no fsync dance in the hot path — just an ordering argument you can verify by reading 40 lines.
 
-*The chat-layer seam* (REFERENCE.md §13.8.2):
+*The chat-layer seam* (`docs/reference/13-the-model-stack-fucina_models.md` §13.8.2):
 
 ```zig
 pub const WarmState = struct { cache: KvCache, tokens: []const usize };
@@ -543,7 +539,7 @@ pub fn sendTokensReuse(self: *Self, ids: []const u32, writer: *std.Io.Writer) !u
 
 `initWarm` adopts a previous cache plus the token shadow describing its positions; `sendTokensReuse` reconciles by LCP, truncates, prefills the tail, and reports the reused span as `reused_prefix`; `takeCache` releases the cache back to the pool afterwards. Warm-reuse == fresh-stateless equivalence is proven in `chat_tests.zig`.
 
-*The server policy*, `src/llm/serving/gguf_chat.zig` — and the entire matching policy is fourteen lines (backend.zig:182-195):
+*The server policy*, `src/models/text/serving/gguf_chat.zig` — and the entire matching policy is fourteen lines (gguf_chat.zig:226-239):
 
 ```zig
 fn commonPrefix(tokens: []const usize, ids: []const u32) usize {
@@ -564,7 +560,7 @@ fn similarEnough(lcp: usize, ids_len: usize) bool {
 
 The pool (`kv_slots`, default 1; each slot a full `--ctx` cache — "~112 KiB/position for a 28-layer/8-kv-head/128-dim f16 geometry", `docs/LMSERVER.md`) holds previous requests' caches plus token shadows. `acquireConversation` (backend.zig:464) picks the best-LCP slot when it passes the gate, otherwise recycles the LRU slot. Follow-up turns of a chat re-prefill only the last reply + new message; a non-matching request costs one full prefill, exactly as a reuse-free server would.
 
-The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same sidecar format: a slot about to be destroyed by an unrelated request spills to disk — but only "when the incoming request would keep less than half of it AND no stored entry already contains it" (save-on-evict, backend.zig:650-662, with containment dedup and supersede-in-place) — and is restored, zero re-prefill, when a later request matches it better than every resident slot ("the disk tier competes only when it strictly beats the pool", backend.zig:481). One hygiene detail with a comment worth reading: after an aborted turn, history can sit one un-forwarded token past the cache, so the reclaimed slot's shadow is trimmed to `cache.len` — "a slot always describes exactly the positions its cache holds" (backend.zig:608-614).
+The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same sidecar format: a slot about to be destroyed by an unrelated request spills to disk — but only "when the incoming request would keep less than half of it AND no stored entry already contains it" (save-on-evict, gguf_chat.zig:828-836, with containment dedup and supersede-in-place) — and is restored, zero re-prefill, when a later request matches it better than every resident slot ("the disk tier competes only when it strictly beats the pool", gguf_chat.zig:607). One hygiene detail with a comment worth reading: after an aborted turn, history can sit one un-forwarded token past the cache, so the reclaimed slot's shadow is trimmed to `cache.len()` — "a slot always describes exactly the positions its cache holds" (gguf_chat.zig:770-776).
 
 **The measured effect, honestly.** The repo does not publish an end-to-end latency multiplier for KV reuse, and this course will not invent one. What the docs commit to is the mechanism and its accounting: the reused span is reported per request as `cached_tokens` in the OpenAI usage block (`prompt_tokens_details` / `input_tokens_details`, LMSERVER.md), and what reuse eliminates is precisely the re-prefill of that span. Two composition notes from earlier sections apply: speculation cannot ride a warm start (`error.SpeculationWithReuse`), and if KV memory rather than time is your constraint, `--cache-type q8_0` halves the cache (59.5 vs 112 KiB/token on the 0.6B) as a *capacity* option — explicitly not a speed option: "decode attention is compute-bound on M1 and the dequant costs ~2.3x the attention phase at 2048 ctx, so f16 stays the default" (`docs/TRAINING.md` §10).
 
@@ -585,7 +581,7 @@ The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same 
 // may transiently also sit in the LRU after a repin); misses collect.
 self.n_miss = 0;
 for (self.active[0..self.n_active]) |eid| {
-    if (findPinned(ls, eid)) |slot| {
+    if (tiers.findPinned(ls, eid)) |slot| {
         self.resolveSlot(ls, eid, slot);
         self.stats.hits += 1;
         self.stats.pin_hits += 1;
@@ -626,7 +622,7 @@ pub const Options = struct {
 };
 ```
 
-Every acquire updates a per-expert usage histogram, persisted as a `<gguf>.experts` sidecar. At the next startup, `auto_pin` reads it and pins the hottest experts in RAM — "they are read once at startup and never evicted. The engine gets faster the more it is used" (expert_store.zig:533-534). Each stage is independently measurable: `Stats.hitRate()` splits pinned hits from LRU hits from misses, and `Stats.pilotRecall()` scores the prefetcher. The **pilot** (`--moe-pilot`) is that prefetcher: predict the *next* layer's experts from the current post-attention state and prefetch them from the background thread while the current layer computes. Measured recall of the one-layer-ahead prediction: 87.6% (30B), 90.5% (235B) — and, the docs add immediately, it "never changes output" (`docs/RUNNING-MODELS.md`). On the model side the whole feature is one opt-in field: `qwen3.model.LoadOptions{ .moe_stream = .{ .gguf_path = ..., .cache_bytes = ... } }` (`src/llm/qwen3/model.zig:155-157`), and the streamed tier plugs into the same fused MoE kernels through `fucina.MoeRhs`'s `streamed` variant — same blocks, same kernels, which is *why* the output can be bit-identical.
+Every acquire updates a per-expert usage histogram, persisted as a `<gguf>.experts` sidecar. At the next startup, `auto_pin` reads it and pins the hottest experts in RAM — "they are read once at startup and never evicted. The engine gets faster the more it is used" (expert_store.zig:93-94). Each stage is independently measurable: `Stats.hitRate()` splits pinned hits from LRU hits from misses, and `Stats.pilotRecall()` scores the prefetcher. The **pilot** (`--moe-pilot`) is that prefetcher: predict the *next* layer's experts from the current post-attention state and prefetch them from the background thread while the current layer computes. Measured recall of the one-layer-ahead prediction: 87.6% (30B), 90.5% (235B) — and, the docs add immediately, it "never changes output" (`docs/RUNNING-MODELS.md`). On the model side the whole feature is one opt-in field: `qwen3.model.LoadOptions{ .moe_stream = .{ .gguf_path = ..., .cache_bytes = ... } }` (`src/models/qwen3/runner.zig:251`, re-exported as `qwen3.model.LoadOptions`), and the streamed tier plugs into the same fused MoE kernels through `fucina.MoeRhs`'s `streamed` variant — same blocks, same kernels, which is *why* the output can be bit-identical.
 
 **The measured effect.** From `docs/RUNNING-MODELS.md` (M1 Max, 64 GB):
 
@@ -655,7 +651,7 @@ The honest paragraph the numbers demand: the documented CUDA WMMA kernels "raise
 
 ## 13.10 Serving it: lmserve
 
-All of these tricks meet the network in `zig build lmserve` (`examples/lmserve/main.zig` + `examples/lmserve/`) — an OpenAI-compatible server over the same engine, speaking both wire dialects (`POST /v1/chat/completions`, `POST /v1/responses`), verified end-to-end against openai-python 2.45.0 (`docs/LMSERVER.md`). It is "an example, not a library surface": a model family integrates through one small two-function `Backend` vtable (`validate` on the connection thread, `generate` on the worker), and any family served by `llm.chat.Conversation` gets the whole adapter for free.
+All of these tricks meet the network in `zig build lmserve` (`apps/lmserve/main.zig`) — an OpenAI-compatible server, speaking both wire dialects (`POST /v1/chat/completions`, `POST /v1/responses`), verified end-to-end against openai-python 2.45.0 (`docs/LMSERVER.md`). The server itself is a library, not an example: the transport (HTTP server, SSE emitter, wire dialects, tool calling, request scheduler) is the exported `fucina_serving` module (`src/serving.zig` + `src/serving/`), the engine and contract live on `models.text.serving` (`serving.open`/`openFromFile` returns a ready `Backend` for a registry-served GGUF), and lmserve is a thin CLI front end over both. A model family integrates through one small two-function `Backend` vtable (`validate` on the connection thread, `generate` on the worker), and any family served by `models.text.chat.Conversation` gets the whole adapter for free.
 
 Its threading design is a direct consequence of Chapter 6's execution model — "accept concurrently, generate sequentially":
 
@@ -690,13 +686,13 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 
 ## Explore the source
 
-- `src/llm/speculative/core.zig` — the normative losslessness header, the verify row loop, the CostGate with its inline tests; the single most teaching-dense file of the chapter.
-- `src/llm/speculative/sam_index.zig` — the header's proof sketch of self-match exclusion, the 10-line greedy automaton descent, poisoning and freezing.
-- `src/llm/speculative/cascade.zig` and `src/llm/speculative/constrained.zig` — source composition with per-source muting; the ~100-line bridge that makes grammars draft.
-- `src/llm/logit_processor.zig` + `src/llm/sampler.zig` — the seam every decode path funnels through.
-- `src/llm/kv_persist.zig` — 295 lines of crash-safe binary file design; read it as a systems exercise.
-- `src/llm/serving/gguf_chat.zig` — the slot pool, similarity gate, disk tier, and constraint cache; the server policy in one file.
-- `src/exec/expert_store.zig` — the tiered store, the pilot thread, the platform shims; the best-commented systems code in the tree.
+- `src/models/text/speculative/core.zig` — the normative losslessness header, the verify row loop, the CostGate with its inline tests; the single most teaching-dense file of the chapter.
+- `src/models/text/speculative/sam_index.zig` — the header's proof sketch of self-match exclusion, the 10-line greedy automaton descent, poisoning and freezing.
+- `src/models/text/speculative/cascade.zig` and `src/models/text/speculative/constrained.zig` — source composition with per-source muting; the ~100-line bridge that makes grammars draft.
+- `src/models/text/logit_processor.zig` + `src/models/text/sampler.zig` — the seam every decode path funnels through.
+- `src/models/text/kv_persist.zig` — 295 lines of crash-safe binary file design; read it as a systems exercise.
+- `src/models/text/serving/gguf_chat.zig` — the slot pool, similarity gate, disk tier, and constraint cache; the server policy in one file.
+- `src/store/expert_store.zig` — the tiered store's facade over its five concern files (`io`/`geometry`/`tiers`/`policy`/`persist`); the best-commented systems code in the tree.
 - `docs/SPECULATIVE.md`, `docs/CONSTRAINED-DECODING.md`, `docs/LMSERVER.md`, `docs/RUNNING-MODELS.md`, `docs/GPU-OFFLOAD.md` — the design records, adjudications included.
 
 ## Exercises
@@ -705,7 +701,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 2. **(Easy)** Extend the course toy decoder (§13.3) with a `stop_token`: when a committed token equals it, the row loop must break immediately — bonus row included. Write a test that proves the streams with and without drafting still match up to and including the stop. You have reproduced the RNG-accounting rule of `core.zig:32-39` in miniature.
 3. **(Medium)** Add a Token-Recycling drafter to the toy: a `vocab × K` table updated with each step's "top-K" (for the toy model, the true successor plus K−1 decoys), drafting by top-1 chain walk. Measure tokens/step against `noDraft` over 1000 tokens. Then make the model non-Markov (`targetNext(prev, cur)`) and watch acceptance change — you are rediscovering why acceptance is a property of (model × token stream).
 4. **(Medium)** Write a `LogitProcessor` that bans a fixed token list, following the `OddMask` shape from `docs/reference/13-the-model-stack-fucina_models.md` §13.6, and install it via `chat.Options.logit_processor` on a qwen3 chat. Verify: (a) the banned tokens never appear; (b) greedy output with `.speculation = true` and `false` is identical (the §13.6 no-rollback argument in action). Then make your processor expose `forcedTokens` for some state and confirm speculation starts drafting your forced spans.
-5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:608-614 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `src/llm/serving/gguf_chat.zig`.
+5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len()" reclaim (gguf_chat.zig:770-776 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `src/models/text/serving/gguf_chat.zig`.
 
 ---
 
