@@ -1088,15 +1088,10 @@ fn accumulateQ8_0x4Rows(
     rhs: *const BlockQ8_0x4,
     acc: *[common.q8_0_row_block]QKV4f32,
 ) void {
-    switch (isa.tier) {
-        .neon_i8mm, .neon_sdot => return accumulateQ8_0x4RowsAarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc),
-        .x86_vnni, .x86_avx2, .portable, .scalar => {
-            inline for (0..common.q8_0_row_block) |r| {
-                const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-                acc[r] = accumulateQ8_0x4(lhs, rhs, acc[r]);
-            }
-        },
-    }
+    common.accumulateLaneRows(common.q8_0_row_block, .{
+        .one = accumulateQ8_0x4,
+        .aarch64 = accumulateQ8_0x4RowsAarch64,
+    }, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
 }
 
 fn accumulateQ8_0x4Aarch64(lhs: *const BlockQ8_0, rhs: *const BlockQ8_0x4, acc: QKV4f32) QKV4f32 {
@@ -1161,13 +1156,13 @@ fn accumulateQ8_0x4RowsAarch64(
 }
 
 fn accumulateQ8_0x4Packed(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_0x4, acc: *[4]QKV4f32) void {
-    return switch (isa.tier) {
-        .scalar => accumulateQ8_0x4PackedScalar(lhs, rhs, acc),
-        .neon_i8mm, .neon_sdot => accumulateQ8_0x4PackedAarch64(lhs, rhs, acc),
-        .x86_vnni => accumulateQ8_0x4PackedVnni(lhs, rhs, acc),
-        .x86_avx2 => accumulateQ8_0x4PackedAvx2(lhs, rhs, acc),
-        .portable => accumulateQ8_0x4PackedWiden(lhs, rhs, acc),
-    };
+    return common.accumulateTier(.{
+        .scalar = accumulateQ8_0x4PackedScalar,
+        .aarch64 = accumulateQ8_0x4PackedAarch64,
+        .vnni = accumulateQ8_0x4PackedVnni,
+        .avx2 = accumulateQ8_0x4PackedAvx2,
+        .widen = accumulateQ8_0x4PackedWiden,
+    }, .{ lhs, rhs, acc });
 }
 
 fn accumulateQ8_0x4PackedAarch64(lhs: *const BlockQ8_0x4, rhs: *const BlockQ8_0x4, acc: *[4]QKV4f32) void {

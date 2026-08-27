@@ -405,6 +405,74 @@ pub fn addHalvesI32x8(v: QKV8i32) QKV4i32 {
     return lo + hi;
 }
 
+/// The accumulate tier ladder every lane-packed format entry spells the
+/// same way: `.scalar` takes the scalar reference body, the two NEON tiers
+/// take the fused aarch64 body, and the x86/portable tiers take either one
+/// comptime-tier body (`arms.x86`, called with `isa.tier` prepended — the
+/// K-quant spelling) or three per-tier bodies (`arms.vnni`/`arms.avx2`/
+/// `arms.widen` — the q8_0 packed spelling). Comptime-resolved: each build
+/// sees exactly the one direct call the spelled-out switch made.
+pub inline fn accumulateTier(comptime arms: anytype, args: anytype) TierArmReturn(arms) {
+    const Arms = @TypeOf(arms);
+    return switch (isa.tier) {
+        .scalar => @call(.auto, arms.scalar, args),
+        .neon_i8mm, .neon_sdot => @call(.auto, arms.aarch64, args),
+        .x86_vnni => if (comptime @hasField(Arms, "x86"))
+            @call(.auto, arms.x86, .{isa.tier} ++ args)
+        else
+            @call(.auto, arms.vnni, args),
+        .x86_avx2 => if (comptime @hasField(Arms, "x86"))
+            @call(.auto, arms.x86, .{isa.tier} ++ args)
+        else
+            @call(.auto, arms.avx2, args),
+        .portable => if (comptime @hasField(Arms, "x86"))
+            @call(.auto, arms.x86, .{isa.tier} ++ args)
+        else
+            @call(.auto, arms.widen, args),
+    };
+}
+
+fn TierArmReturn(comptime arms: anytype) type {
+    return @typeInfo(@TypeOf(arms.scalar)).@"fn".return_type.?;
+}
+
+/// The lane-packed rows shell: accumulate one packed RHS block into
+/// `row_block` consecutive LHS rows' accumulators. A format with a fused
+/// rows body registers it (`arms.aarch64`, and `arms.x86` for a
+/// comptime-tier one); every other tier walks the rows in order with the
+/// single-row accumulate `arms.one` (value- or pointer-form, told apart by
+/// its return type). The walk (r = 0 upward at one block index) is the
+/// bitwise contract; overriding tiers keep their fused bodies' own order.
+pub inline fn accumulateLaneRows(
+    comptime row_block: usize,
+    comptime arms: anytype,
+    lhs_blocks: anytype,
+    row_start: usize,
+    blocks_per_row: usize,
+    block_index: usize,
+    rhs: anytype,
+    acc: anytype,
+) void {
+    const Arms = @TypeOf(arms);
+    switch (isa.tier) {
+        .neon_i8mm, .neon_sdot => if (comptime @hasField(Arms, "aarch64")) {
+            return arms.aarch64(lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
+        },
+        .x86_vnni, .x86_avx2, .portable => if (comptime @hasField(Arms, "x86")) {
+            return arms.x86(isa.tier, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
+        },
+        .scalar => {},
+    }
+    inline for (0..row_block) |r| {
+        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+        if (comptime @typeInfo(@TypeOf(arms.one)).@"fn".return_type.? == void) {
+            arms.one(lhs, rhs, &acc[r]);
+        } else {
+            acc[r] = arms.one(lhs, rhs, acc[r]);
+        }
+    }
+}
+
 pub const q8_0_row_block: usize = 4;
 pub const q4_kx8_row_block: usize = 16;
 pub const qk_col_block: usize = 2;

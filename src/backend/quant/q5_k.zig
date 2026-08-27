@@ -397,13 +397,14 @@ pub fn matmulQ5_KCompactQ8_Kx4ColOuter(
 }
 
 fn accumulateQ5_Kx8(lhs: *const BlockQ8_K, rhs: *const BlockQ5_Kx8, acc: *[2]QKV4f32) void {
-    return switch (isa.tier) {
-        .scalar => accumulateQ5_Kx8Scalar(lhs, rhs, acc),
-        .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Aarch64(lhs, rhs, acc),
-        .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Tier(isa.tier, lhs, rhs, acc),
-    };
+    return common.accumulateTier(.{
+        .scalar = accumulateQ5_Kx8Scalar,
+        .aarch64 = accumulateQ5_Kx8Aarch64,
+        .x86 = accumulateQ5_Kx8Tier,
+    }, .{ lhs, rhs, acc });
 }
 
+// No fused rows body for q5_k: every tier walks the shell's generic loop.
 fn accumulateQ5_Kx8Rows(
     lhs_blocks: []const BlockQ8_K,
     row_start: usize,
@@ -412,18 +413,17 @@ fn accumulateQ5_Kx8Rows(
     rhs: *const BlockQ5_Kx8,
     acc: *[common.q4_kx8_row_block][2]QKV4f32,
 ) void {
-    inline for (0..common.q4_kx8_row_block) |r| {
-        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
-        accumulateQ5_Kx8(lhs, rhs, &acc[r]);
-    }
+    common.accumulateLaneRows(common.q4_kx8_row_block, .{
+        .one = accumulateQ5_Kx8,
+    }, lhs_blocks, row_start, blocks_per_row, block_index, rhs, acc);
 }
 
 fn accumulateQ5_Kx8Q8_Kx4(lhs: *const types.BlockQ8_Kx4, rhs: *const BlockQ5_Kx8, acc: *[4][2]QKV4f32) void {
-    return switch (isa.tier) {
-        .scalar => accumulateQ5_Kx8Q8_Kx4Scalar(lhs, rhs, acc),
-        .neon_i8mm, .neon_sdot => accumulateQ5_Kx8Q8_Kx4Sdot(lhs, rhs, acc),
-        .x86_vnni, .x86_avx2, .portable => accumulateQ5_Kx8Q8_Kx4Tier(isa.tier, lhs, rhs, acc),
-    };
+    return common.accumulateTier(.{
+        .scalar = accumulateQ5_Kx8Q8_Kx4Scalar,
+        .aarch64 = accumulateQ5_Kx8Q8_Kx4Sdot,
+        .x86 = accumulateQ5_Kx8Q8_Kx4Tier,
+    }, .{ lhs, rhs, acc });
 }
 
 // pub: exercised directly by q5_k_tests.zig (bit-exact vs the scalar reference

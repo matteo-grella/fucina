@@ -275,6 +275,14 @@ this point; earlier history is `git log`.
   the split is bitwise-neutral. `backend.tile` is the range splitter's
   exported seam.
 
+- The quantized accumulate scaffolding is spelled once: the per-format
+  tier-dispatch ladders and lane-rows loop shells of q4_k/q5_k/q6_k/q8_0
+  ride `quant/common.zig`'s `accumulateTier` and `accumulateLaneRows`
+  (comptime-resolved; per-format bodies stay beside their formats).
+  Codegen is unchanged: the q4_k x8 and q8_0 x4 tile streams and the whole
+  proof binary are byte-identical before/after, and the x86dot-check
+  checksum is unchanged.
+
 - The fused row kernels (softmax/logsumexp/log-softmax rows and their
   strided inner-lane arms, layer/RMS-norm rows and backward stats,
   cross-entropy and distillation rows, dropout, scatter-add, the gated
