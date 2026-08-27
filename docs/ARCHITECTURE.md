@@ -193,6 +193,9 @@ Backends:
   each entry carries its scalar reference arm (the `scalar` namespaces in
   `backend/vector/`), and `src/backend/parity_test.zig` keeps entry and
   reference arm in numeric agreement.
+- `src/backend/blas.zig`: the CBLAS provider seam (the one `cblas_sgemm`
+  extern behind `gemm`/`gemmStrided`, the vendor thread setters, the MKL
+  nested scope); `backend.blas` re-exports it on BLAS-backed builds.
 - `src/backend/vector.zig` + `src/backend/vector/`: portable SIMD kernels,
   addressed by child module (`vector.gemm.gemm`):
   `primitives.zig`, `gemm.zig`, `gemm_blocked.zig` — the BLIS-style blocked

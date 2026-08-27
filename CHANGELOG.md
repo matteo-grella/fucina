@@ -270,6 +270,16 @@ this point; earlier history is `git log`.
   `rhs_lifetime: fucina.RhsLifetime` (`.stable_process` = provider-owned
   bytes), so stack consumers pass the lifetime through instead of
   respelling the bool.
+- The CBLAS provider is one leaf, `src/backend/blas.zig`: the single
+  `cblas_sgemm` extern, the vendor thread setters (one comptime switch),
+  the once-only `-Dblas-threads` configuration, the MKL nested scope, the
+  `fitsCblas` dimension gate and the Accelerate packed-kernel preference
+  move there from `native.zig`; the five raw `cblas_sgemm` spellings in
+  `native.zig` collapse onto `blas.gemm` (orientation request) and
+  `blas.gemmStrided` (explicit leading dimensions). Same calls, same
+  argument values, no numeric change. `backend.blas` re-exports the seam;
+  its member names (`sgemmStrided`, `beginNestedScope`/`endNestedScope`,
+  `matmulFoldedx4`) are unchanged.
 - The backend kernel interface is derived from the declarations:
   `backend/interface.zig` and its three hand-maintained name lists
   (`names`/`generic_names`/`pool_free_names`) are gone. `native.zig`'s

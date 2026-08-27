@@ -99,16 +99,19 @@ pub const vector_impl = @import("backend/vector.zig");
 
 /// Provider extension: strided-view BLAS GEMM plus the nested-scope guard
 /// and the folded-ternary BLAS arm, available only on BLAS-backed native
-/// builds. Deliberately OUTSIDE the conformed `kernels` set (the scalar
-/// provider has no BLAS): callers gate on `blas.available` at comptime and
-/// fall back to the portable route, so a scalar or no-BLAS build never
-/// analyzes the aliases.
+/// builds. The CBLAS provider itself is `backend/blas.zig` (the one
+/// `cblas_sgemm` extern, the vendor thread setters, the MKL nested scope);
+/// this namespace re-exports it. Deliberately OUTSIDE the conformed
+/// `kernels` set (the reference leg has no BLAS): callers gate on
+/// `blas.available` at comptime and fall back to the portable route, so a
+/// scalar or no-BLAS build never analyzes the aliases.
 pub const blas = if (build_options.backend_kind == .native and build_options.use_blas) struct {
+    const provider = @import("backend/blas.zig");
     pub const available = true;
-    pub const sgemmStrided = native_impl.sgemmStrided;
-    pub const NestedScope = native_impl.NestedBlasScope;
-    pub const beginNestedScope = native_impl.beginNestedBlasScope;
-    pub const endNestedScope = native_impl.endNestedBlasScope;
+    pub const sgemmStrided = provider.gemmStrided;
+    pub const NestedScope = provider.NestedScope;
+    pub const beginNestedScope = provider.beginNestedScope;
+    pub const endNestedScope = provider.endNestedScope;
     pub const matmulFoldedx4 = native_impl.matmulFoldedx4Blas;
 } else struct {
     pub const available = false;

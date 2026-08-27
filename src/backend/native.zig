@@ -12,6 +12,7 @@
 //! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const build_options = @import("build_options");
+const blas = @import("blas.zig");
 const isa = @import("isa.zig");
 const dtype_mod = @import("../dtype.zig");
 const parallel = @import("../parallel.zig");
@@ -19,7 +20,6 @@ const tensor = @import("../tensor.zig");
 const packed_matmul = @import("packed.zig");
 const ops = @import("ops.zig");
 const quantized_matmul = @import("quant.zig");
-const thread = @import("../thread.zig");
 const vector = @import("vector.zig");
 const vector_common = @import("vector/common.zig");
 const gpu = @import("gpu.zig").impl;
@@ -119,41 +119,6 @@ fn checkedTensorProduct(a: usize, b: usize) !usize {
 fn checkedQuantizedProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
 }
-
-const cblas_row_major: c_int = 101;
-const cblas_no_trans: c_int = 111;
-const cblas_trans: c_int = 112;
-const max_cblas_dim: usize = @intCast(std.math.maxInt(c_int));
-var blas_threads_config_done = std.atomic.Value(bool).init(false);
-var blas_threads_config_mutex: thread.Mutex = .{};
-
-extern fn cblas_sgemm(
-    order: c_int,
-    trans_a: c_int,
-    trans_b: c_int,
-    m: c_int,
-    n: c_int,
-    k: c_int,
-    alpha: f32,
-    a: [*]const f32,
-    lda: c_int,
-    b: [*]const f32,
-    ldb: c_int,
-    beta: f32,
-    c: [*]f32,
-    ldc: c_int,
-) void;
-
-extern fn openblas_set_num_threads(num_threads: c_int) void;
-extern fn bli_thread_set_num_threads(num_threads: c_int) void;
-// MKL's C entry points are the capitalized names. The lowercase
-// `mkl_set_num_threads` is the Fortran binding: it takes its argument by
-// reference, so calling it by value dereferences the count.
-extern fn MKL_Set_Num_Threads(num_threads: c_int) void;
-// Per-thread override; returns the previous value for the calling thread,
-// where 0 means "follow the global setting".
-extern fn MKL_Set_Num_Threads_Local(num_threads: c_int) c_int;
-extern fn nvpl_blas_set_num_threads(num_threads: c_int) void;
 
 pub const ParallelConfig = vector.ParallelConfig;
 
@@ -267,19 +232,6 @@ pub fn dot(
     return vector.elementwise.dotIntoTyped(pc, dtype, out, a, b);
 }
 
-fn cblasTrans(transposed: bool) c_int {
-    return if (transposed) cblas_trans else cblas_no_trans;
-}
-
-/// Leading dimensions of the row-major operands for one orientation.
-fn ldA(kind: ops.MatmulKind, m: usize, k: usize) usize {
-    return if (kind == .trans_a) m else k;
-}
-
-fn ldB(kind: ops.MatmulKind, n: usize, k: usize) usize {
-    return if (kind == .trans_b) k else n;
-}
-
 /// The dense GEMM (`ops.Gemm`). The f32 family routes GPU (store only: the
 /// async GPU GEMM overwrites its destination and has no accumulate seam)
 /// -> BLAS (beta = 1 for accumulate) -> the vector kernels; the
@@ -303,16 +255,13 @@ pub fn gemm(
         }
         if (comptime build_options.use_blas) {
             if (shouldUseBlas(m, n, k)) {
-                blasGemm(
-                    cblasTrans(g.kind == .trans_a),
-                    cblasTrans(g.kind == .trans_b),
+                blas.gemm(
+                    g.kind,
                     m,
                     n,
                     k,
                     contiguousDataConst(a, m * k),
-                    ldA(g.kind, m, k),
                     contiguousDataConst(b, k * n),
-                    ldB(g.kind, n, k),
                     if (g.accumulate) 1.0 else 0.0,
                     contiguousData(out, m * n),
                 );
@@ -377,17 +326,14 @@ fn matmulPackedDense(
         }
     }
     if (comptime build_options.use_blas) {
-        if (shouldUseBlas(m, n, k) and !packedDenseKernelPreferred(m, k)) {
-            blasGemm(
-                cblas_no_trans,
-                cblas_trans,
+        if (shouldUseBlas(m, n, k) and !blas.packedDenseKernelPreferred(m, k)) {
+            blas.gemm(
+                .trans_b,
                 m,
                 n,
                 k,
                 contiguousDataConst(a, m * k),
-                k,
                 contiguousDataConst(&rhs.rhs, rhs.padded_n * k),
-                k,
                 0.0,
                 contiguousData(out, m * n),
             );
@@ -509,7 +455,7 @@ fn matmulQuantRows(
     if (comptime isa.reference) return vector.matmul_quant.scalar.matmulQuantRows(g, allocator, out, a, rhs, m, n, k);
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     if (comptime build_options.use_blas and tableBlasFormat(g.weight)) {
-        if (m >= table_blas_min_m and fitsCblas(m, n, k)) {
+        if (m >= table_blas_min_m and blas.fitsCblas(m, n, k)) {
             return matmul2DQuantizedRhsTableBlas(pc, g.weight, allocator, out, a, rhs, m, n, k);
         }
     }
@@ -595,23 +541,7 @@ fn matmul2DQuantizedRhsQ2_0Blas(
             for (tasks) |*t| runQ2_0DequantSlice(t);
         }
         // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
-        ensureBlasThreadsConfigured();
-        cblas_sgemm(
-            cblas_row_major,
-            cblas_no_trans,
-            cblas_trans,
-            cDim(m),
-            cDim(n),
-            cDim(kc),
-            1.0,
-            ad.ptr + k0,
-            cDim(k),
-            panel.ptr,
-            cDim(kc),
-            if (k0 == 0) 0.0 else 1.0,
-            cd.ptr,
-            cDim(n),
-        );
+        blas.gemmStrided(false, true, m, n, kc, 1.0, ad[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, cd, n);
     }
 }
 
@@ -982,23 +912,7 @@ fn matmul2DQuantizedRhsTableBlas(
             for (tasks) |*t| Task.run(t);
         }
         // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
-        ensureBlasThreadsConfigured();
-        cblas_sgemm(
-            cblas_row_major,
-            cblas_no_trans,
-            cblas_trans,
-            cDim(m),
-            cDim(n),
-            cDim(kc),
-            1.0,
-            ad.ptr + k0,
-            cDim(k),
-            panel.ptr,
-            cDim(kc),
-            if (k0 == 0) 0.0 else 1.0,
-            cd.ptr,
-            cDim(n),
-        );
+        blas.gemmStrided(false, true, m, n, kc, 1.0, ad[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, cd, n);
     }
 }
 
@@ -1021,7 +935,7 @@ pub fn matmulFoldedx4Blas(
     k: usize,
 ) !bool {
     if (comptime !build_options.use_blas) return false;
-    if (m < folded_blas_min_m or !fitsCblas(m, n, k)) return false;
+    if (m < folded_blas_min_m or !blas.fitsCblas(m, n, k)) return false;
 
     const Task = struct {
         folded: []const quantized_matmul.BlockTQ2_0Foldedx4,
@@ -1052,23 +966,7 @@ pub fn matmulFoldedx4Blas(
         } else {
             for (tasks) |*t| Task.run(t);
         }
-        ensureBlasThreadsConfigured();
-        cblas_sgemm(
-            cblas_row_major,
-            cblas_no_trans,
-            cblas_trans,
-            cDim(m),
-            cDim(n),
-            cDim(kc),
-            1.0,
-            a.ptr + k0,
-            cDim(k),
-            panel.ptr,
-            cDim(kc),
-            if (k0 == 0) 0.0 else 1.0,
-            out.ptr,
-            cDim(n),
-        );
+        blas.gemmStrided(false, true, m, n, kc, 1.0, a[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, out, n);
     }
     return true;
 }
@@ -1097,7 +995,7 @@ pub fn gemmBatched(
     }
     if (comptime build_options.use_blas and !isa.reference) {
         if (shouldUseBatchedBlas(m, n, k, batch_count)) {
-            blasBatched(cblasTrans(kind == .trans_a), cblasTrans(kind == .trans_b), out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c, ldA(kind, m, k), ldB(kind, n, k));
+            blasBatched(kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
             return;
         }
     }
@@ -1148,8 +1046,7 @@ fn gpuBatched(
 }
 
 fn blasBatched(
-    trans_a: c_int,
-    trans_b: c_int,
+    comptime kind: ops.MatmulKind,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
@@ -1160,8 +1057,6 @@ fn blasBatched(
     stride_a: usize,
     stride_b: usize,
     stride_c: usize,
-    lda: usize,
-    ldb: usize,
 ) void {
     a.buffer.waitReady();
     b.buffer.waitReady();
@@ -1169,174 +1064,29 @@ fn blasBatched(
     const ap = a.buffer.data[a.offset..].ptr;
     const bp = b.buffer.data[b.offset..].ptr;
     const cp = out.buffer.data[out.offset..].ptr;
-    const matrix_a_len = if (trans_a == cblas_trans) k * m else m * k;
-    const matrix_b_len = if (trans_b == cblas_trans) n * k else k * n;
+    const matrix_a_len = if (kind == .trans_a) k * m else m * k;
+    const matrix_b_len = if (kind == .trans_b) n * k else k * n;
 
     for (0..batch_count) |bi| {
-        blasGemm(
-            trans_a,
-            trans_b,
+        blas.gemm(
+            kind,
             m,
             n,
             k,
             ap[bi * stride_a .. bi * stride_a + matrix_a_len],
-            lda,
             bp[bi * stride_b .. bi * stride_b + matrix_b_len],
-            ldb,
             0.0,
             cp[bi * stride_c .. bi * stride_c + m * n],
         );
     }
 }
 
-fn blasGemm(
-    trans_a: c_int,
-    trans_b: c_int,
-    m: usize,
-    n: usize,
-    k: usize,
-    a: []const f32,
-    lda: usize,
-    b: []const f32,
-    ldb: usize,
-    beta: f32,
-    c: []f32,
-) void {
-    ensureBlasThreadsConfigured();
-    cblas_sgemm(
-        cblas_row_major,
-        trans_a,
-        trans_b,
-        cDim(m),
-        cDim(n),
-        cDim(k),
-        1.0,
-        a.ptr,
-        cDim(lda),
-        b.ptr,
-        cDim(ldb),
-        beta,
-        c.ptr,
-        cDim(n),
-    );
-}
-
-/// Raw strided sgemm for exec-layer fused kernels (the attention-backward
-/// strip contractions): C[m,n] = alpha·op(A)·op(B) + beta·C, row-major,
-/// every leading dimension explicit. BLAS builds only — callers comptime-gate
-/// on `backend.native_uses_blas`.
-pub fn sgemmStrided(
-    trans_a: bool,
-    trans_b: bool,
-    m: usize,
-    n: usize,
-    k: usize,
-    alpha: f32,
-    a: []const f32,
-    lda: usize,
-    b: []const f32,
-    ldb: usize,
-    beta: f32,
-    c: []f32,
-    ldc: usize,
-) void {
-    if (comptime !build_options.use_blas) unreachable;
-    ensureBlasThreadsConfigured();
-    cblas_sgemm(
-        cblas_row_major,
-        if (trans_a) cblas_trans else cblas_no_trans,
-        if (trans_b) cblas_trans else cblas_no_trans,
-        cDim(m),
-        cDim(n),
-        cDim(k),
-        alpha,
-        a.ptr,
-        cDim(lda),
-        b.ptr,
-        cDim(ldb),
-        beta,
-        c.ptr,
-        cDim(ldc),
-    );
-}
-
-fn ensureBlasThreadsConfigured() void {
-    if (comptime build_options.blas_threads != 0) {
-        if (blas_threads_config_done.load(.acquire)) return;
-        blas_threads_config_mutex.lock();
-        defer blas_threads_config_mutex.unlock();
-        if (!blas_threads_config_done.load(.monotonic)) {
-            configureBlasThreads();
-            blas_threads_config_done.store(true, .release);
-        }
-    }
-}
-
-fn configureBlasThreads() void {
-    const requested = build_options.blas_threads;
-    if (requested == 0) return;
-
-    const max_threads: u32 = @intCast(std.math.maxInt(c_int));
-    const n: c_int = @intCast(@min(requested, max_threads));
-    switch (comptime build_options.blas_kind) {
-        .openblas => openblas_set_num_threads(n),
-        .blis => bli_thread_set_num_threads(n),
-        .mkl => MKL_Set_Num_Threads(n),
-        .nvpl => nvpl_blas_set_num_threads(n),
-        .none, .accelerate, .blas => {},
-    }
-}
-
-/// Token from `beginNestedBlasScope`, restored by `endNestedBlasScope`.
-pub const NestedBlasScope = c_int;
-
-/// Serialize THIS thread's BLAS calls for the duration of a fucina parallel
-/// region, returning the token that restores the previous setting.
-///
-/// A self-threading BLAS spawns an engine team per call, so one issued from
-/// inside our own parallel region puts two schedulers on the same cores. The
-/// limit belongs to the nested caller, not the process: a single big top-level
-/// GEMM still wants the engine's own threads, and it outruns our pool-parallel
-/// packed path when it gets them.
-///
-/// Only MKL is covered — `MKL_Set_Num_Threads_Local` is per-thread and hands
-/// back the previous value, which is exactly this contract. Providers exposing
-/// only process-wide setters keep the engine's default threading.
-pub fn beginNestedBlasScope() NestedBlasScope {
-    if (comptime build_options.blas_kind != .mkl) return 0;
-    return MKL_Set_Num_Threads_Local(1);
-}
-
-pub fn endNestedBlasScope(previous: NestedBlasScope) void {
-    if (comptime build_options.blas_kind != .mkl) return;
-    _ = MKL_Set_Num_Threads_Local(previous);
-}
-
-fn fitsCblas(m: usize, n: usize, k: usize) bool {
-    return m <= max_cblas_dim and n <= max_cblas_dim and k <= max_cblas_dim;
-}
-
-/// With an already-packed dense RHS, skinny-m tall-k cells run faster on the
-/// in-tree packed microkernel than through BLAS: measured on M1 Max
-/// (Accelerate) at k in {4800, 5120, 9600}, m=16 runs 1.8-2.1x BLAS and
-/// m=32 sits at parity-to-1.15x, while at k=64 (the wide-n unembed shape)
-/// BLAS wins from m=16 up — hence the k floor. Scoped to Accelerate: the
-/// OpenBLAS/x86 crossover is unmeasured.
-fn packedDenseKernelPreferred(m: usize, k: usize) bool {
-    if (comptime build_options.blas_kind != .accelerate) return false;
-    return m < 32 and k >= 4096;
-}
-
 fn shouldUseBlas(m: usize, n: usize, k: usize) bool {
-    return fitsCblas(m, n, k) and m >= 16 and n >= 16 and k >= 16;
+    return blas.fitsCblas(m, n, k) and m >= 16 and n >= 16 and k >= 16;
 }
 
 fn shouldUseBatchedBlas(m: usize, n: usize, k: usize, batch_count: usize) bool {
     return batch_count > 1 and shouldUseBlas(m, n, k);
-}
-
-fn cDim(value: usize) c_int {
-    return @intCast(value);
 }
 
 fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {

@@ -329,8 +329,8 @@ first. Module map:
 | `vector/primitives.zig` | `@Vector` leaves: `vecAdd/Sub/Mul/Scale/AddScaled`, `vecUnary/AddUnary/LeakyRelu/Clamp/Gated`, `vecUnaryVjp` (unary-VJP derivative bodies; `unaryVjpVectorizes` gates which ops route here — the exp-family backward loops), `vecSum/Dot`, f16/bf16/f64 typed twins, `vexpf`, bf16 bit converters |
 | `vector/elementwise.zig` | elementwise/reduction entry points, parallel dispatch, snake/groupNorm/prelu/channelAffine kernels |
 | `vector/gemm.zig` | dense f32/f16/f64/bf16 GEMM (NN/TN/NT), register-tiled row kernels, `gemmNNRange/gemmTNRange/gemmNTRange` |
-| `vector/gemm_blocked.zig` | BLIS-style cache-blocked packed f32 GEMM ([§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-vectorgemmzig-vectorgemm_blockedzig)) |
-| `vector/gemm_packed.zig` | load-time packed dense f32 NT microkernel and wide-output task splitter ([§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-vectorgemmzig-vectorgemm_blockedzig)) |
+| `vector/gemm_blocked.zig` | BLIS-style cache-blocked packed f32 GEMM ([§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-srcbackendblaszig-vectorgemmzig-vectorgemm_blockedzig)) |
+| `vector/gemm_packed.zig` | load-time packed dense f32 NT microkernel and wide-output task splitter ([§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-srcbackendblaszig-vectorgemmzig-vectorgemm_blockedzig)) |
 | `vector/matmul_quant.zig` | quantized matmul dispatch + row/column parallel splitters (kernels live in `backend/quant/*`) |
 | `vector/batched.zig` | batched dense GEMM (reuses the `gemm*Range` kernels per batch) |
 | `vector/conv.zig` | causal depthwise/general/grouped 1-D conv, dense conv1d/col2im1d, channel-last conv2d + im2col, `Conv1dDims`/`Conv2dDims` |
@@ -408,7 +408,7 @@ dtype-taking `dot`/`gemm` (`ops.Gemm.typed(dtype)`) accept
 `.f16`, `.bf16`, and `.f64` with the compute/output dtype policy from [§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)
 (f16/bf16 accumulate sums and dots in f32).
 
-## 9.5 GEMM: dispatch precedence, BLAS, and the blocked packed kernel (`src/backend/native.zig`, `vector/gemm.zig`, `vector/gemm_blocked.zig`)
+## 9.5 GEMM: dispatch precedence, BLAS, and the blocked packed kernel (`src/backend/native.zig`, `src/backend/blas.zig`, `vector/gemm.zig`, `vector/gemm_blocked.zig`)
 
 The dense GEMM is one kernel entry, `gemm(pc, request, out, a, b, m, n, k)`,
 where the `ops.Gemm` request states the orientation (`.plain`/`.trans_a`/
@@ -426,12 +426,19 @@ in a fixed order, each tier compiled in only when its build flag is set:
    `batch_count > 1` on top and loops `cblas_sgemm` per matrix.
 3. **Pure-Zig vector GEMM** otherwise.
 
-BLAS providers are linked per `-Dblas`; on first GEMM the native backend pins
+The CBLAS seam is one leaf, `src/backend/blas.zig`: the single
+`cblas_sgemm` extern behind two call spellings (`gemm` over an
+`ops.MatmulKind` orientation with derived leading dimensions, `gemmStrided`
+with explicit ones), the dimension gate `fitsCblas`, the Accelerate
+packed-kernel preference, and the vendor thread setters in one comptime
+switch. BLAS providers are linked per `-Dblas`; on first GEMM the seam pins
 the provider's thread count to `-Dblas-threads` (when nonzero) exactly once,
 under a mutex, via the provider-specific setter (`openblas_set_num_threads`,
-`bli_thread_set_num_threads`, `mkl_set_num_threads`,
+`bli_thread_set_num_threads`, `MKL_Set_Num_Threads`,
 `nvpl_blas_set_num_threads`; Accelerate and the generic `blas` provider have
-no setter and are left alone).
+no setter and are left alone). The MKL nested-scope guard
+(`beginNestedScope`/`endNestedScope`, re-exported on `backend.blas`)
+serializes one thread's BLAS calls inside a fucina parallel region.
 
 The accumulate request (`.{ .accumulate = true }`: `C += A·B`, the backend
 seam under `addDot`, [§4.8](04-tensor-operations.md#48-dot-tag-directed-contraction-srcagtensorzig-srctag_opszig)) skips the GPU tier: `shouldUseBlas` winners run
@@ -441,7 +448,7 @@ kernels, with the blocked path seeding its first k-panel in accumulate
 mode (`gemmBlockedAcc`).
 
 The BLAS tier also exposes one raw entry for exec-layer fused kernels:
-`sgemmStrided` (`native.zig`) is row-major
+`backend.blas.sgemmStrided` (`blas.zig`'s `gemmStrided`) is row-major
 `C = alpha·op(A)·op(B) + beta·C` with every leading dimension explicit,
 compiled on BLAS builds only (callers comptime-gate on
 `backend.native_uses_blas`). The attention-backward BLAS-strip route
@@ -601,7 +608,7 @@ two layout families, plus an older backend-only typed bridge:
   at pack time. The public
   `x.dotPacked(ctx, &packed, contract_tag, out_tag)` takes an f32 lhs and
   dispatches through GPU, BLAS, or the skinny-m wide-output microkernel by the
-  fixed table in [§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-vectorgemmzig-vectorgemm_blockedzig). The source can be released after packing; the model
+  fixed table in [§9.5](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#95-gemm-dispatch-precedence-blas-and-the-blocked-packed-kernel-srcbackendnativezig-srcbackendblaszig-vectorgemmzig-vectorgemm_blockedzig). The source can be released after packing; the model
   owns and deinitializes the pack.
 
 - Block-quantized weights: the container types `QuantizedMatmulRhsQ8_0x4`,
