@@ -260,9 +260,13 @@ backend kernel), plus the scalar reference semantics (`unaryScalar`,
 a faithful musl translation so `gelu_erf` matches `ggml_vec_gelu_erf_f32`).
 `gelu_quant` reproduces ggml's f16-LUT GELU bit-for-bit (input and output
 rounded through f16, hard clamps at ±10) for llama.cpp numeric parity; its
-SIMD lanes evaluate the scalar form per lane, since the f16 output rounding
-turns any approximate lane tanh into flipped table entries
-(`primitives_tests.zig` sweeps every f16 inside the clamps). `gelu` is the
+SIMD lanes evaluate `vtanhf`, a faithful musl-tanhf port on `@Vector` lanes
+(branches as masked selects over a shared musl-expm1f body, `vexpm1f`)
+whose every lane reproduces the scalar `std.math.tanh` bytes — the f16
+output rounding turns any approximate lane tanh into flipped table entries
+(`primitives_tests.zig` sweeps every f16 inside the clamps plus the f16
+midpoints and dense off-grid bands). `elu` (ggml_vec_elu_f32 parity) rides
+`vexpm1f` the same way on its negative arm. `gelu` is the
 exact tanh-approximation form. The other exp-family lane bodies (`exp`,
 `sigmoid`, `silu`, `softplus`, `tanh`, `gelu`, `geglu`, `situ`, the logit
 softcap) all evaluate one `vexpf` per vector, the same polynomial the unary

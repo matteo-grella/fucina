@@ -258,6 +258,16 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `gelu_quant`'s SIMD lanes evaluate `vtanhf`, a musl-faithful tanhf port
+  on `@Vector` lanes over a shared musl expm1f body (`vexpm1f`), instead
+  of the scalar body per lane: every lane still reproduces the ggml
+  f16-LUT bytes (the sweep test now also pins every adjacent-f16 midpoint
+  and dense off-grid f32 bands, validating the input rounding step), at
+  4.7 ms per 1M lanes single-thread against 12.8 ms for the per-lane form.
+  The `elu` lanes ride `vexpm1f` the same way (byte parity with
+  `std.math.expm1`, swept over every finite f16, the saturation cut, and
+  the specials).
+
 - The fused row kernels (softmax/logsumexp/log-softmax rows and their
   strided inner-lane arms, layer/RMS-norm rows and backward stats,
   cross-entropy and distillation rows, dropout, scatter-add, the gated

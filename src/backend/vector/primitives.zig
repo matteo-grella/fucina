@@ -7,10 +7,11 @@
 //! `.geglu`, `.situ`, the logit softcap), so the forward lanes and the
 //! unary-VJP lanes (`unaryDerivativeVec`, which is `vexpf`-based too)
 //! agree to `vexpf`'s accuracy; the sub-vector tails use libm and sit
-//! within the same 2e-6 of the lanes. The one exception is `gelu_quant`:
-//! its lanes evaluate the scalar `ops.geluQuantScalar` per lane because
-//! the ggml f16-LUT contract is byte parity, which no approximate tanh
-//! keeps once the output is rounded to f16 (`primitives_tests.zig`).
+//! within the same 2e-6 of the lanes. The exceptions are the byte-parity
+//! ops `gelu_quant` (ggml's f16-LUT table) and `elu` (ggml_vec_elu_f32):
+//! their lanes ride `vtanhf`/`vexpm1f`, faithful musl ports whose every
+//! lane reproduces the scalar `std.math.tanh`/`std.math.expm1` bytes
+//! (`primitives_tests.zig` sweeps them bit-for-bit).
 
 const std = @import("std");
 const ops = @import("../ops.zig");
@@ -342,7 +343,9 @@ pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
         .gelu => @as(Vf32, @splat(0.5)) * value * (@as(Vf32, @splat(1)) + tanhVec(geluTanhArgVec(value))),
         .quick_gelu => value * sigmoidVec(@as(Vf32, @splat(1.702)) * value),
         .gelu_quant => geluQuantVec(value),
-        .elu => perLaneUnary(.elu, value),
+        // ggml_vec_elu_f32 parity: the negative arm is `vexpm1f`, whose
+        // lanes reproduce the scalar `std.math.expm1` bytes exactly.
+        .elu => @select(f32, value > @as(Vf32, @splat(0)), value, vexpm1f(vector_len, value)),
         .gelu_erf => perLaneUnary(.gelu_erf, value),
         .erf => perLaneUnary(.erf, value),
         .floor => @floor(value),
@@ -374,7 +377,7 @@ inline fn rintVec(value: Vf32) Vf32 {
 }
 
 /// Per-lane scalar fallback for unary ops without a vectorizable form
-/// (expm1-based elu, erf-based gelu): evaluates `ops.unaryScalar` on each
+/// (the erf-based `gelu_erf`/`erf`): evaluates `ops.unaryScalar` on each
 /// lane, so the SIMD body and the scalar tail are bit-identical.
 inline fn perLaneUnary(comptime op: ops.UnaryOp, value: Vf32) Vf32 {
     var out: Vf32 = undefined;
@@ -397,15 +400,213 @@ pub inline fn fastTanhVec(value: Vf32) Vf32 {
 }
 
 /// ggml f16-LUT gelu (see ops.geluQuantScalar): f16-round the input, exact
-/// tanh-gelu, f16-round the output, with hard clamps at +/-10. Evaluated
-/// with the scalar body PER LANE on purpose: the contract is byte parity
-/// with ggml's table, and the f16 output rounding turns any approximate
-/// tanh into flipped table entries (the previous `tanhVec`-based lanes
-/// disagreed with the scalar form on 428 of the 37388 f16 inputs inside
-/// the clamps). The scalar tanh is one `expm1f` per lane, cheaper than
-/// the lane form it replaces.
+/// tanh-gelu, f16-round the output, with hard clamps at +/-10. The contract
+/// is byte parity with ggml's table, which no approximate lane tanh keeps
+/// once the output rounds to f16 — the tanh here is `vtanhf`, the faithful
+/// musl port whose lanes reproduce the `std.math.tanh` bytes the scalar
+/// form calls, so the lanes match the table exactly at vector speed
+/// (`primitives_tests.zig` sweeps every f16 inside the clamps plus the
+/// off-grid f16 midpoints).
 pub inline fn geluQuantVec(value: Vf32) Vf32 {
-    return perLaneUnary(.gelu_quant, value);
+    const xr: Vf32 = @floatCast(@as(Vf16ForF32, @floatCast(value)));
+    // geluScalar's exact shape: 0.5 * x * (1 + tanh(geluTanhArg(x))).
+    const g = @as(Vf32, @splat(0.5)) * xr * (@as(Vf32, @splat(1)) + vtanhf(vector_len, geluTanhArgVec(xr)));
+    const gr: Vf32 = @floatCast(@as(Vf16ForF32, @floatCast(g)));
+    // The hard clamps test the ORIGINAL input, before the f16 rounding.
+    return @select(
+        f32,
+        value <= @as(Vf32, @splat(-10)),
+        @as(Vf32, @splat(0)),
+        @select(f32, value >= @as(Vf32, @splat(10)), value, gr),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// vexpm1f / vtanhf: single-precision expm1 and tanh on @Vector lanes,
+// translated faithfully from musl libc src/math/expm1f.c and tanhf.c (MIT
+// licensed; FDLIBM lineage) through the `std.math.expm1` / `std.math.tanh`
+// scalar ports the backend's scalar arms call. Same constants and branch
+// structure (branches become masked selects, the float-word tricks become
+// integer vector ops), and no fused or reassociated arithmetic — every lane
+// produces bytes identical to the scalar call, which the byte-parity ops
+// (`gelu_quant`'s ggml f16 LUT, `elu`'s ggml_vec_elu_f32) require.
+// `primitives_tests.zig` sweeps both against the scalar forms bit-for-bit.
+// ---------------------------------------------------------------------------
+
+inline fn maskAnd(comptime W: usize, a: @Vector(W, bool), b: @Vector(W, bool)) @Vector(W, bool) {
+    return @select(bool, a, b, @as(@Vector(W, bool), @splat(false)));
+}
+
+inline fn maskOr(comptime W: usize, a: @Vector(W, bool), b: @Vector(W, bool)) @Vector(W, bool) {
+    return @select(bool, a, @as(@Vector(W, bool), @splat(true)), b);
+}
+
+inline fn maskNot(comptime W: usize, a: @Vector(W, bool)) @Vector(W, bool) {
+    return @select(bool, a, @as(@Vector(W, bool), @splat(false)), @as(@Vector(W, bool), @splat(true)));
+}
+
+/// musl expm1f on lanes, byte-identical to `std.math.expm1(f32)` per lane.
+pub inline fn vexpm1f(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
+    const Vec = @Vector(W, f32);
+    const VecU = @Vector(W, u32);
+
+    const o_threshold: f32 = 8.8721679688e+01;
+    const zero: Vec = @splat(0);
+    const one: Vec = @splat(1);
+
+    const ux: VecU = @bitCast(x);
+    const hx = ux & @as(VecU, @splat(0x7FFFFFFF));
+    const sign = (ux >> @splat(31)) != @as(VecU, @splat(0));
+
+    const is_nan = x != x;
+    // |x| >= 27*ln2: negative lanes saturate to -1 (including -inf), lanes
+    // above the overflow threshold go to +inf; in-range large lanes fall
+    // through to the general path exactly as in the scalar.
+    const big = hx >= @as(VecU, @splat(0x4195B844));
+    const ret_neg1 = maskAnd(W, big, sign);
+    const ret_inf = maskAnd(W, maskAnd(W, big, maskNot(W, sign)), x > @as(Vec, @splat(o_threshold)));
+    const early = maskOr(W, maskOr(W, is_nan, ret_neg1), ret_inf);
+    // Early-return lanes run the shared pipeline on 0 (k = 0, polynomial at
+    // 0) so nothing below traps or overflows; their results are replaced at
+    // the end. This also bounds |kf| in the body, keeping @intFromFloat in
+    // range.
+    const xs = @select(f32, early, zero, x);
+
+    var res = vexpm1fBody(W, false, xs);
+    res = @select(f32, ret_inf, x * @as(Vec, @splat(0x1.0p127)), res);
+    res = @select(f32, ret_neg1, -one, res);
+    return @select(f32, is_nan, @as(Vec, @splat(std.math.nan(f32))), res);
+}
+
+/// The argument-reduction + polynomial pipeline shared by `vexpm1f` and
+/// `vtanhf`, byte-faithful to the scalar over lanes that are finite and
+/// below the overflow threshold (the caller's contract). `bounded` marks
+/// the tanhf call site, whose constructed argument is always in
+/// [-log(5/3), 20] (musl tanhf never feeds expm1f anything else): the
+/// |k| > 56 scale arm and its k = 128 special are unreachable there
+/// (k stays in [-1, 29]) and compile out; `vexpm1f` keeps them.
+inline fn vexpm1fBody(comptime W: usize, comptime bounded: bool, xs: @Vector(W, f32)) @Vector(W, f32) {
+    const Vec = @Vector(W, f32);
+    const VecU = @Vector(W, u32);
+    const VecI = @Vector(W, i32);
+
+    const ln2_hi: f32 = 6.9313812256e-01;
+    const ln2_lo: f32 = 9.0580006145e-06;
+    const invln2: f32 = 1.4426950216e+00;
+    const q1_coeff: f32 = -3.3333212137e-2;
+    const q2_coeff: f32 = 1.5807170421e-3;
+
+    const zero: Vec = @splat(0);
+    const one: Vec = @splat(1);
+
+    const uxs: VecU = @bitCast(xs);
+    const axs = uxs & @as(VecU, @splat(0x7FFFFFFF));
+    const ssign = (uxs >> @splat(31)) != @as(VecU, @splat(0));
+
+    // |x| < 2^-25 (subnormals included): returns x unchanged.
+    const tiny = axs < @as(VecU, @splat(0x33000000));
+
+    // Argument reduction x = k*ln2 + reduced, in the scalar's two arms:
+    // |x| in (0.5*ln2, 1.5*ln2) takes k = ±1 with the constant hi/lo pair,
+    // larger |x| takes k = trunc(x/ln2 ± 0.5) with the computed pair.
+    const mid = axs > @as(VecU, @splat(0x3EB17218));
+    const near = axs < @as(VecU, @splat(0x3F851592));
+    const kf = @as(Vec, @splat(invln2)) * xs + @select(f32, ssign, @as(Vec, @splat(-0.5)), @as(Vec, @splat(0.5)));
+    const k_far: VecI = @intFromFloat(kf);
+    const t_far: Vec = @floatFromInt(k_far);
+    const hi_far = xs - t_far * @as(Vec, @splat(ln2_hi));
+    const lo_far = t_far * @as(Vec, @splat(ln2_lo));
+    const hi_near = xs - @select(f32, ssign, @as(Vec, @splat(-ln2_hi)), @as(Vec, @splat(ln2_hi)));
+    const lo_near = @select(f32, ssign, @as(Vec, @splat(-ln2_lo)), @as(Vec, @splat(ln2_lo)));
+    const k_near: VecI = @select(i32, ssign, @as(VecI, @splat(-1)), @as(VecI, @splat(1)));
+    const hi = @select(f32, near, hi_near, hi_far);
+    const lo = @select(f32, near, lo_near, lo_far);
+    const k: VecI = @select(i32, mid, @select(i32, near, k_near, k_far), @as(VecI, @splat(0)));
+    const xm = hi - lo;
+    const xr = @select(f32, mid, xm, xs);
+    const c = @select(f32, mid, (hi - xm) - lo, zero);
+
+    // Degree-2 rational approximation on the reduced interval (the exact
+    // scalar operation order — nothing fused, nothing reassociated).
+    const hfx = @as(Vec, @splat(0.5)) * xr;
+    const hxs = xr * hfx;
+    const r1 = one + hxs * (@as(Vec, @splat(q1_coeff)) + hxs * @as(Vec, @splat(q2_coeff)));
+    const t = @as(Vec, @splat(3)) - r1 * hfx;
+    const e0 = hxs * ((r1 - t) / (@as(Vec, @splat(6)) - xr * t));
+    const res_k0 = xr - (xr * e0 - hxs);
+    const e1 = (xr * (e0 - c) - c) - hxs;
+    const res_km1 = @as(Vec, @splat(0.5)) * (xr - e1) - @as(Vec, @splat(0.5));
+    const res_k1 = @select(
+        f32,
+        xr < @as(Vec, @splat(-0.25)),
+        @as(Vec, @splat(-2)) * (e1 - (xr + @as(Vec, @splat(0.5)))),
+        one + @as(Vec, @splat(2)) * (xr - e1),
+    );
+    // 2^k and 2^-k assembled in the exponent field. Wrapping u32 arithmetic
+    // produces the scalar's bits for every k that reaches each consumer;
+    // out-of-branch lanes hold junk that is never selected.
+    const k_u: VecU = @bitCast(k);
+    const twopk: Vec = @bitCast((@as(VecU, @splat(0x7F)) +% k_u) << @splat(23));
+    const uf: Vec = @bitCast((@as(VecU, @splat(0x7F)) -% k_u) << @splat(23));
+    const res_low = ((xr - e1) + (one - uf)) * twopk; // 2 <= k < 23
+    const res_high = ((xr - (e1 + uf)) + one) * twopk; // 23 <= k <= 56
+    const res_scaled = if (bounded) res_scaled: {
+        break :res_scaled @select(f32, k < @as(VecI, @splat(23)), res_low, res_high);
+    } else res_scaled: {
+        const y0 = (xr - e1) + one;
+        const y1 = @select(
+            f32,
+            k == @as(VecI, @splat(128)),
+            (y0 * @as(Vec, @splat(2))) * @as(Vec, @splat(0x1.0p127)),
+            y0 * twopk,
+        );
+        const res_wide = y1 - one;
+        const wide = maskOr(W, k < @as(VecI, @splat(0)), k > @as(VecI, @splat(56)));
+        break :res_scaled @select(f32, wide, res_wide, //
+            @select(f32, k < @as(VecI, @splat(23)), res_low, res_high));
+    };
+    const res_k = @select(f32, k == @as(VecI, @splat(0)), res_k0, //
+        @select(f32, k == @as(VecI, @splat(-1)), res_km1, //
+            @select(f32, k == @as(VecI, @splat(1)), res_k1, res_scaled)));
+    return @select(f32, tiny, xs, res_k);
+}
+
+/// musl tanhf on lanes, byte-identical to `std.math.tanh(f32)` per lane:
+/// one shared `vexpm1f` for the three expm1 branches (the small-magnitude
+/// arm's negation folds into the quotient's numerator, an exact sign move).
+pub inline fn vtanhf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
+    const Vec = @Vector(W, f32);
+    const VecU = @Vector(W, u32);
+
+    const ux: VecU = @bitCast(x);
+    const uabs = ux & @as(VecU, @splat(0x7FFFFFFF));
+    const ax: Vec = @bitCast(uabs);
+    const sign = (ux >> @splat(31)) != @as(VecU, @splat(0));
+
+    const cross = uabs > @as(VecU, @splat(0x3F0C9F54)); // |x| > log(3)/2, or nan
+    const huge = uabs > @as(VecU, @splat(0x41200000)); // |x| > 10, or nan
+    const mid = uabs > @as(VecU, @splat(0x3E82C578)); // |x| > log(5/3)/2
+    const norm = uabs >= @as(VecU, @splat(0x00800000));
+
+    // expm1(2|x|) feeds the cross-but-not-huge and mid arms, expm1(-2|x|)
+    // the small normal arm; every other lane is fed 0 and overridden.
+    const saturating = maskAnd(W, cross, maskNot(W, huge));
+    const pos_arm = maskOr(W, saturating, maskAnd(W, maskNot(W, cross), mid));
+    const neg_arm = maskAnd(W, maskNot(W, cross), maskAnd(W, maskNot(W, mid), norm));
+    const two_ax = @as(Vec, @splat(2)) * ax;
+    const arg = @select(f32, pos_arm, two_ax, @select(f32, neg_arm, -two_ax, @as(Vec, @splat(0))));
+    // The constructed argument is finite in [-log(5/3), 20] by the masks
+    // above, so the bounded expm1 body applies (its documented contract).
+    const em = vexpm1fBody(W, true, arg);
+    const num = @select(f32, saturating, @as(Vec, @splat(2)), @select(f32, neg_arm, -em, em));
+    const q = num / (em + @as(Vec, @splat(2)));
+    const t_expm1 = @select(f32, saturating, @as(Vec, @splat(1)) - q, q);
+    // |x| > 10: t = 1 + 0/x (1 on finite lanes, NaN propagation on NaN);
+    // this fdiv is independent of the expm1 chain, so it overlaps it.
+    const t_huge = @as(Vec, @splat(1)) + @as(Vec, @splat(0)) / x;
+    const t1 = @select(f32, maskOr(W, pos_arm, neg_arm), t_expm1, ax); // else arm: subnormal t = |x|
+    const t2 = @select(f32, huge, t_huge, t1);
+    return @select(f32, sign, -t2, t2);
 }
 
 pub inline fn gatedActivationVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
