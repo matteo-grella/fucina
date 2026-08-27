@@ -380,6 +380,72 @@ pub const WeightPtqtp = struct {
         return self;
     }
 
+    pub fn outDim(self: *const WeightPtqtp) usize {
+        return self.p1.dim(.out);
+    }
+
+    pub fn inDim(self: *const WeightPtqtp) usize {
+        return self.p1.dim(.in);
+    }
+
+    /// Storage-sharing clone: plane views are retagged and the packs,
+    /// fold, and GPU residency rebuild from the views. The clone drops the
+    /// tie flag (and with it the fold) -- rebuilding is free, unlike the
+    /// fx4 pack copy where the fold IS the weight.
+    pub fn cloneView(self: *const WeightPtqtp, ctx: *ExecContext) !WeightPtqtp {
+        var p1 = try self.p1.withTags(ctx, .{ .out, .in });
+        errdefer p1.deinit();
+        var p2: ?QuantWeight(.tq2_0) = if (self.p2) |*plane|
+            try plane.withTags(ctx, .{ .out, .in })
+        else
+            null;
+        errdefer if (p2) |*plane| plane.deinit();
+        const p3: ?QuantWeight(.tq2_0) = if (self.p3) |*plane|
+            try plane.withTags(ctx, .{ .out, .in })
+        else
+            null;
+        return WeightPtqtp.init(ctx.allocator, p1, p2, p3, false);
+    }
+
+    /// Multi-plane linear: the fused single-dispatch path when it applies
+    /// (`linearSeqPtqtpFused`), else the per-plane facade dot chain --
+    /// bitwise-equal results either way.
+    pub fn linearSeq(self: *const WeightPtqtp, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        if (try linearSeqPtqtpFused(self, ctx, input, out_tag)) |fused| return fused;
+        var p1 = try self.p1.withTags(ctx, .{ out_tag, in_tag });
+        defer p1.deinit();
+        var acc = try input.dot(ctx, &p1, in_tag);
+        inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
+            if (@field(self, plane_field)) |*plane| {
+                errdefer acc.deinit();
+                var tagged = try plane.withTags(ctx, .{ out_tag, in_tag });
+                defer tagged.deinit();
+                var y = try input.dot(ctx, &tagged, in_tag);
+                defer y.deinit();
+                const sum = try acc.add(ctx, &y);
+                acc.deinit();
+                acc = sum;
+            }
+        }
+        return acc;
+    }
+
+    /// Row gather: per-plane f32 gathers summed in plane order.
+    pub fn getRowsAs(self: *const WeightPtqtp, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        var acc = try self.p1.getRows(ctx, .out, token_ids, .seq);
+        defer acc.deinit();
+        inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
+            if (@field(self, plane_field)) |*plane| {
+                var rows2 = try plane.getRows(ctx, .out, token_ids, .seq);
+                defer rows2.deinit();
+                const sum = try acc.add(ctx, &rows2);
+                acc.deinit();
+                acc = sum;
+            }
+        }
+        return acc.withTags(ctx, .{ .seq, out_tag });
+    }
+
     fn buildGpuResidency(self: *WeightPtqtp) void {
         const gpu = offload;
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and offload.supportsQuant(.tq2_0))) return;
@@ -539,6 +605,38 @@ pub const WeightPtqtpFx4 = struct {
         const dev = gpu.allocResidentBytes(bytes.len) orelse return;
         @memcpy(dev, bytes);
         self.gpu_fold = dev;
+    }
+
+    pub fn outDim(self: *const WeightPtqtpFx4) usize {
+        return self.n;
+    }
+
+    pub fn inDim(self: *const WeightPtqtpFx4) usize {
+        return self.k;
+    }
+
+    /// The fold IS the weight: clone copies the pack (unlike the ptqtp
+    /// clone, which drops fold/tie and rebuilds free).
+    pub fn cloneView(self: *const WeightPtqtpFx4, ctx: *ExecContext) !WeightPtqtpFx4 {
+        const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, self.pack.len);
+        @memcpy(owned, self.pack);
+        return WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, self.n, self.k, true);
+    }
+
+    /// One-pass folded linear (`linearSeqFx4`); `in_tag` is fixed by the
+    /// stored pack geometry.
+    pub fn linearSeq(self: *const WeightPtqtpFx4, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        _ = in_tag;
+        return linearSeqFx4(self, ctx, input, out_tag);
+    }
+
+    /// Row gather through `decodeRow` -- decoded straight into the result.
+    pub fn getRowsAs(self: *const WeightPtqtpFx4, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, self.k });
+        errdefer out_t.deinit();
+        const dst = try out_t.data();
+        for (token_ids, 0..) |row, i| self.decodeRow(row, dst[i * self.k ..][0..self.k]);
+        return out_t;
     }
 
     /// Decode output row `r` to f32 — the embedding/util path (`getRowsAs`,

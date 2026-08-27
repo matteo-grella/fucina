@@ -69,12 +69,16 @@ fn dotLinear(
     comptime in_tag: Tag,
     comptime out_tag: Tag,
 ) !fucina.Tensor(.{ .seq, out_tag }) {
-    @setEvalBranchQuota(20_000);
     return switch (weight.*) {
-        .q4_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q5_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q6_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q8_0 => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
+        .dense => |*d| switch (d.*) {
+            inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
+        },
+        .packed_quant => |*pq| switch (pq.*) {
+            inline else => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
+        },
+        // The dtype-erased compact container's linearSeq IS the frozen dot:
+        // the facade dot against the compact blocks, differentiable input.
+        .quant => |*cw| cw.linearSeq(ctx, input, in_tag, out_tag),
         .ptqtp => |*w| blk: {
             var acc = try dotFrozen(&w.p1, ctx, input, in_tag, out_tag);
             inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
@@ -92,7 +96,6 @@ fn dotLinear(
         // Native-folded PTQTP has no plane facade to dot through — fx4
         // files are serving artifacts, not training checkpoints.
         .tq2_0_fx4 => error.UnsupportedWeightType,
-        inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
     };
 }
 

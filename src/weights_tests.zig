@@ -68,7 +68,7 @@ test "LinearWeight.load q8_0: cloneView shares block storage and survives source
     var source = try LinearWeight.load(&ctx, &info, out_dim, in_dim);
     var source_owned = true;
     defer if (source_owned) source.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).q8_0, std.meta.activeTag(source));
+    try std.testing.expect(source == .packed_quant and source.dtype() == .q8_0);
 
     var clone = try source.cloneView(&ctx);
     defer clone.deinit();
@@ -95,6 +95,91 @@ test "LinearWeight.load q8_0: cloneView shares block storage and survives source
             try std.testing.expectEqual(@as(f32, @floatFromInt(expected)), yd[s * out_dim + o]);
         }
     }
+}
+
+test "cold-format container (q4_0): forward, grads, rows, and cloneView match the typed facade path" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const out_dim = 6;
+    const in_dim = 64; // two q4_0 blocks per row
+    const seq_len = 3;
+
+    var w_vals: [out_dim * in_dim]f32 = undefined;
+    testIntegerFill(&w_vals, 5, 2);
+    const enc = try allocator.alloc(u8, try gguf.tensorByteLen(.q4_0, &.{w_vals.len}));
+    defer allocator.free(enc);
+    try gguf.encodeF32(.q4_0, &w_vals, enc);
+
+    const info = gguf.TensorInfo{
+        .name = "w",
+        .dims = .{ in_dim, out_dim, 0, 0 },
+        .n_dims = 2,
+        .ggml_type = .q4_0,
+        .offset = 0,
+        .data = enc,
+    };
+
+    var w = try LinearWeight.load(&ctx, &info, out_dim, in_dim);
+    var w_owned = true;
+    defer if (w_owned) w.deinit();
+    try std.testing.expect(w == .quant);
+    try std.testing.expect(w.dtype() == .q4_0);
+    try std.testing.expectEqual(@as(usize, out_dim), w.outDim());
+    try std.testing.expectEqual(@as(usize, in_dim), w.inDim());
+
+    // The typed facade route the container erases: same blocks, same ops.
+    const blocks: []const fucina.quant.BlockQ4_0 = @alignCast(std.mem.bytesAsSlice(fucina.quant.BlockQ4_0, enc));
+    var typed = try weights.QuantWeight(.q4_0).fromBlocks(&ctx, .{ out_dim, in_dim }, blocks);
+    defer typed.deinit();
+
+    var x_vals: [seq_len * in_dim]f32 = undefined;
+    testIntegerFill(&x_vals, 7, 3);
+    var x_cold = try fucina.Tensor(.{ .seq, .embed }).variableFromSlice(&ctx, .{ seq_len, in_dim }, &x_vals);
+    defer x_cold.deinit();
+    var x_typed = try fucina.Tensor(.{ .seq, .embed }).variableFromSlice(&ctx, .{ seq_len, in_dim }, &x_vals);
+    defer x_typed.deinit();
+
+    // Forward bitwise, and the input gradient flows through the erased
+    // container exactly as through the typed quant-RHS dot.
+    var y_cold = try w.linearSeq(&ctx, &x_cold, .embed, .ffn);
+    defer y_cold.deinit();
+    try std.testing.expect(y_cold.requiresGrad());
+    var w_tagged = try typed.withTags(&ctx, .{ .ffn, .embed });
+    defer w_tagged.deinit();
+    var y_typed = try x_typed.dot(&ctx, &w_tagged, .embed);
+    defer y_typed.deinit();
+    try std.testing.expectEqualSlices(f32, y_typed.asRawTensor().dataConst(), y_cold.asRawTensor().dataConst());
+
+    var loss_cold = try y_cold.sumAll(&ctx);
+    defer loss_cold.deinit();
+    try loss_cold.backward(&ctx);
+    var loss_typed = try y_typed.sumAll(&ctx);
+    defer loss_typed.deinit();
+    try loss_typed.backward(&ctx);
+    var g_cold = (try x_cold.grad(&ctx)).?;
+    defer g_cold.deinit();
+    var g_typed = (try x_typed.grad(&ctx)).?;
+    defer g_typed.deinit();
+    try std.testing.expectEqualSlices(f32, g_typed.asRawTensor().dataConst(), g_cold.asRawTensor().dataConst());
+
+    // Row gather, then again through a clone that outlives the source.
+    const ids = [_]usize{ 4, 0, 5 };
+    var rows_typed = try typed.getRows(&ctx, .out, &ids, .seq);
+    defer rows_typed.deinit();
+    var rows_cold = try w.getRowsAs(&ctx, &ids, .embed);
+    defer rows_cold.deinit();
+    try std.testing.expectEqualSlices(f32, try rows_typed.dataConst(), try rows_cold.dataConst());
+
+    var clone = try w.cloneView(&ctx);
+    defer clone.deinit();
+    w.deinit();
+    w_owned = false;
+    var rows_clone = try clone.getRowsAs(&ctx, &ids, .embed);
+    defer rows_clone.deinit();
+    try std.testing.expectEqualSlices(f32, try rows_typed.dataConst(), try rows_clone.dataConst());
 }
 
 /// Integer-valued q8_0 blocks (d = 1.0): the dequantized weight IS qs, so the
@@ -218,7 +303,7 @@ test "linearSeq (q5_k): compact decode route (m < 4) matches the packed path bit
     };
     var w = try LinearWeight.load(&ctx, &info, out_dim, in_dim);
     defer w.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).q5_k, std.meta.activeTag(w));
+    try std.testing.expect(w == .packed_quant and w.dtype() == .q5_k);
 
     // Restore the env/arch default once done (the setter pre-seeds the
     // read-once gate cache; null resets it to unread).
@@ -277,7 +362,7 @@ test "linearSeq (q6_k): compact decode route (m < 4) matches the packed path bit
     };
     var w = try LinearWeight.load(&ctx, &info, out_dim, in_dim);
     defer w.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).q6_k, std.meta.activeTag(w));
+    try std.testing.expect(w == .packed_quant and w.dtype() == .q6_k);
 
     // Restore the env/arch default once done (the setter pre-seeds the
     // read-once gate cache; null resets it to unread).
@@ -332,7 +417,7 @@ fn testBf16AndF32Pair(ctx: *ExecContext, values: []const f32, out_dim: usize, in
     var w_bf16 = try w32.to(ctx, .bf16);
     errdefer w_bf16.deinit();
     const w_ref = try WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values);
-    return .{ .{ .bf16 = w_bf16 }, .{ .f32 = w_ref } };
+    return .{ .{ .dense = .{ .bf16 = w_bf16 } }, .{ .dense = .{ .f32 = w_ref } } };
 }
 
 test "linearSeq: resident bf16 weight matches the f32-widened reference bitwise" {
@@ -350,7 +435,7 @@ test "linearSeq: resident bf16 weight matches the f32-widened reference bitwise"
     var pair = try testBf16AndF32Pair(&ctx, &w_vals, out_dim, in_dim);
     defer pair[0].deinit();
     defer pair[1].deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).bf16, std.meta.activeTag(pair[0]));
+    try std.testing.expect(pair[0] == .dense and pair[0].dtype() == .bf16);
 
     var x_vals: [seq_len * in_dim]f32 = undefined;
     testIntegerFill(&x_vals, 7, 3); // {-3..3}
@@ -393,8 +478,8 @@ test "fuseLinear: bf16 parts fuse on the out axis and match the separate project
     defer a32.deinit();
     var b32 = try WeightF32.fromSlice(&ctx, .{ out_b, in_dim }, &b_vals);
     defer b32.deinit();
-    var a = LinearWeight{ .bf16 = try a32.to(&ctx, .bf16) };
-    var b = LinearWeight{ .bf16 = try b32.to(&ctx, .bf16) };
+    var a = LinearWeight{ .dense = .{ .bf16 = try a32.to(&ctx, .bf16) } };
+    var b = LinearWeight{ .dense = .{ .bf16 = try b32.to(&ctx, .bf16) } };
 
     var x_vals: [seq_len * in_dim]f32 = undefined;
     testIntegerFill(&x_vals, 7, 3);
@@ -415,7 +500,7 @@ test "fuseLinear: bf16 parts fuse on the out axis and match the separate project
     try std.testing.expect(maybe_fused != null);
     var fused = maybe_fused.?; // parts were consumed by the successful fuse
     defer fused.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).bf16, std.meta.activeTag(fused));
+    try std.testing.expect(fused == .dense and fused.dtype() == .bf16);
 
     var y = try fused.linearSeq(&ctx, &x, .embed, .ffn);
     defer y.deinit();
@@ -481,9 +566,9 @@ test "GGUF load: bf16 tensors stay resident bf16 and linearSeq matches the widen
     var weight = try LinearWeight.load(&ctx, try file.get("w"), out_dim, in_dim);
     defer weight.deinit();
     // The load must route to the RESIDENT bf16 arm, not widen to f32.
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).bf16, std.meta.activeTag(weight));
+    try std.testing.expect(weight == .dense and weight.dtype() == .bf16);
 
-    var reference = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) };
+    var reference = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) } };
     defer reference.deinit();
 
     var x_vals: [2 * in_dim]f32 = undefined;
@@ -519,11 +604,11 @@ test "toPtqtp: dense f32 decorates to dual planes; linearSeq matches the dequant
     var prng = std.Random.DefaultPrng.init(31);
     var w_vals: [out_dim * in_dim]f32 = undefined;
     for (&w_vals) |*v| v.* = prng.random().floatNorm(f32) * 0.05;
-    var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) };
+    var weight = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) } };
     defer weight.deinit();
 
     const stats = try weight.toPtqtp(&ctx, .{});
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).ptqtp, std.meta.activeTag(weight));
+    try std.testing.expect(weight == .ptqtp);
     try std.testing.expect(weight.ptqtp.p2 != null);
     try std.testing.expectEqual(@as(usize, out_dim), weight.outDim());
     try std.testing.expectEqual(@as(usize, in_dim), weight.inDim());
@@ -567,12 +652,12 @@ test "toPtqtp: rejects contract dims off the 256-block grid" {
 
     var w_vals: [4 * 128]f32 = undefined;
     @memset(&w_vals, 0.25);
-    var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ 4, 128 }, &w_vals) };
+    var weight = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ 4, 128 }, &w_vals) } };
     defer weight.deinit();
 
     try std.testing.expect(!weight.ptqtpEligible());
     try std.testing.expectError(weights.Error.UnsupportedWeightType, weight.toPtqtp(&ctx, .{}));
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).f32, std.meta.activeTag(weight));
+    try std.testing.expect(weight == .dense and weight.dtype() == .f32);
 }
 
 test "toPtqtp planes=3: triple-plane arm, linearSeq matches the three-plane reconstruction" {
@@ -586,7 +671,7 @@ test "toPtqtp planes=3: triple-plane arm, linearSeq matches the three-plane reco
     var prng = std.Random.DefaultPrng.init(303);
     var w_vals: [out_dim * in_dim]f32 = undefined;
     for (&w_vals) |*v| v.* = prng.random().floatNorm(f32) * 0.05;
-    var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) };
+    var weight = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, &w_vals) } };
     defer weight.deinit();
 
     const stats = try weight.toPtqtp(&ctx, .{ .planes = 3 });
@@ -628,7 +713,7 @@ test "tie-fitted ptqtp serves the folded one-pass semantics" {
     defer allocator.free(w_vals);
     for (w_vals) |*v| v.* = prng.random().floatNorm(f32) * 0.05;
 
-    var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, w_vals) };
+    var weight = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, w_vals) } };
     defer weight.deinit();
     _ = try weight.toPtqtp(&ctx, .{ .planes = 2, .tie_scales = true });
 
@@ -674,7 +759,7 @@ test "fused ptqtp linear is bitwise identical to the per-plane facade chain" {
     for (w_vals) |*v| v.* = prng.random().floatNorm(f32) * 0.05;
 
     for ([_]u8{ 1, 2, 3 }) |planes| {
-        var weight = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, w_vals) };
+        var weight = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ out_dim, in_dim }, w_vals) } };
         defer weight.deinit();
         _ = try weight.toPtqtp(&ctx, .{ .planes = planes });
 

@@ -673,10 +673,7 @@ fn ensureResidentFloatWeights(model: *const models.qwen3.model.Model, stdout: *s
 }
 
 fn isFloatWeight(w: *const fucina.weights.LinearWeight) bool {
-    return switch (w.*) {
-        .f32, .f16, .bf16 => true,
-        else => false,
-    };
+    return w.* == .dense;
 }
 
 fn saveEsCheckpoint(

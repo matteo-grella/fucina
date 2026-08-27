@@ -1799,8 +1799,11 @@ fn linearForward(
 
     const conv_start = profileStart(profile, io);
     var conv_kernel = switch (layer.conv1d) {
-        .f32 => |*t| try t.withTags(ctx, .{ .conv, .tap }),
-        else => return Error.UnsupportedVariant, // qwen35 GGUFs store ssm_conv1d as f32
+        .dense => |*d| switch (d.*) {
+            .f32 => |*t| try t.withTags(ctx, .{ .conv, .tap }),
+            else => return Error.UnsupportedVariant, // qwen35 GGUFs store ssm_conv1d as f32
+        },
+        else => return Error.UnsupportedVariant,
     };
     defer conv_kernel.deinit();
     var conv = try qkv.causalDepthwiseConv1d(ctx, .seq, .conv, .tap, &conv_kernel, 1, conv_state);
@@ -1993,12 +1996,12 @@ fn ffnForward(
     if (ffn_rows >= 12 and dense.input_proj == .fused) {
         const gate_up_weight = &dense.input_proj.fused;
         switch (dense.down_proj) {
-            .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
-                return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile);
+            .packed_quant => |*pq| switch (pq.*) {
+                .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                    return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile);
+                },
+                inline .q5_k, .q6_k, .q8_0 => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
             },
-            .q5_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
-            .q6_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
-            .q8_0 => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, input, &ffn_in, io, profile),
             else => {},
         }
     }

@@ -1,7 +1,8 @@
 //! Model weight I/O and the fused linear/MoE weight containers: GGUF-backed
-//! dense and quantized weights (packed-RHS `LinearWeight`, PTQTP plane
-//! weights, `LookupWeight`), MoE expert-stack loading (resident, mmap-
-//! borrowed, or disk-streamed through `ExpertStore`), the fused forward
+//! dense and quantized weights (`LinearWeight` — five behaviour containers
+//! over ~30 GGUF formats — PTQTP plane weights, `LookupWeight`), MoE
+//! expert-stack loading (resident, mmap-borrowed, or disk-streamed through
+//! `ExpertStore`), the fused forward
 //! helpers the LLM families share (`moeSwiGluFfnSeq`, `linearSeq*`), GGUF
 //! host-side vector/matrix readers, and PTQTP decoration. Public as
 //! `fucina.weights`.
@@ -33,8 +34,8 @@
 //! `ptqtp` trit-plane containers, `dense` dense/packed containers and
 //! loaders, `stack` quantized byte stacks, `borrowed` zero-copy linears,
 //! `moe` expert stacks and streaming with the `moe_stream` options leaf,
-//! `linear` the LinearWeight/LookupWeight unions, `fuse` fusion and
-//! decoration).
+//! `linear` the LinearWeight containers and the LookupWeight table,
+//! `fuse` fusion and decoration).
 
 const common = @import("weights/common.zig");
 const host = @import("weights/host.zig");
@@ -71,6 +72,9 @@ pub const QuantByteStack = stack.QuantByteStack;
 pub const makeQuantByteStack = stack.makeQuantByteStack;
 
 pub const LinearWeight = linear.LinearWeight;
+pub const DenseWeight = linear.DenseWeight;
+pub const PackedWeight = linear.PackedWeight;
+pub const ColdQuantWeight = linear.ColdQuantWeight;
 pub const LookupWeight = linear.LookupWeight;
 
 pub const loadMoeRhs = moe.loadMoeRhs;

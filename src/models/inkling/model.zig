@@ -1006,9 +1006,7 @@ fn loadExpertDown(ctx: *ExecContext, bank: *const gguf.TensorInfo, n_expert: usi
 
 fn packDenseLinearRhs(ctx: *ExecContext, linear: *const LinearWeight) !?fucina.PackedRhs(.f32) {
     return switch (linear.*) {
-        .f32 => |*weight| try weight.packRhs(ctx),
-        .f16 => |*weight| try weight.packRhs(ctx),
-        .bf16 => |*weight| try weight.packRhs(ctx),
+        .dense => |*weight| try weight.packRhs(ctx),
         else => null,
     };
 }

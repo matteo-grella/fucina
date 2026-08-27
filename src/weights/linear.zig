@@ -1,8 +1,12 @@
-//! The `LinearWeight` union — one nominal arm per loadable GGUF weight
-//! format — with its load / forward / decoration methods, and the
-//! lookup-only `LookupWeight` table. The union dispatches into the
-//! per-format bodies: packed dense arms in `dense.zig`, PTQTP arms in
-//! `ptqtp.zig`.
+//! The `LinearWeight` shape -- one container arm per BEHAVIOUR, not per
+//! GGUF format: `dense` (f32/f16/bf16 facade dots), `quant` (every other
+//! block format behind one dtype-erased compact container), `packed_quant`
+//! (the four packed-RHS formats), `ptqtp` (trit planes), `tq2_0_fx4`
+//! (native fold). The ~30 GGML formats exist as distinct comptime types
+//! ONLY inside `loadWithOptions` -- the one runtime-dtype -> comptime
+//! switch -- which builds the `quant` container's per-dtype vtable; every
+//! behaviour method dispatches over the five containers once. Also home to
+//! the lookup-only `LookupWeight` table.
 
 const std = @import("std");
 
@@ -20,6 +24,7 @@ const ptqtp_w = @import("ptqtp.zig");
 
 const offload = backend_mod.offload;
 const Tensor = ag_mod.Tensor;
+const PackedRhs = ag_mod.PackedRhs;
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
 const Error = common.Error;
@@ -36,36 +41,311 @@ const WeightQ8_0 = dense.WeightQ8_0;
 const WeightPtqtp = ptqtp_w.WeightPtqtp;
 const WeightPtqtpFx4 = ptqtp_w.WeightPtqtpFx4;
 const Tag = @TypeOf(.tag);
+const Allocator = std.mem.Allocator;
 
-pub const LinearWeight = union(enum) {
+/// The dense float container: one nominal arm per storage width, all three
+/// serving through the differentiable facade `dot` (f16/bf16 stream their
+/// raw bits through the mixed-precision TransB kernels).
+pub const DenseWeight = union(enum) {
     f32: WeightF32,
     f16: WeightF16,
     bf16: WeightBf16,
-    q1_0: QuantWeight(.q1_0),
-    q2_0: QuantWeight(.q2_0),
-    q4_0: QuantWeight(.q4_0),
-    q4_1: QuantWeight(.q4_1),
-    q5_0: QuantWeight(.q5_0),
-    q5_1: QuantWeight(.q5_1),
-    q8_0: WeightQ8_0,
-    q2_k: QuantWeight(.q2_k),
-    q3_k: QuantWeight(.q3_k),
+
+    pub fn dtype(self: *const DenseWeight) DType {
+        return switch (self.*) {
+            inline else => |*w| @TypeOf(w.*).dtype,
+        };
+    }
+
+    pub fn deinit(self: *DenseWeight) void {
+        switch (self.*) {
+            inline else => |*w| w.deinit(),
+        }
+        self.* = undefined;
+    }
+
+    pub fn cloneView(self: *const DenseWeight, ctx: *ExecContext) !DenseWeight {
+        return switch (self.*) {
+            inline else => |*w, tag| @unionInit(DenseWeight, @tagName(tag), try w.withTags(ctx, .{ .out, .in })),
+        };
+    }
+
+    pub fn outDim(self: *const DenseWeight) usize {
+        return switch (self.*) {
+            inline else => |*w| w.dim(.out),
+        };
+    }
+
+    pub fn inDim(self: *const DenseWeight) usize {
+        return switch (self.*) {
+            inline else => |*w| w.dim(.in),
+        };
+    }
+
+    pub fn linearSeq(self: *const DenseWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        return switch (self.*) {
+            inline else => |*w| blk: {
+                var tagged = try w.withTags(ctx, .{ out_tag, in_tag });
+                defer tagged.deinit();
+                break :blk try input.dot(ctx, &tagged, in_tag);
+            },
+        };
+    }
+
+    pub fn getRowsAs(self: *const DenseWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        return switch (self.*) {
+            .f32 => |*table| blk: {
+                var rows = try table.gather(ctx, .out, token_ids, .seq);
+                defer rows.deinit();
+                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
+            },
+            inline .f16, .bf16 => |*table| blk: {
+                var rows_half = try table.gather(ctx, .out, token_ids, .seq);
+                defer rows_half.deinit();
+                var rows = try rows_half.to(ctx, .f32);
+                defer rows.deinit();
+                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
+            },
+        };
+    }
+
+    /// Snapshot as f32 output-row panels for `dotPacked` (all three arms
+    /// share the dense panel container -- f16/bf16 widen once here).
+    pub fn packRhs(self: *const DenseWeight, ctx: *ExecContext) !PackedRhs(.f32) {
+        return switch (self.*) {
+            inline else => |*w| try w.packRhs(ctx),
+        };
+    }
+};
+
+/// The packed-RHS container: the four formats with column-interleaved
+/// packed kernels (`dense.PackedQuantWeight` bodies), each arm carrying
+/// the raw block tensor plus its packed RHS and lifetime.
+pub const PackedWeight = union(enum) {
     q4_k: WeightQ4_K,
     q5_k: WeightQ5_K,
     q6_k: WeightQ6_K,
-    iq1_s: QuantWeight(.iq1_s),
-    iq1_m: QuantWeight(.iq1_m),
-    iq2_xxs: QuantWeight(.iq2_xxs),
-    iq2_xs: QuantWeight(.iq2_xs),
-    iq2_s: QuantWeight(.iq2_s),
-    iq3_xxs: QuantWeight(.iq3_xxs),
-    iq3_s: QuantWeight(.iq3_s),
-    iq4_nl: QuantWeight(.iq4_nl),
-    iq4_xs: QuantWeight(.iq4_xs),
-    tq1_0: QuantWeight(.tq1_0),
-    tq2_0: QuantWeight(.tq2_0),
-    mxfp4: QuantWeight(.mxfp4),
-    nvfp4: QuantWeight(.nvfp4),
+    q8_0: WeightQ8_0,
+
+    pub fn dtype(self: *const PackedWeight) DType {
+        return switch (self.*) {
+            inline else => |*w| @TypeOf(w.*).dtype,
+        };
+    }
+
+    pub fn deinit(self: *PackedWeight) void {
+        switch (self.*) {
+            inline else => |*w| w.deinit(),
+        }
+        self.* = undefined;
+    }
+
+    pub fn cloneView(self: *const PackedWeight, ctx: *ExecContext) !PackedWeight {
+        return switch (self.*) {
+            inline else => |*w, tag| @unionInit(PackedWeight, @tagName(tag), try w.cloneView(ctx)),
+        };
+    }
+
+    pub fn outDim(self: *const PackedWeight) usize {
+        return switch (self.*) {
+            inline else => |*w| w.value.dim(.out),
+        };
+    }
+
+    pub fn inDim(self: *const PackedWeight) usize {
+        return switch (self.*) {
+            inline else => |*w| w.value.dim(.in),
+        };
+    }
+
+    pub fn linearSeq(self: *const PackedWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        return switch (self.*) {
+            inline else => |*w| try dense.linearSeq(w, ctx, input, in_tag, out_tag),
+        };
+    }
+
+    pub fn getRowsAs(self: *const PackedWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        return switch (self.*) {
+            inline else => |*w| blk: {
+                var rows = try w.value.getRows(ctx, .out, token_ids, .seq);
+                defer rows.deinit();
+                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
+            },
+        };
+    }
+
+    /// Whether this arm has a fused normalize+quantize+packed-GEMM kernel
+    /// (MMLA q4_k has none). Shape/tuning gates live on the caller
+    /// (`LinearWeight.supportsNormedFusion`).
+    pub fn supportsNormedFusion(self: *const PackedWeight) bool {
+        return switch (self.*) {
+            .q4_k => comptime !backend_mod.supports_q4_k_mmla,
+            .q8_0, .q5_k, .q6_k => true,
+        };
+    }
+
+    /// The fused normed route; null when this arm has no fused kernel
+    /// (q4_k on MMLA targets -- the caller re-normalizes and delegates).
+    pub fn tryLinearSeqNormed(
+        self: *const PackedWeight,
+        ctx: *ExecContext,
+        x: anytype,
+        norm_weight: anytype,
+        eps: f32,
+        comptime in_tag: Tag,
+        comptime out_tag: Tag,
+    ) !?Tensor(.{ .seq, out_tag }) {
+        switch (self.*) {
+            .q4_k => |*w| {
+                if (comptime backend_mod.supports_q4_k_mmla) return null;
+                return try x.rmsNormMulDotPacked(ctx, norm_weight, eps, &w.packed_rhs, in_tag, out_tag);
+            },
+            inline .q8_0, .q5_k, .q6_k => |*w| return try x.rmsNormMulDotPacked(ctx, norm_weight, eps, &w.packed_rhs, in_tag, out_tag),
+        }
+    }
+};
+
+/// Dtype-erased compact container for every block format outside the
+/// packed set (the cold formats: legacy q4_0/q5_1..., i-quants, tq1_0,
+/// mxfp4, ...). The typed `QuantWeight(dt)` facade tensor lives in a heap
+/// box behind a per-dtype vtable built at load -- the behaviour methods
+/// are dtype-free, and results are the same facade calls the typed tensor
+/// would make (canonical `[.seq, .in] x [.out, .in]` tags, retagged at the
+/// boundary through grad-transparent views).
+pub const ColdQuantWeight = struct {
+    /// The loaded GGML block format (runtime).
+    dtype: DType,
+    out_dim: usize,
+    in_dim: usize,
+    /// Heap box holding the typed `QuantWeight(dtype)`.
+    box: *anyopaque,
+    allocator: Allocator,
+    vt: *const VTable,
+
+    pub const VTable = struct {
+        deinit: *const fn (*anyopaque, Allocator) void,
+        clone_view: *const fn (*anyopaque, *ExecContext) anyerror!*anyopaque,
+        linear: *const fn (*anyopaque, *ExecContext, *const Tensor(.{ .seq, .in })) anyerror!Tensor(.{ .seq, .out }),
+        get_rows: *const fn (*anyopaque, *ExecContext, []const usize) anyerror!Tensor(.{ .seq, .in }),
+    };
+
+    fn Impl(comptime dt: DType) type {
+        return struct {
+            const W = QuantWeight(dt);
+
+            fn cast(box: *anyopaque) *W {
+                return @ptrCast(@alignCast(box));
+            }
+
+            fn deinitFn(box: *anyopaque, allocator: Allocator) void {
+                const w = cast(box);
+                w.deinit();
+                allocator.destroy(w);
+            }
+
+            fn cloneViewFn(box: *anyopaque, ctx: *ExecContext) anyerror!*anyopaque {
+                var view = try cast(box).withTags(ctx, .{ .out, .in });
+                errdefer view.deinit();
+                const fresh = try ctx.allocator.create(W);
+                fresh.* = view;
+                return fresh;
+            }
+
+            fn linearFn(box: *anyopaque, ctx: *ExecContext, x: *const Tensor(.{ .seq, .in })) anyerror!Tensor(.{ .seq, .out }) {
+                return x.dot(ctx, cast(box), .in);
+            }
+
+            fn getRowsFn(box: *anyopaque, ctx: *ExecContext, ids: []const usize) anyerror!Tensor(.{ .seq, .in }) {
+                return cast(box).getRows(ctx, .out, ids, .seq);
+            }
+
+            const vtable = VTable{
+                .deinit = &deinitFn,
+                .clone_view = &cloneViewFn,
+                .linear = &linearFn,
+                .get_rows = &getRowsFn,
+            };
+        };
+    }
+
+    /// Box a typed compact tensor. The ONLY caller is `loadWithOptions`'s
+    /// format switch -- each `dt` instantiation exists exactly there.
+    pub fn of(comptime dt: DType, ctx: *ExecContext, value: QuantWeight(dt)) !ColdQuantWeight {
+        var owned = value;
+        errdefer owned.deinit();
+        const out_dim = owned.dim(.out);
+        const in_dim = owned.dim(.in);
+        const box = try ctx.allocator.create(QuantWeight(dt));
+        box.* = owned;
+        return .{
+            .dtype = dt,
+            .out_dim = out_dim,
+            .in_dim = in_dim,
+            .box = box,
+            .allocator = ctx.allocator,
+            .vt = &Impl(dt).vtable,
+        };
+    }
+
+    /// Unbox the typed tensor when the runtime dtype matches, consuming
+    /// the container (the ptqtp_gguf plane reader's exit).
+    pub fn take(self: *ColdQuantWeight, comptime dt: DType) ?QuantWeight(dt) {
+        if (self.dtype != dt) return null;
+        const w: *QuantWeight(dt) = @ptrCast(@alignCast(self.box));
+        const out = w.*;
+        self.allocator.destroy(w);
+        self.* = undefined;
+        return out;
+    }
+
+    pub fn deinit(self: *ColdQuantWeight) void {
+        self.vt.deinit(self.box, self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn cloneView(self: *const ColdQuantWeight, ctx: *ExecContext) !ColdQuantWeight {
+        const box = try self.vt.clone_view(self.box, ctx);
+        return .{
+            .dtype = self.dtype,
+            .out_dim = self.out_dim,
+            .in_dim = self.in_dim,
+            .box = box,
+            .allocator = ctx.allocator,
+            .vt = self.vt,
+        };
+    }
+
+    pub fn outDim(self: *const ColdQuantWeight) usize {
+        return self.out_dim;
+    }
+
+    pub fn inDim(self: *const ColdQuantWeight) usize {
+        return self.in_dim;
+    }
+
+    /// The generic compact dot (differentiable in the input, exactly the
+    /// typed facade chain): retag to the canonical pair, contract, retag
+    /// back -- the interposed views are grad-transparent and value-exact.
+    pub fn linearSeq(self: *const ColdQuantWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        _ = in_tag;
+        var x = try input.withTags(ctx, .{ .seq, .in });
+        defer x.deinit();
+        var y = try self.vt.linear(self.box, ctx, &x);
+        defer y.deinit();
+        return y.withTags(ctx, .{ .seq, out_tag });
+    }
+
+    pub fn getRowsAs(self: *const ColdQuantWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
+        var rows = try self.vt.get_rows(self.box, ctx, token_ids);
+        defer rows.deinit();
+        return rows.withTags(ctx, .{ .seq, out_tag });
+    }
+};
+
+pub const LinearWeight = union(enum) {
+    dense: DenseWeight,
+    quant: ColdQuantWeight,
+    packed_quant: PackedWeight,
     ptqtp: WeightPtqtp,
     tq2_0_fx4: WeightPtqtpFx4,
 
@@ -90,20 +370,23 @@ pub const LinearWeight = union(enum) {
         // them. No-op once resident; borrowed MoE experts skip this path.
         gguf.prefetch(info.data);
         return switch (info.ggml_type) {
-            .f32, .f64 => .{ .f32 = try dense.loadDenseF32Weight(ctx, info, shape) },
-            .f16 => .{ .f16 = try dense.loadDenseF16Weight(ctx, info, shape, options) },
-            .bf16 => .{ .bf16 = try dense.loadDenseBf16Weight(ctx, info, shape) },
-            .q8_0 => .{ .q8_0 = try dense.loadQ8_0Weight(ctx, info, shape, options) },
-            .q4_k => .{ .q4_k = try dense.loadQ4_KWeight(ctx, info, shape, options) },
-            .q5_k => .{ .q5_k = try dense.loadQ5_KWeight(ctx, info, shape, options) },
-            .q6_k => .{ .q6_k = try dense.loadQ6_KWeight(ctx, info, shape, options) },
-            // Every remaining block format loads as a plain `QuantWeight`
-            // arm named exactly like its GGML type.
-            inline .q1_0, .q2_0, .q4_0, .q4_1, .q5_0, .q5_1, .q2_k, .q3_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .tq2_0, .mxfp4, .nvfp4 => |t| @unionInit(
-                LinearWeight,
-                @tagName(t),
-                try dense.loadQuantizedWeight(@field(DType, @tagName(t)), ctx, info, shape),
-            ),
+            .f32, .f64 => .{ .dense = .{ .f32 = try dense.loadDenseF32Weight(ctx, info, shape) } },
+            .f16 => .{ .dense = .{ .f16 = try dense.loadDenseF16Weight(ctx, info, shape, options) } },
+            .bf16 => .{ .dense = .{ .bf16 = try dense.loadDenseBf16Weight(ctx, info, shape) } },
+            .q8_0 => .{ .packed_quant = .{ .q8_0 = try dense.loadQ8_0Weight(ctx, info, shape, options) } },
+            .q4_k => .{ .packed_quant = .{ .q4_k = try dense.loadQ4_KWeight(ctx, info, shape, options) } },
+            .q5_k => .{ .packed_quant = .{ .q5_k = try dense.loadQ5_KWeight(ctx, info, shape, options) } },
+            .q6_k => .{ .packed_quant = .{ .q6_k = try dense.loadQ6_KWeight(ctx, info, shape, options) } },
+            // Every remaining block format loads into the dtype-erased
+            // compact container: the ONE runtime-dtype -> comptime switch,
+            // and the only site instantiating the per-format vtables.
+            inline .q1_0, .q2_0, .q4_0, .q4_1, .q5_0, .q5_1, .q2_k, .q3_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .tq2_0, .mxfp4, .nvfp4 => |t| .{
+                .quant = try ColdQuantWeight.of(
+                    @field(DType, @tagName(t)),
+                    ctx,
+                    try dense.loadQuantizedWeight(@field(DType, @tagName(t)), ctx, info, shape),
+                ),
+            },
             .tq2_0_fx4 => blk: {
                 const n = shape[0];
                 const k = shape[1];
@@ -122,74 +405,52 @@ pub const LinearWeight = union(enum) {
         };
     }
 
+    /// The storage/block format actually loaded (runtime). Both PTQTP
+    /// containers report `.tq2_0` — the number format of their planes; the
+    /// container arm carries the layout.
+    pub fn dtype(self: *const LinearWeight) DType {
+        return switch (self.*) {
+            .dense => |*d| d.dtype(),
+            .quant => |*c| c.dtype,
+            .packed_quant => |*p| p.dtype(),
+            .ptqtp, .tq2_0_fx4 => .tq2_0,
+        };
+    }
+
     pub fn deinit(self: *LinearWeight) void {
         switch (self.*) {
-            inline else => |*value| value.deinit(),
+            inline else => |*container| container.deinit(),
         }
         self.* = undefined;
     }
 
     pub fn cloneView(self: *const LinearWeight, ctx: *ExecContext) !LinearWeight {
-        @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*value, tag| @unionInit(LinearWeight, @tagName(tag), try value.cloneView(ctx)),
-            .ptqtp => |*value| blk: {
-                var p1 = try value.p1.withTags(ctx, .{ .out, .in });
-                errdefer p1.deinit();
-                var p2: ?QuantWeight(.tq2_0) = if (value.p2) |*plane|
-                    try plane.withTags(ctx, .{ .out, .in })
-                else
-                    null;
-                errdefer if (p2) |*plane| plane.deinit();
-                const p3: ?QuantWeight(.tq2_0) = if (value.p3) |*plane|
-                    try plane.withTags(ctx, .{ .out, .in })
-                else
-                    null;
-                break :blk .{ .ptqtp = WeightPtqtp.init(ctx.allocator, p1, p2, p3, false) };
-            },
-            // The fold IS the weight: clone copies the pack (unlike the
-            // ptqtp clone above, which drops fold/tie and rebuilds free).
-            .tq2_0_fx4 => |*value| blk: {
-                const owned = try ctx.allocator.alloc(backend_quant.BlockTQ2_0Foldedx4, value.pack.len);
-                @memcpy(owned, value.pack);
-                break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator, owned, ctx.allocator, value.n, value.k, true) };
-            },
-            inline else => |*value, tag| blk: {
-                const view = try value.withTags(ctx, .{ .out, .in });
-                break :blk @unionInit(LinearWeight, @tagName(tag), view);
-            },
+            inline else => |*container, tag| @unionInit(LinearWeight, @tagName(tag), try container.cloneView(ctx)),
         };
     }
 
     pub fn outDim(self: *const LinearWeight) usize {
-        @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w| w.value.dim(.out),
-            .ptqtp => |*w| w.p1.dim(.out),
-            .tq2_0_fx4 => |*w| w.n,
-            inline else => |*w| w.dim(.out),
+            inline else => |*container| container.outDim(),
         };
     }
 
     pub fn inDim(self: *const LinearWeight) usize {
-        @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w| w.value.dim(.in),
-            .ptqtp => |*w| w.p1.dim(.in),
-            .tq2_0_fx4 => |*w| w.k,
-            inline else => |*w| w.dim(.in),
+            inline else => |*container| container.inDim(),
         };
     }
 
     /// Replace this weight with a RESIDENT dequantized f16 copy (2 B/weight):
     /// the f16-operands GEMM path's weight format — and the `-Dgpu=metal`
     /// f16 offload operand. Rows are dequantized in chunks through the same
-    /// row-gather the embedding lookup uses, so the transient peak stays a
-    /// few MB. No-op when the weight is already f16. Supported for the arms
-    /// `getRowsAs` covers (f32/f16/bf16/q4_k/q5_k/q6_k/q8_0).
+    /// row-gather the embedding lookup uses (`getRowsAs`, every container),
+    /// so the transient peak stays a few MB. No-op when the weight is
+    /// already f16.
     pub fn toResidentF16(self: *LinearWeight, ctx: *ExecContext) !void {
         switch (self.*) {
-            .f16 => return,
+            .dense => |*d| if (d.* == .f16) return,
             else => {},
         }
         const rows = self.outDim();
@@ -213,7 +474,7 @@ pub const LinearWeight = union(enum) {
 
         const fresh = try WeightF16.fromSlice(ctx, .{ rows, cols }, values);
         self.deinit();
-        self.* = .{ .f16 = fresh };
+        self.* = .{ .dense = .{ .f16 = fresh } };
     }
 
     /// Whether `toPtqtp` accepts this weight: any non-ptqtp arm whose
@@ -276,35 +537,16 @@ pub const LinearWeight = union(enum) {
     }
 
     pub fn linearSeq(self: *const LinearWeight, ctx: *ExecContext, input: anytype, comptime in_tag: Tag, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
-        @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*weight| try dense.linearSeq(weight, ctx, input, in_tag, out_tag),
-            .ptqtp => |*weight| blk: {
-                if (try ptqtp_w.linearSeqPtqtpFused(weight, ctx, input, out_tag)) |fused| break :blk fused;
-                var p1 = try weight.p1.withTags(ctx, .{ out_tag, in_tag });
-                defer p1.deinit();
-                var acc = try input.dot(ctx, &p1, in_tag);
-                inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
-                    if (@field(weight, plane_field)) |*plane| {
-                        errdefer acc.deinit();
-                        var tagged = try plane.withTags(ctx, .{ out_tag, in_tag });
-                        defer tagged.deinit();
-                        var y = try input.dot(ctx, &tagged, in_tag);
-                        defer y.deinit();
-                        const sum = try acc.add(ctx, &y);
-                        acc.deinit();
-                        acc = sum;
-                    }
-                }
-                break :blk acc;
-            },
-            .tq2_0_fx4 => |*weight| try ptqtp_w.linearSeqFx4(weight, ctx, input, out_tag),
-            inline else => |*weight| blk: {
-                var tagged_weight = try weight.withTags(ctx, .{ out_tag, in_tag });
-                defer tagged_weight.deinit();
-                break :blk try input.dot(ctx, &tagged_weight, in_tag);
-            },
+            inline else => |*container| try container.linearSeq(ctx, input, in_tag, out_tag),
         };
+    }
+
+    /// Norm-into-quantize fusion gate: FUCINA_NORM_QUANT_FUSED=0 forces
+    /// the unfused rmsNormMul + linearSeq pair, =1 forces the fused route.
+    /// Read once, cached (`tuning.Table.norm_quant_fused`).
+    pub fn setNormQuantFused(on: ?bool) void {
+        tuning.setField("norm_quant_fused", on);
     }
 
     /// True when `linearSeqNormed` takes the fused normalize+quantize+packed
@@ -317,13 +559,6 @@ pub const LinearWeight = union(enum) {
     /// bitwise). Callers fanning ONE normalized input into several
     /// projections should require this for every projection before
     /// switching to the normed calls — the fallback re-normalizes per call.
-    /// Norm-into-quantize fusion gate: FUCINA_NORM_QUANT_FUSED=0 forces
-    /// the unfused rmsNormMul + linearSeq pair, =1 forces the fused route.
-    /// Read once, cached (`tuning.Table.norm_quant_fused`).
-    pub fn setNormQuantFused(on: ?bool) void {
-        tuning.setField("norm_quant_fused", on);
-    }
-
     pub fn supportsNormedFusion(self: *const LinearWeight, m: usize) bool {
         if (comptime offload.enabled) return false;
         if (!tuning.get().norm_quant_fused) return false;
@@ -335,8 +570,7 @@ pub const LinearWeight = union(enum) {
         // packed path anyway.)
         if (m < 4) return false;
         return switch (self.*) {
-            .q4_k => comptime !backend_mod.supports_q4_k_mmla,
-            .q8_0, .q5_k, .q6_k => true,
+            .packed_quant => |*p| p.supportsNormedFusion(),
             else => false,
         };
     }
@@ -357,15 +591,10 @@ pub const LinearWeight = union(enum) {
         comptime in_tag: Tag,
         comptime out_tag: Tag,
     ) !Tensor(.{ .seq, out_tag }) {
-        @setEvalBranchQuota(20_000);
         if (comptime !offload.enabled) {
-            if (!x.requiresGrad() and x.dim(.seq) >= 4 and tuning.get().norm_quant_fused) switch (self.*) {
-                .q4_k => |*weight| if (comptime !backend_mod.supports_q4_k_mmla) {
-                    return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag);
-                },
-                inline .q8_0, .q5_k, .q6_k => |*weight| return x.rmsNormMulDotPacked(ctx, norm_weight, eps, &weight.packed_rhs, in_tag, out_tag),
-                else => {},
-            };
+            if (self.* == .packed_quant and !x.requiresGrad() and x.dim(.seq) >= 4 and tuning.get().norm_quant_fused) {
+                if (try self.packed_quant.tryLinearSeqNormed(ctx, x, norm_weight, eps, in_tag, out_tag)) |out| return out;
+            }
         }
         var normed = try x.rmsNormMul(ctx, in_tag, norm_weight, eps);
         defer normed.deinit();
@@ -373,51 +602,8 @@ pub const LinearWeight = union(enum) {
     }
 
     pub fn getRowsAs(self: *const LinearWeight, ctx: *ExecContext, token_ids: []const usize, comptime out_tag: Tag) !Tensor(.{ .seq, out_tag }) {
-        @setEvalBranchQuota(20_000);
         return switch (self.*) {
-            .f32 => |*table| blk: {
-                var rows = try table.gather(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            inline .f16, .bf16 => |*table| blk: {
-                var rows_half = try table.gather(ctx, .out, token_ids, .seq);
-                defer rows_half.deinit();
-                var rows = try rows_half.to(ctx, .f32);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            inline .q4_k, .q5_k, .q6_k, .q8_0 => |*table| blk: {
-                var rows = try table.value.getRows(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
-            .ptqtp => |*table| blk: {
-                var acc = try table.p1.getRows(ctx, .out, token_ids, .seq);
-                defer acc.deinit();
-                inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
-                    if (@field(table, plane_field)) |*plane| {
-                        var rows2 = try plane.getRows(ctx, .out, token_ids, .seq);
-                        defer rows2.deinit();
-                        const sum = try acc.add(ctx, &rows2);
-                        acc.deinit();
-                        acc = sum;
-                    }
-                }
-                break :blk try acc.withTags(ctx, .{ .seq, out_tag });
-            },
-            .tq2_0_fx4 => |*table| blk: {
-                var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ token_ids.len, table.k });
-                errdefer out_t.deinit();
-                const dst = try out_t.data();
-                for (token_ids, 0..) |row, i| table.decodeRow(row, dst[i * table.k ..][0..table.k]);
-                break :blk out_t;
-            },
-            inline else => |*table| blk: {
-                var rows = try table.getRows(ctx, .out, token_ids, .seq);
-                defer rows.deinit();
-                break :blk try rows.withTags(ctx, .{ .seq, out_tag });
-            },
+            inline else => |*container| try container.getRowsAs(ctx, token_ids, out_tag),
         };
     }
 };

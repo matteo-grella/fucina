@@ -71,33 +71,37 @@ locate-anything ViT does). Its error set is
 
 ```zig
 pub const LinearWeight = union(enum) {
-    f32: WeightF32,     // fucina.Tensor(.{ .out, .in })
-    f16: WeightF16,     // fucina.Tensor(.{ .dtype = .f16, .tags = .{ .out, .in } })
-    bf16: WeightBf16,   // fucina.Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } })
-    q8_0: WeightQ8_0, q4_k: WeightQ4_K, q5_k: WeightQ5_K, q6_k: WeightQ6_K,
-    // plus one QuantWeight(dtype) arm per remaining GGUF block format:
-    // q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q2_k, q3_k, iq1_s, iq1_m, iq2_xxs, iq2_xs,
-    // iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs, tq1_0, tq2_0, mxfp4, nvfp4
-    ptqtp: WeightPtqtp, // 1-3 packed TQ2_0 trit-planes (PTQTP, section 10.9)
+    dense: DenseWeight,         // nested union: f32 / f16 / bf16 [.out, .in] tensors
+    quant: ColdQuantWeight,     // every other GGUF block format, dtype-erased (runtime .dtype)
+    packed_quant: PackedWeight, // nested union: q4_k / q5_k / q6_k / q8_0 (blocks + packed RHS)
+    ptqtp: WeightPtqtp,         // 1-3 packed TQ2_0 trit-planes (PTQTP, section 10.9)
+    tq2_0_fx4: WeightPtqtpFx4,  // native tied-K=2 fold (serving artifact)
 };
 ```
 
-Every arm is a `[.out, .in]`-tagged tensor kept **resident in its source
-precision** — nothing is widened to f32 at load time:
+One container arm per BEHAVIOUR, not per GGUF format: the ~30 formats
+exist as distinct comptime types only inside `loadWithOptions` (the one
+runtime-dtype → comptime switch), which routes each format into its
+container — the cold formats behind `ColdQuantWeight`'s per-dtype vtable
+built there. `LinearWeight.dtype()` reports the loaded block format at
+runtime (both PTQTP containers report `.tq2_0`). Every container keeps its
+storage **resident in its source precision** — nothing is widened to f32
+at load time:
 
-| Arm | Resident form | Forward path |
+| Container | Resident form | Forward path |
 |---|---|---|
-| `f32` | f32 tensor (f64 sources are narrowed) | plain `dot` |
-| `f16` | f16 tensor, 2 B/weight | f16-operands GEMM ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)); GPU-resident on `-Dgpu=metal` |
-| `bf16` | raw u16 bit patterns, 2 B/weight | mixed f32×bf16 TransB kernel, exact in-register widening |
-| `q8_0`, `q4_k`, `q5_k`, `q6_k` | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path ([§10](10-quantization.md)); q4_k/q6_k/q8_0 also try Metal, and CUDA additionally supports q5_k |
-| all other quant arms | raw GGUF blocks (`QuantWeight(dtype)`) | tagged `dot` through the generic quantized matmul |
+| `dense.f32` | f32 tensor (f64 sources are narrowed) | plain `dot` |
+| `dense.f16` | f16 tensor, 2 B/weight | f16-operands GEMM ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)); GPU-resident on `-Dgpu=metal` |
+| `dense.bf16` | raw u16 bit patterns, 2 B/weight | mixed f32×bf16 TransB kernel, exact in-register widening |
+| `packed_quant` (q8_0/q4_k/q5_k/q6_k) | raw GGUF blocks **plus** a pre-packed matmul RHS | `dotPacked` on the CPU quantized hot path ([§10](10-quantization.md)); q4_k/q6_k/q8_0 also try Metal, and CUDA additionally supports q5_k |
+| `quant` (all other block formats) | raw GGUF blocks (a boxed `QuantWeight(dtype)`) | tagged `dot` through the generic quantized matmul |
 | `ptqtp` | up to three `.tq2_0` plane tensors ([§10.9](10-quantization.md#109-ptqtp-multi-plane-ternary-decomposition-srcptqtpzig-ptqtpmd)) — built in place by `toPtqtp`, or rebuilt bitwise from persisted `<name>.ptqtp0/1/2` plane tensors (`fucina.ptqtp_gguf` pair-detection; [PTQTP.md](../PTQTP.md)) | fused multi-plane entry: ONE Q8_K activation quantization + ONE worker-team dispatch running every plane on the x4 column-interleaved packs and summing in fixed plane order (bitwise equal to the per-plane facade dots, which remain the gradient-path fallback); scale-tied K=2 planes additionally fold into one 4-bit pack served by a single dot pass, and on Metal builds prefill-sized inputs dispatch against resident plane copies — one ternary dequant-in-kernel dispatch per plane, ONE folded dispatch when tied (the dense quant offload's accepted-numerics stance, not bitwise) |
 
 `pub fn QuantWeight(comptime dtype: DType) type` returns
 `fucina.Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } })`. The four hot
 K-quant/Q8 formats get dedicated wrapper structs — `WeightQ4_K`, `WeightQ5_K`,
-`WeightQ6_K`, `WeightQ8_0` — each holding `value` (the raw block tensor) and
+`WeightQ6_K`, `WeightQ8_0`, the arms of the nested `PackedWeight` union —
+each holding `value` (the raw block tensor) and
 `packed_rhs: fucina.PackedRhs(dtype)` built once at init, with
 `init`/`deinit`/`cloneView`/`concat`, plus `initWithRhsLifetime` and a
 `rhs_lifetime: fucina.RhsLifetime` field that tells GPU dispatch whether the
@@ -116,7 +120,7 @@ pub const LoadOptions = struct { gpu_resident: bool = true };
 
 - The tensor's `logicalMatrixShape()` must equal
   `(expected_rows, expected_cols)` = `(out, in)`, else
-  `Error.InvalidWeightShape`; a GGML type without an arm is
+  `Error.InvalidWeightShape`; a GGML type without a container route is
   `Error.UnsupportedWeightType`.
 - `load` calls `gguf.prefetch` on the payload first (readahead for cold-mmapped
   bytes) and copies/repacks it, so the result **does not borrow** the

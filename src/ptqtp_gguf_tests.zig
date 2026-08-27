@@ -135,7 +135,7 @@ test "load: pair-detection rebuilds the decorated weight bitwise, undecorated na
 
     var loaded = (try ptqtp_gguf.maybeLoadPlanes(&ctx, &out, "a.weight", 4, in_dim)).?;
     defer loaded.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).ptqtp, std.meta.activeTag(loaded));
+    try std.testing.expect(loaded == .ptqtp);
     try std.testing.expectEqual(@as(usize, 2), loaded.ptqtp.planeCount());
     try std.testing.expectEqualSlices(u8, try planeBytes(&decorated, 0), try planeBytes(&loaded, 0));
     try std.testing.expectEqualSlices(u8, try planeBytes(&decorated, 1), try planeBytes(&loaded, 1));
@@ -170,7 +170,7 @@ test "fused weight round-trip: row-sliced planes equal per-part decoration and r
     @memcpy(fused_vals[0 .. 4 * in_dim], &a_vals);
     @memcpy(fused_vals[4 * in_dim .. 6 * in_dim], &b_vals);
     @memcpy(fused_vals[6 * in_dim ..], &c_vals);
-    var fused = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ 9, in_dim }, &fused_vals) };
+    var fused = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ 9, in_dim }, &fused_vals) } };
     defer fused.deinit();
     _ = try fused.toPtqtp(&ctx, .{ .planes = 2 });
 
@@ -208,7 +208,7 @@ test "fused weight round-trip: row-sliced planes equal per-part decoration and r
     var fuse_parts = [_]*LinearWeight{ &a_loaded, &b_loaded, &c_loaded };
     var refused = (try weights.fuseLinear(&ctx, &fuse_parts)).?;
     defer refused.deinit();
-    try std.testing.expectEqual(std.meta.Tag(LinearWeight).ptqtp, std.meta.activeTag(refused));
+    try std.testing.expect(refused == .ptqtp);
     try std.testing.expectEqualSlices(u8, try planeBytes(&fused, 0), try planeBytes(&refused, 0));
     try std.testing.expectEqualSlices(u8, try planeBytes(&fused, 1), try planeBytes(&refused, 1));
 }
@@ -295,7 +295,7 @@ test "appended entries and SaveReport accounting; undecorated saves get no versi
     // A decorated weight with no base tensor in the source — the decorated
     // head of a tied-embedding model.
     const head_vals = testWeightValues(4 * in_dim, 9);
-    var head = LinearWeight{ .f32 = try WeightF32.fromSlice(&ctx, .{ 4, in_dim }, &head_vals) };
+    var head = LinearWeight{ .dense = .{ .f32 = try WeightF32.fromSlice(&ctx, .{ 4, in_dim }, &head_vals) } };
     defer head.deinit();
     _ = try head.toPtqtp(&ctx, .{ .planes = 2 });
 

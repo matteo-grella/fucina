@@ -247,22 +247,20 @@ fn adoptWidened(ctx: *ExecContext, raw: anytype) !fucina.Tensor(.{ .out, .in }) 
 fn widenedFrozen(cache: *FrozenCache, weight: *const LinearWeight, ctx: *ExecContext) !?*const fucina.Tensor(.{ .out, .in }) {
     if (cache.map.getPtr(weight)) |hit| return hit;
     var wide: fucina.Tensor(.{ .out, .in }) = switch (weight.*) {
-        inline .f16, .bf16 => |*w| blk: {
-            var wide16 = try w.to(ctx, .f32);
-            defer wide16.deinit();
-            break :blk try adoptWidened(ctx, &wide16.value);
+        .dense => |*d| switch (d.*) {
+            inline .f16, .bf16 => |*w| blk: {
+                var wide16 = try w.to(ctx, .f32);
+                defer wide16.deinit();
+                break :blk try adoptWidened(ctx, &wide16.value);
+            },
+            .f32 => return null,
         },
-        inline .q4_k, .q5_k, .q6_k, .q8_0 => |*w, arm| blk: {
-            const dt = comptime switch (arm) {
-                .q4_k => .q4_k,
-                .q5_k => .q5_k,
-                .q6_k => .q6_k,
-                .q8_0 => .q8_0,
-                else => unreachable,
-            };
-            var raw = try ctx.dequantizeTensor(dt, w.value.asRawTensor());
-            defer raw.deinit();
-            break :blk try adoptWidened(ctx, &raw);
+        .packed_quant => |*pq| switch (pq.*) {
+            inline else => |*w| blk: {
+                var raw = try ctx.dequantizeTensor(@TypeOf(w.*).dtype, w.value.asRawTensor());
+                defer raw.deinit();
+                break :blk try adoptWidened(ctx, &raw);
+            },
         },
         else => return null,
     };
@@ -279,15 +277,19 @@ pub fn dotLinear(
     comptime in_tag: Tag,
     comptime out_tag: Tag,
 ) !fucina.Tensor(.{ .seq, out_tag }) {
-    @setEvalBranchQuota(20_000);
     if (cache) |c| {
         if (try widenedFrozen(c, weight, ctx)) |wide| return dotFrozen(wide, ctx, input, in_tag, out_tag);
     }
     return switch (weight.*) {
-        .q4_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q5_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q6_k => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
-        .q8_0 => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
+        .dense => |*d| switch (d.*) {
+            inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
+        },
+        .packed_quant => |*pq| switch (pq.*) {
+            inline else => |*w| dotFrozen(&w.value, ctx, input, in_tag, out_tag),
+        },
+        // The dtype-erased compact container's linearSeq IS the frozen dot:
+        // the facade dot against the compact blocks, differentiable input.
+        .quant => |*cw| cw.linearSeq(ctx, input, in_tag, out_tag),
         .ptqtp => |*w| blk: {
             var acc = try dotFrozen(&w.p1, ctx, input, in_tag, out_tag);
             inline for ([_][]const u8{ "p2", "p3" }) |plane_field| {
@@ -305,7 +307,6 @@ pub fn dotLinear(
         // Native-folded PTQTP has no plane facade to dot through — fx4
         // files are serving artifacts, not training checkpoints.
         .tq2_0_fx4 => error.UnsupportedWeightType,
-        inline else => |*w| dotFrozen(w, ctx, input, in_tag, out_tag),
     };
 }
 
@@ -921,9 +922,10 @@ pub fn Trainer(comptime targets: Targets) type {
             if (self.fused_head_state == .unknown) {
                 self.fused_head_state = .unavailable;
                 switch (self.model.output) {
-                    .f32 => |*w| self.adoptFusedHead(ctx, &w.value),
-                    .f16 => |*w| self.widenFusedHead(ctx, w),
-                    .bf16 => |*w| self.widenFusedHead(ctx, w),
+                    .dense => |*d| switch (d.*) {
+                        .f32 => |*w| self.adoptFusedHead(ctx, &w.value),
+                        inline .f16, .bf16 => |*w| self.widenFusedHead(ctx, w),
+                    },
                     else => {},
                 }
             }

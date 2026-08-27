@@ -74,7 +74,7 @@ fn linearFromFile(ctx: *ExecContext, allocator: std.mem.Allocator, name: []const
     const values = try readF32(allocator, name, rows * cols);
     defer allocator.free(values);
     const w = try weights.WeightF32.fromSlice(ctx, .{ rows, cols }, values);
-    return .{ .f32 = w };
+    return .{ .dense = .{ .f32 = w } };
 }
 
 fn vectorFromFile(ctx: *ExecContext, allocator: std.mem.Allocator, comptime tag: @TypeOf(.tag), name: []const u8, len: usize) !fucina.Tensor(.{tag}) {

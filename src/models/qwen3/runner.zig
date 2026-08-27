@@ -1467,12 +1467,12 @@ fn denseFfn(
     if (ffn_in.dim(.seq) >= 12 and dense.input_proj == .fused) {
         const gate_up_weight = &dense.input_proj.fused;
         switch (dense.down_proj) {
-            .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
-                return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile);
+            .packed_quant => |*pq| switch (pq.*) {
+                .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                    return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile);
+                },
+                inline .q5_k, .q6_k, .q8_0 => |*down| return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile),
             },
-            .q5_k => |*down| return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile),
-            .q6_k => |*down| return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile),
-            .q8_0 => |*down| return denseFfnFusedDown(ctx, io, gate_up_weight, &down.packed_rhs, ffn_in, profile),
             else => {},
         }
     }
@@ -1544,12 +1544,12 @@ fn denseFfnNormed(
     const gate_up_weight = &dense.input_proj.fused;
     if (input.dim(.seq) >= 12) {
         switch (dense.down_proj) {
-            .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
-                return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile);
+            .packed_quant => |*pq| switch (pq.*) {
+                .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                    return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile);
+                },
+                inline .q5_k, .q6_k, .q8_0 => |*down| return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile),
             },
-            .q5_k => |*down| return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile),
-            .q6_k => |*down| return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile),
-            .q8_0 => |*down| return denseFfnFusedDownNormed(ctx, io, gate_up_weight, &down.packed_rhs, input, norm_weight, eps, profile),
             else => {},
         }
     }

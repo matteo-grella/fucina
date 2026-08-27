@@ -63,7 +63,7 @@ fn linearNoise(ctx: *ExecContext, allocator: std.mem.Allocator, rows: usize, col
     const values = try noiseSlice(allocator, rows * cols, seed);
     defer allocator.free(values);
     const w = try weights.WeightF32.fromSlice(ctx, .{ rows, cols }, values);
-    return .{ .f32 = w };
+    return .{ .dense = .{ .f32 = w } };
 }
 
 fn vectorOnes(ctx: *ExecContext, allocator: std.mem.Allocator, comptime tag: @TypeOf(.tag), len: usize) !fucina.Tensor(.{tag}) {

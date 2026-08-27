@@ -30,7 +30,7 @@ const LinearWeight = weights.LinearWeight;
 /// for all dtypes: measured faster there (design Q8_0 ~24s fused vs ~28s).
 fn shouldFuse(sample: *const LinearWeight) bool {
     return switch (sample.*) {
-        .f32, .f16, .bf16 => fucina.native_uses_blas,
+        .dense => fucina.native_uses_blas,
         else => true,
     };
 }
@@ -642,12 +642,12 @@ pub const Model = struct {
         if (ffn_in.dim(.seq) >= 12 and layer.ffn_input == .fused) {
             const gate_up_weight = &layer.ffn_input.fused;
             switch (layer.down_proj) {
-                .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
-                    return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in);
+                .packed_quant => |*pq| switch (pq.*) {
+                    .q4_k => |*down| if (comptime !fucina.quant.supports_q4_k_mmla) {
+                        return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in);
+                    },
+                    inline .q5_k, .q6_k, .q8_0 => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in),
                 },
-                .q5_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in),
-                .q6_k => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in),
-                .q8_0 => |*down| return ffnFusedDown(ctx, gate_up_weight, &down.packed_rhs, ffn_in),
                 else => {},
             }
         }

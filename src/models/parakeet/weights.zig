@@ -186,8 +186,7 @@ pub const ParakeetWeights = struct {
         if (xv.shape[1] != qkv.in) return weights.Error.InvalidWeightShape;
 
         const blocks = try quantBlockSlice(fucina.quant.BlockQ6_K, qkv.data);
-        const rhs_lifetime: fucina.RhsLifetime = if (qkv.device_owned) .stable_process else .transient;
-        var raw_out = try self.ctx.matmul2DWithQuantizedBlocksRhs(.q6_k, x_raw, blocks, qkv.totalOutRows(), qkv.in, .{ .rhs_lifetime = rhs_lifetime });
+        var raw_out = try self.ctx.matmul2DWithQuantizedBlocksRhs(.q6_k, x_raw, blocks, qkv.totalOutRows(), qkv.in, .{ .rhs_lifetime = qkv.rhs_lifetime });
         errdefer raw_out.deinit();
         try addQkvBias(&raw_out, qkv.out, q_bias, k_bias, v_bias);
         return try Tensor2.constant(self.ctx, raw_out);

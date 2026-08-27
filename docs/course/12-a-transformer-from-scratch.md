@@ -395,9 +395,10 @@ piece in the order the code runs it.
 
 ### 12.3.1 Embedding lookup
 
-`token_embedding` is a `LinearWeight` — the same 29-arm `union(enum)` over
-weight formats you met in [Chapter 11](11-model-files-and-quantization.md) —
-and `getRowsAs` (`src/weights/linear.zig:375`) gathers one row per token id
+`token_embedding` is a `LinearWeight` — a five-container `union(enum)`
+over weight-format behaviours (the ~30 GGUF formats from
+[Chapter 11](11-model-files-and-quantization.md) route into it at load) —
+and `getRowsAs` (`src/weights/linear.zig`) gathers one row per token id
 into a fresh `[seq, embed]` f32 tensor. Because the gather is a method on
 the weight union, a q8_0 or f16 embedding table works exactly like an f32
 one: rows dequantize or widen on the fly ("nothing is widened to f32 at

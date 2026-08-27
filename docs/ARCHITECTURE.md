@@ -720,7 +720,7 @@ decides which. The rule is stated at the top of `src/weights.zig`; in short:
 | `models/train/lora_trainer.zig` | models | a LoRA TARGET SELECTION: the per-layer adapter set, its A/B tuple, and the dropout seed stream |
 
 `linearSeq*` is forward compute inside the model-I/O module on purpose:
-`LinearWeight.linearSeq` is a union dispatch into the per-format arms and
+`LinearWeight.linearSeq` is a container dispatch into the per-route arms and
 those arms take the container types back, so the container and its multiply
 are one mutually-dependent unit. A helper that fits none of these rows wants
 a new home with a stated subject, not a fifth un-ruled one.

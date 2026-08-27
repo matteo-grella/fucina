@@ -244,6 +244,21 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `weights.LinearWeight` is a five-container union — `dense` (f32/f16/bf16),
+  `quant` (every other GGUF block format, dtype-erased behind a vtable
+  built at load), `packed_quant` (q4_k/q5_k/q6_k/q8_0 with their packed
+  RHS), `ptqtp`, `tq2_0_fx4` — instead of one union arm per GGUF format.
+  Method names and signatures are unchanged; per-format pattern matches
+  respell: `.f32 => |*w|` becomes `.dense => |*d| switch (d.*) { .f32 =>
+  ... }`, `.q4_k => |*down|` becomes `.packed_quant => |*p| switch (p.*)
+  { .q4_k => ... }`; the `.ptqtp` and `.tq2_0_fx4` spellings are
+  unchanged. New: `LinearWeight.dtype()` returns the loaded block format
+  at runtime; the containers are exported as `weights.DenseWeight`,
+  `weights.PackedWeight`, `weights.ColdQuantWeight`.
+- `weights.QuantByteStack.device_owned: bool` is now
+  `rhs_lifetime: fucina.RhsLifetime` (`.stable_process` = provider-owned
+  bytes), so stack consumers pass the lifetime through instead of
+  respelling the bool.
 - The public bf16/f8 tensor branches speak VALUE types instead of raw bit
   patterns: `item`/`data`/`dataConst`/`copyTo`/`fromSlice`/
   `fromBorrowedConstSlice`/`variableFromSlice` on a `.bf16` tensor now take

@@ -466,10 +466,11 @@ fn moePlaneInfos(file: *const gguf.File, base_name: []const u8) !?MoePlaneSet {
 
 fn loadPlane(ctx: *ExecContext, info: *const gguf.TensorInfo, expected_rows: usize, expected_cols: usize) !weights.QuantWeight(.tq2_0) {
     if (info.ggml_type != .tq2_0) return Error.PlaneTypeMismatch;
-    const loaded = try LinearWeight.load(ctx, info, expected_rows, expected_cols);
+    var loaded = try LinearWeight.load(ctx, info, expected_rows, expected_cols);
     return switch (loaded) {
-        .tq2_0 => |plane| plane,
-        else => unreachable, // load() maps .tq2_0 infos to the .tq2_0 arm.
+        // load() boxes .tq2_0 infos in the compact container; unbox typed.
+        .quant => |*cold| cold.take(.tq2_0) orelse unreachable,
+        else => unreachable,
     };
 }
 

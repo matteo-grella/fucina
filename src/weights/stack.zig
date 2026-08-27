@@ -7,12 +7,14 @@ const std = @import("std");
 
 const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
+const exec_mod = @import("../exec.zig");
 
 const common = @import("common.zig");
 const gpu = @import("gpu.zig");
 
 const offload = backend_mod.offload;
 const DType = dtype_mod.DType;
+const RhsLifetime = exec_mod.RhsLifetime;
 const Error = common.Error;
 const Allocator = std.mem.Allocator;
 
@@ -33,9 +35,11 @@ pub const QuantByteStackOptions = struct {
     require_device: bool = false,
 };
 
-/// Internal byte stack for same-shaped quantized linear weights. The stack is
-/// CPU-readable either way; `device_owned=true` additionally means the bytes
-/// live in provider-owned storage and are safe for cached wraps until deinit.
+/// Internal byte stack for same-shaped quantized linear weights. The stack
+/// is CPU-readable either way; `rhs_lifetime` is the one lifetime spelling
+/// (`RhsLifetime`, like the packed containers): `.stable_process` means the
+/// bytes live in provider-owned storage — safe for cached wraps until
+/// deinit, freed through the provider — `.transient` means plain heap.
 pub const QuantByteStack = struct {
     dtype: DType,
     count: usize,
@@ -43,10 +47,10 @@ pub const QuantByteStack = struct {
     out: usize,
     bytes_per_weight: usize,
     data: []u8,
-    device_owned: bool,
+    rhs_lifetime: RhsLifetime,
 
     pub fn deinit(self: *QuantByteStack, allocator: Allocator) void {
-        if (self.device_owned) {
+        if (self.rhs_lifetime.isCacheable()) {
             if (comptime offload.enabled) offload.freeResidentBytes(self.data);
         } else {
             allocator.free(self.data);
@@ -86,18 +90,18 @@ pub fn makeQuantByteStack(
 
     const total_len = try std.math.mul(usize, bytes_per_weight, parts.len);
     _ = try std.math.mul(usize, first.out, parts.len);
-    var device_owned = false;
+    var rhs_lifetime: RhsLifetime = .transient;
     const data: []u8 = blk: {
         if (options.prefer_device and comptime offload.enabled and gpu.dtypeHasDenseQuantGpuKernel(dtype)) {
             if (offload.allocResidentBytes(total_len)) |dev| {
-                device_owned = true;
+                rhs_lifetime = .stable_process;
                 break :blk dev;
             }
         }
         if (options.require_device) return null;
         break :blk try allocator.alloc(u8, total_len);
     };
-    errdefer if (!device_owned) allocator.free(data);
+    errdefer if (!rhs_lifetime.isCacheable()) allocator.free(data);
 
     for (parts, 0..) |part, i| {
         @memcpy(data[i * bytes_per_weight ..][0..bytes_per_weight], part.data);
@@ -110,6 +114,6 @@ pub fn makeQuantByteStack(
         .out = first.out,
         .bytes_per_weight = bytes_per_weight,
         .data = data,
-        .device_owned = device_owned,
+        .rhs_lifetime = rhs_lifetime,
     };
 }

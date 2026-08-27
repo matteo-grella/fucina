@@ -3225,7 +3225,7 @@ const layer_goldens = [_]LayerGolden{
 
 fn goldenLinear(ctx: *ExecContext, values: []const f32, out_dim: usize, in_dim: usize) !weights.LinearWeight {
     std.debug.assert(values.len == out_dim * in_dim);
-    return .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) };
+    return .{ .dense = .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) } };
 }
 
 fn goldenVector(ctx: *ExecContext, comptime tag: @TypeOf(.tag), values: []const f32) !fucina.Tensor(.{tag}) {

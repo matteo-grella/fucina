@@ -65,7 +65,7 @@ fn randLinear(ctx: *ExecContext, seed: u64, out_dim: usize, in_dim: usize, bound
     const values = try ctx.allocator.alloc(f32, out_dim * in_dim);
     defer ctx.allocator.free(values);
     rng.uniformFill(seed, values, -bound, bound);
-    return .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) };
+    return .{ .dense = .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) } };
 }
 
 fn randVector(ctx: *ExecContext, seed: u64, comptime tag: Tag, len: usize) !fucina.Tensor(.{tag}) {

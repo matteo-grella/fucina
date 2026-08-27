@@ -1109,7 +1109,10 @@ fn denseGeglu(
     // m*ffn intermediates the unfused path materializes below.
     if (input.dim(.seq) >= 2) {
         switch (down_w.*) {
-            .q8_0 => |*down| return gate.gegluQuantDotPacked(ctx, &up, &down.packed_rhs, .ffn, .embed),
+            .packed_quant => |*pq| switch (pq.*) {
+                .q8_0 => |*down| return gate.gegluQuantDotPacked(ctx, &up, &down.packed_rhs, .ffn, .embed),
+                else => {},
+            },
             else => {},
         }
     }

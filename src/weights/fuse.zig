@@ -30,10 +30,15 @@ const WeightPtqtpFx4 = ptqtp_w.WeightPtqtpFx4;
 fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !void {
     if (comptime !offload.enabled) return;
     for (parts) |part| switch (part.*) {
-        .f32 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
-        .f16 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),
-        inline .q4_k, .q5_k, .q6_k, .q8_0 => |*weight| if (!weight.rhs_lifetime.isCacheable() and try gpu.makeGpuResidentQuantWeight(@TypeOf(weight.*).dtype, ctx, &weight.value)) {
-            weight.rhs_lifetime = .stable_process;
+        .dense => |*d| switch (d.*) {
+            .f32 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f32, WeightF32, ctx, value),
+            .f16 => |*value| _ = try gpu.makeGpuResidentDenseWeight(.f16, WeightF16, ctx, value),
+            .bf16 => {},
+        },
+        .packed_quant => |*pq| switch (pq.*) {
+            inline else => |*weight| if (!weight.rhs_lifetime.isCacheable() and try gpu.makeGpuResidentQuantWeight(@TypeOf(weight.*).dtype, ctx, &weight.value)) {
+                weight.rhs_lifetime = .stable_process;
+            },
         },
         // loadForFusion skipped the fold residency; a declined fx4 part
         // serves standalone and wants it back.
@@ -58,25 +63,41 @@ fn declinedFusion(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
 /// before returning.
 pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeight {
     if (parts.len < 2 or parts.len > 4) return Error.InvalidWeightShape;
-    const fusable = [_]std.meta.Tag(LinearWeight){ .f32, .f16, .bf16, .q4_k, .q5_k, .q6_k, .q8_0 };
-    inline for (fusable) |tag| {
-        if (std.meta.activeTag(parts[0].*) == tag) {
-            for (parts[1..]) |part| {
-                if (std.meta.activeTag(part.*) != tag) return declinedFusion(ctx, parts);
-            }
-            const name = @tagName(tag);
-            var others: [3]*const @FieldType(LinearWeight, name) = undefined;
-            for (parts[1..], 0..) |part, i| others[i] = &@field(part.*, name);
-            var fused = try @field(parts[0].*, name).concat(ctx, .out, others[0 .. parts.len - 1]);
-            for (parts) |part| part.deinit();
-            // Dense fused results re-acquire GPU residency like the quant
-            // arms (the parts were loaded fusion-only, skipping residency).
-            if (comptime tag == .f16) {
-                _ = try gpu.makeGpuResidentDenseWeight(.f16, WeightF16, ctx, &fused);
-            } else if (comptime tag == .f32) {
-                _ = try gpu.makeGpuResidentDenseWeight(.f32, WeightF32, ctx, &fused);
-            }
-            return @unionInit(LinearWeight, name, fused);
+    // Dense and packed containers fuse per inner format: same-arm parts
+    // concat on the out dim; anything mixed declines with every part valid.
+    if (parts[0].* == .dense) {
+        switch (parts[0].dense) {
+            inline else => |*first, tag| {
+                for (parts[1..]) |part| {
+                    if (part.* != .dense or std.meta.activeTag(part.dense) != tag) return declinedFusion(ctx, parts);
+                }
+                var others: [3]*const @TypeOf(first.*) = undefined;
+                for (parts[1..], 0..) |part, i| others[i] = &@field(part.dense, @tagName(tag));
+                var fused = try first.concat(ctx, .out, others[0 .. parts.len - 1]);
+                for (parts) |part| part.deinit();
+                // Dense fused results re-acquire GPU residency like the quant
+                // arms (the parts were loaded fusion-only, skipping residency).
+                if (comptime tag == .f16) {
+                    _ = try gpu.makeGpuResidentDenseWeight(.f16, WeightF16, ctx, &fused);
+                } else if (comptime tag == .f32) {
+                    _ = try gpu.makeGpuResidentDenseWeight(.f32, WeightF32, ctx, &fused);
+                }
+                return .{ .dense = @unionInit(linear.DenseWeight, @tagName(tag), fused) };
+            },
+        }
+    }
+    if (parts[0].* == .packed_quant) {
+        switch (parts[0].packed_quant) {
+            inline else => |*first, tag| {
+                for (parts[1..]) |part| {
+                    if (part.* != .packed_quant or std.meta.activeTag(part.packed_quant) != tag) return declinedFusion(ctx, parts);
+                }
+                var others: [3]*const @TypeOf(first.*) = undefined;
+                for (parts[1..], 0..) |part, i| others[i] = &@field(part.packed_quant, @tagName(tag));
+                const fused = try first.concat(ctx, .out, others[0 .. parts.len - 1]);
+                for (parts) |part| part.deinit();
+                return .{ .packed_quant = @unionInit(linear.PackedWeight, @tagName(tag), fused) };
+            },
         }
     }
     // PTQTP arms fuse per plane: the solver treats every 256-column group
@@ -84,9 +105,9 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
     // decorating the fused matrix (ptqtp_gguf.zig persists per-part planes
     // on the strength of the same property). Requires a uniform plane
     // count; mixed counts stay separate like any mixed-format parts.
-    if (std.meta.activeTag(parts[0].*) == .ptqtp) {
+    if (parts[0].* == .ptqtp) {
         for (parts[1..]) |part| {
-            if (std.meta.activeTag(part.*) != .ptqtp) return declinedFusion(ctx, parts);
+            if (part.* != .ptqtp) return declinedFusion(ctx, parts);
         }
         const plane_count = parts[0].ptqtp.planeCount();
         for (parts[1..]) |part| {
@@ -119,9 +140,9 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
     // format rejects anything else), so each part's groups land whole on
     // group boundaries — byte-identical to folding the fused matrix (fold
     // is per-column with no cross-column state).
-    if (std.meta.activeTag(parts[0].*) == .tq2_0_fx4) {
+    if (parts[0].* == .tq2_0_fx4) {
         for (parts[1..]) |part| {
-            if (std.meta.activeTag(part.*) != .tq2_0_fx4) return declinedFusion(ctx, parts);
+            if (part.* != .tq2_0_fx4) return declinedFusion(ctx, parts);
         }
         const k = parts[0].tq2_0_fx4.k;
         var total_blocks: usize = 0;

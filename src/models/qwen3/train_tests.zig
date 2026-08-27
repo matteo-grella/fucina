@@ -53,19 +53,22 @@ fn randLinear(ctx: *ExecContext, seed: u64, out_dim: usize, in_dim: usize, bound
     const values = try ctx.allocator.alloc(f32, out_dim * in_dim);
     defer ctx.allocator.free(values);
     rng.uniformFill(seed, values, -bound, bound);
-    return .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) };
+    return .{ .dense = .{ .f32 = try weights.WeightF32.fromSlice(ctx, .{ out_dim, in_dim }, values) } };
 }
 
 /// Replace an f32 LinearWeight with the resident-bf16 arm holding the same
 /// values rounded to bf16 (what `LinearWeight.load` produces for bf16 GGUFs).
 fn toBf16Weight(ctx: *ExecContext, w: *weights.LinearWeight) !void {
     var converted = switch (w.*) {
-        .f32 => |*t| try t.to(ctx, .bf16),
+        .dense => |*d| switch (d.*) {
+            .f32 => |*t| try t.to(ctx, .bf16),
+            else => unreachable, // tests only convert the synthetic f32 weights
+        },
         else => unreachable, // tests only convert the synthetic f32 weights
     };
     errdefer converted.deinit();
     w.deinit();
-    w.* = .{ .bf16 = converted };
+    w.* = .{ .dense = .{ .bf16 = converted } };
 }
 
 const quant_encode = fucina.internal.backend_mod.quantized_matmul;
@@ -87,7 +90,10 @@ fn toServingQuant(ctx: *ExecContext, w: *weights.LinearWeight, comptime format: 
         .q4_k => 256,
     };
     const src = switch (w.*) {
-        .f32 => |*t| t,
+        .dense => |*d| switch (d.*) {
+            .f32 => |*t| t,
+            else => unreachable, // tests only convert the synthetic f32 weights
+        },
         else => unreachable, // tests only convert the synthetic f32 weights
     };
     const out_dim = src.dim(.out);
@@ -629,9 +635,9 @@ test "frozen weights stay bitwise unchanged; only adapters carry grads" {
     defer trainer.deinit();
 
     // Snapshot representative frozen weights bitwise.
-    const embed_data = try model.token_embedding.f32.dataConst();
-    const q_proj_data = try model.layers[0].attn_proj.separate.q_proj.f32.dataConst();
-    const down_data = try model.layers[1].ffn.dense.down_proj.f32.dataConst();
+    const embed_data = try model.token_embedding.dense.f32.dataConst();
+    const q_proj_data = try model.layers[0].attn_proj.separate.q_proj.dense.f32.dataConst();
+    const down_data = try model.layers[1].ffn.dense.down_proj.dense.f32.dataConst();
     const norm_data = try model.output_norm.dataConst();
     const embed_before = try allocator.dupe(f32, embed_data);
     defer allocator.free(embed_before);
@@ -654,9 +660,9 @@ test "frozen weights stay bitwise unchanged; only adapters carry grads" {
         const loss = try trainer.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
     }
-    try std.testing.expect(!model.token_embedding.f32.requiresGrad());
-    try std.testing.expect(!model.layers[0].attn_proj.separate.q_proj.f32.requiresGrad());
-    try std.testing.expect(!model.output.f32.requiresGrad());
+    try std.testing.expect(!model.token_embedding.dense.f32.requiresGrad());
+    try std.testing.expect(!model.layers[0].attn_proj.separate.q_proj.dense.f32.requiresGrad());
+    try std.testing.expect(!model.output.dense.f32.requiresGrad());
     for (trainer.adapters) |*ads| {
         var ga = (try ads.q.a.grad(&ctx)) orelse return error.MissingGrad;
         defer ga.deinit();
@@ -671,9 +677,9 @@ test "frozen weights stay bitwise unchanged; only adapters carry grads" {
 
     // Train for real, then demand the frozen weights are bitwise untouched.
     for (0..3) |_| _ = try lossStep(&ctx, &trainer, &opt);
-    try std.testing.expectEqualSlices(f32, embed_before, try model.token_embedding.f32.dataConst());
-    try std.testing.expectEqualSlices(f32, q_proj_before, try model.layers[0].attn_proj.separate.q_proj.f32.dataConst());
-    try std.testing.expectEqualSlices(f32, down_before, try model.layers[1].ffn.dense.down_proj.f32.dataConst());
+    try std.testing.expectEqualSlices(f32, embed_before, try model.token_embedding.dense.f32.dataConst());
+    try std.testing.expectEqualSlices(f32, q_proj_before, try model.layers[0].attn_proj.separate.q_proj.dense.f32.dataConst());
+    try std.testing.expectEqualSlices(f32, down_before, try model.layers[1].ffn.dense.down_proj.dense.f32.dataConst());
     try std.testing.expectEqualSlices(f32, norm_before, try model.output_norm.dataConst());
 }
 
@@ -893,10 +899,10 @@ test "full-stack gradcheck: finite differences through Trainer.loss match backwa
         try loss.backward(&ctx);
     }
     // Frozen base weights are constants: no GradState even after backward.
-    try std.testing.expect(!model.token_embedding.f32.requiresGrad());
-    try std.testing.expect(!model.layers[0].attn_proj.separate.q_proj.f32.requiresGrad());
-    try std.testing.expect(!model.layers[1].ffn.dense.down_proj.f32.requiresGrad());
-    try std.testing.expect(!model.output.f32.requiresGrad());
+    try std.testing.expect(!model.token_embedding.dense.f32.requiresGrad());
+    try std.testing.expect(!model.layers[0].attn_proj.separate.q_proj.dense.f32.requiresGrad());
+    try std.testing.expect(!model.layers[1].ffn.dense.down_proj.dense.f32.requiresGrad());
+    try std.testing.expect(!model.output.dense.f32.requiresGrad());
 
     const Sampled = struct {
         layer: usize,
@@ -1715,7 +1721,7 @@ test "forwardHidden full depth + output tail reproduces evalLastLogits" {
         defer ctx.closeExecScope(scope);
         const h = try trainer.forwardHidden(&ctx, &tokens, null, .{});
         const normed = try h.rmsNormMul(&ctx, .embed, &model.output_norm, tiny_config.rms_norm_eps);
-        var out_w = try model.output.f32.withTags(&ctx, .{ .vocab, .embed });
+        var out_w = try model.output.dense.f32.withTags(&ctx, .{ .vocab, .embed });
         defer out_w.deinit();
         const logits = try normed.dot(&ctx, &out_w, .embed);
         const last = try logits.narrow(&ctx, .seq, tokens.len - 1, 1);
