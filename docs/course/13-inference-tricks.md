@@ -22,7 +22,7 @@ Everything in this chapter is a transformation of one loop, so the loop's shape 
 
 A violated invariant is not a debug assert but a real error, `error.InvalidDecodeState` — because "an empty or kv-desynced history would index out of bounds / corrupt the cache in ReleaseFast" (core.zig:557-560). Every trick below must preserve this invariant through every path, including error unwinds.
 
-The second foundation is that the KV cache can **rewind**. Chapter 12 built the cache as per-position K/V rows; because every position occupies whole per-(position, kv-head) rows and every reader addresses rows strictly below `len`, dropping positions is one integer store. From the machine-verified snippet in `docs/REFERENCE.md` §13.4:
+The second foundation is that the KV cache can **rewind**. Chapter 12 built the cache as per-position K/V rows; because every position occupies whole per-(position, kv-head) rows and every reader addresses rows strictly below `len`, dropping positions is one integer store. From the machine-verified snippet in `docs/reference/13-the-model-stack-fucina_models.md` §13.4:
 
 ```zig
 try cache.appendLayer(&ctx, 0, &k, &v); // writes at offset len, does not advance
@@ -47,7 +47,7 @@ The third foundation is a single sentence from `docs/BENCHMARK.md` that explains
 
 **The idea.** Decode all N streams in lockstep: each step gathers one token per stream and runs a single m=N forward pass — one weight read amortized over N streams. Each stream keeps its own KV cache, its own sampler, its own history; only the GEMM is shared.
 
-**Where it lives.** The turnkey entry is `chat.Conversation.sendBatch` (`src/llm/chat.zig`; API in `docs/REFERENCE.md` §13.8.2):
+**Where it lives.** The turnkey entry is `chat.Conversation.sendBatch` (`src/llm/chat.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.8.2):
 
 ```zig
 pub fn sendBatch(convos: []const *Self, users: []const []const u8,
@@ -226,7 +226,7 @@ pub fn step(
 ) !usize {
 ```
 
-(`history` must be allocated with `ctx.allocator` — the decoder appends committed tokens to it; each committed token streams out through `sink`, a tiny two-field vtable any stdout writer or SSE sink can satisfy.) `forwardStepAllLogits` is the verify entry: same KV semantics as `forwardStep`, but it returns `[len, vocab]` logits for *every* appended position — "one batched pass scores all draft positions for ~one step's weight traffic" (`docs/REFERENCE.md` §14). The verify row loop (core.zig:676-717) is recognizably the toy's loop plus real sampling, top-k feedback capture, and stats. And one line the toy also mirrors deserves its own note:
+(`history` must be allocated with `ctx.allocator` — the decoder appends committed tokens to it; each committed token streams out through `sink`, a tiny two-field vtable any stdout writer or SSE sink can satisfy.) `forwardStepAllLogits` is the verify entry: same KV semantics as `forwardStep`, but it returns `[len, vocab]` logits for *every* appended position — "one batched pass scores all draft positions for ~one step's weight traffic" (`docs/reference/14-model-families-and-example-applications.md` §14). The verify row loop (core.zig:676-717) is recognizably the toy's loop plus real sampling, top-k feedback capture, and stats. And one line the toy also mirrors deserves its own note:
 
 > **Zig note** — `errdefer` as transactional invariant restoration. The batched forward advances `kv` (to `pos0 + 1 + draft_len`) *before* its own fallible tail ops, and the row loop appends to `history` as it commits — so a failure anywhere in between would leave cache and history desynced. One line fixes every path: `errdefer kv.truncate(history.items.len - 1);` (core.zig:666). `history.items.len` is read *at unwind time*, so the truncate always restores `history.len == kv.len + 1` no matter where the error struck, and also drops unverified draft rows from the cache. Error unwinding as a correctness mechanism, not just cleanup.
 
@@ -291,7 +291,7 @@ fn matchLenBrute(stream: []const usize) usize {
 }
 ```
 
-On the stream `{5, 6, 7, 5, 6}` this returns 2 (the suffix `[5,6]` occurred ending at index 1) and the draft is what followed that occurrence: `{7, 5, 6}` — matching the repo's machine-verified snippet for the real index (`docs/REFERENCE.md` §13.9.2):
+On the stream `{5, 6, 7, 5, 6}` this returns 2 (the suffix `[5,6]` occurred ending at index 1) and the draft is what followed that occurrence: `{7, 5, 6}` — matching the repo's machine-verified snippet for the real index (`docs/reference/13-the-model-stack-fucina_models.md` §13.9.2):
 
 ```zig
 test "SamIndex: longest self-excluded suffix match drives the draft" {
@@ -334,7 +334,7 @@ Frozen SAMs are the **RAG seam**: build an index per tokenized reference documen
 
 ### The Token-Recycling matrix
 
-When no index matches, `src/llm/speculative/recycling.zig` drafts from recycled verification logits (Token Recycling, Luo et al. 2024): verification already computes full logits for every draft position and throws away everything but the sampled token — recycle the top-K instead. One row per vocab token holds the most recently observed top-8 next-token candidates; drafting walks the top-1 chain from the last committed token. The whole thing is a `vocab × 8` u32 matrix — "≈4.6 MiB for the Qwen3 vocab at K=8" (`docs/REFERENCE.md` §13.9.3) — fed through `observeTopK`. From the machine-verified snippet there:
+When no index matches, `src/llm/speculative/recycling.zig` drafts from recycled verification logits (Token Recycling, Luo et al. 2024): verification already computes full logits for every draft position and throws away everything but the sampled token — recycle the top-K instead. One row per vocab token holds the most recently observed top-8 next-token candidates; drafting walks the top-1 chain from the last committed token. The whole thing is a `vocab × 8` u32 matrix — "≈4.6 MiB for the Qwen3 vocab at K=8" (`docs/reference/13-the-model-stack-fucina_models.md` §13.9.3) — fed through `observeTopK`. From the machine-verified snippet there:
 
 ```zig
 var rec = try llm.speculative.recycling.Recycling.init(alloc, 32); // vocab 32, K = 8
@@ -400,7 +400,7 @@ For context (explicitly *not* a controlled A/B): llama.cpp's `llama-lookup` repo
 
 ### What composes, what refuses to
 
-The chat layer is the turnkey wiring — `chat.Options{ .speculation = true, .spec_options = .{...}, .io = io }` — the `Conversation` owns the cascade and decoder, wires the template's stop id into `spec_options.stop_token`, and a `TurnGate` keeps the conversation SAM byte-exact across trimmed turns by filtering `observe`/`observeTopK` so the index never learns tokens the turn trim discards (`docs/SPECULATIVE.md` §9). Setting `.io` enables the live cost rescale; without it the gate runs on the static table. The same layer enforces the composition rules as loud init errors rather than silent misbehaviour (`docs/REFERENCE.md` §13.8.2):
+The chat layer is the turnkey wiring — `chat.Options{ .speculation = true, .spec_options = .{...}, .io = io }` — the `Conversation` owns the cascade and decoder, wires the template's stop id into `spec_options.stop_token`, and a `TurnGate` keeps the conversation SAM byte-exact across trimmed turns by filtering `observe`/`observeTopK` so the index never learns tokens the turn trim discards (`docs/SPECULATIVE.md` §9). Setting `.io` enables the live cost rescale; without it the gate runs on the static table. The same layer enforces the composition rules as loud init errors rather than silent misbehaviour (`docs/reference/13-the-model-stack-fucina_models.md` §13.8.2):
 
 - `stop_sequences` compose with speculation: the accept gate scans the reply tail before taking a token, and the sequence-completing token is neither streamed nor counted (the turn trim discards it), preserving the one-RNG-draw-per-committed-token contract.
 - Cross-request KV reuse + speculation → `error.SpeculationWithReuse`: "the SpeculationIndex mirrors committed history append-only and can neither adopt nor rewind."
@@ -424,7 +424,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q4_K_S.gguf \
 
 **The idea.** Constrain the *distribution*, not the loop: before each sample, write `-inf` over every token the grammar forbids. The softmax renormalizes over what is left; sampling proceeds unchanged. The design question with all the leverage is *where* the mask hook lives, and Fucina's answer is: **inside the sampler**. Every decode path in the tree — plain chat, the speculative decoder's plain and verify steps, lockstep batch, hand-rolled runner loops — already funnels through `Sampler.next`, so "a single optional hook there — mask the logits row before the pipeline, observe the selected token after — gives every model family constrained decoding with zero decode-loop changes" (`docs/CONSTRAINED-DECODING.md`, intro). The rejected alternative (wiring a mask into each loop, llama.cpp's shape) is recorded in §8 of that document: Fucina has five-plus decode loops, and the sampler-hosted hook "keeps the invariant 'every path samples identically' a structural fact rather than a per-loop obligation."
 
-**Where it lives.** The seam is `LogitProcessor` (`src/llm/logit_processor.zig`; API in `docs/REFERENCE.md` §13.6) — the same vtable pattern as `DraftSource`:
+**Where it lives.** The seam is `LogitProcessor` (`src/llm/logit_processor.zig`; API in `docs/reference/13-the-model-stack-fucina_models.md` §13.6) — the same vtable pattern as `DraftSource`:
 
 ```zig
 pub const LogitProcessor = struct {
@@ -461,7 +461,7 @@ const OddMask = struct {
 };
 ```
 
-(from `docs/REFERENCE.md` §13.6 — bias lists, banned tokens, or watermarking plug into the same seam with no grammar involvement.)
+(from `docs/reference/13-the-model-stack-fucina_models.md` §13.6 — bias lists, banned tokens, or watermarking plug into the same seam with no grammar involvement.)
 
 **The engine.** For real grammars, `llm.llguidance.Constraint` (`src/llm/llguidance.zig`) compiles a JSON schema, regex, or Lark-variant grammar with the vendored [llguidance](https://github.com/guidance-ai/llguidance) engine — the one behind vLLM/SGLang-class structured output — into per-step token bitmasks (~10–50 µs of pure CPU mask work per token, CONSTRAINED-DECODING.md §3), off the model's ms-scale critical path. It is build-gated behind `-Dllguidance=true` (cargo builds the Rust staticlib, ~15 MB stripped); without the flag everything still compiles and `Constraint.init` returns `error.LlguidanceNotEnabled` — the seam itself is pure Zig and always available. One bridge detail that is a *correctness* feature, not bookkeeping: control tokens carry toktrie's `0xFF` special marker, so a JSON string that happens to contain the text `<|im_end|>` can never steer the sampler into emitting the actual control token and silently ending the turn mid-object (CONSTRAINED-DECODING.md §3). When the grammar completes, the mask forces the turn's stop token — termination rides the existing stop handling, no new mechanism.
 
@@ -501,7 +501,7 @@ zig build qwen3 -Dllguidance=true -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8
 
 **The idea.** Attention state is a pure function of the token prefix: two requests sharing a token prefix share, position for position, identical K/V rows. So keep previous requests' caches, match a new request to the cache with the **longest common token prefix**, rewind to the shared span with `truncate` (§13.1 again), and prefill only the tail.
 
-> **ML note** — why is prefix matching *sound* rather than heuristic? Causal attention means position i's K/V rows depend only on tokens 0..i. Token-level LCP therefore identifies exactly the positions whose cached state is valid for the new request — no model knowledge needed, and any render divergence (a stripped reasoning block, edited history, another client entirely) is absorbed automatically by reusing less. One subtlety: the reuse is capped at `ids.len - 1` even on a perfect match, "because logits are not cached state" — the last token must be forwarded to produce the next distribution (`docs/REFERENCE.md` §13.8.2).
+> **ML note** — why is prefix matching *sound* rather than heuristic? Causal attention means position i's K/V rows depend only on tokens 0..i. Token-level LCP therefore identifies exactly the positions whose cached state is valid for the new request — no model knowledge needed, and any render divergence (a stripped reasoning block, edited history, another client entirely) is absorbed automatically by reusing less. One subtlety: the reuse is capped at `ids.len - 1` even on a perfect match, "because logits are not cached state" — the last token must be forwarded to produce the next distribution (`docs/reference/13-the-model-stack-fucina_models.md` §13.8.2).
 
 **Where it lives — three layers.**
 
@@ -704,7 +704,7 @@ The through-line of this chapter, one last time: `truncate` made the cache rewin
 1. **(Easy)** Run `--spec` on two prompts: one that asks the model to copy a paragraph you provide, one free-form ("write a story"). Read the `spec: steps=… (verify …, fallback …, off …)` stats line and the per-source summary. Explain each field's movement using §13.5 — in particular, why the free-form run's `off` count is the gate doing its job, and what the ~0.99x floor is buying you.
 2. **(Easy)** Extend the course toy decoder (§13.3) with a `stop_token`: when a committed token equals it, the row loop must break immediately — bonus row included. Write a test that proves the streams with and without drafting still match up to and including the stop. You have reproduced the RNG-accounting rule of `core.zig:32-39` in miniature.
 3. **(Medium)** Add a Token-Recycling drafter to the toy: a `vocab × K` table updated with each step's "top-K" (for the toy model, the true successor plus K−1 decoys), drafting by top-1 chain walk. Measure tokens/step against `noDraft` over 1000 tokens. Then make the model non-Markov (`targetNext(prev, cur)`) and watch acceptance change — you are rediscovering why acceptance is a property of (model × token stream).
-4. **(Medium)** Write a `LogitProcessor` that bans a fixed token list, following the `OddMask` shape from `docs/REFERENCE.md` §13.6, and install it via `chat.Options.logit_processor` on a qwen3 chat. Verify: (a) the banned tokens never appear; (b) greedy output with `.speculation = true` and `false` is identical (the §13.6 no-rollback argument in action). Then make your processor expose `forcedTokens` for some state and confirm speculation starts drafting your forced spans.
+4. **(Medium)** Write a `LogitProcessor` that bans a fixed token list, following the `OddMask` shape from `docs/reference/13-the-model-stack-fucina_models.md` §13.6, and install it via `chat.Options.logit_processor` on a qwen3 chat. Verify: (a) the banned tokens never appear; (b) greedy output with `.speculation = true` and `false` is identical (the §13.6 no-rollback argument in action). Then make your processor expose `forcedTokens` for some state and confirm speculation starts drafting your forced spans.
 5. **(Hard)** Build a two-slot LCP pool over the toy decoder: token shadows, `commonPrefix`, the `lcp * 10 > ids_len` gate, LRU eviction, and a "shadow trimmed to cache.len" reclaim (backend.zig:608-614 explains why). Drive it with three interleaved "conversations" and assert (a) follow-up turns re-prefill only their tails, (b) an unrelated request evicts the LRU slot, not the best-matching one, (c) outputs are identical to a pool-free run. You will have re-derived the heart of `src/llm/serving/gguf_chat.zig`.
 
 ---

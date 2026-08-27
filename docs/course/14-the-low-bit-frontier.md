@@ -38,7 +38,7 @@ Why adopt ggml's format rather than invent one? `docs/TERNARY.md:16-27` gives th
 - **The alternatives buy little**: bitnet.cpp's `I2_S` differs "only in bit order and scale placement" and measures within ~6% of TQ2_0-class kernels on dot-capable CPUs (the doc quotes arXiv:2502.11880: i7-13700H, 3.8B model — I2_S 35.04 t/s vs TQ2_0 33.19).
 - **The genuinely different alternatives were measured and declined**: bitnet.cpp's TL1/TL2 lookup-table kernels win mainly on CPUs *without* int8 dot instructions and on footprint (TL2 is 1.67 bpw), but are GEMV-only and need offline per-shape codegen — "deliberately **not** ported; recorded as future work" (`docs/TERNARY.md:24-27`).
 
-The even-smaller sibling `tq1_0` (1.6875 bpw, five trits packed base-3⁵ per byte) exists as a dtype but stays decode/cold-matmul-only (`docs/REFERENCE.md` §10.7). The frontier is TQ2_0.
+The even-smaller sibling `tq1_0` (1.6875 bpw, five trits packed base-3⁵ per byte) exists as a dtype but stays decode/cold-matmul-only (`docs/reference/10-quantization.md` §10.7). The frontier is TQ2_0.
 
 > **ML note** — Why would three values be enough to represent a language model at all? The empirical claim of the BitNet line is that *at sufficient scale, trained-from-scratch ternary models track full-precision quality*, because what matters is the direction each weight pushes (and whether it participates), not its fifth significant digit. That claim is about models *trained ternary from the start*. Converting an existing full-precision model to ternary after the fact is a much harder problem — §14.6 is about exactly how much harder, with a measured collapse to show for it.
 
@@ -157,7 +157,7 @@ Three readings worth extracting:
 2. **x86-VNNI beats the byte ratio.** ~4.8× Q4_K on Raptor Lake, because `vpdpbusd` consumes 32 bytes per instruction vs `sdot`'s 16 — instruction-set density, not magic (`docs/TERNARY.md:89-90`, `docs/PTQTP.md:286-288`). Remember this asymmetry: it flips an economic conclusion in §14.7.
 3. **The two x86 arms (AVX2-maddubs and AVX-VNNI) produce bit-equal checksums** (`b1f84dde82d0c0a4`, `docs/TERNARY.md:92-94`) — the exact-integer-accumulation claim of §14.2, hardware-verified.
 
-Using a ternary tensor requires nothing new at the facade — `.tq2_0` weights flow through the same `dot` dispatch as every quantized RHS in Chapter 11. This is the machine-verified snippet from `docs/REFERENCE.md` §10.7 (run against the real modules by `zig build snippet-check`):
+Using a ternary tensor requires nothing new at the facade — `.tq2_0` weights flow through the same `dot` dispatch as every quantized RHS in Chapter 11. This is the machine-verified snippet from `docs/reference/10-quantization.md` §10.7 (run against the real modules by `zig build snippet-check`):
 
 ```zig
 test "TQ2_0 ternary weights are a first-class matmul RHS" {
@@ -188,7 +188,7 @@ test "TQ2_0 ternary weights are a first-class matmul RHS" {
 }
 ```
 
-Everything here is Chapter 11 machinery pointed at a new dtype: `gguf.encodeF32` grows a `.tq2_0` arm, `fromBlocks` takes logical shapes over wire blocks, and `dot` comptime-dispatches to the ternary kernel because the RHS dtype says so. Like every quantized tensor, a `.tq2_0` tensor is a constant — it exposes only quantized operations, never receives gradients, and float ops on it are absent at comptime (`docs/REFERENCE.md` §10.2). Which raises the question the rest of this chapter answers: if the served weights cannot take a gradient, how does anything ternary ever get *trained*?
+Everything here is Chapter 11 machinery pointed at a new dtype: `gguf.encodeF32` grows a `.tq2_0` arm, `fromBlocks` takes logical shapes over wire blocks, and `dot` comptime-dispatches to the ternary kernel because the RHS dtype says so. Like every quantized tensor, a `.tq2_0` tensor is a constant — it exposes only quantized operations, never receives gradients, and float ops on it are absent at comptime (`docs/reference/10-quantization.md` §10.2). Which raises the question the rest of this chapter answers: if the served weights cannot take a gradient, how does anything ternary ever get *trained*?
 
 ## 14.4 Training ternary, take one: the straight-through estimator
 
@@ -237,7 +237,7 @@ The latent float `w` never appears in the forward output — only its quantizati
 
 > **ML note** — Why does an estimator this wrong work? Three partial answers, none fully satisfying — which is the honest state of the theory. (1) *The bias is bounded where it matters*: for weights well inside a quantization cell, small moves genuinely don't change the loss, so "zero gradient" is locally true and the STE's fiction only matters near boundaries — exactly where you want pressure to accumulate. (2) *The latent weights integrate noise*: a single STE gradient is a bad estimate, but summed over many batches the systematic component (which side of the boundary should I be on?) survives while the fiction washes out. (3) *It is the identity chosen by the people who scaled it*: Fucina implements "exactly the BitNet recipe (`w + (Q(w) − w).detach()`)" — no clipping, no masking (`docs/TERNARY.md:130-134`) — because when you port a method whose success is empirical, you port its exact form, not your improvement of it.
 
-Fucina packages this as one facade op on the ordinary f32 tensor — `dotTernarySte` (`src/ag/tensor.zig`; documented in `docs/REFERENCE.md` §10.7):
+Fucina packages this as one facade op on the ordinary f32 tensor — `dotTernarySte` (`src/ag/tensor.zig`; documented in `docs/reference/10-quantization.md` §10.7):
 
 ```zig
 pub fn dotTernarySte(self: *const Self, ctx: *ExecContext, weight: anytype,
@@ -492,7 +492,7 @@ A last calibration, because this chapter taught research results and research re
 - `src/backend/quant/ternary.zig` — encoders, the crumb layout, and every kernel arm; the module doc (lines 1–23) is the chapter in miniature, and the `bsums` invariant comment (lines 315–318) is the trap to remember.
 - `src/ptqtp.zig` — `solveGroup` and `quantizeMatrix`; the module doc records the pinned candidate order and the fp16-rounding delta with their reasons.
 - `src/ptqtp_gguf.zig` and `src/llm/qwen3/model.zig` (`decoratePtqtp`, `savePtqtpGguf`) — plane persistence and pair-detection; `tools/export_gguf.zig` for the streaming quantizer.
-- `docs/REFERENCE.md` §10.7 — the machine-verified TQ2_0 and `dotTernarySte` snippets (`zig build snippet-check` runs them against the real modules).
+- `docs/reference/10-quantization.md` §10.7 — the machine-verified TQ2_0 and `dotTernarySte` snippets (`zig build snippet-check` runs them against the real modules).
 - `examples/es_ternary_spirals/main.zig` and `examples/ptqtp_spirals/main.zig` — the two self-verifying acceptance demos: training ternary from scratch without gradients, and converting a float model post-hoc.
 
 ## Exercises

@@ -52,7 +52,7 @@ Notice the pattern in the milestone column: in every project the first thing you
 
 **2. Add a pointwise op, end to end.** The classic first contribution, and every station of it now has a name you know. Two routes:
 
-- *The short route — no core edits.* `elementalUnary`/`elementalBinary` (`src/ag/tensor/float/elementwise.zig:467`, engine in `src/ag/elemental.zig`): supply scalar forward and backward functions, get a SIMD-chunked, parallel op with a VJP (row in docs/DEVELOPMENT.md §2's "check before you build" table; contract in docs/REFERENCE.md §4.4). This is how you prototype an activation in an evening.
+- *The short route — no core edits.* `elementalUnary`/`elementalBinary` (`src/ag/tensor/float/elementwise.zig:467`, engine in `src/ag/elemental.zig`): supply scalar forward and backward functions, get a SIMD-chunked, parallel op with a VJP (row in docs/DEVELOPMENT.md §2's "check before you build" table; contract in `docs/reference/04-tensor-operations.md` §4.4). This is how you prototype an activation in an evening.
 - *The full route — a first-class citizen.* Follow `tanh` through the tree and add your op beside it at each stop:
   - the semantic spec: one enum variant plus one `switch` arm in `src/backend/ops.zig` (`UnaryOp`, `unaryScalar`);
   - the vectorized body: behind `vecUnary` in `src/backend/vector/primitives.zig:155`;

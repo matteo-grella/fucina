@@ -257,7 +257,7 @@ This is the sentence that separates verification-as-culture from verification-as
 
 ## 16.4 Docs are tests: `snippet-check`
 
-Documentation lies in a specific, predictable way: it was true when written, then the API moved. Fucina closes that hole by making the reference manual executable. `zig build snippet-check` — an in-tree build step, run in CI on every push — extracts every runnable ```zig block from `docs/REFERENCE.md` (any fenced block containing a column-0 `test "..."` declaration), generates a test root from them (`tools/gen_snippet_tests.zig`), and runs it against the real `fucina`/`fucina_llm` modules with the build's option set (`docs/REFERENCE.md` §2.7).
+Documentation lies in a specific, predictable way: it was true when written, then the API moved. Fucina closes that hole by making the reference manual executable. `zig build snippet-check` — an in-tree build step, run in CI on every push — extracts every runnable ```zig block from `docs/REFERENCE.md` (any fenced block containing a column-0 `test "..."` declaration), generates a test root from them (`tools/gen_snippet_tests.zig`), and runs it against the real `fucina`/`fucina_llm` modules with the build's option set (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.7).
 
 The authoring contract is small and worth copying:
 
@@ -272,7 +272,7 @@ Two smaller pieces of documentation discipline orbit the same idea. `zig build d
 
 ## 16.5 Tests that scale with the tree, and the CI matrix
 
-The unit-test layer underneath all of this has three structural conventions (`docs/REFERENCE.md` §2.7):
+The unit-test layer underneath all of this has three structural conventions (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.7):
 
 **Sibling test files.** Behavior tests live in `<name>_tests.zig` next to the production file — 155 of them across `src/` and `examples/`. The production file pulls its sibling in with a one-line forwarding stanza:
 
@@ -292,7 +292,7 @@ so analyzing the production file analyzes its tests, while the production code i
 
 **Passing tests are silent.** "Always-passing tests must not print to stderr" (`docs/DEVELOPMENT.md` §4.4) — success-path diagnostics route through an opt-in `testlog` gate. Noise trains people to ignore output; the only acceptable output of a green run is nothing.
 
-On top sits the CI matrix (`docs/REFERENCE.md` §2.8; `.github/workflows/ci.yml`): two OSes — `ubuntu-latest` (x86-64) and `macos-15` (arm64, pinned rather than `-latest`, bumped deliberately) — with `fail-fast: false` so one OS's failure doesn't mask the other's. The steps, in order:
+On top sits the CI matrix (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.8; `.github/workflows/ci.yml`): two OSes — `ubuntu-latest` (x86-64) and `macos-15` (arm64, pinned rather than `-latest`, bumped deliberately) — with `fail-fast: false` so one OS's failure doesn't mask the other's. The steps, in order:
 
 1. `zig build test` — native backend (Accelerate on macOS, no BLAS on Linux, per the `-Dblas` default);
 2. `zig build` — every executable compiles;
@@ -563,7 +563,7 @@ And notice, finally, what the habit buys that no single gate could: *compounding
 - `docs/DEVELOPMENT.md` — the invariants with their enforcement status, the check-before-you-build table, and the honest-completion rules ("Negatives are results", "BLOCKED beats fabricated").
 - `src/ag/gradcheck.zig` — the finite-difference referee: contract-first doc comment, `comptime` loss validation, tuple inputs.
 - `src/x86dot_check.zig:1-40` — the execution-attestation table; what "tested" means when hardware you don't own is involved.
-- `docs/REFERENCE.md` §2.7–2.8 — test organization, the snippet-check authoring contract, and the CI matrix.
+- `docs/reference/02-toolchain-build-and-project-wiring.md` §2.7–2.8 — test organization, the snippet-check authoring contract, and the CI matrix.
 - `docs/MEMORY-MODEL.md` §4 — the arena rejection: the best worked example of documenting a rejected alternative with measurements.
 - `CONTRIBUTING.md` — the whole contribution contract in 77 lines; the two-track framing this chapter is built on.
 - `src/backend/parity_test.zig` and `src/backend/quant/encode_golden_test.zig` — what scalar-vs-native parity and byte-exact golden testing look like as real test files.

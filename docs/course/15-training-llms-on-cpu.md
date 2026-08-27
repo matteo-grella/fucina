@@ -275,7 +275,7 @@ Look at the `.ptqtp` arm: [Chapter 14](14-the-low-bit-frontier.md)'s multi-plane
 
 > **ML note** — "Gradients flow to the f32 activations only" is the whole reason quantized fine-tuning works, so make sure it landed: backpropagation through a layer needs the layer's weight to compute the *input's* gradient (dx = dy·W), but it only needs the weight's gradient if the weight is trainable. Freeze the weight and the backward pass just multiplies by it — an operation quantized kernels are perfectly happy to do. LoRA then reintroduces trainability *beside* the frozen weight rather than inside it. The memory bill follows: weight storage stays at Q4_K_S's few bits per weight, and the only optimizer state is the adapters'. If you know the literature: this combination — LoRA adapters over a quantized frozen base — is the recipe QLoRA popularized (Dettmers et al., 2023, arXiv:2305.14314); Fucina's variant trains over the GGUF block formats it already serves, rather than a training-specific 4-bit format.
 
-The minimal usage, from the reference's entry-point map (`docs/REFERENCE.md` §14.2.1; this snippet needs model assets, so the snippet harness skips it):
+The minimal usage, from the reference's entry-point map (`docs/reference/14-model-families-and-example-applications.md` §14.2.1; this snippet needs model assets, so the snippet harness skips it):
 
 ```zig
 const Trainer = llm.qwen3.train.Trainer(.{ .q = true, .v = true });
@@ -298,7 +298,7 @@ opt.zeroGrad();
 
 Everything here is Chapter 8's ritual with two new nouns. `loss` is mean cross-entropy over one flat token sequence, with `ignore_index` (`maxInt(usize)`, `src/llm/qwen3/train.zig:74`) masking positions that must not be supervised — you will see why in §15.5. And the exec-scope requirement is *checked*: call `loss` without an open scope and you get `Error.ExecScopeRequired` instead of the undefined behavior a dangling graph node would be (`docs/TRAINING.md` §12, last bullet). A composite op that knows its own lifetime contract and refuses to run outside it is the polite version of the rule.
 
-The rest of the trainer's surface, mapped so you can navigate the source (`docs/REFERENCE.md` §14.2.1):
+The rest of the trainer's surface, mapped so you can navigate the source (`docs/reference/14-model-families-and-example-applications.md` §14.2.1):
 
 - `registerAllParams(opt)` — every adapter's A/B onto anything with `addParamNamed`, under the names `layers.<i>.<target>.lora_{a,b}`; the trainer must outlive the optimizer (params and names are borrowed — the Chapter 8 ownership rule again).
 - `lossExt(ctx, tokens, labels, .{ .reduction, .loss_scale })` — the gradient-accumulation seam: `.sum` reduction plus a caller-computed scale, exactly what §15.6's window needs.
@@ -656,9 +656,9 @@ Two of those roads — the fine-tunes — also belong to a wider menu. Counting 
 | LoRA SFT (§15.2–15.7; `docs/TRAINING.md` §9) | adapter weights beside the frozen base | exact gradients | merged, re-quantized GGUF | `zig build finetune` |
 | Evolution strategies (§15.8; [Chapter 9](09-training-without-gradients.md) §9.8; `docs/TRAINING.md` §13) | adapters, or every resident float | scalar rewards, forward passes only | same checkpoint layout and export, minus `optimizer.fucina` | `zig build es-finetune` |
 | PTQTP ([Chapter 14](14-the-low-bit-frontier.md) §14.6–14.8; `docs/PTQTP.md`) | the weights' *representation* | none — data-free, solves a decomposition | ternary GGUF | `zig build ptqtp-qwen3`, `export-gguf --ptqtp` |
-| Cartridges (`docs/CARTRIDGES.md`; `docs/REFERENCE.md` §13.10) | the *context* — a trained KV prefix; weights untouched | self-study distillation, teacher top-k CE | cartridge safetensors beside the unchanged base GGUF | `zig build cartridge` |
+| Cartridges (`docs/CARTRIDGES.md`; `docs/reference/13-the-model-stack-fucina_models.md` §13.10) | the *context* — a trained KV prefix; weights untouched | self-study distillation, teacher top-k CE | cartridge safetensors beside the unchanged base GGUF | `zig build cartridge` |
 
-The menu composes through seams this chapter already crossed. §15.4's `dotLinear` carries a `.ptqtp` arm — trit planes are just more frozen constant RHS, so LoRA fine-tuning runs over a PTQTP model unchanged — and the cartridge trainer *is* this chapter's trainer with every adapter switched off (`Trainer(.{ .q = false, .v = false })`, `docs/REFERENCE.md` §13.10), leaving the trained KV rows as the only parameters.
+The menu composes through seams this chapter already crossed. §15.4's `dotLinear` carries a `.ptqtp` arm — trit planes are just more frozen constant RHS, so LoRA fine-tuning runs over a PTQTP model unchanged — and the cartridge trainer *is* this chapter's trainer with every adapter switched off (`Trainer(.{ .q = false, .v = false })`, `docs/reference/13-the-model-stack-fucina_models.md` §13.10), leaving the trained KV rows as the only parameters.
 
 The deeper takeaway is not about hardware at all. The reason this chapter could be short on new machinery is that the training stack was built out of *contracts* — lifetime rules, seed contracts, checkpoint sentinels, parity oracles — and contracts compose. A quantized frozen transformer, a LoRA adapter, an accumulation window, a resumable loader, and a GGUF exporter snap together because each one states exactly what it needs and refuses loudly otherwise. How that discipline is practiced across the whole repository is the final chapter's story.
 
@@ -694,7 +694,7 @@ Loose ends, and where they live:
 - `src/llm/qwen3/train_tests.zig` / `train_golden_tests.zig` — the finite-difference and torch-golden angles of §15.6's verification battery, readable as ordinary tests; `src/llm/data_tests.zig` pins the loader permutation.
 - `examples/es_finetune/main.zig` — the gradient-free twin; its module doc is the best two-page comparison of backprop-vs-ES trade-offs in the tree.
 - `docs/TRAINING.md` §9 — LoRA, verification, and the export loop, with every number this chapter quoted.
-- `docs/REFERENCE.md` §14.2.1 — the machine-verified entry-point map for the trainer surface summarized in §15.4.
+- `docs/reference/14-model-families-and-example-applications.md` §14.2.1 — the machine-verified entry-point map for the trainer surface summarized in §15.4.
 - `src/training_checkpoint.zig` — the directory protocol: `beginSave`, `writeFileAtomic`, the sentinel-last `TrainerState`, and the full list of optional resume fields (LoRA, data-loader, and ES alike).
 - `tools/export_gguf.zig` — merge and transcode; Chapter 11's writers earning their keep.
 - `docs/RUNNING-MODELS.md` — where every model file comes from, including the f16-transcode note this chapter's loop depends on; the copy-paste "fine-tune → merge → re-quantize → serve" script is `examples/finetune/README.md`.

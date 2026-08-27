@@ -12,8 +12,8 @@ gave us the weights: a GGUF file, memory-mapped, its tensors resident in
 their source precision. This chapter turns them into a machine that talks.
 
 Everything is grounded in a real model: **Qwen3-0.6B**, implemented in
-`src/llm/runner.zig` (~2,400 lines; `src/llm/qwen3/model.zig` is the family's alias surface over it — `Config` IS `runner.Descriptor`, `Model` IS `runner.Model`). Around it sits the `fucina_llm`
-module, which — in the words of `docs/REFERENCE.md` §13 — "contains
+`src/models/qwen3/runner.zig` (~2,200 lines; `src/models/qwen3/model.zig` is the family's alias surface over it — `Config` IS `runner.Descriptor`, `Model` IS `runner.Model`). Around it sits the `fucina_models`
+module, which — in the words of `docs/reference/13-the-model-stack-fucina_models.md` §13 — "contains
 everything a transformer inference/fine-tuning runner needs that is not a
 tensor op: GGUF-to-weight binding, KV caching, tokenizers, sampling, SFT data
 plumbing, multi-turn chat, and lossless draft-free speculative decoding."
@@ -27,10 +27,10 @@ second read. Every claim is pinned to a file and line you can open.
 ## 12.1 The whole machine in nine numbers
 
 Strip away the mythology and a transformer's architecture is a struct of
-integers. Here is Qwen3-0.6B, verbatim (*from `src/llm/runner.zig`*):
+integers. Here is Qwen3-0.6B, verbatim (*from `src/models/qwen3/runner.zig`*):
 
 ```zig
-pub fn qwen3_0_6b() Config {
+pub fn qwen3_0_6b() Descriptor {
     return .{
         .vocab_size = 151_936,
         .hidden_size = 1024,
@@ -103,8 +103,8 @@ loop correct and fast.
 A language model consumes integers, not characters. The map between them is
 the tokenizer — worth building first because it needs no tensors at all,
 just strings, hash maps, and one clever trick. Fucina's lives in
-`src/llm/tokenizer.zig`, and its module comment states the design in one
-breath (*from `src/llm/tokenizer.zig:1-2`*): a "native byte-level BPE
+`src/models/text/tokenizer.zig`, and its module comment states the design in one
+breath (*from `src/models/text/tokenizer.zig:1-2`*): a "native byte-level BPE
 tokenizer (GPT-2 / Qwen family), built from a model's own GGUF metadata —
 no external tokenizer dependency, no per-model hardcoding." The vocabulary
 (`tokenizer.ggml.tokens`) and merge rules (`tokenizer.ggml.merges`) come
@@ -120,7 +120,7 @@ any language, in any encoding, even binary garbage, is *some* byte sequence.
 There is one wrinkle: the vocabulary is stored as printable strings, and
 many bytes are not printable. GPT-2's solution, faithfully implemented here,
 maps every byte to a printable Unicode stand-in (*from
-`src/llm/tokenizer.zig:588-600`, trimmed*):
+`src/models/text/tokenizer.zig:588-600`, trimmed*):
 
 ```zig
 /// GPT-2 byte→unicode: printable bytes map to themselves; the rest shift into
@@ -156,7 +156,7 @@ the *order* of those fusions is saved as a ranked list of merge rules. At
 inference time the algorithm is almost embarrassingly simple: start from
 single bytes, and repeatedly merge the adjacent pair with the
 lowest-numbered (earliest-learned) rule until no rule applies. The repo's
-implementation is `applyMerges` (`src/llm/tokenizer.zig:468-495`) — 28
+implementation is `applyMerges` (`src/models/text/tokenizer.zig:468-495`) — 28
 lines, whose doc comment is the entire specification: "Repeatedly merge the
 adjacent symbol pair with the lowest merge rank." To make it concrete, here
 is a self-contained toy you can run today — **course code**, not repo code
@@ -166,7 +166,7 @@ is a self-contained toy you can run today — **course code**, not repo code
 const std = @import("std");
 
 /// Course code — a toy byte-level BPE encoder. The real thing is
-/// src/llm/tokenizer.zig; this keeps only the algorithm.
+/// src/models/text/tokenizer.zig; this keeps only the algorithm.
 const MiniBpe = struct {
     vocab: []const []const u8, // token id = index into this list
     merges: []const []const u8, // "a b" rules; rank = index (lower wins)
@@ -249,7 +249,7 @@ characters, each of which *is* in the vocabulary of a valid GPT-2 model.
 One difference is instructive: our toy merges by widening a slice into
 `text`, while `applyMerges` owns each symbol on the heap and must
 `allocator.free` both halves of every merge — explicit ownership, visible
-in the code, leak-checked by the test allocator. `docs/REFERENCE.md` §13.5
+in the code, leak-checked by the test allocator. `docs/reference/13-the-model-stack-fucina_models.md` §13.5
 carries a machine-verified twin of this experiment against the real
 `Tokenizer` (the snippet gate from [Chapter 16](16-the-craft.md) runs it in
 CI): `initFromParts` with the four-token vocabulary
@@ -280,7 +280,7 @@ doc comment (`tokenizer.zig:644-649`) calls out the load-bearing details:
 digits split *one per chunk* (`\p{N}` has no quantifier), punctuation runs
 absorb trailing newlines, and a whitespace run before a word donates its
 last space to that word. In-repo tests pin exactly these behaviours (*from
-`src/llm/tokenizer.zig:1174-1181`*):
+`src/models/text/tokenizer.zig:1174-1181`*):
 
 ```zig
 test "qwen2 pretokenizer: digits split one per chunk (\\p{N} singleton)" {
@@ -291,7 +291,7 @@ test "qwen2 pretokenizer: digits split one per chunk (\\p{N} singleton)" {
 ```
 
 Why so much ceremony over a splitter? Because the correctness bar for the
-whole tokenizer is **token-ID-exactness**: `docs/REFERENCE.md` §13.5 states
+whole tokenizer is **token-ID-exactness**: `docs/reference/13-the-model-stack-fucina_models.md` §13.5 states
 that "on valid UTF-8 input it chunks and encodes **token-ID-exact** against
 llama.cpp for qwen2-pre models (malformed UTF-8 is the one documented
 deviation)". Not "produces similar text" — the *same integers*, id for id.
@@ -313,7 +313,7 @@ Two more behaviours you will rely on later:
   for normal pretokenization.
 - **`encode` vs `encodeRaw`.** `encode` applies the model's BOS/EOS policy;
   `encodeRaw` does not, because chat "templates own structure"
-  (`docs/REFERENCE.md` §13.5) — the template decides every structural
+  (`docs/reference/13-the-model-stack-fucina_models.md` §13.5) — the template decides every structural
   token.
 
 And one honesty mechanism: a GGUF declaring a pretokenizer this module does
@@ -328,7 +328,7 @@ Generation emits one token at a time, and a token's bytes can end mid-way
 through a multi-byte UTF-8 character — the next token completes it. Print
 naively and your terminal shows garbage mid-emoji. `StreamDecoder`
 (`tokenizer.zig:537-572`) buffers the incomplete tail (*from
-`src/llm/tokenizer.zig:555-564`*):
+`src/models/text/tokenizer.zig:555-564`*):
 
 ```zig
 /// Decode `id` and write any now-complete UTF-8 to `writer`.
@@ -352,7 +352,7 @@ pub fn push(self: *StreamDecoder, allocator: Allocator, id: u32, writer: *std.Io
 
 Now the model. Here is the heart of `forwardStep` — the function that does
 *all* the transformer work, whether you hand it a 500-token prompt or one
-token (*from `src/llm/runner.zig`, profiling and MoE prefetch
+token (*from `src/models/qwen3/runner.zig`, profiling and MoE prefetch
 trimmed*):
 
 ```zig
@@ -362,7 +362,7 @@ errdefer x.deinit();
 const cfg = self.config;
 for (self.layers, 0..) |*layer, layer_i| {
     const last_query_only = last_only and layer_i + 1 == cfg.num_layers and token_ids.len > 1;
-    x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i));
+    x = try ctx.replace(x, attentionBlock(ctx, io, cfg, layer, &x, &rope_table, self.kv_head_for_head, last_query_only, profile, kv, layer_i, self.attention_override));
     x = try ctx.replace(x, ffnBlock(ctx, io, cfg, layer, &x, profile));
 }
 kv.advance(token_ids.len);
@@ -386,7 +386,7 @@ piece in the order the code runs it.
 
 > **Zig note** — `x = try ctx.replace(x, ...)` is Fucina's idiom for "the
 > new tensor replaces the old one". Its second parameter is an *error
-> union* on purpose (`src/exec.zig:355-375`): the block call is evaluated
+> union* on purpose (`src/exec/runtime.zig:765`): the block call is evaluated
 > by the caller, and on error the old `x` is NOT consumed — the binding and
 > its `errdefer` stay valid — while on success the old tensor is released
 > and the new one returned for rebinding. One idiom keeps the residual
@@ -402,19 +402,19 @@ and `getRowsAs` (`src/weights/linear.zig`) gathers one row per token id
 into a fresh `[seq, embed]` f32 tensor. Because the gather is a method on
 the weight union, a q8_0 or f16 embedding table works exactly like an f32
 one: rows dequantize or widen on the fly ("nothing is widened to f32 at
-load time", `docs/REFERENCE.md` §13.2).
+load time", `docs/reference/13-the-model-stack-fucina_models.md` §13.2).
 
 A small elegance hides at load: many models *tie* the output projection to
 the embedding table (one matrix maps ids to vectors on the way in and
 vectors to scores on the way out). The loader expresses the fallback chain
-as one labeled block (*from `src/llm/runner.zig`, comment
-trimmed*):
+as one labeled block (*from `src/models/model_common.zig:210-214` — the
+shared load band every family's loader calls*):
 
 ```zig
-var output = blk: {
-    if (try ptqtp_gguf.maybeLoadPlanes(ctx, file, "output.weight", config.vocab_size, config.hidden_size)) |planes| break :blk planes;
-    if (file.maybeGet("output.weight")) |info| break :blk try LinearWeight.load(ctx, info, config.vocab_size, config.hidden_size);
-    break :blk try token_embedding.cloneView(ctx);
+const output = blk: {
+    if (try ptqtp_gguf.maybeLoadPlanes(ctx, file, "output.weight", vocab, hidden)) |planes| break :blk planes;
+    if (file.maybeGet("output.weight")) |info| break :blk try LinearWeight.load(ctx, info, vocab, hidden);
+    break :blk try token_embedding.cloneView(ctx); // tied embeddings
 };
 ```
 
@@ -452,7 +452,7 @@ RMSNorm with learned length-128 weights (`q_norm`/`k_norm`, loaded at
 
 Attention starts with three matmuls: the normalized stream is projected to
 queries (2048 wide), keys and values (1024 wide each). Then `split` reshapes
-the flat projections into heads (*from `src/llm/runner.zig`*):
+the flat projections into heads (*from `src/models/qwen3/runner.zig`*):
 
 ```zig
 var q3 = try qkv_linear.q.split(ctx, .q, .{ .head, .d }, .{ config.num_attention_heads, config.head_dim });
@@ -475,7 +475,7 @@ One performance decision is visible in the types. `AttentionProjection`
 `[2048+1024+1024, 1024]` matrix so three matmuls become one wider GEMM (one
 pass over the activations). The fusion *declines gracefully* — it returns
 `!?LinearWeight`, and `null` means "mixed formats: parts untouched, use
-them individually" (`docs/REFERENCE.md` §13.2); the forward switches on the
+them individually" (`docs/reference/13-the-model-stack-fucina_models.md` §13.2); the forward switches on the
 union. The FFN's gate/up pair gets the same treatment
 (`runner.zig`).
 
@@ -494,7 +494,7 @@ properly, once.
 
 **The mechanism.** Take a head's 128-dimensional query vector and view it as
 64 two-dimensional pairs — in the "half" layout used here, channel `i` pairs
-with channel `i + 64` (NEOX/Llama convention; `docs/REFERENCE.md` §4.12).
+with channel `i + 64` (NEOX/Llama convention; `docs/reference/04-tensor-operations.md` §4.12).
 For a token at absolute position `p`, rotate pair `i` by the angle
 
 ```
@@ -567,7 +567,7 @@ precomputed once per forward into a `RopeTable` (`ctx.prepareRopeTable`,
 distinguishes building a prefill step from a decode step
 (`runner.zig`: prefill fills `pos0..pos0+len`, decode passes the one
 current position). The rotation is fused with §12.3.2's per-head q/k norm
-into a single kernel call (*from `src/llm/runner.zig`*):
+into a single kernel call (*from `src/models/qwen3/runner.zig`*):
 
 ```zig
 var q_rope = try q3.rmsNormMulRopeHalfPrepared(ctx, .seq, .d, &layer.q_norm, config.rms_norm_eps, rope_table);
@@ -577,14 +577,14 @@ defer k_rope.deinit();
 ```
 
 Note what is *absent*: `v3` is never roped. Values carry content, not
-addresses; only the q·k matching needs positions. `docs/REFERENCE.md` §4.12
+addresses; only the q·k matching needs positions. `docs/reference/04-tensor-operations.md` §4.12
 pins the primitive with a machine-verified test worth looking up: position 0
 is the identity, and position 1 rotates pair 0 by exactly `cos(1)`/`sin(1)`
 — one radian, because pair 0's frequency is `theta_base^0 = 1`.
 
 One consequence to file away for §12.4: because a token's rotation depends
 only on its *own* absolute position — never on its neighbours — a key can be
-rotated once and cached forever. `src/llm/kv_cache.zig:15-16` states it as a
+rotated once and cached forever. `src/models/text/kv_cache.zig:15-16` states it as a
 design rule: "K is stored *after* RoPE (V has no RoPE), so past positions
 are never re-rotated."
 
@@ -593,14 +593,13 @@ are never re-rotated."
 Attention itself: every query attends every (allowed) key, scores become
 softmax weights, weights blend the values. The one Qwen3 twist is the
 head-count asymmetry — 16 query heads, 8 KV heads — and the entire mapping
-that implements it is three lines at load time (*from
-`src/llm/runner.zig`*):
+that implements it is three lines at load time (`kvHeadMap`,
+`src/models/model_common.zig:221-226`, called by the runner's loader):
 
 ```zig
-const kv_head_for_head = try allocator.alloc(usize, config.num_attention_heads);
-errdefer allocator.free(kv_head_for_head);
-const heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
-for (kv_head_for_head, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
+const map = try allocator.alloc(usize, n_heads);
+const heads_per_kv = n_heads / n_kv_heads;
+for (map, 0..) |*kv_head, head_i| kv_head.* = head_i / heads_per_kv;
 ```
 
 Query heads 0 and 1 share KV head 0; heads 2 and 3 share KV head 1; and so
@@ -612,14 +611,14 @@ stay at full width. The quality cost of sharing is small; the saving here
 is exactly 2× (multi-query attention is the same idea taken to one KV
 head).
 
-The kernel is one call, `groupedAttention` (`docs/REFERENCE.md` §4.13),
+The kernel is one call, `groupedAttention` (`docs/reference/04-tensor-operations.md` §4.13),
 with the model-side wrapper supplying the standard scale (*from
-`src/llm/runner.zig`*):
+`src/models/qwen3/runner.zig`*):
 
 ```zig
 fn causalAttention(
     ctx: *ExecContext,
-    config: Config,
+    config: Descriptor,
     q: *const fucina.Tensor(.{ .seq, .head, .d }),
     k: anytype,
     v: anytype,
@@ -641,12 +640,12 @@ fn causalAttention(
 > key. In `groupedAttention` the mask is the default (`.mask = .causal`),
 > and the options struct is comptime-validated per KV representation, so
 > "a misspelled option is a compile error, never silently-full-causal
-> attention" (`docs/REFERENCE.md` §4.13).
+> attention" (`docs/reference/04-tensor-operations.md` §4.13).
 
 The `k: anytype` in the wrapper is doing real work: the same call site
 accepts f32 tensors (no cache), f16 cache views, or raw q8_0 block slices —
 the representation is comptime-dispatched from the type
-(`docs/REFERENCE.md` §4.13 lists all five accepted forms). The same section
+(`docs/reference/04-tensor-operations.md` §4.13 lists all five accepted forms). The same section
 carries the simplest possible attention unit test, machine-verified: one
 query against *one* cached position, whose softmax weight must be 1, so the
 output must be exactly `v` — attention reduced to its base case
@@ -670,11 +669,11 @@ gated nonlinearity, one projection back down. `silu(z) = z · sigmoid(z)` is
 a smooth ReLU relative; the gating means one pathway (`gate`) decides *how
 much* of the other pathway's signal (`up`) passes, per channel — empirically
 stronger than a plain nonlinearity at equal parameter count. In code, the
-separate-weights arm reads (*from `src/llm/runner.zig`,
+separate-weights arm reads (*from `src/models/qwen3/runner.zig`,
 trimmed*):
 
 ```zig
-var gate_up = try dense.input_proj.project(ctx, ffn_in, config);
+var gate_up = try dense.input_proj.project(ctx, ffn_in, config.intermediate_size);
 defer gate_up.deinit();
 const out = try gate_up.up.swiglu(ctx, &gate_up.gate);
 ```
@@ -728,7 +727,7 @@ The fix follows from one observation about causal attention: position `p`'s
 keys and values *never change* once computed — later tokens cannot influence
 earlier ones (that is what the causal mask means), and RoPE rotates each key
 by its own absolute position only (§12.3.4). So cache them. `KvCache`
-(`src/llm/kv_cache.zig`) stores, per layer, the K and V rows of every
+(`src/models/text/kv_cache.zig`) stores, per layer, the K and V rows of every
 position seen so far; a step computes projections **only for its new
 tokens**, appends their K/V, and runs its queries against the whole cached
 prefix.
@@ -742,7 +741,7 @@ as a read-and-accumulate over cached rows, not a recomputation of them.
 worth of matmuls plus one scan."
 
 The storage layout is chosen so that reading the cache costs nothing
-(*doc comment, `src/llm/kv_cache.zig:8-16`*):
+(*doc comment, `src/models/text/kv_cache.zig:8-16`*):
 
 > K and V are kept as f16 `[capacity, kv_heads, head_dim]` contiguous
 > tensors — the exact `[.seq, .kv_head, .d]` layout the f16 attention kernel
@@ -754,12 +753,12 @@ The storage layout is chosen so that reading the cache costs nothing
 
 Here it is in action inside the attention block — append the new rows, then
 attend over a zero-copy view of everything (*from
-`src/llm/runner.zig`, q8_0 arm trimmed*):
+`src/models/qwen3/runner.zig`, q8_0 arm trimmed*):
 
 ```zig
 var attn = if (cache) |kv| blk: {
     try kv.appendLayer(ctx, layer_i, &k_rope, &v3);
-    const cached_len = kv.len + k_rope.dim(.seq);
+    const cached_len = kv.len() + k_rope.dim(.seq);
     switch (kv.dtype) {
         .f16 => {
             var k_view = try kv.k[layer_i].narrow(ctx, .seq, 0, cached_len);
@@ -775,12 +774,13 @@ var attn = if (cache) |kv| blk: {
 
 Three contracts make this correct, and each is enforced:
 
-1. **`appendLayer` does not advance `len`.** All 28 layers append at the
-   same base offset; `kv.advance(token_ids.len)` runs *once*, after the
-   layer loop (`runner.zig`; doc comment at `kv_cache.zig:250-253`).
+1. **`appendLayer` does not advance the cache length.** All 28 layers
+   append at the same base offset; `kv.advance(token_ids.len)` runs
+   *once*, after the layer loop (`runner.zig`; doc comment at
+   `kv_cache.zig:275-277`).
    Get this wrong in a model port and every layer after the first writes
    to the wrong rows.
-2. **`forwardStep` demands `kv.len == pos0`** (else
+2. **`forwardStep` demands `kv.len() == pos0`** (else
    `Error.InvalidSequenceLength`) and enough capacity (else
    `KvCacheOverflow`) — `runner.zig`. The cache's length *is* the
    model's notion of "where we are".
@@ -790,29 +790,30 @@ Three contracts make this correct, and each is enforced:
    runner's `--verify-cache N` flag checks exactly this, decode step by
    decode step, against the cacheless entry.
 
-The write path (`appendLayer`'s f16 arm, `kv_cache.zig:268-281`) shows the
+The write path (`appendLayer`'s f16 arm, `kv_cache.zig:293-305`) shows the
 allocation discipline this loop runs under: new rows are cast "straight into
 the cache slot: one pass, no temporaries" — and the comment preserves the
 *before* state (a materialized f32 copy, an unpooled temp, a memcpy), the
 repo's habit of naming the rejected version. And because the buffers are
 pre-allocated at capacity and every reader and writer addresses rows
-strictly from `len`, rewinding the cache is a single integer store (*from
-`src/llm/kv_cache.zig:310-312`*):
+strictly from `count`, rewinding the cache is a single integer store
+(*from `src/models/text/kv_cache.zig:334-336`*):
 
 ```zig
 pub fn truncate(self: *KvCache, keep_len: usize) void {
-    if (keep_len < self.len) self.len = keep_len;
+    if (keep_len < self.count) self.count = keep_len;
 }
 ```
 
-Its doc comment (`kv_cache.zig:300-309`) is a small masterclass in
+Its doc comment (`kv_cache.zig:324-333`) is a small masterclass in
 invariant-driven design: it enumerates every reader and writer to prove
-that decrementing `len` *is* the rewind, in both storage modes. Speculative
+that decrementing `count` *is* the rewind, in both storage modes (the
+public read of the length is the method `len()`). Speculative
 decoding ([Chapter 13](13-inference-tricks.md)) leans on this to drop
 rejected draft tokens; the chat reuse seam (§12.7) leans on it to rewind to
 a common prefix. A windowed ring-buffer cache would have made the one-liner
 impossible — which is why "the cache itself has no window logic"
-(`docs/REFERENCE.md` §13.4): windowed models apply their sliding window at
+(`docs/reference/13-the-model-stack-fucina_models.md` §13.4): windowed models apply their sliding window at
 read time, in the attention kernel.
 
 **How big is it?** Do the arithmetic from the config: per position,
@@ -827,7 +828,7 @@ KV heads instead of 8, double it.
 each (position, head) row as `head_dim/32` q8_0 blocks — 34 bytes per 32
 elements, roughly halving f16's footprint again at a small quantization
 loss. Be precise about what this buys: the runner's README
-(`examples/qwen3/README.md`) calls it
+(`apps/qwen3/README.md`) calls it
 "halves KV memory — capacity option; decode is NOT faster on M1". A
 *capacity* lever (twice the context in the same RAM), not a speed lever —
 measured, not assumed. It demands `head_dim % 32 == 0` (else
@@ -901,23 +902,28 @@ repo's answer is to *document the threshold* and test both sides of it.
 ## 12.6 Sampling: from logits to a token
 
 The forward pass ends with 151,936 raw scores; something must pick one
-token. The simplest picker is greedy — take the argmax — and the minimal
-autoregressive loop around it is worth reading in full (*from
-`src/llm/runner.zig`*):
+token. The picker lives in one shared loop, `models.text.generate` — the
+reference generation loop over the decoder contract, which every family and
+the chat engine decode through (`greedy` is its argmax-only, slice-filling
+convenience). The core is worth reading in full (*from
+`src/models/text/generate.zig`, stop handling trimmed*):
 
 ```zig
-const limit = @min(options.max_new_tokens, out_tokens.len);
+// Prefill at the cache's current position.
+var logits = try model.forwardStep(ctx, cache, prompt, cache.len());
+defer logits.deinit();
+
 var produced: usize = 0;
-while (produced < limit) {
-    const next = try argmaxLast(ctx, &logits);
-    out_tokens[produced] = next;
+while (produced < opts.max_tokens and cache.len() < opts.capacity) {
+    const next = try sampler.next(ctx, &logits, history.items);
+    // ... stop-id check, then:
+    try sink.emit(next);
+    try history.append(a, next);
     produced += 1;
-    if (options.stop_token) |stop| if (next == stop) break;
-    if (produced == limit) break;
+
     // Allocate the next step before freeing the current logits, so an
-    // error here leaves `logits` valid for the function-scope defer
-    // (deinit-then-reassign would leave it dangling on the error path).
-    const fresh = try self.forwardStep(ctx, kv, &.{next}, kv.len);
+    // error here leaves `logits` valid for the function-scope defer.
+    const fresh = try model.forwardStep(ctx, cache, &.{next}, cache.len());
     logits.deinit();
     logits = fresh;
 }
@@ -932,7 +938,7 @@ while (produced < limit) {
 
 Greedy is perfect for benchmarks and parity tests, but the sampler's module
 comment tells you why it cannot be the default for chat
-(*from `src/llm/sampler.zig:1-9`*): "Greedy (argmax) is deterministic and
+(*from `src/models/text/sampler.zig:1-9`*): "Greedy (argmax) is deterministic and
 right for benchmarking, but it makes instruction-tuned models like Qwen3
 degenerate into repetition. This sampler implements the usual quality
 pipeline — repetition / frequency / presence penalties, temperature, top-k,
@@ -940,7 +946,7 @@ top-p (nucleus), and min-p — over the model's logits, matching llama.cpp's
 parameter set and defaults. With `temperature <= 0` it falls back to greedy,
 so the benchmark path is unchanged."
 
-The knobs, verbatim (*from `src/llm/sampler.zig:23-48`, trimmed*):
+The knobs, verbatim (*from `src/models/text/sampler.zig:23-48`, trimmed*):
 
 ```zig
 pub const Config = struct {
@@ -965,7 +971,7 @@ pub const Config = struct {
 optional logit processor (the constrained-decoding seam,
 [Chapter 13](13-inference-tricks.md)) → penalties → greedy shortcut → top-k
 → temperature softmax → top-p → min-p → one random draw. The heart of it
-(*from `src/llm/sampler.zig:116-139`, trimmed*):
+(*from `src/models/text/sampler.zig:116-139`, trimmed*):
 
 ```zig
 // temperature + softmax over the candidates (vals[0] is the max).
@@ -1021,7 +1027,7 @@ values.
 
 Finally, determinism. The RNG is `std.Random.DefaultPrng` seeded once at
 init (`sampler.zig:60-62`); the draw sequence is a pure function of the
-seed. Not cosmetic: `docs/REFERENCE.md` §13.6 notes the chat and
+seed. Not cosmetic: `docs/reference/13-the-model-stack-fucina_models.md` §13.6 notes the chat and
 speculative layers *rely* on exactly one draw per committed token, so
 speculation cannot desynchronize a seeded conversation. Determinism as a
 design value, again.
@@ -1031,7 +1037,7 @@ design value, again.
 The secret about chat models: there is no chat. The model does one thing —
 continue text. "Chat" is a *text protocol* it was fine-tuned on, and the
 entire ChatML implementation is string concatenation (*from
-`src/llm/chat.zig:80-92`*):
+`src/models/text/chat.zig:80-92`*):
 
 ```zig
 .chatml => {
@@ -1073,19 +1079,19 @@ never re-processes its past.
 
 The decode loop is the teaching centerpiece of the whole stack — thirty
 lines that contain everything this chapter built (*from
-`src/llm/chat.zig:708-744`, stop-sequence handling trimmed*):
+`src/models/text/chat.zig:743-779`, stop-sequence handling trimmed*):
 
 ```zig
 fn decodeTurn(self: *Self, prefix: []const usize, writer: *std.Io.Writer) !usize {
     const a = self.allocator;
 
     // Prefill this turn's tokens at the current cache position.
-    var logits = try self.model.forwardStep(self.ctx, &self.cache, prefix, self.cache.len);
+    var logits = try self.model.forwardStep(self.ctx, &self.cache, prefix, self.cache.len());
     defer logits.deinit();
 
     self.stream.reset();
     var produced: usize = 0;
-    while (produced < self.max_response_tokens and self.cache.len < self.cache.capacity) {
+    while (produced < self.max_response_tokens and self.cache.len() < self.cache.capacity) {
         const next = try self.sampler.next(self.ctx, &logits, self.history.items);
         if (self.isStopToken(next)) break;
         try self.stream.push(a, @intCast(next), writer);
@@ -1093,7 +1099,7 @@ fn decodeTurn(self: *Self, prefix: []const usize, writer: *std.Io.Writer) !usize
         try self.history.append(a, next);
         produced += 1;
         var single = [_]usize{next};
-        const fresh = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len);
+        const fresh = try self.model.forwardStep(self.ctx, &self.cache, &single, self.cache.len());
         logits.deinit();
         logits = fresh;
     }
@@ -1113,7 +1119,7 @@ whose prefix exceeds remaining capacity is `error.ContextFull`
 ### The comptime contract
 
 `Conversation` never names qwen3. Its expectations are the decoder
-contract (`llm.decoder`, asserted by `assertDecoder(Model)` at the top of
+contract (`models.decoder`, asserted by `assertDecoder(Model)` at the top of
 the type function; doc comment at `chat.zig:294-301`): a `Cache` type, a
 `caps` value, `initCache`, and the `forwardStep` /
 `forwardStepAllLogits` decode entries; `Tok` must provide a `Tokenizer`
@@ -1121,7 +1127,7 @@ and a `StreamDecoder`. Zig checks these at instantiation, and the two
 batch-ish entries make a beautifully instructive contrast:
 
 - **`forwardStepAllLogits` is a hard compile-time requirement — even with
-  speculation permanently off.** `docs/REFERENCE.md` §13.8.2: `send`
+  speculation permanently off.** `docs/reference/13-the-model-stack-fucina_models.md` §13.8.2: `send`
   unconditionally references the speculative path, so `Conversation`
   requires `caps.rewind` (which in turn requires the verify entry); it is
   only *executed* when speculation is enabled. Comptime checking covers
@@ -1130,7 +1136,7 @@ batch-ish entries make a beautifully instructive contrast:
   included, the moment you instantiate the type.
 - **`forwardStepBatch` is comptime-*gated*, so it is optional.** The
   family declares the capability (`caps.batch`) and the code asks before
-  touching the entry (*from `src/llm/chat.zig:817-826`, comment
+  touching the entry (*from `src/models/text/chat.zig:817-826`, comment
   included*):
 
 ```zig
@@ -1150,7 +1156,7 @@ if (comptime Model.caps.batch) {
 > and it becomes optional with a graceful runtime fallback — the `else`
 > branch is not even analysed for a model whose `caps.batch` is false. No
 > interface files, no trait declarations: the contract *is* the usage,
-> which is why the repo states it once, in `llm/decoder.zig`, and asserts
+> which is why the repo states it once, in `src/models/decoder.zig`, and asserts
 > it everywhere.
 
 Beyond `send`, the same type carries the seams
@@ -1166,7 +1172,7 @@ one of them plugs into machinery you have already seen.
 Everything so far was the *dense* Qwen3. The same file also implements the
 MoE variants — Qwen3-30B-A3B and 235B-A22B — and the difference is exactly
 one component: the FFN. Structurally, it is a two-armed union
-(*from `src/llm/runner.zig`*):
+(*from `src/models/qwen3/runner.zig`*):
 
 ```zig
 const Ffn = union(enum) {
@@ -1188,7 +1194,7 @@ memory instead — which is why Chapter 11's shard-streaming quantizer and
 Chapter 13's expert streaming exist.
 
 The routing is small enough to read whole. First the model side (*from
-`src/llm/runner.zig`, trimmed*):
+`src/models/qwen3/runner.zig`, trimmed*):
 
 ```zig
 var logits = try moe.router.linearSeq(ctx, ffn_in, .embed, .expert);
@@ -1293,9 +1299,9 @@ zig build lmserve -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --port 8
 `-Doptimize=ReleaseFast` is not optional in spirit: the README warns Debug
 is 10–50x slower, and — [Chapter 6](06-going-fast-on-cpus.md)'s lesson —
 build on the machine you run on, because the kernels specialize to the
-compiling host's CPU. Then explore the runner (`examples/qwen3/main.zig`; run it
+compiling host's CPU. Then explore the runner (`apps/qwen3/main.zig`; run it
 with no arguments for the usage text). A sampler from its README
-(`examples/qwen3/README.md`):
+(`apps/qwen3/README.md`):
 
 ```sh
 # Chat with a system prompt + sampling overrides
@@ -1362,19 +1368,19 @@ against another implementation — the verification religion of
 
 ## Explore the source
 
-- `src/llm/qwen3/model.zig` — the whole model; start at `Config`, then read
+- `src/models/qwen3/model.zig` — the whole model; start at `Config`, then read
   `forwardStepImpl`, `attentionBlock`, and `ffnBlock` in that order.
-- `src/llm/tokenizer.zig` — byte-level BPE end to end; the pretokenizer
+- `src/models/text/tokenizer.zig` — byte-level BPE end to end; the pretokenizer
   tests at the bottom are the fastest way to internalize chunking rules.
-- `src/llm/kv_cache.zig` — ~320 lines; read every doc comment, especially
+- `src/models/text/kv_cache.zig` — ~380 lines; read every doc comment, especially
   `truncate`'s.
-- `src/llm/sampler.zig` — the complete sampling pipeline in 180 lines.
-- `src/llm/chat.zig` — templates, `Conversation`, `decodeTurn`, and the
+- `src/models/text/sampler.zig` — the complete sampling pipeline in ~230 lines.
+- `src/models/text/chat.zig` — templates, `Conversation`, `decodeTurn`, and the
   reuse/batch seams Chapter 13 builds on.
 - `src/exec/topk.zig` — MoE routing in one page.
-- `examples/qwen3/main.zig` and `docs/REFERENCE.md` §13 — the runner (every flag
+- `apps/qwen3/main.zig` and `docs/reference/13-the-model-stack-fucina_models.md` §13 — the runner (every flag
   a doorway into a section of this chapter) and the machine-verified
-  `fucina_llm` reference it exercises.
+  `fucina_models` reference it exercises.
 
 ## Exercises
 
@@ -1382,13 +1388,13 @@ against another implementation — the verification religion of
    qwen2 pretokenizer splits `"I'll pay 42 euros!\n"` (§12.2's rules:
    contractions, one digit per chunk, punctuation absorbs trailing
    newlines). Check yourself with `--tokenize file.txt` and the tests in
-   `src/llm/tokenizer.zig:1174-1209`.
+   `src/models/text/tokenizer.zig:1174-1209`.
 2. **Extend MiniBpe.** Add §12.2's GPT-2 byte→Unicode mapping to the
    course-code `MiniBpe` so it encodes arbitrary bytes (spaces become
    `Ġ`-prefixed symbols); test on `"hi hi"` with your own vocabulary.
    `gpt2ByteToUnicode` (`tokenizer.zig:591`) is your reference.
 3. **Feel the cache.** Write a small runner (crib the model-loading
-   prologue from `examples/qwen3/main.zig`) that generates 64 tokens twice: once
+   prologue from `apps/qwen3/main.zig`) that generates 64 tokens twice: once
    with `Model.generate` (KV-cached), once by calling `forwardLastLogits`
    on the full growing sequence each step. Verify the token ids match
    exactly (greedy is deterministic), then time both.
@@ -1397,7 +1403,7 @@ against another implementation — the verification religion of
    `Config` (temperature 0.7, seed 42) fed identical logits and history
    produce identical sequences; changing only the seed diverges.
 5. **(Hard) A window into attention.** `groupedAttention` accepts
-   `.window = w` for sliding-window attention (`docs/REFERENCE.md` §4.13).
+   `.window = w` for sliding-window attention (`docs/reference/04-tensor-operations.md` §4.13).
    Modify a local copy of `causalAttention` in `model.zig` to pass a window
    and measure — with `--compare-logits` as your oracle — how output
    diverges from full attention as `w` shrinks on a long prompt. (Qwen3 was
