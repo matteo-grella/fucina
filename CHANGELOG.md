@@ -270,6 +270,15 @@ this point; earlier history is `git log`.
   `rhs_lifetime: fucina.RhsLifetime` (`.stable_process` = provider-owned
   bytes), so stack consumers pass the lifetime through instead of
   respelling the bool.
+- The backend kernel interface is derived from the declarations:
+  `backend/interface.zig` and its three hand-maintained name lists
+  (`names`/`generic_names`/`pool_free_names`) are gone. `native.zig`'s
+  `kernels` declaration list is the inventory; a kernel that takes no
+  `pc: ParallelConfig` carries a `pool_free_<name>` marker beside it, and
+  `backend.zig`'s `conformKernels` checks the `pc`-first/pool-free
+  contract from the signatures at comptime. Rewrite:
+  `backend.interface.names` and the count assertions over the lists become
+  reflection over `@typeInfo(backend.kernels).@"struct".decls`.
 - One CPU kernel provider: `backend/cpu.zig` is gone, and
   `-Dbackend=scalar` no longer swaps provider modules. Each kernel entry
   selects its scalar reference arm internally on the reference build

@@ -213,9 +213,10 @@ template (e.g. `softmax` for a row op, `maxPool2d` for a pool op).
 1. `src/backend/ops.zig` — only if the op needs a new selector enum
    member. The consuming switches are exhaustive, so every arm site below
    becomes a compile error until handled. One exception is named in step 8.
-2. `src/backend/interface.zig` — add the kernel name to the set (and to
-   `generic_names`/`pool_free_names` as applicable). `conform` then forces
-   the provider.
+2. `src/backend/native.zig` — add the kernel to the `kernels` table
+   (with a `pool_free_<name>` marker beside it when it takes no `pc`).
+   The declaration list is the interface; `backend.zig`'s `conformKernels`
+   checks the `pc` rule from the signature.
 3. `src/backend/vector/<domain>.zig`, its `scalar` namespace — the scalar
    reference arm. This is the specification (see 1.10; for the quantized
    GEMM family the reference is the `*Scalar` accumulator in

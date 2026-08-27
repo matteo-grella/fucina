@@ -47,7 +47,7 @@ Fields (internal but observable, reached as `ctx.<field>`):
 |---|---|---|
 | `thread_safe_allocator` | `thread.ThreadSafeAllocator` | at `init` (wraps the caller's allocator in a mutex) |
 | `allocator` | `std.mem.Allocator` | at `init` (fat pointer into `thread_safe_allocator`) |
-| `parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig), [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendinterfacezig-srcbackendzig)) |
+| `parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig), [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig)) |
 | `buffers` | `BufferPool` | at `init` ([§6.5](06-the-execution-runtime-execcontext-and-the-memory-model.md#65-bufferpool-transient-reuse-and-scratch-leases-srcexecbuffer_poolzig)) |
 | `work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
 | `dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |

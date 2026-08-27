@@ -1,5 +1,6 @@
 //! The one CPU kernel provider: the `kernels` namespace below is the kernel
-//! set `backend/interface.zig` names. Elementwise, reduction, conv, pool and
+//! set (its declaration list is the interface; `backend.zig`'s
+//! `conformKernels` checks it). Elementwise, reduction, conv, pool and
 //! Winograd entries forward to the portable `@Vector` leaves in `vector/`;
 //! the dense and quantized GEMM family is defined in this file and routes
 //! each call across the GPU provider (`-Dgpu`), a CBLAS provider (`-Dblas`)
@@ -156,22 +157,31 @@ extern fn nvpl_blas_set_num_threads(num_threads: c_int) void;
 
 pub const ParallelConfig = vector.ParallelConfig;
 
-/// The kernel set this backend provides (`backend/interface.zig` names it):
-/// the `vector/` leaf kernels by name, and the GEMM family defined below.
+/// The kernel set: the `vector/` leaf kernels by name and the GEMM family
+/// defined below. The declaration list IS the interface (`backend.zig`'s
+/// `conformKernels` derives its checks from it); a `pool_free_<name>`
+/// marker beside a kernel states that it takes no `pc: ParallelConfig`
+/// (every other kernel takes `pc` first), so going pool-free is an
+/// explicit decision, not a signature accident.
 pub const kernels = struct {
     pub const addInto = vector.elementwise.addInto;
+    pub const pool_free_addInto = true;
     pub const addContiguousIntoUnchecked = vector.elementwise.addContiguousIntoUnchecked;
     pub const divContiguousIntoUnchecked = vector.elementwise.divContiguousIntoUnchecked;
     pub const maximumContiguousIntoUnchecked = vector.elementwise.maximumContiguousIntoUnchecked;
     pub const minimumContiguousIntoUnchecked = vector.elementwise.minimumContiguousIntoUnchecked;
     pub const subInto = vector.elementwise.subInto;
+    pub const pool_free_subInto = true;
     pub const subContiguousIntoUnchecked = vector.elementwise.subContiguousIntoUnchecked;
     pub const mulInto = vector.elementwise.mulInto;
+    pub const pool_free_mulInto = true;
     pub const mulContiguousIntoUnchecked = vector.elementwise.mulContiguousIntoUnchecked;
     pub const elementwiseContiguousIntoTyped = vector.elementwise.elementwiseContiguousIntoTyped;
     pub const scaleInto = vector.elementwise.scaleInto;
     pub const addScaledSlice = vector.elementwise.addScaledSlice;
+    pub const pool_free_addScaledSlice = true;
     pub const addRowVectorSlice = vector.elementwise.addRowVectorSlice;
+    pub const pool_free_addRowVectorSlice = true;
     pub const causalDepthwiseConv1dInto = vector.conv.causalDepthwiseConv1dInto;
     pub const causalDepthwiseConv1dBackwardInputInto = vector.conv.causalDepthwiseConv1dBackwardInputInto;
     pub const causalDepthwiseConv1dBackwardKernelInto = vector.conv.causalDepthwiseConv1dBackwardKernelInto;
@@ -217,23 +227,31 @@ pub const kernels = struct {
     pub const gatedContiguousIntoUnchecked = vector.elementwise.gatedContiguousIntoUnchecked;
     pub const sumInto = vector.elementwise.sumInto;
     pub const sumSlice = vector.elementwise.sumSlice;
+    pub const pool_free_sumSlice = true;
     pub const prodInto = vector.elementwise.prodInto;
     pub const prodSlice = vector.elementwise.prodSlice;
+    pub const pool_free_prodSlice = true;
     pub const sumSliceTyped = vector.elementwise.sumSliceTyped;
     pub const dot = native.dot;
     pub const gemm = native.gemm;
     pub const gemmBatched = native.gemmBatched;
     pub const packDenseRhs = native.packDenseRhs;
+    pub const pool_free_packDenseRhs = true;
     pub const quantizeMatmulRhsBlockwiseI8 = native.quantizeMatmulRhsBlockwiseI8;
+    pub const pool_free_quantizeMatmulRhsBlockwiseI8 = true;
     pub const quantizeMatmulRhsQ4_0 = native.quantizeMatmulRhsQ4_0;
+    pub const pool_free_quantizeMatmulRhsQ4_0 = true;
     pub const quantizeMatmulRhsQ8_0 = native.quantizeMatmulRhsQ8_0;
+    pub const pool_free_quantizeMatmulRhsQ8_0 = true;
     pub const matmul2DQuantizedRhs = native.matmul2DQuantizedRhs;
     pub const matmulPacked = native.matmulPacked;
     pub const matmul2DPackedQ8_0x4LhsRhs = native.matmul2DPackedQ8_0x4LhsRhs;
     pub const matmul2DPackedPaddedQ8_0x4LhsRhs = native.matmul2DPackedPaddedQ8_0x4LhsRhs;
     pub const matmulPackedSlice = native.matmulPackedSlice;
     pub const unaryRowSlice = vector.elementwise.unaryRowSlice;
+    pub const pool_free_unaryRowSlice = true;
     pub const mulRowSlice = vector.elementwise.mulRowSlice;
+    pub const pool_free_mulRowSlice = true;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32

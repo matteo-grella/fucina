@@ -1,8 +1,8 @@
 //! Backend facade: re-exports the shared kernel vocabulary (ops, the
 //! quantized and packed RHS container types, `PackedRhsFor`) and the one
-//! CPU kernel provider. `kernels` is `native.zig`'s kernel set, the
-//! namespace `backend/interface.zig` names and checks at comptime; every
-//! pool-taking kernel takes `pc: ParallelConfig` first. `-Dbackend=scalar`
+//! CPU kernel provider. `kernels` is `native.zig`'s kernel set; its
+//! declaration list is the interface, held to the `pc`-first/pool-free
+//! contract by `conformKernels` below at comptime. `-Dbackend=scalar`
 //! does not select a second provider: it sets `backend/isa.zig`'s
 //! `reference` flag, and every kernel entry then selects its scalar
 //! reference arm internally (the `scalar` namespaces in `vector/` and the
@@ -81,9 +81,6 @@ pub const ThreadPool = thread.Pool;
 // scalar reference arms): production code above this band goes through
 // `kernels`, `blas`, or `simd`, never through the provider by name.
 pub const native_impl = @import("backend/native.zig");
-/// The kernel name lists (`names`, `generic_names`, `pool_free_names`) and
-/// `conform`; exported so the reference can assert its kernel inventory.
-pub const interface = @import("backend/interface.zig");
 // GPU GEMM provider selected by -Dgpu (metal.zig or cuda.zig, via the
 // backend/gpu.zig leaf); inert (never analyzed past the `enabled` flag) on
 // -Dgpu=none builds. This is the SECOND conformed contract: providers are
@@ -168,7 +165,44 @@ pub const ParallelConfig = native_impl.ParallelConfig;
 pub const kernels = native_impl.kernels;
 
 comptime {
-    interface.conform(native_impl.kernels);
+    conformKernels(native_impl.kernels);
+}
+
+/// The kernel-set contract, derived from the declarations themselves
+/// rather than a parallel name list: every declaration of `kernels` is
+/// either a kernel function or a `pool_free_<name>` marker naming one. A
+/// kernel that uses the worker pool takes `pc: ParallelConfig` as its
+/// FIRST parameter and nowhere else; a kernel that takes no `pc` carries
+/// the marker beside it, so dropping the pool from a signature is an
+/// explicit decision rather than an accident. Generic entries (comptime
+/// dtype/op/request or `anytype` containers) satisfy the same rule: their
+/// `pc` parameter, when present, is concrete.
+fn conformKernels(comptime Impl: type) void {
+    comptime {
+        @setEvalBranchQuota(20_000);
+        const marker = "pool_free_";
+        for (@typeInfo(Impl).@"struct".decls) |d| {
+            if (std.mem.startsWith(u8, d.name, marker)) {
+                if (!@hasDecl(Impl, d.name[marker.len..])) @compileError(
+                    "kernel marker `" ++ d.name ++ "` names no kernel",
+                );
+                continue;
+            }
+            const info = @typeInfo(@TypeOf(@field(Impl, d.name)));
+            if (info != .@"fn") @compileError(
+                "kernel namespace declares non-kernel `" ++ d.name ++ "`",
+            );
+            const params = info.@"fn".params;
+            const takes_pc = params.len > 0 and params[0].type == ParallelConfig;
+            const rest = if (takes_pc) params[1..] else params;
+            for (rest) |p| if (p.type == ParallelConfig) @compileError(
+                "kernel `" ++ d.name ++ "` takes ParallelConfig past the first parameter",
+            );
+            if (takes_pc == @hasDecl(Impl, marker ++ d.name)) @compileError(
+                "kernel `" ++ d.name ++ "` disagrees with its `pool_free_` marker on taking `pc: ParallelConfig` first",
+            );
+        }
+    }
 }
 
 test {

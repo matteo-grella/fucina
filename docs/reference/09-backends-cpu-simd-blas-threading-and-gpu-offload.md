@@ -101,41 +101,38 @@ test "backend build facts" {
 }
 ```
 
-## 9.2 The kernel interface and the kernel contract (`src/backend/interface.zig`, `src/backend.zig`)
+## 9.2 The kernel interface and the kernel contract (`src/backend.zig`, `src/backend/native.zig`)
 
 ```zig
-// src/backend/interface.zig
-pub const names = [_][]const u8{ "addInto", "addContiguousIntoUnchecked", ... }; // 76 kernels
-pub const generic_names = [_][]const u8{ ... };    // 14: take a comptime dtype, op, or request
-pub const pool_free_names = [_][]const u8{ ... };  // 13: take no `pc`
-pub fn conform(comptime Impl: type) void;          // the single comptime check
-
 // src/backend/native.zig
-pub const kernels = struct { ... };                // exactly the names above
+pub const kernels = struct {
+    pub const addInto = vector.elementwise.addInto;
+    pub const pool_free_addInto = true; // marker: takes no `pc`
+    pub const addContiguousIntoUnchecked = vector.elementwise.addContiguousIntoUnchecked;
+    ...
+};
 
 // src/backend.zig
 pub const kernels = native_impl.kernels;
 comptime {
-    interface.conform(native_impl.kernels);
+    conformKernels(native_impl.kernels); // the pc-first / pool-free contract
 }
 ```
 
-The provider meets one interface, declared once by name in
-`interface.zig`. It is a comptime-checked namespace rather than a struct of
-function pointers because many kernels are generic over a `comptime` dtype
-or op. `conform` verifies, for every name: the provider declares it;
-a non-generic entry has the reference signature (fallible kernels return
-`!T` with an inferred error set, and two inferred sets are distinct types
-by construction, so the payload is what is compared); a generic entry has
-the same parameter count; the `pc` rule below holds; and the provider
-declares nothing beyond the set.
+The declaration list of `native.kernels` IS the interface: there is no
+parallel name list to keep in sync. It is a comptime-checked namespace
+rather than a struct of function pointers because many kernels are generic
+over a `comptime` dtype or op. `conformKernels` derives its checks from
+the declarations: every declaration is a kernel function or a
+`pool_free_<name>` marker naming one; a kernel that takes
+`pc: ParallelConfig` takes it FIRST and nowhere else; and a kernel that
+takes no `pc` must carry the marker beside it, so going pool-free is an
+explicit decision rather than a signature accident.
 
 The signature rule: a kernel that needs the worker pool takes
 `pc: ParallelConfig` as its FIRST parameter; a kernel that does not use the
-pool does not take it (`pool_free_names`). Both implementations follow the
-same rule for every name, so an exec caller is backend-agnostic; the scalar
-reference accepts `pc` wherever the native kernel threads on it and ignores
-it. `ParallelConfig` is `struct { pool: ?*thread.Pool = null }`; `.{}` runs
+pool does not take it (the `pool_free_` markers). The scalar reference arms
+ignore `pc` wherever the native arms thread on it. `ParallelConfig` is `struct { pool: ?*thread.Pool = null }`; `.{}` runs
 the kernel serially.
 
 The worker team lives on `ExecContext` (`parallel_pool`, an atomic pointer
@@ -173,9 +170,10 @@ Kernel naming encodes the checking tier — with one caveat:
   combinations it has kernels for and rejects the rest at comptime.
   `gemmBatched` takes `comptime kind: ops.MatmulKind` plus batch strides.
 
-The full kernel inventory, grouped (every name is an entry of
-`interface.names`; entries marked `*` take no `pc`, entries marked `†` are
-generic over a comptime dtype, op, request, or container type):
+The full kernel inventory, grouped (every name is a declaration of
+`backend.kernels`; entries marked `*` take no `pc` and carry the
+`pool_free_` marker, entries marked `†` are generic over a comptime dtype,
+op, request, or container type):
 
 | Family | Kernels |
 |---|---|
@@ -190,22 +188,29 @@ generic over a comptime dtype, op, request, or container type):
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
 | quantized RHS | `quantizeMatmulRhsBlockwiseI8`*, `quantizeMatmulRhsQ4_0`*, `quantizeMatmulRhsQ8_0`*, `matmul2DQuantizedRhs` (the `AnyQuantizedMatmulRhs` union), `matmulPacked`† (comptime container dispatch on `(dtype, pack)` over the packed layouts, dense panels included), `matmulPackedSlice`† (pre-quantized LHS slices), `matmul2DPackedQ8_0x4LhsRhs`, `matmul2DPackedPaddedQ8_0x4LhsRhs`. The provider additionally exports `matmulQuantizedRhs`† (any compact `.rows` dtype, the `QuantGemm.rowsFor` selection) outside the conformed set, for the provider microbenches |
 
-The counts above are asserted against the lists themselves (the name
-lists are reachable as `fucina.internal.backend_mod.interface`):
+The counts above are asserted against the declarations themselves (the
+kernel set is reachable as `fucina.internal.backend_mod.kernels`):
 
 ```zig
 test "kernel interface inventory" {
     const backend = fucina.internal.backend_mod;
-    const interface = backend.interface;
-    try std.testing.expectEqual(@as(usize, 75), interface.names.len);
-    try std.testing.expectEqual(@as(usize, 13), interface.generic_names.len);
-    try std.testing.expectEqual(@as(usize, 13), interface.pool_free_names.len);
-    // Every named kernel is a declaration of the active provider's set
-    // (`conform` pins that set to exactly `names`, so the same check on the
-    // generic and pool-free lists shows they are subsets of the names).
-    inline for (interface.names ++ interface.generic_names ++ interface.pool_free_names) |name| {
-        try std.testing.expect(@hasDecl(backend.kernels, name));
+    comptime var kernel_count: usize = 0;
+    comptime var pool_free_count: usize = 0;
+    comptime var generic_count: usize = 0;
+    inline for (@typeInfo(backend.kernels).@"struct".decls) |d| {
+        if (comptime std.mem.startsWith(u8, d.name, "pool_free_")) {
+            // Marker beside its kernel; `conformKernels` pins the pairing.
+            try std.testing.expect(@hasDecl(backend.kernels, d.name["pool_free_".len..]));
+            pool_free_count += 1;
+        } else {
+            kernel_count += 1;
+            if (@typeInfo(@TypeOf(@field(backend.kernels, d.name))).@"fn".is_generic)
+                generic_count += 1;
+        }
     }
+    try std.testing.expectEqual(@as(usize, 75), kernel_count);
+    try std.testing.expectEqual(@as(usize, 13), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 13), generic_count);
 }
 ```
 
@@ -568,7 +573,7 @@ arm per GGML format) and, per call, quantizes the f32 activation rows into
 the format's activation blocks — `Q8_0`/`Q8_1` for legacy and
 `IQ4_NL`/`MXFP4`/`NVFP4` formats, `Q8_K` for K-quants and the `IQ*`/`TQ*`
 table formats — using the caller's allocator (the deliberate scratch tier
-from [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendinterfacezig-srcbackendzig)). The x4/x8 interleaved fast paths add row-shape policy, tuned so
+from [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig)). The x4/x8 interleaved fast paths add row-shape policy, tuned so
 every row's math stays bit-identical to the kernel that owns it:
 
 - `Q8_0x4`: `m % 4 == 0` goes straight to the packed kernel; `12 ≤ m < 32`
@@ -646,7 +651,7 @@ This subsection covers the backend seam.
 `tryWorkPool` (under `work_pool_mutex`) initializes one `thread.Pool`
 per `ExecContext` with `cpuThreadCount(vector_max_threads) - 1` workers and
 publishes it in `ExecContext.parallel_pool` — the atomic
-release-store/acquire-load pair from [§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig) and [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendinterfacezig-srcbackendzig), because a kernel
+release-store/acquire-load pair from [§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig) and [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig), because a kernel
 dispatched on another thread may race the publication; every kernel call
 reads it through `ctx.pc()`. `ExecContext.deinit` unpublishes (stores
 `null`) before destroying the pool. Exec ops call
