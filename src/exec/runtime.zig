@@ -155,16 +155,6 @@ pub fn floatEnvironmentAtInit(self: *const ExecContext) ?fpenv.Environment {
     return self.fp_env_at_init;
 }
 
-/// Speculation-verify kernel pinning: while ON, batched quant-matmul
-/// ops reproduce the m == 1 kernel numerics bitwise, so a verify
-/// batch's logits equal sequential decode's (the lossless-speculation
-/// requirement at any draft depth). Toggle around a speculative
-/// VERIFY forward only — batch throughput is sacrificed while pinned.
-/// See `ExecContext.pin_rowwise_kernels` for the mechanism.
-pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void {
-    self.pin_rowwise_kernels = on;
-}
-
 /// Per-context tuning overrides: route policy that can differ between
 /// two contexts in one process (fields left null follow the process-wide
 /// FUCINA_* gates; see `fucina.tuning`).
@@ -254,6 +244,42 @@ pub fn disableQuantDotGpu(self: *ExecContext) QuantDotGpuDisabledScope {
 
 pub fn quantDotGpuEnabled(self: *const ExecContext) bool {
     return self.quant_dot_gpu_disabled.load(.acquire) == 0;
+}
+
+// ------------------------------------------------------------------
+// Quant-matmul batch numerics: the speculative-verify rowwise pin.
+// ------------------------------------------------------------------
+
+/// Handle returned by `pinRowwiseNumerics`; `close` lifts the pin (nests).
+pub const RowwiseNumericsScope = struct {
+    ctx: *ExecContext,
+    active: bool = true,
+
+    pub fn close(self: *RowwiseNumericsScope) void {
+        if (!self.active) return;
+        std.debug.assert(self.ctx.rowwise_numerics_pinned > 0);
+        self.ctx.rowwise_numerics_pinned -= 1;
+        self.active = false;
+    }
+};
+
+/// Pin every quant-matmul entry on this context to `.rowwise` numerics
+/// (`QuantMatmul.numerics`) while the returned scope is open: batched
+/// entries reproduce the m == 1 kernel numerics bitwise, so a
+/// speculative-verify batch's logits — and the KV rows it leaves behind —
+/// equal sequential decode's (the lossless-speculation requirement at any
+/// draft depth). Open around a speculative VERIFY forward only: batch
+/// matmul throughput is sacrificed while pinned. A depth count, so scopes
+/// nest; like every other context mutation it belongs to one thread.
+pub fn pinRowwiseNumerics(self: *ExecContext) RowwiseNumericsScope {
+    self.rowwise_numerics_pinned += 1;
+    return .{ .ctx = self };
+}
+
+/// True while a `pinRowwiseNumerics` scope is open: the quant matmuls
+/// then run `.rowwise` numerics regardless of the per-call request.
+pub fn rowwiseNumericsPinned(self: *const ExecContext) bool {
+    return self.rowwise_numerics_pinned > 0;
 }
 
 // ------------------------------------------------------------------

@@ -182,19 +182,20 @@ pub const ExecContext = struct {
     /// Open `disableQuantDotGpu` scopes on this context (any thread); the
     /// quantized-RHS facade dot offloads only while zero.
     quant_dot_gpu_disabled: std.atomic.Value(u32) = .init(0),
-    /// Speculation-verify kernel pinning (toggle through
-    /// `pinRowwiseKernels`). While set, every batched
-    /// quant-matmul entry reproduces the m == 1 kernel numerics exactly:
-    /// the packed/plain entries run as independent single-row calls of
-    /// themselves, the fused K-quant entries keep their per-row tail
-    /// kernels for every row, and the batched MoE op skips the
+    /// Open `pinRowwiseNumerics` scopes on this context (the
+    /// speculative-verify kernel pin). While nonzero, every batched
+    /// quant-matmul entry runs `.rowwise` numerics
+    /// (`QuantMatmul.numerics`) and reproduces the m == 1 kernel numerics
+    /// exactly: the packed/plain entries run as independent single-row
+    /// calls of themselves, the fused K-quant entries keep their per-row
+    /// tail kernels for every row, and the batched MoE op skips the
     /// lane-packed Q8_Kx4 kernels. A verify batch then produces logits
     /// bit-identical to sequential decode — the property that keeps deep
     /// speculative drafting lossless. Batch matmul throughput is
     /// deliberately sacrificed while pinned (verify batches are small,
     /// and on streamed MoE the expert-fetch amortization — the part that
     /// pays — is preserved).
-    pin_rowwise_kernels: bool = false,
+    rowwise_numerics_pinned: u32 = 0,
     /// Grow-only MoE-decode scratch (`exec/moe.zig`): carved by the
     /// single-row MoE entries under its own mutex.
     moe_scratch: MoeDecodeScratch = .{},
@@ -207,7 +208,6 @@ pub const ExecContext = struct {
 
     pub const init = exec_runtime.init;
     pub const deinit = exec_runtime.deinit;
-    pub const pinRowwiseKernels = exec_runtime.pinRowwiseKernels;
     pub const setTuning = exec_runtime.setTuning;
     pub const checkFloatEnvironment = exec_runtime.checkFloatEnvironment;
     pub const floatEnvironmentAtInit = exec_runtime.floatEnvironmentAtInit;
@@ -251,6 +251,9 @@ pub const ExecContext = struct {
     pub const QuantDotGpuDisabledScope = exec_runtime.QuantDotGpuDisabledScope;
     pub const disableQuantDotGpu = exec_runtime.disableQuantDotGpu;
     pub const quantDotGpuEnabled = exec_runtime.quantDotGpuEnabled;
+    pub const RowwiseNumericsScope = exec_runtime.RowwiseNumericsScope;
+    pub const pinRowwiseNumerics = exec_runtime.pinRowwiseNumerics;
+    pub const rowwiseNumericsPinned = exec_runtime.rowwiseNumericsPinned;
     pub const tryWorkPool = exec_runtime.tryWorkPool;
     pub const workPool = exec_runtime.workPool;
     pub const pc = exec_runtime.pc;

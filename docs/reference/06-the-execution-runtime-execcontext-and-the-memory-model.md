@@ -31,7 +31,7 @@ pub const ExecContext = struct {
     dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
     scopes: ScopeStack,              // the context's own exec-scope stack
     quant_dot_gpu_disabled: std.atomic.Value(u32), // open disableQuantDotGpu scopes
-    pin_rowwise_kernels: bool,
+    rowwise_numerics_pinned: u32, // open pinRowwiseNumerics scopes
     fp_env_at_init: ?fpenv.Environment,
     moe_scratch: MoeDecodeScratch,   // grow-only MoE decode scratch
 
@@ -97,7 +97,8 @@ pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
 pub fn pc(self: *const ExecContext) backend.ParallelConfig
 pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
-pub fn pinRowwiseKernels(self: *ExecContext, on: bool) void
+pub fn pinRowwiseNumerics(self: *ExecContext) RowwiseNumericsScope
+pub fn rowwiseNumericsPinned(self: *const ExecContext) bool
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
 pub fn replace(self: *ExecContext, old: anytype, new_value: anytype) @TypeOf(new_value)
 pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: anytype) !Tensor
@@ -114,15 +115,19 @@ returns a zero-copy view (a refcounted alias, [§6.2](06-the-execution-runtime-e
 [§2.6](02-toolchain-build-and-project-wiring.md#26-runtime-environment-variables)): fields left null follow the process-wide FUCINA_* gates, so two
 contexts in one process can run different route policy (first consumer: the
 CPU f32 weight-shadow route).
-`pinRowwiseKernels(true)` pins every batched quant-matmul entry to the
-`m == 1` kernel numerics — the packed/plain entries run as independent
-single-row calls of themselves, the fused K-quant entries keep their
-per-row tail kernels for every row, and the batched MoE op skips the
-lane-packed Q8_Kx4 kernels — so a speculation verify batch produces
-logits bit-identical to sequential decode, the property that keeps deep
-speculative drafting lossless ([§13.9](13-the-model-stack-fucina_models.md#139-speculative-decoding-srcmodelstextspeculative)). Batch matmul throughput is
-deliberately sacrificed while pinned; toggle it around the verify forward
-only (the backing field is `pin_rowwise_kernels`, false at `init`). The
+`pinRowwiseNumerics()` opens a scope that pins every batched quant-matmul
+entry on the context to the `m == 1` kernel numerics
+(`QuantMatmul.numerics = .rowwise`, forced context-wide) — the
+packed/plain entries run as independent single-row calls of themselves,
+the fused K-quant entries keep their per-row tail kernels for every row,
+and the batched MoE op skips the lane-packed Q8_Kx4 kernels — so a
+speculation verify batch produces logits bit-identical to sequential
+decode, the property that keeps deep speculative drafting lossless
+([§13.9](13-the-model-stack-fucina_models.md#139-speculative-decoding-srcmodelstextspeculative)). Batch matmul throughput is
+deliberately sacrificed while pinned; open the scope around the verify
+forward only and `close()` it after (scopes nest — the backing field is
+`rowwise_numerics_pinned`, an open-scope count, zero at `init`;
+`rowwiseNumericsPinned()` is the query). The
 scope and pool methods are covered below.
 
 **MoE decode scratch** (`moe_scratch`, ops in `src/exec/moe.zig`). A

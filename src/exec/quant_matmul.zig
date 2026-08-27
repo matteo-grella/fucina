@@ -82,9 +82,10 @@ pub const Numerics = enum { batched, rowwise };
 /// consulted (`.auto` asks `offload`, exactly as the dedicated entries
 /// did; a decline falls through to the CPU kernels), `rhs_lifetime` the
 /// RHS storage guarantee for address-keyed GPU caches, and `numerics` the
-/// batch policy: `.rowwise` reproduces `ExecContext.pin_rowwise_kernels`
-/// for this call — every row runs the m == 1 kernels (the K-quant fused
-/// engine pins by forcing its per-row tail kernel instead of looping).
+/// batch policy: `.rowwise` pins every row to the m == 1 kernels, also
+/// forced context-wide by an open `pinRowwiseNumerics` scope (the K-quant
+/// fused engine pins by forcing its per-row tail kernel instead of
+/// looping).
 pub const QuantMatmul = struct {
     prologue: ?exec_row_ops.FusedActKind = null,
     placement: Placement = .auto,
@@ -224,11 +225,11 @@ fn matmulQuantImpl(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     const Rhs = @typeInfo(@TypeOf(rhs)).pointer.child;
     comptime if (opts.prologue != null and rhsClass(Rhs) != .lane_packed)
         @compileError("matmulQuant: the fused prologues serve the lane-packed containers, not " ++ @typeName(Rhs));
-    // The one row-pinned fallback (see `ExecContext.pin_rowwise_kernels`
-    // and `QuantMatmul.numerics`). The dense panel never pins; the K-quant
+    // The one row-pinned fallback (see `QuantMatmul.numerics` and
+    // `ExecContext.pinRowwiseNumerics`). The dense panel never pins; the K-quant
     // fused engine pins inside its body.
     if (comptime rhsClass(Rhs) != .dense and !pinsViaTailKernel(Rhs, opts)) {
-        if ((self.pin_rowwise_kernels or opts.numerics == .rowwise) and m > 1)
+        if ((self.rowwiseNumericsPinned() or opts.numerics == .rowwise) and m > 1)
             return rowwisePinned(self, out, lhs, rhs, opts, m, k);
     }
     return matmulQuantBody(self, out, lhs, rhs, opts, m, k);
@@ -322,7 +323,7 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
             .q6_kx4 => .q6_kx4,
             else => unreachable,
         };
-        const pinned = self.pin_rowwise_kernels or opts.numerics == .rowwise;
+        const pinned = self.rowwiseNumericsPinned() or opts.numerics == .rowwise;
         switch (comptime act) {
             .split_swiglu => {
                 const gate_up = switch (lhs) {
@@ -505,7 +506,7 @@ fn fusedKQuantGemm(
 
     // Pinned mode forces the per-row tail kernels for every row: they are
     // the m == 1 dispatch, so the batch stays bit-identical to sequential
-    // decode (see ExecContext.pin_rowwise_kernels / QuantMatmul.numerics).
+    // decode (see QuantMatmul.numerics / ExecContext.pinRowwiseNumerics).
     const use_x4 = !pinned and switch (kind) {
         .q4_kx8 => m % 4 == 0 or m >= 64 or (m >= 4 and m < 32),
         .q5_kx8 => m % 4 == 0 or m >= 128,

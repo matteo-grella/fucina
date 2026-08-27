@@ -113,9 +113,9 @@ pub fn runVerifyBatch(
             defer cache.deinit();
             var prefill_logits = try model.forwardStep(ctx, &cache, tokens, 0);
             prefill_logits.deinit();
-            ctx.pinRowwiseKernels(pinned);
+            var pin: ?fucina.ExecContext.RowwiseNumericsScope = if (pinned) ctx.pinRowwiseNumerics() else null;
             var all = blk: {
-                defer ctx.pinRowwiseKernels(false);
+                defer if (pin) |*p| p.close();
                 break :blk try model.forwardStepAllLogits(ctx, &cache, committed[0..m], pos0);
             };
             defer all.deinit();
@@ -181,9 +181,9 @@ pub fn runVerifyBatch(
         var verify_buf: [9]usize = undefined;
         verify_buf[0] = committed[0];
         for (verify_buf[1..m]) |*t| t.* = 0; // deliberately wrong drafts
-        ctx.pinRowwiseKernels(true);
+        var pin = ctx.pinRowwiseNumerics();
         var all = blk: {
-            defer ctx.pinRowwiseKernels(false);
+            defer pin.close();
             break :blk try model.forwardStepAllLogits(ctx, &cache, verify_buf[0..m], pos0);
         };
         all.deinit();

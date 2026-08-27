@@ -303,16 +303,16 @@ pub fn main(init: std.process.Init) !void {
                 drafted += 1;
             }
             // Verify with one batched trunk step; rewind on partial accept.
-            // Kernel-pinned (ExecContext.pinRowwiseKernels): the verify
+            // Kernel-pinned (ExecContext.pinRowwiseNumerics): the verify
             // logits AND the cache rows it leaves behind for accepted
             // positions are bit-identical to sequential decode at any
             // depth, which is what keeps --mtp output byte-identical to
             // plain greedy.
             var snap = try session.cache.snapshot();
             defer snap.deinit();
-            ctx.pinRowwiseKernels(true);
+            var pin = ctx.pinRowwiseNumerics();
             _ = blk: {
-                defer ctx.pinRowwiseKernels(false);
+                defer pin.close();
                 break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], .{ .all = streams_all[0 .. n_drafts * hc_dim] });
             };
             forwards += 1;
@@ -340,12 +340,12 @@ pub fn main(init: std.process.Init) !void {
                 // replay only the accepted tokens to rebuild the caches —
                 // pinned too, so the rebuilt rows match sequential decode.
                 session.cache.restore(&snap);
-                ctx.pinRowwiseKernels(true);
+                var pin_replay = ctx.pinRowwiseNumerics();
                 // Rows-less stepBatchExtra returns the SESSION-OWNED logits
                 // slice — discarded, never freed (freeing it poisons the
                 // session's buffer and the next step segfaults).
                 _ = blk: {
-                    defer ctx.pinRowwiseKernels(false);
+                    defer pin_replay.close();
                     break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
                 forwards += 1;
@@ -405,9 +405,9 @@ pub fn main(init: std.process.Init) !void {
 
             var snap = try session.cache.snapshot();
             defer snap.deinit();
-            ctx.pinRowwiseKernels(true);
+            var pin = ctx.pinRowwiseNumerics();
             _ = blk: {
-                defer ctx.pinRowwiseKernels(false);
+                defer pin.close();
                 break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..n_drafts], rows[0..n_drafts], null);
             };
             forwards += 1;
@@ -441,12 +441,12 @@ pub fn main(init: std.process.Init) !void {
                 // Restore and replay only the accepted prefix — pinned, so
                 // the rebuilt cache rows match sequential decode.
                 session.cache.restore(&snap);
-                ctx.pinRowwiseKernels(true);
+                var pin_replay = ctx.pinRowwiseNumerics();
                 // Rows-less stepBatchExtra returns the SESSION-OWNED logits
                 // slice — discarded, never freed (freeing it poisons the
                 // session's buffer and the next step segfaults).
                 _ = blk: {
-                    defer ctx.pinRowwiseKernels(false);
+                    defer pin_replay.close();
                     break :blk try models.deepseek4.model.stepBatchExtra(&model, &ctx, &session, draft_buf[0..accepted], null, null);
                 };
                 forwards += 1;

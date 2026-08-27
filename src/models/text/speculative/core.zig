@@ -40,10 +40,10 @@
 //! Logits, however, are computed in verify batches of m = 1+draft rows
 //! instead of m = 1, so byte-identity with a plain run rests on two
 //! legs. (1) `Options.pin_kernels` (the default): the verify forward
-//! runs under `ExecContext.pinRowwiseKernels`, making every batched
-//! quant-matmul entry reproduce the m == 1 numerics bitwise — both the
-//! verify LOGITS and the KV rows the verify leaves behind for committed
-//! positions (qwen3's --verify-batch harness checks rows, post-batch
+//! runs under an `ExecContext.pinRowwiseNumerics` scope, making every
+//! batched quant-matmul entry reproduce the m == 1 numerics bitwise —
+//! both the verify LOGITS and the KV rows the verify leaves behind for
+//! committed positions (qwen3's --verify-batch harness checks rows, post-batch
 //! continuation, and garbage-draft truncate-replay, all bitwise through
 //! m = 32). (2) The caller must PREFILL both runs identically — the same
 //! tokens in the same single batch — because prefill kernels are
@@ -195,7 +195,7 @@ pub const Options = struct {
     /// arrives as an accepted draft token mid-batch. Null = no stop token.
     stop_token: ?usize = null,
     /// Kernel-family pinning for the verify forward
-    /// (`ExecContext.pinRowwiseKernels`): the batched quant matmuls
+    /// (`ExecContext.pinRowwiseNumerics`): the batched quant matmuls
     /// reproduce the m == 1 numerics bitwise — verify logits AND the KV
     /// rows left behind for committed positions — one of the two legs of
     /// the byte-identity contract (module doc; the other leg is the
@@ -723,8 +723,8 @@ pub fn SpeculativeDecoder(comptime Model: type) type {
             errdefer kv.truncate(history.items.len - 1);
 
             const t0 = self.nowNs();
-            if (self.options.pin_kernels) ctx.pinRowwiseKernels(true);
-            defer if (self.options.pin_kernels) ctx.pinRowwiseKernels(false);
+            var pin: ?ExecContext.RowwiseNumericsScope = if (self.options.pin_kernels) ctx.pinRowwiseNumerics() else null;
+            defer if (pin) |*p| p.close();
             var logits = try model.forwardStepAllLogits(ctx, kv, verify, pos0);
             defer logits.deinit();
             const verify_ns: ?u64 = if (t0) |start| @intCast(self.nowNs().? - start) else null;

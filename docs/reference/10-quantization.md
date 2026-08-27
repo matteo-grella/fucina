@@ -394,9 +394,9 @@ width 2k, for `.split_swiglu`); `.rms_norm` is `{ x, weight, eps }`;
 `.gate_up` is `{ gate, up }` (`.geglu_quant`, `q8_0x4` only).
 `placement = .auto` consults the GPU offload seam exactly as the named
 entries did, falling back to the CPU kernels on decline;
-`numerics = .rowwise` pins every row to the m == 1 kernels (the
-`pin_rowwise_kernels` semantics, per call; the K-quant fused engine pins
-by forcing its per-row tail kernel instead of looping). RHS containers
+`numerics = .rowwise` pins every row to the m == 1 kernels — per call,
+or context-wide through an open `pinRowwiseNumerics` scope; the K-quant
+fused engine pins by forcing its per-row tail kernel instead of looping. RHS containers
 come from `packMatmulRhs`/`packMatmulRhsAs` (owned lane packs),
 `packDenseMatmulRhs` (the dense f32 panel), or the borrowing
 `compactMatmulRhs`/`compactMatmulRhsFromBlocks` (a compact `.rows`

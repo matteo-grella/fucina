@@ -1564,7 +1564,7 @@ a persistent sampler never desyncs. Given bitwise-identical logits the output
 stream equals the non-speculative run's. Logits are computed in verify
 batches of m = 1+draft rows, and byte-identity with a plain run rests on
 two legs: `Options.pin_kernels` (the default) runs the verify forward
-under `ExecContext.pinRowwiseKernels` ([§6.1](06-the-execution-runtime-execcontext-and-the-memory-model.md#61-execcontext-role-and-lifecycle-srcexeczig-srcexecruntimezig)), so every batched quant
+under an `ExecContext.pinRowwiseNumerics` scope ([§6.1](06-the-execution-runtime-execcontext-and-the-memory-model.md#61-execcontext-role-and-lifecycle-srcexeczig-srcexecruntimezig)), so every batched quant
 matmul reproduces the m = 1 numerics bitwise — the verify logits AND the
 KV rows the verify leaves behind for committed positions — and the caller
 must prefill both runs identically (prefill kernels are

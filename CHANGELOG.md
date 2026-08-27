@@ -41,9 +41,14 @@ this point; earlier history is `git log`.
   names the fused activation (`.split_swiglu`/`.rms_norm_mul`/
   `.geglu_quant`), `placement` the accelerator policy, `rhs_lifetime` the
   RHS storage guarantee, and `numerics = .rowwise` the per-call
-  kernel-pinned batch mode (`pin_rowwise_kernels` semantics without the
-  context flag). The body is one row-pinned fallback, one fused prologue,
-  one accelerator attempt and one backend call.
+  kernel-pinned batch mode. The body is one row-pinned fallback, one
+  fused prologue, one accelerator attempt and one backend call.
+- `ExecContext.pinRowwiseNumerics()` / `rowwiseNumericsPinned()`
+  (`RowwiseNumericsScope`): the context-scoped rowwise-numerics pin — a
+  nesting scope count forcing `QuantMatmul.numerics = .rowwise` on every
+  quant matmul (and the batched MoE op) while open. The
+  speculative-verify pin, replacing the `pin_rowwise_kernels` bool +
+  `pinRowwiseKernels()` setter (see Removed).
 - `ExecContext.compactMatmulRhs` / `compactMatmulRhsFromBlocks`
   (`exec.CompactRhsFor(dt)`): the borrowing compact `.rows` container over
   a block-quantized weight tensor's blocks or a raw block slice, for
@@ -222,6 +227,16 @@ this point; earlier history is `git log`.
   The `try*` GPU attempts (`tryMatmulQuantRhs`, `tryMatmulTernaryFolded`,
   `tryMatmulQuantRhsSharedInput`) stay: they take raw quantized bytes and
   a decline-to-CPU contract that `matmulQuant` does not subsume.
+- `ExecContext.pin_rowwise_kernels` and `pinRowwiseKernels(on)`: the raw
+  bool + setter give way to the request vocabulary. Rewrite: pass
+  `.numerics = .rowwise` on the `QuantMatmul` request of the calls that
+  must pin, or — around a whole verify forward whose model internals you
+  do not thread options through — open the context scope:
+  `var pin = ctx.pinRowwiseNumerics(); defer pin.close();` (the query is
+  `ctx.rowwiseNumericsPinned()`; the backing field is the open-scope
+  count `rowwise_numerics_pinned`). Semantics are unchanged: batched
+  quant matmuls reproduce the m == 1 numerics bitwise while pinned, the
+  lossless-speculation property.
 - `fucina.native_uses_accelerate`: derivable from the facts that remain.
   Rewrite: `fucina.native_blas_kind == .accelerate`.
 
