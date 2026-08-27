@@ -18,7 +18,7 @@ stops being a style preference and becomes the difference between music and
 noise. And there is a historical symmetry to enjoy along the way: the language
 we have been learning was itself born from exactly this problem.
 
-The subject is `examples/nam/` — a complete, self-contained port of the
+The subject is `apps/nam/` — a complete, self-contained port of the
 [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler)
 ecosystem. One binary loads any upstream `.nam` amp profile, plays it live
 against your audio devices, benchmarks it, trains *new* profiles from captured
@@ -59,7 +59,7 @@ recorded what came back. A neural network was then trained so that
 file. That file is a `.nam`, and there are thousands of free ones:
 [Tone3000](https://www.tone3000.com) hosts a large public library, almost all
 of them the "standard WaveNet" architecture this example runs at full fidelity
-(`examples/nam/README.md`, Getting started).
+(`apps/nam/README.md`, Getting started).
 
 > **ML note** — Why a *neural* network for an amplifier? Because distortion
 > is nonlinearity, and nonlinearity is precisely what linear DSP cannot
@@ -67,13 +67,13 @@ of them the "standard WaveNet" architecture this example runs at full fidelity
 > as loud; a tube amp pushed twice as hard produces a *different shape* —
 > that is what "breakup" is. The consequence threads through this whole
 > chapter: input level changes **tone**, not just volume
-> (`examples/nam/README.md`: "NAM models are nonlinear, so input level
+> (`apps/nam/README.md`: "NAM models are nonlinear, so input level
 > controls breakup, not just loudness"), and a nonlinear model cannot be
 > resampled to another rate the way a linear filter can (§10.12).
 
 The format is refreshingly plain. A `.nam` file is **one JSON document**:
 `version`, `architecture`, `config`, `weights` (a flat float array), optional
-`metadata`, optional `sample_rate` (`examples/nam/nam_file.zig:1-15`). The
+`metadata`, optional `sample_rate` (`apps/nam/nam_file.zig:1-15`). The
 reader accepts versions 0.5.0 through 0.7.x, matching the upstream loader's
 gate exactly:
 
@@ -85,18 +85,18 @@ pub const latest_version = Version{ .major = 0, .minor = 7, .patch = 0 };
 pub const earliest_version = Version{ .major = 0, .minor = 5, .patch = 0 };
 ```
 
-*(from `examples/nam/nam_file.zig:29-33`)*
+*(from `apps/nam/nam_file.zig:29-33`)*
 
 Four architectures exist in the wild — `pub const Arch = enum { wavenet,
-lstm, convnet, linear };` (`examples/nam/nam_file.zig:60`) — and the example
+lstm, convnet, linear };` (`apps/nam/nam_file.zig:60`) — and the example
 loads and plays all of them, plus the current upstream trainer's
 `SlimmableContainer` export. Training, however, targets WaveNet only; keep
-that asymmetry in mind for §10.6 (`examples/nam/README.md`, Compatibility
-guarantees; `examples/nam/main.zig:647`).
+that asymmetry in mind for §10.6 (`apps/nam/README.md`, Compatibility
+guarantees; `apps/nam/main.zig:647`).
 
 The part worth savouring is `weights`. The classic "standard" WaveNet — the
 config behind most profiles you will download — is **13,802 floats**
-(`examples/nam/README.md`; `examples/nam/train.zig:34-36`). Not billions.
+(`apps/nam/README.md`; `apps/nam/train.zig:34-36`). Not billions.
 Thirteen thousand. A model that imitates a tube amplifier convincingly enough
 that guitarists use it on stage fits in 55 KB and stays resident in L1 cache.
 "A model is just numbers plus a shape recipe" is a slogan from
@@ -118,7 +118,7 @@ fn buildLayer(allocator: std.mem.Allocator, lc: *const nam_file.WaveNetLayerArra
     cursor.* += input_mixin.loadNamWeights(weights[cursor.*..]);
 ```
 
-*(from `examples/nam/wavenet.zig:305-313`)*
+*(from `apps/nam/wavenet.zig:305-313`)*
 
 Two things to notice. First, the `errdefer` ladder from
 [Chapter 3](03-tensors-from-scratch.md) again: every partially-built resource
@@ -132,7 +132,7 @@ subtlety:
 if (cursor + 1 != weights.len) return error.WeightCountMismatch;
 ```
 
-*(from `examples/nam/wavenet.zig:233-235`)*
+*(from `apps/nam/wavenet.zig:233-235`)*
 
 The JSON `config` *does* carry a `head_scale` field — but at runtime the
 engine takes the value from the **last float of the weight stream**, which
@@ -143,7 +143,7 @@ porting means porting the behaviour, not the documentation.
 
 One more design decision worth naming: `NamModel` retains the original file
 bytes — `raw_bytes: []u8` — "for byte-faithful re-export"
-(`examples/nam/nam_file.zig:248-249`). That single field is what makes the
+(`apps/nam/nam_file.zig:248-249`). That single field is what makes the
 GGUF interchange of §10.8 *lossless by construction* rather than lossless by
 careful re-serialization.
 
@@ -152,9 +152,9 @@ from the internet, so shapes that would corrupt memory are rejected with
 `error.InvalidConvShape` — `taps == 0` would underflow the padding
 arithmetic, `taps > max_taps` would overrun fixed tile arrays, a huge
 dilation would blow up the history allocation
-(`examples/nam/stream_conv.zig:52-60`). The upstream C++ core asserts these
+(`apps/nam/stream_conv.zig:52-60`). The upstream C++ core asserts these
 only in debug builds; the port's module docs record each such divergence as a
-deliberate deviation (`examples/nam/engine.zig:6-7`).
+deliberate deviation (`apps/nam/engine.zig:6-7`).
 
 ## 10.3 WaveNet: exponential context at linear cost
 
@@ -167,7 +167,7 @@ looks only backwards in time. Output `y[t]` depends on `x[t]`, `x[t−d]`,
 `x[t−2d]`, … and never on `x[t+anything]`. This is the streaming counterpart
 of the `causalConv1d` op you met in the operation library
 ([Chapter 5](05-the-operation-library.md)); the two share the same `[tap, in,
-out]` weight orientation by design (`examples/nam/stream_conv.zig:3-5`).
+out]` weight orientation by design (`apps/nam/stream_conv.zig:3-5`).
 
 Now *dilated*: `d` is the spacing between taps. A 3-tap conv with dilation 1
 sees 3 consecutive samples; with dilation 512 it sees 3 samples spread over
@@ -175,16 +175,16 @@ sees 3 consecutive samples; with dilation 512 it sees 3 samples spread over
 doubles how far back the network can hear, while adding only a constant
 amount of work. The receptive field of one such stack is
 `1 + Σ d·(k−1)` — implemented three separate times in the example
-(`examples/nam/nam_file.zig:134-141`, `examples/nam/train.zig:55-61`, and the
-ConvNet variant at `examples/nam/nam_file.zig:186-190`; the first also adds a
+(`apps/nam/nam_file.zig:134-141`, `apps/nam/train.zig:55-61`, and the
+ConvNet variant at `apps/nam/nam_file.zig:186-190`; the first also adds a
 `(head_kernel − 1)` term, zero for the classic config's `head_kernel = 1`,
-`examples/nam/train.zig:2372`), the parity habit of
+`apps/nam/train.zig:2372`), the parity habit of
 [Chapter 6](06-going-fast-on-cpus.md) applied to arithmetic: derive it once,
 verify it thrice.
 
 Work it out for the real config. The classic spec is *2 arrays, 16→8
 channels, k=3, dilations 1..512, Tanh, head_scale 0.02 — 13,802 weights*
-(`examples/nam/train.zig:34-43`). This course snippet does the arithmetic and
+(`apps/nam/train.zig:34-43`). This course snippet does the arithmetic and
 `zig test` confirms it (course code, not repo code):
 
 ```zig
@@ -246,7 +246,7 @@ a second time in autograd ops:
 //! stream). All buffers are sized once at init; process() is allocation-free.
 ```
 
-*(from `examples/nam/wavenet.zig:4-15`)*
+*(from `apps/nam/wavenet.zig:4-15`)*
 
 Three structural ideas hide in those lines. The **condition mixin**: the raw
 input is re-fed to *every* layer, not just the first, so deep layers never
@@ -261,7 +261,7 @@ transformer of [Chapter 12](12-a-transformer-from-scratch.md).
 Gated variants (`a = act(top) * act2(bottom)`), FiLM conditioning, grouped
 convolutions and nested `condition_dsp` engines are all supported for loading
 — real downloadable files use them — but they are refinements of the same
-skeleton, and the module doc plus `examples/nam/nam_file.zig:88-120` are the
+skeleton, and the module doc plus `apps/nam/nam_file.zig:88-120` are the
 reference when you want them.
 
 ## 10.4 Streaming convolution: state makes chunking disappear
@@ -277,7 +277,7 @@ output could still reach back into. The example calls this the *history*, and
 its streaming conv states the contract in its module doc: "the per-conv
 history holds the last `dilation*(K-1)` input rows so output is independent
 of how the stream is chunked. All buffers are allocated at init; `process` is
-allocation-free" (`examples/nam/stream_conv.zig:1-9`).
+allocation-free" (`apps/nam/stream_conv.zig:1-9`).
 
 The entire "streaming" idea is five lines inside the kernel — a tap either
 reads this chunk or the saved history, and nothing else changes:
@@ -294,7 +294,7 @@ while (t < frames) : (t += 1) {
     }
 ```
 
-*(from `examples/nam/stream_conv.zig:223-231`)*
+*(from `apps/nam/stream_conv.zig:223-231`)*
 
 Advancing the history is a separate, explicit step:
 
@@ -313,11 +313,11 @@ pub fn push(self: *StreamConv, input: []const f32, frames: usize) void {
 }
 ```
 
-*(from `examples/nam/stream_conv.zig:300-313`)*
+*(from `apps/nam/stream_conv.zig:300-313`)*
 
 The `process`/`push` split is a deliberate compute-then-commit design:
 `process` "does NOT advance history — call `push` with the same input
-afterwards" (`examples/nam/stream_conv.zig:158-159`). Calling `process` twice
+afterwards" (`apps/nam/stream_conv.zig:158-159`). Calling `process` twice
 without `push` is idempotent, which makes chunk-invariance trivially testable
 — and forgetting `push` is the documented gotcha: your convs go subtly stale
 and the audio is wrong in ways your ears notice before your tests do.
@@ -398,7 +398,7 @@ test "output is independent of how the stream is chunked" {
 The real kernel wraps the same logic in the SIMD vocabulary of
 [Chapter 6](06-going-fast-on-cpus.md): output channels are processed
 `vector_len` at a time (`std.simd.suggestVectorLength(f32) orelse 4`,
-`examples/nam/stream_conv.zig:13-14`), and each weight-vector load is
+`apps/nam/stream_conv.zig:13-14`), and each weight-vector load is
 amortized across `time_tile = 8` frames of fused multiply-adds:
 
 ```zig
@@ -413,26 +413,26 @@ for (0..self.taps) |k| {
 }
 ```
 
-*(from `examples/nam/stream_conv.zig:190-198`)*
+*(from `apps/nam/stream_conv.zig:190-198`)*
 
 The comment on `time_tile` names what this buys: "the Eigen-GEMM-style
 amortization upstream gets from processing whole blocks as matrix products"
-(`examples/nam/stream_conv.zig:146-149`) — the C++ reference leans on Eigen;
+(`apps/nam/stream_conv.zig:146-149`) — the C++ reference leans on Eigen;
 the Zig port gets the same register-level reuse from an `inline for`.
 
 > **Zig note** — `pub fn process(..., comptime accumulate: bool)`
-> (`examples/nam/stream_conv.zig:160`) is the comptime-specialization pattern
+> (`apps/nam/stream_conv.zig:160`) is the comptime-specialization pattern
 > from [Chapter 6](06-going-fast-on-cpus.md) in miniature: one body, two
 > compiled kernels — overwrite-output and add-into-output (the latter
 > exercised by `stream_conv_tests.zig`'s "accumulate adds on top" test; the
 > engine's head accumulator itself sums layer contributions with explicit
-> `+=` loops, `examples/nam/wavenet.zig:626-633`) — with the branch resolved
+> `+=` loops, `apps/nam/wavenet.zig:626-633`) — with the branch resolved
 > at compile time, not per sample.
 
 And the invariant that makes the mini-test's `expectEqual` legitimate at full
 scale: "per output element the accumulation order (bias, then k-major i-inner
 FMA) is identical in every path, so results are bit-identical across tile
-boundaries and chunkings" (`examples/nam/stream_conv.zig:151-159`). Where
+boundaries and chunkings" (`apps/nam/stream_conv.zig:151-159`). Where
 [Chapter 6](06-going-fast-on-cpus.md) accepted tolerance when SIMD
 reassociated a reduction, this kernel is engineered so that no path
 reassociates *relative to any other path* — because §10.5's parity gates
@@ -452,15 +452,15 @@ pub const Impl = union(nam_file.Arch) {
 };
 ```
 
-*(from `examples/nam/engine.zig:30-35`)*
+*(from `apps/nam/engine.zig:30-35`)*
 
 `Engine.init` validates that the model is mono-in/mono-out *before*
 construction — a `condition_size` other than 1 would make the mixin convs
 "index past the mono buffer (panic in Debug, OOB read in ReleaseFast)"
-(`examples/nam/engine.zig:39-55`) — another checked-error fence around
+(`apps/nam/engine.zig:39-55`) — another checked-error fence around
 untrusted files. Dispatch is a single `switch`; teardown uses `inline else`
 to expand one arm per variant at compile time
-(`examples/nam/engine.zig:85-87`).
+(`apps/nam/engine.zig:85-87`).
 
 Two behavioural contracts live here, and both exist for parity with upstream:
 
@@ -471,7 +471,7 @@ audio — and the count is rounded **up to whole buffers**:
 "Reset(sampleRate, maxBufferSize) prewarms by default with zero samples
 rounded up to whole buffers (ceil(prewarm/maxBuf)*maxBuf, dsp.cpp:47-81) —
 golden parity vs upstream tools/render depends on reproducing exactly that"
-(`examples/nam/engine.zig:1-7`). Not "about enough zeros" — *exactly* the
+(`apps/nam/engine.zig:1-7`). Not "about enough zeros" — *exactly* the
 upstream rounding, or the golden renders drift by a block's worth of warmup.
 
 **The exact tanh.** The classic WaveNet applies `tanh` twenty times per
@@ -493,9 +493,9 @@ under a written contract:
 /// - Specials: ±0 → ±0, subnormals → x, ±inf → ±1, NaN → NaN.
 ```
 
-*(from `examples/nam/activations.zig:16-29`)*
+*(from `apps/nam/activations.zig:16-29`)*
 
-The implementation beneath it (`examples/nam/activations.zig:30-82`) is a
+The implementation beneath it (`apps/nam/activations.zig:30-82`) is a
 small masterclass in float bit-craft — sign-stripping via `@bitCast` to `u32`
 lanes, an odd Taylor series for small inputs, the fdlibm hi/lo `ln2` split
 and exponent assembly `(k + 127) << 23` for the large branch, explicit NaN
@@ -507,7 +507,7 @@ test sweep *enforces*. This is [Chapter 6](06-going-fast-on-cpus.md)'s parity
 religion, written as API documentation.
 
 What does all this discipline buy? The compatibility section of
-`examples/nam/README.md` quotes the measured results (as always in this
+`apps/nam/README.md` quotes the measured results (as always in this
 course: measured, dated, machine-specific — not asserted):
 
 - vs upstream `tools/render` on the upstream example models: "standard
@@ -522,14 +522,14 @@ Playing other people's profiles is half the story. The same binary trains new
 ones, and the pipeline is a compact lesson in something frameworks rarely
 teach: **your dataset is an instrument, and it must be calibrated**.
 
-The physical procedure (diagrammed in `examples/nam/README.md`, Hardware):
+The physical procedure (diagrammed in `apps/nam/README.md`, Hardware):
 the interface's line output plays a standardized test signal into your amp
 (through a reamp box, which restores instrument level and impedance), and the
 amp's output is recorded back — the "reamp" pair. The test signal is the same
 **v3 capture file** the official NAM trainer uses (`v3_0_0.wav`), recognized
-by MD5 checksum (`examples/nam/data.zig:32-49`): 9,120,000 samples at 48 kHz
+by MD5 checksum (`apps/nam/data.zig:32-49`): 9,120,000 samples at 48 kHz
 — 3 minutes 10 seconds — with a precisely known internal structure
-(`examples/nam/data.zig:14-27`). Then either the one-step
+(`apps/nam/data.zig:14-27`). Then either the one-step
 `profile --signal v3_0_0.wav --reamp-out reamp.wav --out my-amp.nam ...`
 (play, record, train) or the two-step `train --input ... --output ...` on a
 pair you recorded in a DAW.
@@ -539,23 +539,23 @@ upstream trainer:
 
 - **Latency calibration.** The capture file embeds *blips* — impulses at
   known sample positions (`blip_locations = [_]usize{ 504000, 552000 }`,
-  `examples/nam/data.zig:26`). Your interface's round-trip delay shifts the
+  `apps/nam/data.zig:26`). Your interface's round-trip delay shifts the
   recording by some unknown number of samples; the calibrator measures a
   noise floor from a known-silent stretch, scans for the blips' arrival, and
   recovers the shift (`calibrateLatencyV3`,
-  `examples/nam/data.zig:100-147`). Misalign x and y by even a few samples
+  `apps/nam/data.zig:100-147`). Misalign x and y by even a few samples
   and you are asking the model to predict the future — training will
   converge to a worse amp, silently.
 - **No clipping.** Any `|y| ≥ 1.0` refuses the capture outright
-  (`examples/nam/data.zig:230-234`): a clipped sample is information
+  (`apps/nam/data.zig:230-234`): a clipped sample is information
   destroyed at the ADC, and no optimizer recovers it.
 - **Pre-silence.** 0.4 s of *exact zeros* required before the training split
-  (`examples/nam/data.zig:238-244`) — the streaming model starts from zero
+  (`apps/nam/data.zig:238-244`) — the streaming model starts from zero
   state, so the data must too.
 - **Replicate consistency.** The v3 signal contains the validation segment
   twice; if the two recordings of it differ by self-ESR > 0.01, your rig
   drifted mid-capture (knob bumped, tube warmed) and the pair is rejected
-  (`checkV3`, `examples/nam/data.zig:156-165`).
+  (`checkV3`, `apps/nam/data.zig:156-165`).
 
 ESR — Error-to-Signal Ratio — is the domain's quality number, and it is
 twelve lines you can read whole:
@@ -575,22 +575,22 @@ pub fn esr(pred: []const f32, target: []const f32) f64 {
 }
 ```
 
-*(from `examples/nam/data.zig:56-67`)*
+*(from `apps/nam/data.zig:56-67`)*
 
 Mean squared error *normalized by the target's energy* — so 0.01 means "the
 residual carries 1% of the signal's power" regardless of how loud the capture
 was. The console bands are upstream's, verbatim: **< 0.01 "Great!"**,
-< 0.035 "Not bad!" (`examples/nam/data.zig:70-76`;
-`examples/nam/README.md:183-184`).
+< 0.035 "Not bad!" (`apps/nam/data.zig:70-76`;
+`apps/nam/README.md:183-184`).
 
 Windowing follows upstream's `nx`/`ny` semantics
-(`examples/nam/data.zig:190-212`): each training example is an input window
+(`apps/nam/data.zig:190-212`): each training example is an input window
 of `nx + ny − 1` samples and a target of the last `ny`, where `nx` is the
 model's receptive field (4,093 for the classic spec — the number you derived
-in §10.3) and `ny` defaults to 8,192 (`examples/nam/main.zig:541`). The input
+in §10.3) and `ny` defaults to 8,192 (`apps/nam/main.zig:541`). The input
 window is longer than the target by exactly `nx − 1`: those samples are the
 context the first predicted output needs. The last 9 seconds of the capture
-are held out as the validation split (`examples/nam/README.md:171-172`).
+are held out as the validation split (`apps/nam/README.md:171-172`).
 
 ## 10.7 The trainer: one architecture, two execution regimes
 
@@ -615,7 +615,7 @@ for (ap.layers, 0..) |*lp, l| {
 }
 ```
 
-*(from `examples/nam/train.zig:279-289`)*
+*(from `apps/nam/train.zig:279-289`)*
 
 Put this beside the module-doc algebra of §10.3 and read them line against
 line: `z = dilated_conv(x) + input_mixin(condition)` → `causalConv1d` +
@@ -630,11 +630,11 @@ badly.
 
 Get the loss function's identity precise, because it is a common confusion:
 **the training loss is MSE** — "mean over elements, the torch F.mse_loss
-default" (`examples/nam/train.zig:300-311`) — optionally plus a multi-
+default" (`apps/nam/train.zig:300-311`) — optionally plus a multi-
 resolution STFT spectral term at weight 0.0005 in the packed recipe
-(`default_mrstft_weight: f32 = 0.0005`, `examples/nam/train.zig:101`;
+(`default_mrstft_weight: f32 = 0.0005`, `apps/nam/train.zig:101`;
 `LossOptions.mrstft_weight` defaults to 0, `:130-133`). **ESR is the
-validation metric, not the loss** (`examples/nam/train.zig:1-7`). The
+validation metric, not the loss** (`apps/nam/train.zig:1-7`). The
 distinction is standard ML practice you should carry everywhere: optimize a
 smooth, well-conditioned objective; *judge* with the interpretable domain
 number.
@@ -667,7 +667,7 @@ for (0..epochs) |epoch| {
     }
 ```
 
-*(from `examples/nam/main.zig:702-724`)*
+*(from `apps/nam/main.zig:702-724`)*
 
 Every ingredient is one you already own. The one-line exponential LR schedule
 (`lr = lr0 · γ^epoch`). The counter-based deterministic RNG driving a
@@ -680,23 +680,23 @@ per example so gradients *sum* into the parameters' `.grad`, one `opt.step()`
 per 16 — big-batch mathematics on a small machine's memory, the pattern
 [Chapter 8](08-training.md) taught generalizing unchanged. The published
 recipe: "MSE, Adam lr 0.004, gamma=0.993, batch 16, 100 epochs"
-(`examples/nam/README.md:181-182`).
+(`apps/nam/README.md:181-182`).
 
 After each epoch, validation does something quietly brilliant: it does *not*
 run the autograd graph. It exports the current weights into the **streaming
 inference engine** and streams the held-out split through that
-(`examples/nam/train.zig:4-7`). So every epoch continuously proves that the
+(`apps/nam/train.zig:4-7`). So every epoch continuously proves that the
 trainable's weight-extraction order matches the engine's weight-cursor order
 — the exact class of bug (a transposed conv layout, a swapped layer) that
 otherwise survives until a user's amp sounds wrong. The best epoch by
 validation ESR is what gets exported, not the last
-(`examples/nam/main.zig:726-736`).
+(`apps/nam/main.zig:726-736`).
 
 Two scope notes, stated as precisely as the code states them. Training
 targets WaveNet: the spec presets (`standard`, `tiny`, `a2`, `a2-nano`,
 `packed`) are all WaveNet shapes, and fine-tuning an existing file via
 `--init` prints "error: --init currently trains WaveNet .nam files only" for
-anything else (`examples/nam/main.zig:647`); LSTM/ConvNet/Linear profiles are
+anything else (`apps/nam/main.zig:647`); LSTM/ConvNet/Linear profiles are
 load-and-play. And everything here is CPU, f32, single process — no GPU
 anywhere in this example.
 
@@ -706,16 +706,16 @@ A trained model you cannot share is a science-fair project. The exporter
 writes `.nam` v0.7.0 in the modern upstream exporter shape, with the full
 upstream metadata schema — date, measured loudness, your `--name`/`--gear-*`
 fields, the latency-calibration record, the final ESR
-(`examples/nam/nam_export.zig`; `examples/nam/README.md:184-186`). The
+(`apps/nam/nam_export.zig`; `apps/nam/README.md:184-186`). The
 compatibility claims are then *measured*, in both directions
-(`examples/nam/README.md`, Compatibility guarantees):
+(`apps/nam/README.md`, Compatibility guarantees):
 
 - **Import:** any upstream-tooling `.nam` of the supported architectures,
   0.5.0–0.7.x, including the current trainer's `SlimmableContainer` export.
 - **Export:** profiles load in upstream `NeuralAmpModelerCore` (`loadmodel`),
   and "rendering through the upstream core matches Fucina (6.7e-8 max on a
   trained classic profile; 2.7e-8 max on a packed-container smoke)". The test
-  plan (`examples/nam/README.md`, Test plan) even includes a Python
+  plan (`apps/nam/README.md`, Test plan) even includes a Python
   re-import oracle: `nam.models.init_from_nam(json.load(open('model.nam')))`
   against the official trainer package.
 
@@ -729,7 +729,7 @@ covers the format itself) here is **a lossless container, never a runtime
 format**: the file carries one flat f32 tensor plus "the ENTIRE original .nam
 JSON byte-verbatim in the string KV `nam.file_json` … so GGUF -> .nam export
 is byte-identical by construction, the strongest possible round-trip
-guarantee" (`examples/nam/gguf_compat.zig:1-10`). And quantization — the
+guarantee" (`apps/nam/gguf_compat.zig:1-10`). And quantization — the
 central topic of the next chapter — "is refused by design (13.8k-param
 models: no block-divisible dims, no bandwidth win, real ESR risk)" (same
 lines). A 55 KB model is already L1-resident; quantizing it would save
@@ -742,9 +742,9 @@ Now the chapter's summit. Offline rendering can be leisurely; `live` cannot.
 
 The physics first. Audio hardware runs at a fixed sample rate — 48,000
 samples per second here (`pub const standard_sample_rate: f64 = 48000.0;`,
-`examples/nam/data.zig:12`). The OS does not deliver samples one at a time;
+`apps/nam/data.zig:12`). The OS does not deliver samples one at a time;
 it delivers *periods* — blocks of, by default, 64 frames
-(`examples/nam/live.zig`, `Options.period` default 64) — by calling your
+(`apps/nam/live.zig`, `Options.period` default 64) — by calling your
 callback on a dedicated realtime thread. The contract is unforgiving: the
 callback must return the processed block before the next one lands. The
 budget per block is pure arithmetic:
@@ -757,7 +757,7 @@ Miss it and the hardware plays whatever stale bytes are in the buffer — an
 audible click. Miss it regularly and the instrument is unplayable.
 
 Against that budget, the measured cost of the model, quoted from
-`examples/nam/README.md` (Performance — a dated, machine-specific snapshot,
+`apps/nam/README.md` (Performance — a dated, machine-specific snapshot,
 like every benchmark in this course): "standard WaveNet ≈ 49 µs per 64-frame
 block @48 kHz on one core (ReleaseFast, i9-13950HX P-core; 2026-07-03 x86
 snapshot) ≈ 27× realtime — 1.8× faster than upstream `benchmodel` at the
@@ -768,10 +768,10 @@ comfortable for one model, and meaningful because a *chain* (§10.12) runs
 several serially.
 
 A cautionary footnote that is itself a lesson: the header comment of
-`examples/nam/live.zig:1-4` still cites "~67 us per 64-frame block …
+`apps/nam/live.zig:1-4` still cites "~67 us per 64-frame block …
 measured 2026-06-12, M1 Max" — a snapshot that predates a tanh-parity change
 and its SIMD recovery; the README's ≈80 µs (and the 67→162→80 µs history
-behind it, `examples/nam/README.md:331-333`) is the current record. Numbers
+behind it, `apps/nam/README.md:331-333`) is the current record. Numbers
 rot; dates are what keep them honest. When a doc comment and a maintained
 README disagree, trust the one that carries the newer date — and measure your
 own machine anyway, which is exactly what `bench` is for:
@@ -783,19 +783,19 @@ const budget_ns = @as(f64, @floatFromInt(blocksize)) / rate * 1e9;
 try stdout.print("realtime:     {d:.1}x headroom\n", .{budget_ns / ns_per_block});
 ```
 
-*(from `examples/nam/main.zig:330-336`)*
+*(from `apps/nam/main.zig:330-336`)*
 
 `zig build nam -Doptimize=ReleaseFast -- bench my-amp.nam` prints your
 per-block cost against your budget. Run it before ever going live — and run
 it in ReleaseFast, because "debug builds are ~20× slower and will not keep up
-in realtime" (`examples/nam/README.md:23-24`). Recall
+in realtime" (`apps/nam/README.md:23-24`). Recall
 [Chapter 1](01-just-enough-zig.md): optimization mode is a build-time
 decision in Zig, and here it is the difference between an instrument and a
 noise generator.
 
 The audio plumbing is the vendored miniaudio C library behind a thin shim:
 `extern fn` declarations, an `opaque {}` device handle, and a C-callable
-callback type (`examples/nam/audio.zig:11-27`):
+callback type (`apps/nam/audio.zig:11-27`):
 
 ```zig
 pub const RawCallback = *const fn (user: ?*anyopaque, output: ?[*]f32, input: ?[*]const f32, frame_count: c_uint) callconv(.c) void;
@@ -810,11 +810,11 @@ pub const RawCallback = *const fn (user: ?*anyopaque, output: ?[*]f32, input: ?[
 
 One honesty note before the deep dive: the live path is "Tested on macOS /
 Apple Silicon (the audio layer is vendored miniaudio, so Linux should work
-too but is untested)" (`examples/nam/README.md:14-16`). The chapter follows
+too but is untested)" (`apps/nam/README.md:14-16`). The chapter follows
 the code in stating exactly that, no more. (Also macOS-specific and worth
 knowing: microphone permission is attributed to your *terminal app*, and "a
 denied permission yields silence with no error",
-`examples/nam/README.md:92-94`.)
+`apps/nam/README.md:92-94`.)
 
 ## 10.10 Inside the callback: how "no allocation" is guaranteed
 
@@ -847,7 +847,7 @@ pub fn audioCallback(user: ?*anyopaque, output: ?[*]f32, input: ?[*]const f32, f
     if (shared.tap) |tap| tap.push(raw_in);
 ```
 
-*(from `examples/nam/live.zig:268-282`)*
+*(from `apps/nam/live.zig:268-282`)*
 
 Walk the guarantees one by one:
 
@@ -855,16 +855,16 @@ Walk the guarantees one by one:
 preallocates all audio-thread scratch at a capacity of
 `frame_cap = @max(2048, period * 4)` — the input-trim buffer, the gate-gain
 buffer, and two inter-stage "ping-pong" buffers
-(`examples/nam/main.zig:1352-1364`). Every engine and cab is likewise sized to
+(`apps/nam/main.zig:1352-1364`). Every engine and cab is likewise sized to
 `frame_cap` at load, and prewarmed. The callback's job is to *fill* buffers,
 never to *find* them. This is the payoff of the discipline stated
 independently in every engine's module doc — "All buffers are allocated at
-init; `process` is allocation-free" (`examples/nam/stream_conv.zig:9`;
+init; `process` is allocation-free" (`apps/nam/stream_conv.zig:9`;
 same contract in `wavenet.zig:15`, `engine.zig`, `ir_cab.zig:66-68`). The
 port even *tightened* the reference here: upstream's ConvNet/LSTM allocate
 per `process()` call; "all engines here are allocation-free after
 init/reset — a deliberate, numerics-preserving deviation"
-(`examples/nam/models.zig:3-5`).
+(`apps/nam/models.zig:3-5`).
 
 **Control crosses threads only as atomics.** The UI thread (keyboard, MIDI)
 and the audio thread share exactly one struct, and every field of it is an
@@ -884,7 +884,7 @@ pub const Shared = struct {
     gain_bits: std.atomic.Value(u32) = .init(@bitCast(@as(f32, 1.0))),
 ```
 
-*(from `examples/nam/live.zig:93-102`)*
+*(from `apps/nam/live.zig:93-102`)*
 
 No mutex anywhere near the audio thread. Gain knobs are `f32` values stored
 as `u32` bits via `@bitCast` — the same integer representation the `fetchMax`
@@ -892,7 +892,7 @@ peak meter below needs — so a knob turn is one atomic store, and the audio
 thread can never observe a torn float. Switching amp profiles mid-song is *one atomic index store* into a
 preloaded, prewarmed array of chains ("switching is one atomic index store
 and the callback never allocates, locks, or touches the Fucina thread pool",
-`examples/nam/live.zig:1-6`). Note that last clause: the worker pool from
+`apps/nam/live.zig:1-6`). Note that last clause: the worker pool from
 [Chapter 6](06-going-fast-on-cpus.md) — with its parking and waking — is
 exactly the kind of machinery a realtime thread must not touch, and the
 streaming engines are single-threaded on purpose.
@@ -908,16 +908,16 @@ fn atomicMaxF32(cell: *std.atomic.Value(u32), value: f32) void {
 }
 ```
 
-*(from `examples/nam/live.zig:264-266`; the doc comment at :256-263 explains
+*(from `apps/nam/live.zig:264-266`; the doc comment at :256-263 explains
 why a single fetchMax RMW beats a compare-and-swap loop here — no lost update
 against the reader's `swap(0)`.)*
 
 **Edge cases degrade, never overrun.** If a pathological driver delivers a
 block larger than the configured period, the callback counts it, passes dry
 audio through, and refuses to overrun the engines' buffers
-(`examples/nam/live.zig:284-290`). Bypass is snapshotted once per block "so a
+(`apps/nam/live.zig:284-290`). Bypass is snapshotted once per block "so a
 mid-block toggle can't split this block across states"
-(`examples/nam/live.zig:320-322`).
+(`apps/nam/live.zig:320-322`).
 
 **Statefulness leaks into UX — correctly.** Read the `mute` doc comment above
 again: muting *keeps processing* and only zeroes the device buffer, "so
@@ -926,7 +926,7 @@ a 4,093-sample state discontinuity — a thump. Once you think in streaming
 state, even the mute button is a model-warmth decision.
 
 And one line of pure domain insight, from the input-trim loop
-(`examples/nam/live.zig:292-294`): "Input trim BEFORE the model: an amp
+(`apps/nam/live.zig:292-294`): "Input trim BEFORE the model: an amp
 model is nonlinear, so this is the 'how hard you hit the amp' knob, not just
 volume." The `,`/`.` keys do not make it louder; they change how the model
 distorts — because that is what driving a real amp harder does.
@@ -938,9 +938,9 @@ is: sound into the interface's ADC → driver buffering → the duplex ring →
 your 64-frame period → DAC buffering → speakers. `live` prints an honest
 estimate at startup, computed from what CoreAudio actually reports —
 "input device + duplex+period + output device"
-(`examples/nam/live.zig:989-1005`; `examples/nam/README.md`, Latency).
+(`apps/nam/live.zig:989-1005`; `apps/nam/README.md`, Latency).
 
-Work it in real numbers, all from `examples/nam/README.md:340-355`. The
+Work it in real numbers, all from `apps/nam/README.md:340-355`. The
 middle term is ≈ 3·period, because miniaudio's duplex ring keeps about two
 capture periods of slack ahead of the one being played: at the default
 `--period 64` that is 192 samples ÷ 48 kHz = **4 ms**. A proper USB interface
@@ -958,23 +958,23 @@ Two engineering notes from the same section repay attention because both are
   *accumulates* in the duplex ring — "latency grows second by second while
   you play (measured: ~1100 samples/s)" — so the player retunes the device to
   48 kHz at the OS level for the session instead
-  (`examples/nam/README.md:356-360`). Related: monitor through the same
+  (`apps/nam/README.md:356-360`). Related: monitor through the same
   interface you capture with — two devices means two crystals, and
   independent clocks drift into periodic clicks
-  (`examples/nam/README.md:123-125`).
+  (`apps/nam/README.md:123-125`).
 - **A rejected optimization, with its price tag.** Replacing miniaudio's
   duplex machinery with separate devices and a custom one-period ring would
   be "worth ~1.3 ms at 64-frame periods but only ~0.3–0.5 ms once a good
   interface runs at `--period 16`; not pursued at that price
   (underrun-crackle risk for sub-ms gain)"
-  (`examples/nam/README.md:369-376`). Declining an optimization, in writing,
+  (`apps/nam/README.md:369-376`). Declining an optimization, in writing,
   with numbers — the recorded-negatives ethic of
   [Chapter 6](06-going-fast-on-cpus.md) applied to latency.
 
 There is even a ground-truth tool: `loopback-test` sends impulses out your
 interface and times their return through a physical patch cable — measuring,
 rather than estimating, your rig's true round trip
-(`examples/nam/README.md:366-368`).
+(`apps/nam/README.md:366-368`).
 
 ## 10.12 The extras: cabs, chains, and a tuner
 
@@ -1010,22 +1010,22 @@ pub fn process(self: *IrCab, input: []const f32, output: []f32, frames: usize) v
 }
 ```
 
-*(from `examples/nam/ir_cab.zig:166-183`)*
+*(from `apps/nam/ir_cab.zig:166-183`)*
 
 Up to 8,192 taps, upstream's fixed −18 dB headroom gain baked into the
 weights, no FFT — "FFT/partitioned convolution is unnecessary at cab-IR
 lengths and is deliberately not implemented"
-(`examples/nam/ir_cab.zig:15-16`). And here the nonlinearity lesson of §10.2
+(`apps/nam/ir_cab.zig:15-16`). And here the nonlinearity lesson of §10.2
 closes: an IR **is resampled** to the session rate at load when it differs
 (cubic, like upstream) because resampling a linear filter's impulse response
 is well-defined — while a `.nam` model "still hard-rejects rate mismatch (it
-cannot be resampled)" (`examples/nam/ir_cab.zig:22-25`). Linear systems are
+cannot be resampled)" (`apps/nam/ir_cab.zig:22-25`). Linear systems are
 characterized by their impulse response; nonlinear systems are not
 characterized by anything short of themselves.
 
 **Chains — a rig as a text file.** A `.chain` manifest lists stages, one per
-line, top to bottom = signal flow (`examples/nam/chain.zig:1-13`; example
-from `examples/nam/README.md`):
+line, top to bottom = signal flow (`apps/nam/chain.zig:1-13`; example
+from `apps/nam/README.md`):
 
 ```
 # pedal -> amp -> cab
@@ -1037,22 +1037,22 @@ cab.wav :: trim=-2                 # cabinet IR, pulled back 2 dB
 
 The per-stage `trim` exists *because* the stages are nonlinear: "the level
 *into* a stage shapes its breakup, not just its volume"
-(`examples/nam/README.md:264-265`). Inside the callback, stages route
+(`apps/nam/README.md:264-265`). Inside the callback, stages route
 through the two preallocated ping-pong buffers, and a `.nam` stage never
 runs in-place — "WaveNet is not in-place safe (reads `input` across the
 pass, pushes history after writing `output`)" — a precondition pinned with a
-four-distinct-buffers assert (`examples/nam/live.zig:366-381`). Profiles
+four-distinct-buffers assert (`apps/nam/live.zig:366-381`). Profiles
 even carry a `gear_type` tag the player uses for polite advice at load:
 a cab IR after an `amp_cab` capture gets a "redundant cab" note, a chain
 ending in a cab-less `amp` gets "cab likely needed"
-(`examples/nam/live.zig:420-427`; `examples/nam/README.md`, Cab advice).
+(`apps/nam/live.zig:420-427`; `apps/nam/README.md`, Cab advice).
 
 **The tuner — the right tool per regime, in one program.** Press `t` and a
 strobe-class chromatic tuner runs off the raw input — "measured well under
-0.1 cent on stable tones" (`examples/nam/README.md:67-70`). Its plumbing is a
+0.1 cent on stable tones" (`apps/nam/README.md:67-70`). Its plumbing is a
 wait-free single-producer/single-consumer ring the callback feeds with one
 `@memcpy` pair and a release store (`Tap.push`,
-`examples/nam/tuner.zig:99-113`); when the tuner is off, the tap costs the
+`apps/nam/tuner.zig:99-113`); when the tuner is off, the tap costs the
 audio thread a single atomic load, and the analysis thread parks on a futex.
 The analysis itself — McLeod pitch method, per-partial spectral refinement,
 inharmonicity fitting — runs in plain scalar `f64`, deliberately *not* on the
@@ -1060,12 +1060,12 @@ Tensor facade: "the working sets are 63-tap FIR dots and 2-4k-sample
 correlations at a ~15 Hz cadence — far below the shapes where the
 pool-parallel Tensor pipeline amortizes its dispatch/allocation — and the
 sub-0.1-cent accuracy target needs f64 accumulation"
-(`examples/nam/tuner.zig:7-12`). One program, three regimes, three correct
+(`apps/nam/tuner.zig:7-12`). One program, three regimes, three correct
 tools: autograd tensors for training, hand-rolled f32 SIMD for the realtime
 chain, scalar f64 for precision analysis. Knowing your library's amortization
 regime — and stepping outside it without guilt — is a mark of owning the
 whole stack. (MIDI control of every knob exists too, macOS-only for now;
-`examples/nam/README.md:224-225`.)
+`apps/nam/README.md:224-225`.)
 
 ## 10.13 When latency is the product
 
@@ -1142,24 +1142,24 @@ reference, write the numbers down with their dates — travels unchanged.
 
 ## Explore the source
 
-- `examples/nam/stream_conv.zig` — the streaming conv: history read, `push`,
+- `apps/nam/stream_conv.zig` — the streaming conv: history read, `push`,
   the `time_tile` SIMD kernel, and the bit-exactness invariant; read the
   module doc first.
-- `examples/nam/wavenet.zig` — the full streaming WaveNet: the module-doc
+- `apps/nam/wavenet.zig` — the full streaming WaveNet: the module-doc
   algebra, the weight cursor with its `errdefer` ladders, FiLM and gating.
-- `examples/nam/engine.zig` — the tagged-union facade, the prewarm contract,
+- `apps/nam/engine.zig` — the tagged-union facade, the prewarm contract,
   and checked errors where upstream asserts.
-- `examples/nam/activations.zig` — the exact-contract SIMD tanh; the contract
+- `apps/nam/activations.zig` — the exact-contract SIMD tanh; the contract
   comment is the lesson, the bit-craft below it is the bonus.
-- `examples/nam/train.zig` — the autograd twin of the engine; compare its
+- `apps/nam/train.zig` — the autograd twin of the engine; compare its
   layer loop with `wavenet.zig`'s module doc line by line.
-- `examples/nam/data.zig` — ESR, the v3 capture structure, latency blips, and
+- `apps/nam/data.zig` — ESR, the v3 capture structure, latency blips, and
   the data-hygiene checks.
-- `examples/nam/live.zig` — `audioCallback`, `Shared`, the noise gate, the
+- `apps/nam/live.zig` — `audioCallback`, `Shared`, the noise gate, the
   ping-pong chain routing, and the honest latency print.
-- `examples/nam/tuner.zig` — the wait-free tap and a deliberate walk *off*
+- `apps/nam/tuner.zig` — the wait-free tap and a deliberate walk *off*
   the Tensor facade, with the reasoning written down.
-- `examples/nam/README.md` — the parity, performance, and latency numbers
+- `apps/nam/README.md` — the parity, performance, and latency numbers
   quoted in this chapter, each with its protocol and date.
 
 ## Exercises
@@ -1172,7 +1172,7 @@ reference, write the numbers down with their dates — travels unchanged.
    your headroom with the budget formula from §10.9.
 2. **(Medium)** Extend the course `MiniStreamConv` with a
    `comptime accumulate: bool` parameter à la the real kernel
-   (`examples/nam/stream_conv.zig:160`), so two instances can share one
+   (`apps/nam/stream_conv.zig:160`), so two instances can share one
    output buffer the way the engine's head accumulator sums layer
    contributions. Extend
    the chunk-invariance test to cover both modes, and check both compile from
@@ -1186,7 +1186,7 @@ reference, write the numbers down with their dates — travels unchanged.
    excerpt: load a mono WAV of taps, direct FIR with a carried tail, and a
    chunk-invariance test. Then make yours in-place safe (`input == output`),
    explain *why* that is achievable for the FIR but not for the WaveNet
-   engine (see `examples/nam/live.zig:366-368`), and verify with a test that
+   engine (see `apps/nam/live.zig:366-368`), and verify with a test that
    aliasing the buffers changes nothing.
 5. **(Hard)** The full loop, on your own rig: run the README's test plan
    step 5 — a `profile` capture against a loopback (patch the interface's
