@@ -14,7 +14,7 @@ then downloads Qwen3-0.6B and chats with it live in the terminal.
 
 1. The whole forward pass is embedding lookup → 28 × (grouped-query
    attention + SwiGLU FFN, each *adding* into one residual stream) → final
-   RMSNorm → lm_head — real, readable code in `src/llm/qwen3/model.zig`.
+   RMSNorm → lm_head — real, readable code in `src/models/qwen3/runner.zig`.
 2. Causal attention means a position's K/V never change once computed, so
    cache them: every matmul then runs on one row per new token (constant
    work), plus one scan of the cached prefix. Prefill is compute-bound GEMM;
@@ -35,12 +35,12 @@ eight key-value heads.
 Everything between typing a question and reading the answer lives in one
 Zig file you can read top to bottom.
 
-**Visual:** Code shot: `src/llm/qwen3/model.zig:71–83` (the `qwen3_0_6b()`
+**Visual:** Code shot: `src/models/qwen3/runner.zig:136-148` (the `qwen3_0_6b()`
 config, exactly the chapter's §12.1 excerpt). As the VO names each number,
 highlight the matching field: `vocab_size`, `hidden_size`, `num_layers`,
 `num_attention_heads` + `num_key_value_heads`.
 
-**Overlay:** "`src/llm/qwen3/model.zig` — ~1,800 lines, the whole model" ·
+**Overlay:** "`src/models/qwen3/runner.zig` — ~2,200 lines, the whole model" ·
 "16 query heads, 8 KV heads — that asymmetry *is* grouped-query attention".
 
 ### [0:26–0:55] The whole forward pass
@@ -53,9 +53,9 @@ positions inside the attention call. A final norm, one last matmul, and out
 come 151,936 scores — one per vocabulary token. That is the entire
 architecture.
 
-**Visual:** Code shot: `src/llm/qwen3/model.zig:512–543` (the heart of
+**Visual:** Code shot: `src/models/qwen3/runner.zig:507-530` (the heart of
 `forwardStep`), with sequential highlights synced to the VO: the
-`getRowsAs` embedding line (512), the layer loop with `attentionBlock` /
+`getRowsAs` embedding line (507), the layer loop with `attentionBlock` /
 `ffnBlock` (516–529), `rmsNormMul` final norm (533), the `linearSeq` logits
 line (543). Then cut to a rendered version of §12.1's data-flow diagram:
 text → token ids → `[seq, 1024]` residual stream → 28 blocks → logits →
@@ -80,9 +80,9 @@ of the cache.
 **Visual:** First a simple diagram: a growing token row where, per step,
 only the last cell is "computed" (bright) and the rest is "read from cache"
 (dim), versus the naive version where everything relights every step. Then
-code shot: `src/llm/kv_cache.zig:8–16` (the doc comment: f16
+code shot: `src/models/text/kv_cache.zig:8–16` (the doc comment: f16
 `[capacity, kv_heads, head_dim]`, "K is stored *after* RoPE … never
-re-rotated"). Then code shot: `src/llm/qwen3/model.zig:1214–1235` — the
+re-rotated"). Then code shot: `src/models/qwen3/runner.zig:1175-1199` — the
 `appendLayer` call and the f16 `narrow` views feeding `causalAttention`,
 highlighting `appendLayer` then the two `narrow` lines.
 
@@ -148,8 +148,8 @@ algebra as a runnable test, the sampler, chat templates, mixture-of-experts
 make this faster — without changing a single answer.
 
 **Visual:** Quick montage of file cards from the chapter's "Explore the
-source" list: `src/llm/tokenizer.zig`, `src/llm/kv_cache.zig`,
-`src/llm/sampler.zig`, `src/llm/chat.zig`. End card: series title, "Full
+source" list: `src/models/text/tokenizer.zig`, `src/models/text/kv_cache.zig`,
+`src/models/text/sampler.zig`, `src/models/text/chat.zig`. End card: series title, "Full
 chapter: `docs/course/12-a-transformer-from-scratch.md`", "Next: 13 —
 Inference tricks".
 
@@ -159,13 +159,13 @@ tricks — faster, without changing a single answer".
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `src/llm/qwen3/model.zig:71–83` — the `qwen3_0_6b()` nine-integer config.
-- `src/llm/qwen3/model.zig:512–543` — the heart of `forwardStep`
+- `src/models/qwen3/runner.zig:136-148` — the `qwen3_0_6b()` nine-integer config.
+- `src/models/qwen3/runner.zig:507-530` — the heart of `forwardStep`
   (embedding, layer loop, final norm, logits). The on-screen range includes
   a MoE pilot-prefetch stanza the chapter's excerpt trims; highlights keep
   the eye on the taught lines.
-- `src/llm/kv_cache.zig:8–16` — the cache-layout doc comment.
-- `src/llm/qwen3/model.zig:1214–1235` — `appendLayer` + zero-copy `narrow`
+- `src/models/text/kv_cache.zig:8–16` — the cache-layout doc comment.
+- `src/models/qwen3/runner.zig:1175-1199` — `appendLayer` + zero-copy `narrow`
   views into `causalAttention`.
 
 **Terminal recordings (real, executed):**

@@ -65,7 +65,7 @@ of the answer is computed from the names in the question.
 
 **Visual:** Code shot: `README.md:31–40`, highlighting the two `dot` calls
 and their comments (`contract .in -> .{ .batch, .h1 }`); then cut to
-`src/ag/tensor.zig:3747`, the real `dot` signature, with the return-type
+`src/ag/tensor/float/matmul.zig:122`, the real `dot` signature, with the return-type
 expression `!Tensor(dotResultTags(...))` highlighted.
 
 **Overlay:** "Result tags computed at compile time — in return type position."
@@ -84,7 +84,7 @@ program. This is a shape bug that never ran.
 `a: Tensor(.{ .m, .k })`, `b: Tensor(.{ .n, .j })`, `a.dot(ctx, b, .k)`) with
 the `// no .k axis anywhere` comment highlighted; then a terminal-style
 render of the chapter's verbatim compiler trace (§4.7), animated bottom-up:
-call site → `dot` return type (src/ag/tensor.zig:3747) → `dotResultTags` →
+call site → `dot` return type (src/ag/tensor/float/matmul.zig:122) → `dotResultTags` →
 `src/tags.zig:187: error: tensor tag not found`.
 
 **Overlay:** "Zig 0.16.0 — trace verbatim from the chapter" · "a shape bug
@@ -100,7 +100,8 @@ bug. The types spend themselves on the quiet kind — where sizes match and
 meaning doesn't.
 
 **Visual:** Code shot: the machine-verified snippet quoted in chapter §4.4
-(from docs/REFERENCE.md §7.7): `test "incompatible dims fail with
+(from `docs/reference/07-named-axes-the-tag-algebra.md` §7.7):
+`test "incompatible dims fail with
 ShapeMismatch"` — highlight `.{3}` vs `.{2}`, then the two
 `expectError(error.ShapeMismatch, ...)` lines.
 
@@ -128,7 +129,7 @@ chapter in `docs/course/`" · "Next: The operation library".
   - `README.md:24–41` — `Model` struct + `forward` (segments 2 and 3).
   - `README.md:56–60` — Fortran shape-discipline paragraph (segment 6 quote
     card).
-  - `src/ag/tensor/float/matmul.zig:130` — the `dot` signature with
+  - `src/ag/tensor/float/matmul.zig:122` — the `dot` signature with
     `dotResultTags` in return type position (segments 3 and 4).
   - `src/tags.zig:185–188` — `tagIndexOrCompileError` with the
     `"tensor tag not found"` message (optional inset during segment 4).
@@ -143,7 +144,8 @@ chapter in `docs/course/`" · "Next: The operation library".
     with Zig 0.16.0, via a scratch `build_options` stub (scalar backend, no
     BLAS); reproduce that setup or use the rendered frame.
   - §4.4 snippet `test "incompatible dims fail with ShapeMismatch"` (segment
-    5; source docs/REFERENCE.md §7.7, machine-verified by the
+    5; source `docs/reference/07-named-axes-the-tag-algebra.md` §7.7,
+    machine-verified by the
     `zig build snippet-check` CI gate).
   - §4.3 mini test `"instances carry no tags at runtime"` (segment 6 inset).
 - **Diagram to draw:** segment 1 — wrong-way matmul yielding a
@@ -159,14 +161,14 @@ chapter in `docs/course/`" · "Next: The operation library".
   runtime) is mandatory, not filler.
 - **Caveats that MUST stay attached:** the trace overlay "Zig 0.16.0 —
   trace verbatim from the chapter"; the ShapeMismatch snippet is
-  machine-verified (REFERENCE.md
+  machine-verified (reference
   §7.7). If any wording drifts, keep this framing: Fucina's public API is
   explicitly young — every signature shown is today's code, not a frozen
   contract (chapter §4.1). No performance numbers appear in this episode;
   do not add any.
 - **Must not change:** the compiler trace text (verbatim or not at all); the
   claim pairing "names/ranks/dtype = comptime, sizes = runtime" (chapter
-  §4.4, quoting REFERENCE.md §3.1); the ZML credit (README.md:386–387) —
+  §4.4, quoting reference §3.1); the ZML credit (README.md:481-482) —
   it must appear on screen somewhere: keep it in the segment-2 overlay, or
   move it to the segment-6 end card if that overlay is reworked.
 - **Trim order if long:** first the segment-6 `@sizeOf` inset (keep the

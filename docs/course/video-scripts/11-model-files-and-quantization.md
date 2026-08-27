@@ -58,7 +58,7 @@ no deserialization step, because each block format's in-memory type is an
 extern struct — the struct is the wire format, and a comptime assert pins
 its size at build time. Loading is reinterpreting. The file is the memory.
 
-**Visual:** Code shot 1: `src/gguf.zig:242–262` (`File.loadMmap` —
+**Visual:** Code shot 1: `src/gguf/reader.zig:112-133` (`File.loadMmap` —
 `PROT_READ`, `MAP_PRIVATE`, fd closed immediately). Code shot 2:
 `src/dtype.zig:81–84` (`BlockQ8_0`: `d: u16` + `qs: [32]i8`), then pan to
 `src/dtype.zig:228–256` — the comptime block asserting
@@ -145,8 +145,8 @@ peak-RSS report.
 models/Qwen3-0.6B-f16.gguf --out models/Qwen3-0.6B-Q4_K_S.gguf --dtype
 q4_k`, ending on its summary lines (`exported …` · `tensors: … transcoded
 (q4_k)`). Code shot:
-`src/gguf.zig:1115–1160` (`beginStream` → `DataStreamer`; `declareTensor`
-sits earlier at `src/gguf.zig:1040`). Then type-on only (do not execute):
+`src/gguf/writer.zig:311-359` (`beginStream` → `DataStreamer`; `declareTensor`
+sits earlier at `src/gguf/writer.zig:231`). Then type-on only (do not execute):
 the §11.11 mode-(c) command `zig build export-gguf
 -Doptimize=ReleaseFast -- --from-gguf big-BF16.gguf --out big-ptqtp3.gguf
 --ptqtp=3`.
@@ -175,7 +175,7 @@ transformer from scratch — the tensor directory becomes a transformer".
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `src/gguf.zig:242–262` — `File.loadMmap` (read-only map, parse in place).
+- `src/gguf/reader.zig:112-133` — `File.loadMmap` (read-only map, parse in place).
 - `src/dtype.zig:81–84` — `BlockQ8_0` extern struct; `src/dtype.zig:228–256`
   — the comptime size asserts (27 block structs).
 - `src/backend/quant/q8k.zig:57–68` — the 11-line Q8_0 encoder loop.
@@ -187,8 +187,8 @@ transformer from scratch — the tensor directory becomes a transformer".
   starting at line 137); `src/gguf_tests.zig:533` — real-model re-emit test
   title (optional one-line shot); `src/gguf_tests.zig:254` — stream ≡
   finish test (cited in overlay only).
-- `src/gguf.zig:1115–1160` — `beginStream`/`DataStreamer` (`declareTensor`
-  is at `src/gguf.zig:1040`, outside this shot).
+- `src/gguf/writer.zig:311-359` — `beginStream`/`DataStreamer` (`declareTensor`
+  is at `src/gguf/writer.zig:231`, outside this shot).
 
 **Terminal recordings (exact commands):**
 - `xxd -l 96 models/Qwen3-0.6B-f16.gguf` — the GGUF magic in the ASCII
@@ -257,7 +257,7 @@ transformer from scratch — the tensor directory becomes a transformer".
   v2/v3 policy (§11.1, §11.4); 34 B / 32 weights / 8.5 bpw / error d/2
   (§11.7); 28 GB / 14 / 7.4 / 3.9 GB and the 4 → 25 tok/s floors (§11.6,
   explicitly arithmetic); 27 formats decode / 10 encodeF32 block formats
-  (§11.8; `src/gguf.zig:1172–1210`); 8 adversarial golden
+  (§11.8; `src/gguf/codec.zig:27-73`); 8 adversarial golden
   vectors and the six byte-for-byte formats
   (`src/backend/quant/encode_golden_test.zig` via §11.10); 27 comptime size
   asserts (§11.7). Nothing else may be quantified.

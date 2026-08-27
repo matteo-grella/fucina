@@ -33,8 +33,8 @@ It's Fucina's canonical smoke test, and CI runs it against the real library
 on every push. To read it, you need a handful of Zig features. Here they are.
 
 **Visual:** Full-screen code shot of the first program —
-`docs/REFERENCE.md` lines 253–281 (the fenced `test "first program"` block,
-§1.4). Slow scroll top to bottom; briefly highlight the final two
+`docs/reference/01-introduction-and-mental-model.md` lines 103-131 (the
+fenced `test "first program"` block, §1.4). Slow scroll top to bottom; briefly highlight the final two
 `expectApproxEqAbs` lines (tolerance `1e-6`) on "one part in a million".
 
 **Overlay:** `27 lines — runs against the real library in CI (zig build snippet-check)`
@@ -60,13 +60,13 @@ the demo's `DebugAllocator` with `defer if (gpa.deinit() == .leak)
 ### [1:00–1:24] Errors are values
 
 **VO:** Second: errors are values. There are no exceptions. A raw tensor
-operation can fail in exactly seven ways — one closed error set, and that's
+operation can fail in exactly eight ways — one closed error set, and that's
 the complete list. Every fallible call is marked with try, so the failure
 path of the whole program is legible at a glance. A mismatched matmul has no
 unchecked escape hatch to fly through.
 
-**Visual:** Code shot of `src/tensor.zig` lines 11–19 (`pub const TensorError
-= error{ ... }`), the seven names counted off one by one. Quick cut back to
+**Visual:** Code shot of `src/tensor.zig` lines 22–36 (`pub const TensorError
+= error{ ... }`), the eight names counted off one by one. Quick cut back to
 the first program with all twelve `try` keywords highlighted at once.
 
 **Overlay:** `7 names. That's the whole failure surface.`
@@ -113,8 +113,9 @@ described.
 ### [2:31–3:00] Light the forge
 
 **VO:** Try it. One compiler — exactly Zig zero-point-sixteen-point-zero —
-and nothing else to install. Clone, then: zig build test. Nine test roots —
-the tensor core, the LLM stack, seven examples — no model files needed, and a
+and nothing else to install. Clone, then: zig build test. Eleven test roots —
+the tensor core, the model stack, the serving band, eight applications — no
+model files needed, and a
 leaked byte fails the build. Green means your forge is lit. The chapter
 unfolds all of this, feature by feature. Next time: just enough machine
 learning — what those twenty-seven lines were actually computing.
@@ -132,16 +133,16 @@ state. End card with the series title, "Full chapter:
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `docs/REFERENCE.md` lines 253–281 — the `test "first program"` snippet
-  (§1.4; identical to the chapter's §1.2 block at
-  `docs/course/01-just-enough-zig.md:78-106` — REFERENCE.md is used because
-  it is the CI-verified original). The "27 lines" are the code between the
-  fences (lines 254–280, blank lines included), and that code contains
+- `docs/reference/01-introduction-and-mental-model.md` lines 103-131 — the
+  `test "first program"` snippet (§1.4; identical to the chapter's §1.2
+  block — the reference is used because it is the CI-verified original).
+  The "27 lines" are the code between the fences (lines 104-130, blank
+  lines included), and that code contains
   exactly twelve `try` keywords — verified, so the segment-3 highlight count
   matches the on-screen snippet. Segments 1–3.
 - `examples/spirals/main.zig` lines 328–331 — `DebugAllocator` + `@panic("leak")`.
   Segment 2.
-- `src/tensor.zig` lines 11–19 — `TensorError` (seven members). Segment 3.
+- `src/tensor.zig` lines 22–36 — `TensorError` (eight members). Segment 3.
 - `src/ag/tensor.zig` lines 189–194 — `pub fn Tensor(...) type`. Segment 4.
 - `src/tags.zig` line 4 — `pub const Tag = @TypeOf(.tag);`. Segment 5.
 - `src/fucina.zig` lines 28–42 — RawTensor comment + `@compileError` guard.
@@ -166,9 +167,9 @@ episode — that is part of the point of `zig build test`.
 - **Tone:** warm and concrete; the episode's engine is "read real code,
   feature by feature". No hype — the strongest claims are quoted ones.
 - **Numbers and their sources (must survive the edit):** "27 lines",
-  "nine test roots", "seven error names", "twelve `try`s", "0.16.0", and
+  "eleven test roots", "eight error names", "twelve `try`s", "0.16.0", and
   "zero runtime tagging cost" all come from the chapter /
-  `docs/REFERENCE.md`; "one part in a million" is the `1e-6` tolerance
+  `docs/reference/`; "one part in a million" is the `1e-6` tolerance
   visible in the on-screen code. No benchmark figures appear in this episode,
   so no machine/date caveats are needed — do not add performance numbers in
   refinement.

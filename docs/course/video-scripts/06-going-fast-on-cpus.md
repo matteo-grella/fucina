@@ -75,9 +75,9 @@ this compiles to NEON fadd.4s. On an AVX2 machine, vaddps on ymm registers.
 Same body on both. One source tree, specialized at compile time — the
 unused ISA arms aren't even in the binary.
 
-**Visual:** Code shot 1: `src/backend/vector/common.zig:24–25` (the two-line
+**Visual:** Code shot 1: `src/backend/vector/common.zig:32-33` (the two-line
 vector-width policy), held while the VO explains it. Code shot 2:
-`src/backend/vector/primitives.zig:52–74` (the production `vecAdd`), with the
+`src/backend/vector/primitives.zig:54-76` (the production `vecAdd`), with the
 three tiers highlighted in sequence: 4×-unrolled body, 1× vector body, scalar
 tail. Then a split-screen graphic: the same source centered, left panel
 "Apple M1 → NEON `fadd.4s` (4 lanes)", right panel "x86 AVX2 → `vaddps` on
@@ -101,7 +101,7 @@ GEMM seam. GPU as provider, never the architecture.
 era · Level 1 vector–vector / Level 2 matrix–vector (GEMV) / Level 3
 matrix–matrix (GEMM) · SGEMM/DGEMM naming = Fortran heritage" (stated as
 common knowledge, per §6.6). Then code shot:
-`src/backend/native.zig:250–294` — the dispatch precedence — with three
+`src/backend/native.zig:441-460` — the dispatch precedence — with three
 sequential highlights synced to the VO: the `use_gpu` block ("may decline"),
 the `use_blas` block ("may decline"), the final
 `vector.gemm.gemm` call ("always answers").
@@ -155,10 +155,10 @@ Autograd — the graph hidden in the values".
 ## Asset list
 
 **Code shots (repo files, exact ranges):**
-- `src/backend/vector/common.zig:24–25` — the two-line vector-width policy.
-- `src/backend/vector/primitives.zig:52–74` — the production `vecAdd`
+- `src/backend/vector/common.zig:32-33` — the two-line vector-width policy.
+- `src/backend/vector/primitives.zig:54-76` — the production `vecAdd`
   three-tier loop.
-- `src/backend/native.zig:250–294` — GPU → BLAS → vector dispatch precedence.
+- `src/backend/native.zig:441-460` — GPU → BLAS → vector dispatch precedence.
 
 **Diagrams to render (one sentence each):**
 - Schematic profiler bar: "matmul" vs "everything else", order-of-magnitude

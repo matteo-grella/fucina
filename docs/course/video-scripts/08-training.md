@@ -58,7 +58,7 @@ before step", (5) `opt.step`, (6) `opt.zeroGrad()`. Stage numbers 1–6 tick
 on beside each highlight.
 
 **Overlay:** "canonical order: `backward` → `clipGradNorm` → `step` →
-`zeroGrad` (docs/REFERENCE.md §11, pinned by tests)" · at the last beat:
+`zeroGrad` (reference §11, pinned by tests)" · at the last beat:
 "skip `zeroGrad` on purpose = gradient accumulation (ch. 8, §8.8)".
 
 ### [0:53–1:23] One line, then twelve
@@ -75,14 +75,14 @@ implementation.
 **Visual:** Code shot 1: the course-code SGD one-liner,
 `docs/course/08-training.md:204–208`, kept on screen with its "Course code —
 NOT from the Fucina repo" comment visible. Code shot 2: the shipping AdamW
-inner loop, `src/optim.zig:756–767` (`runScalar`), with three highlights in
+inner loop, `src/optim/moment_pair.zig:147-158` (`runScalar`), with three highlights in
 sequence: `decayed` (decoupled decay), the `m1`/`v1` lines (the two EMAs),
 the final line (bias-corrected step). Then a small card: "golden parity:
 PyTorch 2.12 · Keller Jordan's muon.py · apollo_torch — goldens in
 `src/optim_tests.zig`".
 
 **Overlay:** "SGD: 1 line · AdamW: 12 lines" · "bias corrections computed
-once per step, in f64 (docs/REFERENCE.md §11)".
+once per step, in f64 (reference §11)".
 
 ### [1:23–1:53] The frontier, and what it costs
 
@@ -94,7 +94,7 @@ a random projection regenerated from a seed instead of stored — attacking
 optimizer state, which at LLM scale costs more than the model. The bench
 table makes the trade concrete.
 
-**Visual:** Brief scroll of `src/optim.zig:1384–1416` (`newtonSchulz5` with
+**Visual:** Brief scroll of `src/optim/muon.zig:212-244` (`newtonSchulz5` with
 its doc comment "approximates U*V^T with singular values in roughly
 (0.5, 1.5) — by design, not a bug"). Then a rendered table card, one
 15.7M-param transformer block, ms/step: sgd 1.8–3.0 · adamw 5.2–6.0 ·
@@ -126,7 +126,7 @@ highlight sweeps down the loss values on the "trained … steps: loss …"
 lines as the VO says "loss column". The printed numbers are whatever the
 recording machine produces — real output only.
 
-**Overlay:** "`examples/spirals/main.zig` — 494 lines, the whole chapter
+**Overlay:** "`examples/spirals/main.zig` — 502 lines, the whole chapter
 runnable" · "no downloads: the demo generates its own 400 points".
 
 ### [2:18–2:45] The gate: != 0
@@ -141,9 +141,9 @@ testable property — so it is tested.
 **Visual:** Split screen. Left: the same terminal output, highlighting the
 six "resume from step 1000: max |delta param| = 0 (bit-exact)" lines one
 by one. Right: code shot
-`examples/spirals/main.zig:310–315` — the `max_diff` loop and
+`examples/spirals/main.zig:318-323` — the `max_diff` loop and
 `if (max_diff != 0) return error.ResumeNotBitExact;` — with a second brief
-cut to line 299 (`Model.initRandom(ctx, 7)` — "different init: fully
+cut to line 307 (`Model.initRandom(ctx, 7)` — "different init: fully
 overwritten by the checkpoint").
 
 **Overlay:** "`if (max_diff != 0) return error.ResumeNotBitExact;` — not a
@@ -171,9 +171,9 @@ Training without gradients".
 - `docs/course/08-training.md:204–208` — the course-code `sgdStep`
   one-liner (compile-checked course code; keep its "Course code — NOT from
   the Fucina repo" comment in frame).
-- `src/optim.zig:756–767` — the AdamW `runScalar` per-element update.
-- `src/optim.zig:1384–1416` — `newtonSchulz5` with its doc comment.
-- `examples/spirals/main.zig:310–315` — the bit-exact gate; plus line 299 (the
+- `src/optim/moment_pair.zig:147-158` — the AdamW `runScalar` per-element update.
+- `src/optim/muon.zig:212-244` — `newtonSchulz5` with its doc comment.
+- `examples/spirals/main.zig:318-323` — the bit-exact gate; plus line 307 (the
   fresh model from seed 7).
 
 **Terminal recordings (execute on camera):**
@@ -186,7 +186,7 @@ Training without gradients".
   output: one header line, then three lines per optimizer for `[sgd]`, `[adamw]`,
   `[muon]`, `[apollo]`, `[apollo-mini]`, then two lines for the groups demo,
   labeled `[adamw-groups]` (format strings at
-  `examples/spirals/main.zig:292–322,348` and, for the groups demo, `:453,488`;
+  `examples/spirals/main.zig:300-330,356` and, for the groups demo, `:461,496`;
   six "bit-exact" resume lines total). Note: the demo prints one summary
   loss per optimizer at the end of its 2000 steps — there is no per-step
   loss stream — so the
@@ -228,7 +228,7 @@ episode.
   NOT from the Fucina repo" marker. "PyTorch 2.12 / muon.py / apollo_torch"
   is quoted from docs/TRAINING.md §3 and must not drift.
 - **Numbers appearing in the video and their sources:** six stages and the
-  canonical order (chapter §8.1, docs/REFERENCE.md §11); "one line" SGD and
+  canonical order (chapter §8.1, `docs/reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md` §11); "one line" SGD and
   "twelve lines" AdamW (chapter §8.4–8.5); f64 scalar prep (chapter §8.5);
   optimizer ms/step table (docs/TRAINING.md §11 via chapter §8.6); 494
   lines, 2000 steps, checkpoint at 1000, 400 points, seed-7 fresh model,

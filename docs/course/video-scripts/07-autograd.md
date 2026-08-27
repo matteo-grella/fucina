@@ -127,7 +127,7 @@ with "Full chapter: `docs/course/07-autograd.md`".
 - **Repo code shots**:
   - `src/ag/core.zig:205-220` — `GradState` struct.
   - `src/ag/core.zig:406-410` — `finishGradContributionReady` drain.
-  - `src/ag/tensor.zig:6291-6308` — `finishOp`.
+  - `src/ag/tensor/plumbing.zig:258-267` — `finishOp`.
   - `README.md:61-72` — exec-scope snippet with comment.
   - `README.md:367-382` — Origins paragraph (keep "(AFAIK)" visible).
 - **Terminal recording**: assemble `scalar_autograd.zig` in a scratch

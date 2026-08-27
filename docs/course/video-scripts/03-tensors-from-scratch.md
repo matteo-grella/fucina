@@ -17,7 +17,7 @@ memory-model document adjudicates as "strictly better" than an arena.
    no data moves.
 2. In Fucina, `deinit` is not cleanup ceremony; it drives a buffer pool that
    hands the same address back to the next same-sized op (pointer-equality
-   asserted in a machine-verified REFERENCE.md test), keeping cache lines warm.
+   asserted in a machine-verified reference test), keeping cache lines warm.
 3. The pool was weighed against an arena in a dated design document and won
    on measured grounds: holding buffers arena-style (a held exec scope) hit
    16 live buffers on a 16-op chain; the pool's deinit-as-you-go discipline,
@@ -51,11 +51,13 @@ strides, offset — stored inline, so creating a view allocates nothing.
 
 **Visual:** The address formula appears over the diagram
 (`address = offset + i·strides[0] + j·strides[1] + …`, chapter §3.1); then a
-code shot of the real struct: `src/tensor.zig:94-101` (fields `buffer`,
+code shot of the real struct: `src/tensor.zig:128-135` (fields `buffer`,
 `shape`, `strides`, `offset`), highlighting the four fields.
 
 **Overlay:** "address = offset + Σ index·stride" · then: "4 fields — no
-allocation per view (docs/REFERENCE.md §8.5)"
+allocation per view
+(`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md`
+§8.5)"
 
 ### [0:50–1:20] Views for free — and the bill
 
@@ -87,13 +89,15 @@ you just wrote is still sitting in L1 or L2 when the next op writes its
 output to the very same lines.
 
 **Visual:** Code shot of the test `"deinit recycles transient buffers through
-the pool"` from `docs/REFERENCE.md:4810-4826` (§6.2). Step-highlight in sync
+the pool"` from
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md:174-190`
+(§6.2). Step-highlight in sync
 with the VO: `const first_ptr = first.dataConst().ptr;` → `first.deinit();`
-→ `var second = try ctx.elementwise(.add, &a, &a);` → the final
+→ `var second = try ctx.elementwise(.f32, .add, &a, &a);` → the final
 `expectEqual(first_ptr, second.dataConst().ptr)`.
 
 **Overlay:** "same size → same address — asserted, machine-verified
-(REFERENCE.md §6.2)"
+(reference §6.2)"
 
 ### [2:00–2:35] LIFO warmth, arena verdict
 
@@ -147,7 +151,8 @@ names".
   - `src/tensor.zig:94-101` — the four-field raw tensor struct.
   - `src/tensor.zig:464-483` — the broadcast stride loop.
   - `src/storage.zig:120-132` — `release` with `fetchSub`.
-  - `docs/REFERENCE.md:4810-4826` — the pointer-equality pool test (§6.2).
+  - `docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md:174-190`
+    — the pointer-equality pool test (§6.2).
   - `src/exec/buffer_pool.zig:185-188` — the LIFO cache-warmth comment.
   - `docs/MEMORY-MODEL.md:10-15` and `docs/MEMORY-MODEL.md:204-212` — the
     arena verdict quote and the ≤2-vs-16 measurement.
@@ -181,12 +186,13 @@ names".
 - **Optional terminal beat (settled)**: chapter 03 gives no runnable command
   for the pool test, so the §6.2 snippet stays a code shot. If production
   wants a live run anyway, `zig build snippet-check` is real and in-tree
-  (build.zig:849; docs/REFERENCE.md §2.7 and the §2.3 target table; it is a CI
-  step) — it extracts and runs *every* runnable REFERENCE.md snippet, this
+  (build.zig:338; `docs/reference/02-toolchain-build-and-project-wiring.md`
+  §2.7 and the §2.3 target table; it is a CI
+  step) — it extracts and runs *every* runnable docs/reference snippet, this
   test included. If shown, frame it as the gate that machine-verifies the
   snippet, not as running this one test in isolation.
 - **Honesty guardrails**: keep the "raw layer is deliberately not public API"
-  note in the close (chapter §3.13 / REFERENCE.md §8 instability warning);
+  note in the close (chapter §3.13 / reference §8 instability warning);
   no state-of-the-art or production-readiness claims anywhere.
 - **If the cut runs long, trim in this order**: (1) the `src/storage.zig`
   release shot in segment 3 (keep the VO line, show it over the broadcast

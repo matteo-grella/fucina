@@ -55,7 +55,7 @@ every operation runs the moment you call it, on real buffers. No graph to
 build, plan, or compile. The README states the thesis in one line: what
 you read is what runs — in inference and in training alike.
 
-**Visual:** Code/text shot of the repo `README.md:3-12` (the opening
+**Visual:** Code/text shot of the repo `README.md:7-16` (the opening
 paragraph); a highlight sweeps across "what you read is what runs, in
 inference and in training alike" as the VO reaches it, then a second,
 briefer highlight across "CBLAS providers and a GPU offload (Metal or
@@ -75,7 +75,7 @@ trick worth pausing on: this same forward function infers and trains. Open
 an exec scope, and the identical code records what backward needs. No
 train mode, no second graph. One function, both jobs.
 
-**Visual:** Code shot of `README.md:24-53` (the front-page example), in
+**Visual:** Code shot of `README.md:43-73` (the front-page example), in
 two passes: first frame the `Model` struct and `forward` (lines 24–41),
 highlighting the axis-tag types `Tensor(.{ .batch, .in })` (lines 25–28
 and 31) and the `defer z1.deinit()` lines; then pan down to the training
@@ -103,7 +103,7 @@ amp" (guitar + waveform icon) and Ch 12 "A transformer from scratch"
 terminal recording of
 `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
 --chat "What is the capital of France?" --no-think` (the README quick
-start, `README.md:143-144`) printing its answer. Caption the clip:
+start, `README.md:200-202`) printing its answer. Caption the clip:
 "Qwen3-0.6B — one example; the README table lists every family."
 
 **Overlay:** Ch 10: a neural guitar amp, live · Ch 12: a transformer,
@@ -118,7 +118,7 @@ course itself was generated with AI over the library as it stands today.
 That candor is a feature: every claim is cited to file, usually to the
 line, and where text and source disagree, the source wins.
 
-**Visual:** Text shot of `README.md:291-299` (the agentic-assistance
+**Visual:** Text shot of `README.md:386-395` (the agentic-assistance
 passage), highlight on "humans leading the ideas, the testing, and the
 debugging"; then a brief shot of the course chapter
 `docs/course/00-introduction.md` §0.7 ("How this course was made"),
@@ -137,7 +137,7 @@ to read all of it.
 
 **Visual:** Terminal recording: `git clone
 https://github.com/matteo-grella/fucina && cd fucina && zig build test`
-(the README quick start, `README.md:136-138`), ending on the passing test
+(the README quick start, `README.md:190-209`), ending on the passing test
 summary. Hold on an end card: series title + "the written course:
 `docs/course/` in the repo" + "Next: 01 — Just enough Zig".
 
@@ -147,11 +147,11 @@ summary. Hold on an end card: series title + "the written course:
 ## Asset list
 
 - **Code shots** (from the repo, as-is):
-  - `README.md:3-12` — opening paragraph, "what you read is what runs" +
+  - `README.md:7-16` — opening paragraph, "what you read is what runs" +
     the optional-accelerator sentence.
-  - `README.md:24-53` — the front-page example (Model struct, `forward`,
+  - `README.md:43-73` — the front-page example (Model struct, `forward`,
     exec-scope training block).
-  - `README.md:291-299` — the agentic-assistance passage.
+  - `README.md:386-395` — the agentic-assistance passage.
   - `docs/course/00-introduction.md` §0.7 — the "How this course was made"
     passage (brief, for the citation-discipline zoom).
 - **Terminal recordings** (Zig 0.16.0 required — the toolchain is pinned;

@@ -61,8 +61,8 @@ verbatim-repetition microcase, not the typical day.
 **Visual:** Diagram first: token stream `5 6 7 5 6`; the suffix `[5,6]`
 highlights at the end AND at its earlier occurrence; an arrow pulls the
 tokens that followed — `7 5 6` — forward as the draft (per §13.4 /
-`docs/REFERENCE.md` §13.9.2). Then code shot:
-`src/llm/speculative/core.zig:9–20` — the normative losslessness header —
+`docs/reference/13-the-model-stack-fucina_models.md` §13.9.2). Then code shot:
+`src/models/text/speculative/core.zig:9–20` — the normative losslessness header —
 with "sampled == draft[i]" and "the sampled token IS the correction token"
 highlighted in sequence. Close on a numbers card quoting §13.5's table:
 "grounded copy 1.47× (pre-tokenizer-fix encoding; same prompt 1.04×
@@ -96,7 +96,7 @@ zig build qwen3 -Doptimize=ReleaseFast -- \
 Then a three-tier diagram: "pinned hot set → per-layer LRU → `pread`", with
 a router icon feeding it and "the OS sees pages, not experts" as the
 footnote (§13.8 ML note). Then code shot:
-`src/exec/expert_store.zig:926–944` — the acquire resolution loop — with
+`src/store/expert_store.zig:737-756` — the acquire resolution loop — with
 the pinned-hit, LRU-hit, and miss branches highlighted in sequence.
 
 **Overlay:** "142 GB GGUF · 64 GB RAM · ~24 GB peak RSS @ 20 GB expert
@@ -115,11 +115,11 @@ zero. So the grammar becomes a drafter. Spans it forces — the next JSON key,
 the punctuation — draft themselves and verify with probability one.
 Measured: acceptance zero to 83 percent, output byte-identical.
 
-**Visual:** Code shot: `src/llm/logit_processor.zig:35–64` — the
+**Visual:** Code shot: `src/models/text/logit_processor.zig:35–64` — the
 `LogitProcessor` vtable — highlighting `process` ("mask before the
 pipeline"), `commit` ("observe after"), then the two optional structural
 hooks `forcedTokens` / `validPrefixLen`. Then code shot:
-`src/llm/speculative/constrained.zig:36–56` — the entire public surface of
+`src/models/text/speculative/constrained.zig:36–56` — the entire public surface of
 `ConstrainedSource`, two functions. Close on the §13.6 command as a terminal
 shot (runnable if the Q8_0 model is present):
 ```
@@ -174,13 +174,13 @@ closing paragraph). End card: series title, "Full chapter:
 
 **Code shots (repo files, exact ranges — ranges verified 2026-07-18,
 re-verify at record time):**
-- `src/llm/speculative/core.zig:9–20` — the normative losslessness header
+- `src/models/text/speculative/core.zig:9–20` — the normative losslessness header
   (doc comment).
-- `src/exec/expert_store.zig:926–944` — the acquire resolution loop
+- `src/store/expert_store.zig:737-756` — the acquire resolution loop
   (pinned hit / LRU hit / miss collect).
-- `src/llm/logit_processor.zig:35–64` — the `LogitProcessor` vtable with
+- `src/models/text/logit_processor.zig:35–64` — the `LogitProcessor` vtable with
   optional structural hooks.
-- `src/llm/speculative/constrained.zig:36–56` — `ConstrainedSource`'s
+- `src/models/text/speculative/constrained.zig:36–56` — `ConstrainedSource`'s
   two-function public surface (`init` at :47, `source` at :54–56).
 
 **Terminal shots:**

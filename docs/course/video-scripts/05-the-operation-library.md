@@ -30,7 +30,8 @@ back. What you read is what runs. So today, we read it.
 **Visual:** Diagram: two pipelines side by side — "capture graph → compile →
 execute" grayed out on the left, "call → kernel → owned tensor" highlighted
 on the right. Then the quote card: "an op call runs the kernel and returns
-an owned result immediately" — docs/REFERENCE.md §6.
+an owned result immediately" —
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.
 **Overlay:** "PyTorch is eager too — Fucina drops everything *around* the
 eager core: no global device, no graph-capture modes."
 
@@ -46,8 +47,9 @@ That is the entire architecture: validate once at the facade, then small
 unchecked kernels.
 **Visual:** Three code shots in descending sequence, with a small "depth
 gauge" graphic on the left edge (facade → lowering → kernel) tracking the
-descent: (1) `src/ag/tensor.zig:1241–1243` (`add`, the whole method);
-(2) `src/tag_ops.zig:53–81` (`pointwise` — hold on the two `validateTensorRank`
+descent: (1) `src/ag/tensor/elementwise.zig:316-318` (`add`, the whole
+method);
+(2) `src/tag_ops.zig:64-85` (`pointwise` — hold on the two `validateTensorRank`
 lines, then the two `broadcastTensorTo` view lines, then the `switch`);
 (3) `src/exec/elementwise.zig` (`elementwiseRankInto`: the contiguous /
 tail-broadcast / materialize dispatch).
@@ -63,10 +65,10 @@ result gets the very same address back, warm in cache. And here is scale —
 the library's whole skeleton in one tiny method: run the kernel, errdefer
 the value, hand off to finishOp. Every differentiable op ends in one of two
 shared tails, so the contract is implemented once, not re-derived per op.
-**Visual:** Code shot: `src/ag/tensor.zig:1257–1261` (`scale`, entire
+**Visual:** Code shot: `src/ag/tensor/elementwise.zig:334-341` (`scale`, entire
 method). Then a small loop diagram: tensor `deinit` → buffer returns to the
 pool's free list → next same-shaped op receives the same address.
-**Overlay:** "kernels never allocate — docs/REFERENCE.md §6.5" · "same
+**Overlay:** "kernels never allocate — reference §6.5" · "same
 address back: pinned by the pointer-equality recycling test (episode 03)".
 
 ### [1:35–2:10] Contraction by axis name
@@ -78,7 +80,7 @@ and without a single transpose call anywhere. Orientation is the lowering's
 problem, not yours. And this snippet is machine-verified: it runs in CI,
 straight from the reference.
 **Visual:** First a one-line shot of the `dot` signature,
-`src/ag/tensor.zig:3747`. Then the test "dot with a shared batch tag lowers
+`src/ag/tensor/float/matmul.zig:122`. Then the test "dot with a shared batch tag lowers
 to bmm" from the chapter, `docs/course/05-the-operation-library.md:508–521`,
 highlighting `.k` in the `dot` call and the shared `.b` tag. Then a terminal
 shot: `zig build snippet-check` (run in the repo root; show the tail of the
@@ -113,11 +115,11 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
 
 ## Asset list
 - **Code shots (record from the repo at current main):**
-  - `src/ag/tensor.zig:1241–1243` — `add`, the entire facade method.
-  - `src/tag_ops.zig:53–81` — `pointwise`, the entire lowering function.
+  - `src/ag/tensor/elementwise.zig:316-318` — `add`, the entire facade method.
+  - `src/tag_ops.zig:64-85` — `pointwise`, the entire lowering function.
   - `src/exec/elementwise.zig` — `elementwiseRankInto`, the layout dispatch.
-  - `src/ag/tensor.zig:1257–1261` — `scale`, the entire method.
-  - `src/ag/tensor.zig:3747` — the `dot` signature (one line, wraps).
+  - `src/ag/tensor/elementwise.zig:334-341` — `scale`, the entire method.
+  - `src/ag/tensor/float/matmul.zig:122` — the `dot` signature (one line, wraps).
 - **Chapter excerpts (render from `docs/course/05-the-operation-library.md`):**
   - Lines 503–516 — machine-verified test "dot with a shared batch tag
     lowers to bmm".
@@ -126,7 +128,7 @@ over a slow zoom-out of the three-layer depth-gauge diagram from segment 2.
   - Lines 739–754 — machine-verified test "crossEntropy on uniform logits
     is ln(K)".
 - **Terminal recording:** `zig build snippet-check` from the repo root (the
-  in-tree gate that extracts and runs every runnable docs/REFERENCE.md
+  in-tree gate that extracts and runs every runnable docs/reference
   snippet against the real modules). Show the tail: the step completing
   without failures. No model downloads needed for this episode.
 - **Diagrams (3):**

@@ -41,11 +41,11 @@ model (close-up of hands on strings), then reveal the rig — guitar → USB
 interface → laptop terminal. On the terminal: `zig build nam
 -Doptimize=ReleaseFast` run with `.nam` files in a `nam-profiles/` folder,
 showing the numbered amp menu; a number is pressed, the status line appears,
-playing continues. (Per `examples/nam/README.md`, "The simplest path — no
+playing continues. (Per `apps/nam/README.md`, "The simplest path — no
 flags at all".)
 
 **Overlay:** "live · one CPU core · no plugin host, no DAW" · "13,802
-weights (`examples/nam/train.zig:34-36`)".
+weights (`apps/nam/train.zig:34-36`)".
 
 ### [0:26–0:58] Full circle: a language born from audio
 
@@ -101,13 +101,13 @@ builds are around twenty times slower and will not keep up.
 small ticks near its left edge: "≈49 µs" and "≈80 µs". Then terminal
 recording: `zig build nam -Doptimize=ReleaseFast -- bench my-amp.nam`,
 holding on the `budget` / `measured` / `realtime: …x headroom` output lines
-(printed by `examples/nam/main.zig:330-336`).
+(printed by `apps/nam/main.zig:330-336`).
 
 **Overlay:** On the ticks, permanently: "≈49 µs/block — ReleaseFast,
 i9-13950HX P-core, 2026-07-03 x86 snapshot · ≈80 µs — M1 Max ·
-`examples/nam/README.md` (Performance); measure yours with `bench`". On the
+`apps/nam/README.md` (Performance); measure yours with `bench`". On the
 ReleaseFast beat: "Debug ≈ 20× slower — will not keep up
-(`examples/nam/README.md:23-24`)".
+(`apps/nam/README.md:23-24`)".
 
 ### [1:54–2:26] Inside the callback: no allocation, structurally
 
@@ -119,18 +119,18 @@ crosses threads only as atomics: gain knobs are float bits in an atomic
 integer, and switching amps mid-song is one atomic index store into a
 preloaded, prewarmed array.
 
-**Visual:** Code shot 1: `examples/nam/live.zig:268-282` — the `audioCallback`
+**Visual:** Code shot 1: `apps/nam/live.zig:268-282` — the `audioCallback`
 opening, with the doc comment "No allocation, no locks, no syscalls."
 highlighted first, then the null-checked pointers. Code shot 2:
-`examples/nam/live.zig:93-102` — the `Shared` struct, highlighting
+`apps/nam/live.zig:93-102` — the `Shared` struct, highlighting
 `std.atomic.Value` on every field and `gain_bits … @bitCast`. On the final VO
 line, cut back to live footage: `]` pressed mid-riff, the status line flips to
 the next amp, playing never stops.
 
 **Overlay:** "every engine: 'All buffers are allocated at init; `process` is
-allocation-free' (`examples/nam/stream_conv.zig:9` — same contract in
+allocation-free' (`apps/nam/stream_conv.zig:9` — same contract in
 `wavenet.zig`, `engine.zig`, `ir_cab.zig`)" · on the switch cut: "profile
-switch = one atomic index store (`examples/nam/live.zig:1-6`)".
+switch = one atomic index store (`apps/nam/live.zig:1-6`)".
 
 ### [2:26–3:00] One binary, and what's absent
 
@@ -142,9 +142,9 @@ latency is the product, the short list between your code and the deadline is
 the entire feature. Next time: model files and quantization — models six
 orders of magnitude larger, where the walls move.
 
-**Visual:** Split-screen, one beat: left `examples/nam/wavenet.zig:4-15` (the
+**Visual:** Split-screen, one beat: left `apps/nam/wavenet.zig:4-15` (the
 module-doc algebra of the streaming engine), right
-`examples/nam/train.zig:279-289` (the same equations as autograd ops), a thin
+`apps/nam/train.zig:279-289` (the same equations as autograd ops), a thin
 line pairing `z = dilated_conv(x) + input_mixin(condition)` with
 `causalConv1d … add … dot … add`. For the "absent" list, return to the live
 demo — playing continues under the VO while the four "No …" lines stamp onto
@@ -162,21 +162,21 @@ quantization".
 - Hardware: electric guitar; USB audio interface with a Hi-Z/Inst input (or a
   DI box); macOS / Apple Silicon machine — the live path is "Tested on macOS /
   Apple Silicon … Linux should work too but is untested"
-  (`examples/nam/README.md:14-16`). Monitor through the **same** interface
+  (`apps/nam/README.md:14-16`). Monitor through the **same** interface
   (two devices = two clocks = periodic clicks, `README.md:123-125`).
 - Software: `zig build nam -Doptimize=ReleaseFast` with 2–3 `.nam` profiles
   placed in `./nam-profiles/` → numbered amp menu → pick → play. Keys used on
   camera: number keys to pick, `]` to switch mid-riff.
 - macOS gotcha to check before the shoot: microphone permission is attributed
   to the **terminal app**; "a denied permission yields silence with no error"
-  (`examples/nam/README.md:92-94`).
+  (`apps/nam/README.md:92-94`).
 - Capture the processed sound from the interface output (clean DI of the
   result), room mic optional for hands/strings ambience.
 
 **External downloads (weights are NOT in the repo):**
 - 2–3 `.nam` amp profiles from Tone3000 (https://www.tone3000.com — thousands
   of free ones; almost all "standard WaveNet", which this player runs at full
-  fidelity, per `examples/nam/README.md`).
+  fidelity, per `apps/nam/README.md`).
 
 **Terminal recordings:**
 - `zig build nam -Doptimize=ReleaseFast` (no flags, profiles in
@@ -185,11 +185,11 @@ quantization".
   measured / headroom lines.
 
 **Code shots (repo files, exact ranges):**
-- `examples/nam/live.zig:268-282` — `audioCallback` opening + doc-comment rule.
-- `examples/nam/live.zig:93-102` — `Shared` atomics (`gain_bits` as
+- `apps/nam/live.zig:268-282` — `audioCallback` opening + doc-comment rule.
+- `apps/nam/live.zig:93-102` — `Shared` atomics (`gain_bits` as
   `@bitCast` f32 bits).
-- `examples/nam/wavenet.zig:4-15` — module-doc dataflow algebra.
-- `examples/nam/train.zig:279-289` — the autograd twin of the same layer math.
+- `apps/nam/wavenet.zig:4-15` — module-doc dataflow algebra.
+- `apps/nam/train.zig:279-289` — the autograd twin of the same layer math.
 
 **Diagrams to render (one sentence each):**
 - Circle-closing history card: "2016 — Zig conceived inside the Genesis DAW" →
@@ -199,7 +199,7 @@ quantization".
   receptive field 4,093 samples ≈ 85 ms @ 48 kHz (§10.3) — the episode's only
   architecture visual.
 - Budget bar: 1,333 µs block budget with ≈49 µs / ≈80 µs ticks and their
-  caveat caption (§10.9, `examples/nam/README.md` Performance).
+  caveat caption (§10.9, `apps/nam/README.md` Performance).
 - End card with "Full chapter: `docs/course/10-the-guitar-amp.md`" and
   next-episode teaser.
 
@@ -210,7 +210,7 @@ quantization".
   the demo itself, not adjectives. No "revolutionary", no SOTA claims.
 - **Caveats are load-bearing and MUST NOT be cut:** (a) the ≈49 µs / ≈80 µs
   figures always carry "ReleaseFast, i9-13950HX P-core, 2026-07-03 x86
-  snapshot / M1 Max — `examples/nam/README.md` (Performance)"; the chapter
+  snapshot / M1 Max — `apps/nam/README.md` (Performance)"; the chapter
   itself teaches that these numbers rot (§10.9's stale doc-comment lesson), so
   the "measure yours with `bench`" clause stays; (b) the ~20× Debug figure
   keeps its README citation; (c) the §10.1 history stays clearly marked as
@@ -223,11 +223,11 @@ quantization".
   beside it. Build with `-Doptimize=ReleaseFast` — a Debug build will audibly
   glitch and waste the shoot.
 - **Numbers appearing in the video and their sources:** 13,802 weights / 55 KB
-  (§10.2, `examples/nam/train.zig:34-36`); dilations 1..512, receptive field
+  (§10.2, `apps/nam/train.zig:34-36`); dilations 1..512, receptive field
   4,093 ≈ 85 ms (§10.3, chapter-verified test); 64 ÷ 48,000 = 1,333 µs
   (§10.9 arithmetic); ≈49 µs / ≈80 µs, ≈27× / ≈17× headroom
-  (`examples/nam/README.md` Performance via §10.9); ~20× Debug
-  (`examples/nam/README.md:23-24`). Nothing else may be quantified — in
+  (`apps/nam/README.md` Performance via §10.9); ~20× Debug
+  (`apps/nam/README.md:23-24`). Nothing else may be quantified — in
   particular do not add the upstream-comparison or parity numbers; they carry
   protocol baggage this cut has no room to caveat.
 - **If the cut runs long, trim in this order:** the history card's dwell time

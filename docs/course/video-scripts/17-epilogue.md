@@ -30,7 +30,7 @@ the name promised.
 deep-learning stack — the part that hides below Python — as one program, in
 one language, you can read top to bottom. It began with an enum.
 
-**Visual:** Slow push-in on `src/dtype.zig:3-16` — the `DType` enum, from
+**Visual:** Slow push-in on `src/dtype.zig:8-24` — the `DType` enum, from
 `bool` and the integer types down through `f16`/`bf16`/`f32` into the first
 quantized cases. No terminal, no diagram: just the enum that started
 Chapter 3.
@@ -53,11 +53,11 @@ machine. One language. One machine. Nothing you cannot read.
 flicker across `src/storage.zig` and `src/tensor.zig` file headers; (2) the
 journey map — the §17.1 review-index table drawn as a rising path, Part I
 through Part VI, each station labeled with its repo path (`src/dtype.zig`,
-`src/tags.zig`, `src/backend/`, `src/ag/`, `examples/nam/`, `src/llm/`,
+`src/tags.zig`, `src/backend/`, `src/ag/`, `apps/nam/`, `src/models/`,
 `docs/`); (3) live-amp clip reused from Video 10 (guitar → USB interface →
 terminal, playing); (4) terminal recording: `zig build qwen3
 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl`
-(`examples/qwen3/README.md`), a short question streaming an answer,
+(`apps/qwen3/README.md`), a short question streaming an answer,
 captioned "Qwen3-0.6B — one of the model zoo"; (5) hard cut to a black
 card as the VO lands the last three sentences.
 
@@ -81,12 +81,12 @@ becomes a compile error until it does.
 ramp (1 run every example … 6 contribute), with the "first milestone"
 column highlighted as the VO says "the thing that can tell you you are
 wrong". Then terminal recording: `zig build spirals -Doptimize=ReleaseFast`
-running to a decreasing loss. Then code shot `src/ag/tensor.zig:1652-1663`
+running to a decreasing loss. Then code shot `src/ag/tensor/elementwise.zig:552-564`
 (the `elementalUnary` doc comment and signature), followed by the
 five-station route diagram for the full route: `src/backend/ops.zig`
-(enum + switch) → `src/backend/vector/primitives.zig:155` (`vecUnary`) →
+(enum + switch) → `src/backend/vector/primitives.zig:157` (`vecUnary`) →
 `src/exec/elementwise.zig` → `src/ag/backward/elementwise.zig` → `src/ag/tensor.zig`,
-with `src/backend/ops.zig:40-57` (`UnaryOp`, `tanh` at line 56) shown
+with `src/backend/ops.zig:44-61` (`UnaryOp`, `tanh` at line 60) shown
 beside the first station.
 
 **Overlay:** "ReleaseFast is mandatory — Debug is 10–50× slower
@@ -105,14 +105,14 @@ something clarifying about a project whose loss you can hear.
 **Visual:** Doc shot `docs/PORTING.md:1-10`, highlighting the one-line
 version: "you don't optimize what you can't verify". A small parity-ladder
 diagram climbs beside it: tokenizer (token-ID-exact) → logits from raw ids
-→ generation. Then doc shot `examples/nam/README.md:163-170` — the one-step
+→ generation. Then doc shot `apps/nam/README.md:163-170` — the one-step
 `fucina-nam profile --signal v3_0_0.wav …` command and the two-step
 `train --input … --output … --out my-amp.nam` line — over rig B-roll reused
 from Video 10.
 
 **Overlay:** "discrete outputs gate on exact equality; tolerances are never
 loosened (docs/PORTING.md via §17.2)" · "the trainer refuses clipped
-captures (`examples/nam/README.md`)".
+captures (`apps/nam/README.md`)".
 
 ### [2:05–2:31] Contribute: wrong or slow, and a human sends the PR
 
@@ -161,7 +161,7 @@ forge is yours." · "Full chapter: docs/course/17-epilogue.md".
 - `zig build spirals -Doptimize=ReleaseFast` — needs no downloads at all
   (§17.2, project 1); hold on the loss decreasing.
 - `zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf
-  --repl` — one short question, streamed answer (`examples/qwen3/README.md`);
+  --repl` — one short question, streamed answer (`apps/qwen3/README.md`);
   carries the "one of the model zoo" caption from montage beat 4.
 
 **External downloads (weights are NOT in the repo):**
@@ -176,13 +176,13 @@ forge is yours." · "Full chapter: docs/course/17-epilogue.md".
   from Tone3000 (https://www.tone3000.com) and the Video 10 hardware list.
 
 **Code/doc shots (repo files, exact ranges):**
-- `src/dtype.zig:3-16` — the `DType` enum opening (hook).
+- `src/dtype.zig:8-24` — the `DType` enum opening (hook).
 - `src/storage.zig` and `src/tensor.zig` file headers (montage flicker; any
   top-of-file frame is fine).
-- `src/ag/tensor.zig:1652-1663` — `elementalUnary` doc comment + signature.
+- `src/ag/tensor/elementwise.zig:552-564` — `elementalUnary` doc comment + signature.
 - `src/backend/ops.zig:40-57` — `UnaryOp` enum (`tanh` at line 56).
 - `docs/PORTING.md:1-10` — the one-line version of the method.
-- `examples/nam/README.md:163-170` — `profile` one-step command + two-step
+- `apps/nam/README.md:163-170` — `profile` one-step command + two-step
   `train` line.
 - `CONTRIBUTING.md:8-19` — "A human sends the PR" section.
 - `CONTRIBUTING.md:23-27` — the two regression tracks.
@@ -192,7 +192,7 @@ forge is yours." · "Full chapter: docs/course/17-epilogue.md".
   with their repo paths as station labels.
 - Six-project ladder: the §17.2 table as a graded ramp with the
   first-milestone column highlighted.
-- Five-station op route: ops.zig → vector/primitives.zig:155 →
+- Five-station op route: ops.zig → vector/primitives.zig:157 →
   exec/elementwise.zig → ag/backward/elementwise.zig → ag/tensor.zig.
 - Parity ladder: tokenizer (token-ID-exact) → logits from raw ids →
   generation (§17.2, project 4).

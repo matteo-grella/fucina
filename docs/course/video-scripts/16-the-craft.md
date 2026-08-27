@@ -47,24 +47,26 @@ i9-13950HX (docs/BENCHMARK.md)".
 
 ### [0:24–0:53] An architecture you can check
 
-**VO:** Catching wrong starts with structure. The tree is eleven bands —
-dtypes at the bottom, models at the top — and a band may depend only on bands
-at or below it. A checker in the tree runs Tarjan's algorithm over the
-production import graph on every push: one hundred thirty-five files, five
-hundred thirty-one edges, zero cycles. The gate states its own limit: cycles are
-machine-checked; band direction is review-only — labeled, in writing.
+**VO:** Catching wrong starts with structure. The tree is thirteen bands —
+dtypes at the bottom, applications at the top — and a band may depend only
+on bands at or below it. A checker in the tree runs Tarjan's algorithm over
+the production import graph on every push: four hundred sixteen files,
+thirteen hundred seventy-nine edges, zero forbidden cycles, zero band
+inversions — the band direction itself is machine-checked against the layer
+table, encoded as `band_table` in the checker.
 
-**Visual:** Layer-stack diagram: eleven horizontal bands from
+**Visual:** Layer-stack diagram: thirteen horizontal bands from
 `docs/ARCHITECTURE.md`'s table (core · primitives · tensor · tags · backend ·
-exec · tagged · ag+training · facade · llm · apps, bottom to top) with a
-single downward arrow "may depend only on bands at or below". Then a terminal
+store · exec · tagged · ag+training · facade · models · serving · apps,
+bottom to top) with a single downward arrow "may depend only on bands at or
+below". Then a terminal
 shot: `zig build arch-check` running in the repo root. Close on a code shot:
 `tools/check_import_graph.zig:1–15` (the header stating the contract,
 including test-awareness and conservative parsing).
 
-**Overlay:** "as recorded in docs/ARCHITECTURE.md: `production import graph:
-135 files, 531 edges, 0 SCCs`" · "proves acyclicity, not band direction —
-direction is review-checked (docs/DEVELOPMENT.md §1.1)".
+**Overlay:** "arch-check: `production import graph: 416 files, 1379 edges,
+0 forbidden SCCs, 0 band inversions`" · "cycles AND band direction are
+machine-checked (docs/DEVELOPMENT.md §1.1)".
 
 ### [0:53–1:40] The verification religion
 
@@ -109,8 +111,8 @@ build · bench-check · arch-check · doc-check · snippet-check · x86dot-check
 scalar leg · blas=none leg · llguidance leg), with `snippet-check`
 highlighted.
 
-**Overlay:** "docs/REFERENCE.md snippets run against the real
-`fucina`/`fucina_llm` modules — in CI, every push (§2.7)".
+**Overlay:** "docs/reference snippets run against the real
+`fucina`/`fucina_models` modules — in CI, every push (§2.7)".
 
 ### [2:00–2:40] A loss, kept and investigated
 
@@ -168,15 +170,15 @@ actually *executed* — 'tested' never rounds up". End card: "Full chapter:
 
 **Terminal recordings (run in the repo root, no models needed):**
 - `zig build arch-check` — the import-graph gate. Note: the live
-  files/edges count may differ from the doc-recorded figure; the overlay
-  quotes "135 files, 531 edges, 0 SCCs" explicitly *as recorded in*
-  `docs/ARCHITECTURE.md`.
-- `zig build snippet-check` — the REFERENCE.md runnable-snippet gate.
+  files/edges count may drift as the tree grows; if it differs from the
+  overlay figure (416 files, 1379 edges), show the live output unedited
+  and update the overlay.
+- `zig build snippet-check` — the docs/reference runnable-snippet gate.
 
 **Diagrams/cards to render (one sentence each):**
 - Three quiet-failure text beats plus the two-ways quote card, text verbatim
   from `CONTRIBUTING.md` via chapter §16.0.
-- Eleven-band layer stack from the `docs/ARCHITECTURE.md` table quoted in
+- Thirteen-band layer stack from the `docs/ARCHITECTURE.md` table quoted in
   §16.1, single downward "may depend only on bands at or below it" arrow.
 - Oracle-inventory table, rows quoted from the §16.3 arsenal table.
 - Ratchet quote card: "an optimization that flips a single token is reverted,
@@ -204,10 +206,10 @@ re-measured.
   caption (Qwen3-30B MoE, i9-13950HX, Linux, no BLAS either side, llama.cpp
   build 30af6e2, snapshot 2026-07-04) must be on screen whenever 0.36–0.52×,
   0.375–0.509, or 0.965–0.987× is; (b) the 7.2× overlay must carry "q8_0
-  pp256 · i9-13950HX · docs/BENCHMARK.md"; (c) "135 files, 531 edges, 0 SCCs"
-  must stay labeled "as recorded in docs/ARCHITECTURE.md" — if the live
-  `arch-check` output differs, show the live output unedited and let the
-  overlay carry the recorded figure; (d) the residual card keeps the words
+  pp256 · i9-13950HX · docs/BENCHMARK.md"; (c) the arch-check figure (416 files, 1379 edges, 0 forbidden SCCs, 0
+  band inversions) — if the live
+  `arch-check` output differs, show the live output unedited and update
+  the overlay; (d) the residual card keeps the words
   "open, small".
 - **The NEVER shot is VO-unanchored by design:** the attestation table lands
   under "never let a claim outrun its evidence" — keep that sync; without it
@@ -219,8 +221,8 @@ re-measured.
   the conditions caption, or any caveat overlay.
 - **Numbers appearing in the video and their sources (nothing else may be
   quantified):** 7.2× self-speedup, q8_0 pp256, i9-13950HX
-  (`docs/BENCHMARK.md` via §16.0); 135/531/0 (`docs/ARCHITECTURE.md` via
-  §16.2); eleven bands (count of the ARCHITECTURE.md band table quoted in
+  (`docs/BENCHMARK.md` via §16.0); 416/1379/0/0 (`zig build arch-check` via
+  §16.2); thirteen bands (count of the ARCHITECTURE.md band table quoted in
   §16.1); CV > 8% NOISY default (`tools/bench_gate.py` via §16.6);
   0.36–0.52× pp15–33 band, 128 experts / top-8 / ~1–3 rows per expert
   (hypothesis card), 0.375–0.509 reverted-gate control (update dated

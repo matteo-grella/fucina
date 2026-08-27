@@ -43,7 +43,7 @@ is evolution strategies, and its best trick is about memory.
 the VO negates them, leaving only "θ" and an arrow labeled "one scalar
 reward per candidate". On "Ahoy!", a small card quotes the rule-reward
 example from §9.8: *starts with `Ahoy!`, ends with `matey.`* (from
-`examples/es_finetune/main.zig`, described in the chapter).
+`apps/es_finetune/main.zig`, described in the chapter).
 
 **Overlay:** "forward passes only — no `backward()`, no graph, no optimizer
 state (`src/es.zig`)".
@@ -80,7 +80,7 @@ checkpoint is just an iteration counter — no optimizer file at all.
 
 **Visual:** Memory-bill card first: "30 members × 0.6e9 params × 4 bytes ≈
 **72 GB of noise** — for one iteration", labeled "arithmetic, not a
-benchmark" (§9.2). Then code shot: `src/es.zig:545–553` — `memberSeed`, with
+benchmark" (§9.2). Then code shot: `src/es/trainer.zig:367-376` — `memberSeed`, with
 its doc comment "a pure function of (config.seed, iteration, member).
 Checkpoint contract" highlighted. Then a diagram: the coordinate tuple
 "(seed, iteration, member, slot, element)" feeding one function box that
@@ -165,7 +165,7 @@ neural audio".
 **Code shots (repo files, exact ranges — all verified against the tree):**
 - `src/es.zig:11–14` — the four-line ES algorithm in the module doc (frame
   may include lines 8–16 for context).
-- `src/es.zig:545–553` — `memberSeed`: noise seed as a pure function of
+- `src/es/trainer.zig:367-376` — `memberSeed`: noise seed as a pure function of
   (config.seed, iteration, member), "Checkpoint contract" doc comment.
 - `src/es.zig:1–6` — module doc licensing stance ("reimplemented … not
   ported").
@@ -238,7 +238,7 @@ no model weights are needed anywhere in this episode.
 - **Numbers appearing in the video and their sources:** 72 GB = 30 ×
   0.6e9 × 4 bytes (§9.2, arithmetic); ~15k iterations, ~75 s, ~5 ms/iter,
   population 128, 100% accuracy (docs/TRAINING.md:986–987 via §9.6, M1 Max
-  ReleaseFast); 2,000 gradient steps (`examples/spirals/main.zig:26` via §9.6);
+  ReleaseFast); 2,000 gradient steps (`examples/spirals/main.zig:34` via §9.6);
   "nearly two million member evaluations" (§9.6's own arithmetic); target
   0.90 / chance 0.50 (§9.6); 4,482 parameters and 4 default workers (§9.6,
   VO says "four worker threads" — the chapter's stated default); three

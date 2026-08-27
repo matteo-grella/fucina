@@ -62,7 +62,7 @@ from 5.77 to 2e-4. That is memorization, on purpose. The point is the
 whole pipeline closing in under a minute of laptop time — and the
 after-generation opens with Ahoy.
 **Visual:** Code shot: the five-pair pirate dataset at
-`examples/finetune/main.zig:38-44`; then terminal recording:
+`apps/finetune/main.zig:39-45`; then terminal recording:
 `zig build finetune -Doptimize=ReleaseFast -- --steps 30` (default model
 `models/Qwen3-0.6B-Q4_K_S.gguf`), capturing the BEFORE generation
 (pirate-free), the loss trace, and the AFTER generation opening with
@@ -92,7 +92,7 @@ then `zig build export-gguf … --dtype q4_k --out
 /tmp/qwen3-tuned-q4_k.gguf --chat "What is the capital of France?"` and
 `llama-cli -m /tmp/qwen3-tuned-q4_k.gguf` (the cold-open's shot, now in
 context). Time-compress the runs; keep each command line readable.
-Optional cut while step 2 runs: the merge at `src/lora.zig:265-274`
+Optional cut while step 2 runs: the merge at `src/lora.zig:262-272`
 (`w_data += scale * (B·A)`).
 **Overlay:** `merge + quantize: separate passes BY DESIGN — one
 quantization in the file's history` · `"answers … under llama-cli … loads
@@ -107,9 +107,9 @@ against the Python reference: token-exact tokenizer, byte-identical
 loaders, per-layer forward parity. It's a small GPT — six layers, 384
 wide — and nobody pretends otherwise.
 **Visual:** Code shot: the five-subcommand table at
-`examples/nanochat/README.md:20-28` (tok-train / base-train / sft /
+`apps/nanochat/README.md:20-28` (tok-train / base-train / sft /
 eval-bpb / chat); then the honest CPU-demo config `d6` at
-`examples/nanochat/model.zig:56-65` with `.n_layer = 6` and
+`apps/nanochat/model.zig:56-65` with `.n_layer = 6` and
 `.n_embd = 384` highlighted.
 **Overlay:** `parity target: nanochat @ 92d63d4, on CPU in fp32` ·
 `example-local — no src/ changes`
@@ -154,9 +154,9 @@ re-express them, or train the context` · `CPU-first, not CPU-only` ·
   3. `llama-cli -m /tmp/qwen3-tuned-q4_k.gguf`, prompt "What is the
      capital of France?" typed interactively — capture the actual reply;
      this recording doubles as the 0:00 cold open.
-- **Repo code shots**: `examples/finetune/main.zig:38-44` (pirate dataset);
-  `src/lora.zig:265-274` (merge, optional); `examples/nanochat/README.md:20-28`
-  (subcommand table); `examples/nanochat/model.zig:56-65` (d6 config).
+- **Repo code shots**: `apps/finetune/main.zig:39-45` (pirate dataset);
+  `src/lora.zig:262-272` (merge, optional); `apps/nanochat/README.md:20-28`
+  (subcommand table); `apps/nanochat/model.zig:56-65` (d6 config).
 - **Chapter shots**: `docs/course/15-training-llms-on-cpu.md:30-34` (LoRA
   equation), `:115-117` (parameter count), `:646-650` (three-roads table),
   `:654-659` (post-training menu table).
@@ -204,8 +204,8 @@ re-express them, or train the context` · `CPU-first, not CPU-only` ·
   "not pretraining at modern scale" sentence; "Formats, not frameworks,
   are the interface."
 - **Line ranges**: every file/line citation in this script was verified
-  against the working tree on 2026-07-17; re-verify at record time if the
-  repo has moved since.
+  against the tree at commit 14fa754 (2026-08-27); re-verify at record
+  time if the repo has moved since.
 - The chapter has much more (the SFT data pipeline and its BPE boundary
   trap, gradient verification from three angles, the ES twin,
   checkpoint/resume contracts); the end card sends viewers there.
