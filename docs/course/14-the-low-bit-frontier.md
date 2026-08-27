@@ -237,7 +237,7 @@ The latent float `w` never appears in the forward output — only its quantizati
 
 > **ML note** — Why does an estimator this wrong work? Three partial answers, none fully satisfying — which is the honest state of the theory. (1) *The bias is bounded where it matters*: for weights well inside a quantization cell, small moves genuinely don't change the loss, so "zero gradient" is locally true and the STE's fiction only matters near boundaries — exactly where you want pressure to accumulate. (2) *The latent weights integrate noise*: a single STE gradient is a bad estimate, but summed over many batches the systematic component (which side of the boundary should I be on?) survives while the fiction washes out. (3) *It is the identity chosen by the people who scaled it*: Fucina implements "exactly the BitNet recipe (`w + (Q(w) − w).detach()`)" — no clipping, no masking (`docs/TERNARY.md:130-134`) — because when you port a method whose success is empirical, you port its exact form, not your improvement of it.
 
-Fucina packages this as one facade op on the ordinary f32 tensor — `dotTernarySte` (`src/ag/tensor.zig`; documented in `docs/reference/10-quantization.md` §10.7):
+Fucina packages this as one facade op on the ordinary f32 tensor — `dotTernarySte` (`src/ag/tensor/float/matmul.zig:339`; documented in `docs/reference/10-quantization.md` §10.7):
 
 ```zig
 pub fn dotTernarySte(self: *const Self, ctx: *ExecContext, weight: anytype,
