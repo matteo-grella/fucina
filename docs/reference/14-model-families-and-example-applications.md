@@ -354,7 +354,7 @@ const Trainer = models.qwen3.train.Trainer(.{ .q = true, .v = true });
 var trainer = try Trainer.init(ctx, model, .{ .rank = 8, .alpha = 16 }, 42);
 defer trainer.deinit();
 
-var opt = fucina.optim.AdamW.init(ctx.allocator, .{ .lr = 1e-3 });
+var opt = try fucina.optim.AdamW.init(ctx.allocator, .{ .lr = 1e-3 });
 defer opt.deinit();
 try trainer.registerAllParams(&opt);
 

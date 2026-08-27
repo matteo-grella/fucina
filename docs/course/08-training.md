@@ -31,7 +31,7 @@ section below:
 const fucina = @import("fucina");
 const optim = fucina.optim;
 
-var opt = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.01 });
+var opt = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.01 });
 defer opt.deinit();
 try opt.addParam(&w1);                            // params must outlive opt
 try opt.addParam(&b1);
@@ -277,25 +277,27 @@ cannot see until your training run mysteriously underperforms a paper.
 **The constructor panic.** From `src/optim.zig:2069-2076`:
 
 ```zig
-pub fn init(allocator: Allocator, config: SgdConfig) SGD {
+pub fn init(allocator: Allocator, config: SgdConfig) !SGD {
     // PyTorch constructor rule, enforced in every build mode (a debug
     // assert would vanish exactly where training runs: ReleaseFast).
     if (config.nesterov and (config.momentum == 0 or config.dampening != 0)) {
-        @panic("SGD: nesterov requires momentum > 0 and dampening == 0");
+        return error.InvalidOptimizerConfig;
     }
     return .{ .allocator = allocator, .config = config };
 }
 ```
 
 > **Zig note** — Zig gives you three tools for "this must not happen", and
-> this snippet is a masterclass in choosing between them. An **error union**
-> (`!SGD`) is for conditions the caller can meaningfully handle — but a
-> nonsensical hyperparameter combination is a bug in the program, not a
-> runtime circumstance. A **`std.debug.assert`** compiles away in
-> ReleaseFast — which is exactly the build mode training runs in, so the
-> check would vanish precisely where it matters. **`@panic`** survives every
-> build mode and names the invariant in the crash message. Config
-> validation at a constructor is the `@panic` case.
+> this snippet is a masterclass in choosing between them. A
+> **`std.debug.assert`** compiles away in ReleaseFast — which is exactly the
+> build mode training runs in, so the check would vanish precisely where it
+> matters. **`@panic`** survives every build mode but takes the process down,
+> which is right only for invariants no caller could have caused. An **error
+> union** (`!SGD`) also survives every build mode, and a bad hyperparameter
+> combination usually arrives from OUTSIDE the program — a flag, a sweep
+> config, a checkpoint — so the caller can meaningfully surface it.
+> Constructor config validation is the error-union case:
+> `error.InvalidOptimizerConfig`.
 
 ## 8.5 AdamW: the workhorse, ported exactly
 
@@ -588,8 +590,8 @@ already is. So there is no group abstraction to learn: make two instances,
 and let `OptimizerSet` make them feel like one (from TRAINING.md §4):
 
 ```zig
-var decay = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
-var no_decay = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0 });
+var decay = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+var no_decay = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0 });
 // ... addParam matrices to `decay`, biases/norms to `no_decay` ...
 var set = optim.OptimizerSet.init(allocator);
 try set.add(&decay);

@@ -643,7 +643,7 @@ fn runSelfStudy(
     }
     try stdout.flush();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = opts.lr, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = opts.lr, .weight_decay = 0 });
     defer opt.deinit();
     try cart.registerParams(&opt);
 

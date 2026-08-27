@@ -656,7 +656,7 @@ pub const Fleet = struct {
         var resident = Resident{
             .doc = doc,
             .cart = owned,
-            .opt = optim.AdamW.init(self.allocator, .{ .lr = self.base_lr, .weight_decay = 0 }),
+            .opt = try optim.AdamW.init(self.allocator, .{ .lr = self.base_lr, .weight_decay = 0 }),
             .entered_step = self.manifest.docs.items[doc].steps,
         };
         errdefer resident.opt.deinit();

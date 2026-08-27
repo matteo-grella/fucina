@@ -161,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("resumed leaves from {s}\n", .{path});
     }
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
     var set = optim.OptimizerSet.init(allocator);

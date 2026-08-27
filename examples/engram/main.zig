@@ -300,7 +300,7 @@ fn runTrainEval(
     const n_chunks = ids.len / chunk;
     const n_slots = graft.layers.len;
 
-    var opt = fucina.optim.AdamW.init(allocator, .{ .lr = opts.lr, .weight_decay = 0 });
+    var opt = try fucina.optim.AdamW.init(allocator, .{ .lr = opts.lr, .weight_decay = 0 });
     defer opt.deinit();
     if (opts.train) {
         if (!opts.no_engram) try graft.registerParams(&opt);

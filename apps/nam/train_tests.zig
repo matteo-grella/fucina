@@ -70,7 +70,7 @@ test "one optimizer step reduces the segment loss" {
 
     var model = try Trainable.init(allocator, &ctx, ModelSpec.tiny, 7);
     defer model.deinit();
-    var opt = fucina.optim.Adam.init(allocator, .{ .lr = 0.004, .weight_decay = 0 });
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.004, .weight_decay = 0 });
     defer opt.deinit();
     try model.registerParams(&opt);
 
@@ -189,7 +189,7 @@ test "A2 WaveNet snapshot owns updated recursive condition DSP weights" {
     var model = try A2Trainable.initFromWaveNet(allocator, &ctx, &top_config, top_weights);
     defer model.deinit();
 
-    var opt = fucina.optim.Adam.init(allocator, .{ .lr = 0.01, .weight_decay = 0 });
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.01, .weight_decay = 0 });
     defer opt.deinit();
     try model.registerParams(&opt);
     {
@@ -228,7 +228,7 @@ test "A2 training spec initializes, steps, extracts, and renders through shared 
 
     var model = try spec.initTrainable(allocator, &ctx, 123);
     defer model.deinit();
-    var opt = fucina.optim.Adam.init(allocator, .{ .lr = 0.001, .weight_decay = 0 });
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.001, .weight_decay = 0 });
     defer opt.deinit();
     try model.registerParams(&opt);
 
@@ -489,7 +489,7 @@ test "packed WaveNet spec sums submodel losses and extracts slimmable snapshots"
 
     var model = try spec.initTrainable(allocator, &ctx, 321);
     defer model.deinit();
-    var opt = fucina.optim.Adam.init(allocator, .{ .lr = 0.001, .weight_decay = PackedSpec.default_weight_decay });
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.001, .weight_decay = PackedSpec.default_weight_decay });
     defer opt.deinit();
     try model.registerParams(&opt);
 

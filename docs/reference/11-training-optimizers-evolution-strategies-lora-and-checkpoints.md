@@ -39,7 +39,7 @@ test "one training step: forward, backward, clip, step, zero" {
     defer x.deinit();
     const labels = [_]usize{ 0, 1 };
 
-    var opt = optim.AdamW.init(alloc, .{ .lr = 0.05, .weight_decay = 0.01 });
+    var opt = try optim.AdamW.init(alloc, .{ .lr = 0.05, .weight_decay = 0.01 });
     defer opt.deinit();
     try opt.addParam(&w); // params must outlive the optimizer
     try opt.addParam(&b);
@@ -101,7 +101,7 @@ route to the embedded fallback; on the others they are `addParam`, so
 generic registration code may call them unconditionally):
 
 ```zig
-pub fn init(allocator: Allocator, config: Config) Self      // SGD panics here on bad nesterov
+pub fn init(allocator: Allocator, config: Config) !Self     // error.InvalidOptimizerConfig on bad config
 pub fn deinit(self: *Self) void                             // frees slots + state; params stay caller-owned
 pub fn addParam(self: *Self, t: anytype) !void              // t: pointer to an f32/f16/bf16 autograd variable
 pub fn addParamNamed(self: *Self, t: anytype, name: []const u8) !void
@@ -148,7 +148,7 @@ test "bf16 params train through f32 masters" {
     var x = try fucina.Tensor(.{ .t, .in }).fromSlice(&ctx, .{ 1, 2 }, &.{ 1, 2 });
     defer x.deinit();
 
-    var opt = fucina.optim.AdamW.init(alloc, .{ .lr = 0.05 });
+    var opt = try fucina.optim.AdamW.init(alloc, .{ .lr = 0.05 });
     defer opt.deinit();
     try opt.addParam(&w); // allocates + fills the f32 master
 
@@ -224,9 +224,9 @@ pub const AdamWConfig = struct { lr: f32 = 1e-3, beta1: f32 = 0.9, beta2: f32 = 
     state_dtype: StateDType = .f32, second_moment_dtype: StateDType = .f32 };
 ```
 
-`SGD.init` **panics** (in every build mode, deliberately not a debug assert)
-when `nesterov` is set with zero momentum or nonzero dampening — the PyTorch
-constructor rule. With momentum, the buffer is initialized on the first step
+`SGD.init` errors with `error.InvalidOptimizerConfig` (checked in every
+build mode, deliberately not a debug assert) when `nesterov` is set with
+zero momentum or nonzero dampening — the PyTorch constructor rule. With momentum, the buffer is initialized on the first step
 to a clone of the first (decayed) gradient, not zeros (`buf = d_p.clone()`);
 under bf16 state that clone is stored narrowed. `AdamW` applies decay to the
 parameter before the moment update and adds `eps` after dividing `sqrt(v)`
@@ -409,9 +409,9 @@ test "param groups under one OptimizerSet with a warmup-cosine schedule" {
     defer x.deinit();
     const labels = [_]usize{ 0, 1 };
 
-    var decay = optim.AdamW.init(alloc, .{ .lr = 2e-2, .weight_decay = 0.1 });
+    var decay = try optim.AdamW.init(alloc, .{ .lr = 2e-2, .weight_decay = 0.1 });
     defer decay.deinit();
-    var no_decay = optim.AdamW.init(alloc, .{ .lr = 2e-2, .weight_decay = 0 });
+    var no_decay = try optim.AdamW.init(alloc, .{ .lr = 2e-2, .weight_decay = 0 });
     defer no_decay.deinit();
     try decay.addParam(&w); // matrices: decayed group
     try no_decay.addParam(&b); // biases/norms: no-decay group
@@ -547,7 +547,7 @@ test "optimizer state: name-matched slots round-trip; structural config is valid
     var b = try fucina.Tensor(.{.e}).variableFromSlice(&ctx, .{2}, &.{ 5, 6 });
     defer b.deinit();
 
-    var opt = optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9 });
+    var opt = try optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9 });
     defer opt.deinit();
     try opt.addParamNamed(&w, "w");
     try opt.addParamNamed(&b, "b");
@@ -564,7 +564,7 @@ test "optimizer state: name-matched slots round-trip; structural config is valid
     try opt.saveState(&writer);
 
     // Resume: named slots may re-register in any order.
-    var opt2 = optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9 });
+    var opt2 = try optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9 });
     defer opt2.deinit();
     try opt2.addParamNamed(&b, "b");
     try opt2.addParamNamed(&w, "w");
@@ -572,7 +572,7 @@ test "optimizer state: name-matched slots round-trip; structural config is valid
     try opt2.loadState(&reader);
 
     // Structural config fields must match the stored ones (lr is not one).
-    var opt3 = optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.5 });
+    var opt3 = try optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.5 });
     defer opt3.deinit();
     var reader3 = std.Io.Reader.fixed(writer.buffered());
     try std.testing.expectError(error.CheckpointConfigMismatch, opt3.loadState(&reader3));

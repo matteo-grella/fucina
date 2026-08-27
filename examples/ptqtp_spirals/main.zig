@@ -328,7 +328,7 @@ pub fn main(init: std.process.Init) !void {
     // Phase 1: float training.
     var model = try Model.initRandom(&ctx, seed);
     defer model.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 1e-4 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 1e-4 });
     defer opt.deinit();
     try opt.addParam(&model.w1);
     try opt.addParam(&model.w2);
@@ -393,10 +393,10 @@ pub fn main(init: std.process.Init) !void {
             "  k1 rel err  w2 {d:.4}  w3 {d:.4}\n" ++
             "  k2 rel err  w2 {d:.4}  w3 {d:.4}  (zero frac p1 {d:.2} p2 {d:.2}; mean iters {d:.1}; unconverged {d}/{d})\n",
         .{
-            k1_w2.stats.rel_frob_err,          k1_w3.stats.rel_frob_err,
-            k2_w2.stats.rel_frob_err,          k2_w3.stats.rel_frob_err,
-            k2_w2.stats.zero_frac[0],          k2_w2.stats.zero_frac[1],
-            k2_w2.stats.mean_iterations,       k2_w2.stats.unconverged_groups,
+            k1_w2.stats.rel_frob_err,    k1_w3.stats.rel_frob_err,
+            k2_w2.stats.rel_frob_err,    k2_w3.stats.rel_frob_err,
+            k2_w2.stats.zero_frac[0],    k2_w2.stats.zero_frac[1],
+            k2_w2.stats.mean_iterations, k2_w2.stats.unconverged_groups,
             k2_w2.stats.group_count,
         },
     );

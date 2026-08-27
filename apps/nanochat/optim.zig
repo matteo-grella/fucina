@@ -306,7 +306,7 @@ pub const MuonAdamW = struct {
             .muon_initial_lr = cfg.muon_initial_lr,
         };
         for (&self.adamw, 0..) |*a, i| {
-            a.* = AdamW.init(allocator, .{
+            a.* = try AdamW.init(allocator, .{
                 .lr = @floatCast(cfg.adamw_initial_lr[i]),
                 .beta1 = adamw_hyper[i].beta1,
                 .beta2 = adamw_hyper[i].beta2,

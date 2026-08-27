@@ -157,7 +157,7 @@ fn printReport(stdout: anytype, r: Report) !void {
 fn benchClipNorm(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator) !Report {
     var params = try BlockParams.init(ctx, allocator);
     defer params.deinit();
-    var opt = optim.SGD.init(allocator, .{ .lr = 1e-3 });
+    var opt = try optim.SGD.init(allocator, .{ .lr = 1e-3 });
     defer opt.deinit();
     try params.register(&opt);
     try params.setGrads();
@@ -194,9 +194,9 @@ fn benchEmbedding(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
         .{ "adamw-bf16-mv", optim.AdamWConfig{ .state_dtype = .bf16, .second_moment_dtype = .bf16 }, 20 },
     }) |case| {
         var opt = if (@TypeOf(case[1]) == optim.SgdConfig)
-            optim.SGD.init(allocator, case[1])
+            try optim.SGD.init(allocator, case[1])
         else
-            optim.AdamW.init(allocator, case[1]);
+            try optim.AdamW.init(allocator, case[1]);
         defer opt.deinit();
         try opt.addParam(&embed);
         for (0..warmup_iters) |_| {
@@ -213,7 +213,7 @@ fn benchEmbedding(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, s
     }
 
     // Norm-only row (see benchClipNorm): the reduction at embedding scale.
-    var opt = optim.SGD.init(allocator, .{ .lr = 1e-3 });
+    var opt = try optim.SGD.init(allocator, .{ .lr = 1e-3 });
     defer opt.deinit();
     try opt.addParam(&embed);
     embed.grad_state.?.setGrad(try grad.cloneView());

@@ -309,7 +309,7 @@ test "training capstone: tiny conv classifier converges (AdamW + exec scopes)" {
     const img0 = [_]f32{ 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0 }; // bright left
     const img1 = [_]f32{ 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1 }; // bright right
 
-    var opt = fucina.optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0.0 });
+    var opt = try fucina.optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0.0 });
     defer opt.deinit();
     try opt.addParam(&conv_w);
     try opt.addParam(&conv_b);

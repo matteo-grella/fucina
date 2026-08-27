@@ -582,7 +582,9 @@ pub fn clone(self: *const Self, allocator: Allocator) !Self
 **panic** on non-contiguous tensors (`"Tensor.data requires a contiguous
 tensor; materialize or use dataChecked"`) — they are for hot paths that have
 already established contiguity. `dataChecked`/`dataConstChecked` are the
-recoverable variants (`UnsupportedView`). `item()` debug-asserts a
+recoverable variants (`UnsupportedView`); the public facade's
+`data`/`dataConst` reach storage only through the checked pair, so the raw
+panic never surfaces through the public API. `item()` debug-asserts a
 single-element tensor and reads through `dataConst` (so it also requires
 contiguity — a zero-stride broadcast scalar panics).
 

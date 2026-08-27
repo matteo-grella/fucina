@@ -57,7 +57,8 @@ pub const FallbackFrame = enum { nested, inline_slots };
 ///   in wire order. The encoding follows each field's type
 ///   (`frame.writeRecordField`): u64/f32 scalars, dtype-tagged `StateBuf`s,
 ///   raw `[]f32`s. Fields outside `record` are transient.
-/// - `checkConfig(config) void` (optional): constructor-time validation.
+/// - `checkConfig(config) !void` (optional): constructor-time validation
+///   (`error.InvalidOptimizerConfig`).
 /// - `afterLoad(state: *State) void` (optional): per-slot hook after a
 ///   committed load.
 /// - `Fallback` (optional): the `Optimizer(...)` type receiving the params
@@ -99,12 +100,12 @@ pub fn Optimizer(comptime Kernel: type) type {
             }
         }
 
-        pub fn init(allocator: Allocator, config: Config) Self {
-            if (@hasDecl(Kernel, "checkConfig")) Kernel.checkConfig(config);
+        pub fn init(allocator: Allocator, config: Config) !Self {
+            if (@hasDecl(Kernel, "checkConfig")) try Kernel.checkConfig(config);
             return .{
                 .allocator = allocator,
                 .config = config,
-                .fallback = if (has_fallback) Fallback.init(allocator, Kernel.fallbackConfig(config)) else {},
+                .fallback = if (has_fallback) try Fallback.init(allocator, Kernel.fallbackConfig(config)) else {},
             };
         }
 

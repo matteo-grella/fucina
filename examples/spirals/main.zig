@@ -285,7 +285,7 @@ fn demo(
     // Phase 1: train, checkpointing model + optimizer state halfway through.
     var model = try Model.initRandom(ctx, 42);
     defer model.deinit();
-    var opt = Opt.init(allocator, config);
+    var opt = try Opt.init(allocator, config);
     defer opt.deinit();
     try registerParams(&opt, &model);
 
@@ -306,7 +306,7 @@ fn demo(
     // retrain the second half, and demand bit-identical final parameters.
     var resumed = try Model.initRandom(ctx, 7); // different init: fully overwritten by the checkpoint
     defer resumed.deinit();
-    var opt2 = Opt.init(allocator, config);
+    var opt2 = try Opt.init(allocator, config);
     defer opt2.deinit();
     try registerParams(&opt2, &resumed);
     _ = try loadCheckpoint(allocator, io, ckpt_path, &resumed, &opt2);
@@ -431,9 +431,9 @@ fn groupsDemo(
     // Phase 1: train with two groups, checkpoint at the halfway step.
     var model = try Model.initRandom(ctx, 42);
     defer model.deinit();
-    var decay = optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
+    var decay = try optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
     defer decay.deinit();
-    var no_decay = optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
+    var no_decay = try optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
     defer no_decay.deinit();
     try decay.addParam(&model.w1);
     try decay.addParam(&model.w2);
@@ -466,9 +466,9 @@ fn groupsDemo(
     // checkpoint; replaying steps ckpt_step.. must be bit-exact.
     var resumed = try Model.initRandom(ctx, 7);
     defer resumed.deinit();
-    var decay2 = optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
+    var decay2 = try optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
     defer decay2.deinit();
-    var no_decay2 = optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
+    var no_decay2 = try optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
     defer no_decay2.deinit();
     try decay2.addParam(&resumed.w1);
     try decay2.addParam(&resumed.w2);

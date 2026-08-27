@@ -312,6 +312,15 @@ this point; earlier history is `git log`.
   users: `backend.scalar_impl.kernels.X(pc, ...)` becomes the twin
   `backend.vector_impl.<domain>.scalar.X(...)` (no `pc`);
   `backend.native_impl` is unchanged.
+- Optimizer construction is fallible: `Optimizer(Kernel).init` (every
+  `optim.SGD`/`Adam`/`AdamW`/`Muon`/`MuonH`/`Apollo` constructor) returns
+  `!Self`, and an invalid config is `error.InvalidOptimizerConfig` instead
+  of a panic (SGD's nesterov rule, still checked in every build mode).
+  Rewrite: `var opt = optim.AdamW.init(alloc, cfg)` becomes
+  `var opt = try optim.AdamW.init(alloc, cfg)`.
+- The raw tensor's `rows()`/`cols()` rank-2 helpers are deprecated (no
+  in-tree callers); read `shape.at(0)`/`shape.at(1)` instead. Internal
+  (`fucina.internal.RawTensor`).
 - `variance` takes an options struct: `variance(ctx, tag, ddof)` is now
   `variance(ctx, tag, options)` with `fucina.VarianceOptions`
   (`ddof: u1 = 1`, the torch.var default). Rewrite:

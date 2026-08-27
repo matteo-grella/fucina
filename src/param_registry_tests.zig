@@ -74,7 +74,7 @@ test "ParamRegistry zeroGrad and addParamsTo compose with optimizers" {
     defer registry.deinit();
     try registry.addParam("w", &w);
 
-    var opt = optim.SGD.init(allocator, .{ .lr = 0.1 });
+    var opt = try optim.SGD.init(allocator, .{ .lr = 0.1 });
     defer opt.deinit();
     try registry.addParamsTo(&opt);
 
@@ -340,7 +340,7 @@ test "collect registers constants frozen, skips non-tensor fields, trains only v
     try std.testing.expectEqualStrings("w", registry.params.items[0].name);
     try std.testing.expectEqualStrings("frozen", registry.params.items[1].name);
 
-    var opt = optim.SGD.init(allocator, .{ .lr = 0.1 });
+    var opt = try optim.SGD.init(allocator, .{ .lr = 0.1 });
     defer opt.deinit();
     try registry.addParamsTo(&opt); // only the variable is registered
 
@@ -506,7 +506,7 @@ test "addParamsTo registers 16-bit variables and the optimizer steps them" {
     defer registry.deinit();
     try registry.addParam("w", &w);
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05 });
     defer opt.deinit();
     try registry.addParamsTo(&opt);
 

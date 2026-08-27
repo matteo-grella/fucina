@@ -70,7 +70,7 @@ test "optim AdamW single step matches the PyTorch formula" {
     defer c.deinit();
 
     const config = optim.AdamWConfig{ .lr = 0.1, .beta1 = 0.9, .beta2 = 0.999, .eps = 1e-8, .weight_decay = 0.1 };
-    var opt = optim.AdamW.init(allocator, config);
+    var opt = try optim.AdamW.init(allocator, config);
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -116,7 +116,7 @@ test "optim Adam single step uses coupled PyTorch weight decay" {
     defer c.deinit();
 
     const config = optim.AdamConfig{ .lr = 0.1, .beta1 = 0.9, .beta2 = 0.999, .eps = 1e-8, .weight_decay = 0.1 };
-    var opt = optim.Adam.init(allocator, config);
+    var opt = try optim.Adam.init(allocator, config);
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -156,7 +156,7 @@ test "optim AdamW converges on a quadratic through the facade" {
     var target = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 3 }, &.{ -0.5, 0.25, 1, -1, 0.75, 0 });
     defer target.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -226,7 +226,7 @@ test "optim Muon routes by rank and converges with its AdamW fallback" {
     var b_target = try Tensor(.{.out}).fromSlice(&ctx, .{3}, &.{ -0.2, 0.4, 0.1 });
     defer b_target.deinit();
 
-    var opt = optim.Muon.init(allocator, .{
+    var opt = try optim.Muon.init(allocator, .{
         .lr = 0.02,
         .weight_decay = 0,
         .fallback = .{ .lr = 0.05, .weight_decay = 0 },
@@ -298,7 +298,7 @@ test "optim Apollo converges on a quadratic (channel and mini variants)" {
         var b_target = try Tensor(.{.out}).fromSlice(&ctx, .{4}, &.{ -0.2, 0.4, 0.1, 0.3 });
         defer b_target.deinit();
 
-        var opt = optim.Apollo.init(allocator, config);
+        var opt = try optim.Apollo.init(allocator, config);
         defer opt.deinit();
         try opt.addParam(&w); // rank 2 -> APOLLO path
         try opt.addParam(&b); // rank 1 -> HF-AdamW fallback
@@ -617,15 +617,15 @@ test "optim checkpoint resume is bit-exact for Adam, AdamW, Muon, and Apollo" {
         defer target.deinit();
 
         var opt = if (comptime std.mem.eql(u8, kind, "adam"))
-            optim.Adam.init(allocator, .{ .lr = 0.05 })
+            try optim.Adam.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "muon"))
-            optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
+            try optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
         else
             // gap=3 puts a projection-regeneration boundary inside the resumed
             // segment, proving P is reconstructed deterministically.
-            optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
+            try optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
         defer opt.deinit();
         try opt.addParam(&w);
 
@@ -685,16 +685,16 @@ test "optim v3 named state resumes bit-exactly under permuted registration" {
         defer b_target.deinit();
 
         var opt = if (comptime std.mem.eql(u8, kind, "adam"))
-            optim.Adam.init(allocator, .{ .lr = 0.05 })
+            try optim.Adam.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "muon"))
-            optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
+            try optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
         else
             // gap=3 puts a projection-regeneration boundary inside the
             // resumed segment, proving P is reconstructed deterministically
             // from the per-name restored seeds.
-            optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
+            try optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
         defer opt.deinit();
         try opt.addParamNamed(&w1, "w1");
         try opt.addParamNamed(&w2, "w2");
@@ -733,13 +733,13 @@ test "optim v3 named state resumes bit-exactly under permuted registration" {
         // opt2 steps from here on (cross-instance duplicate registration is
         // the caller's responsibility, and opt is left idle).
         var opt2 = if (comptime std.mem.eql(u8, kind, "adam"))
-            optim.Adam.init(allocator, .{ .lr = 0.05 })
+            try optim.Adam.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05 })
         else if (comptime std.mem.eql(u8, kind, "muon"))
-            optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
+            try optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 })
         else
-            optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
+            try optim.Apollo.init(allocator, .{ .lr = 0.02, .rank = 2, .update_proj_gap = 3 });
         defer opt2.deinit();
         try opt2.addParamNamed(&b, "bias");
         try opt2.addParamNamed(&w2, "w2");
@@ -785,7 +785,7 @@ test "optim v3 save rejects name collisions; load rejects unknown and missing na
     // An explicit name colliding with an unnamed param's auto-name is caught
     // at save time, before any byte is written.
     {
-        var opt = optim.AdamW.init(allocator, .{});
+        var opt = try optim.AdamW.init(allocator, .{});
         defer opt.deinit();
         try opt.addParam(&a); // auto-name "param0"
         try opt.addParamNamed(&b, "param0");
@@ -795,7 +795,7 @@ test "optim v3 save rejects name collisions; load rejects unknown and missing na
 
     var writer = std.Io.Writer.fixed(&buf);
     {
-        var opt = optim.AdamW.init(allocator, .{});
+        var opt = try optim.AdamW.init(allocator, .{});
         defer opt.deinit();
         try opt.addParamNamed(&a, "x");
         try opt.addParamNamed(&b, "y");
@@ -805,7 +805,7 @@ test "optim v3 save rejects name collisions; load rejects unknown and missing na
 
     // A record name with no matching registered param errors.
     {
-        var opt = optim.AdamW.init(allocator, .{});
+        var opt = try optim.AdamW.init(allocator, .{});
         defer opt.deinit();
         try opt.addParamNamed(&a, "x");
         try opt.addParamNamed(&b, "z");
@@ -814,7 +814,7 @@ test "optim v3 save rejects name collisions; load rejects unknown and missing na
     }
     // A registered param with no record errors after the stream.
     {
-        var opt = optim.AdamW.init(allocator, .{});
+        var opt = try optim.AdamW.init(allocator, .{});
         defer opt.deinit();
         try opt.addParamNamed(&a, "x");
         try opt.addParamNamed(&b, "y");
@@ -863,7 +863,7 @@ test "optim golden: AdamW matches torch.optim.AdamW over 3 steps" {
 
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1.0, -2.0, 0.5, 3.0, -0.25, 1.5 });
     defer w.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .beta1 = 0.9, .beta2 = 0.999, .eps = 1e-8, .weight_decay = 0.1 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .beta1 = 0.9, .beta2 = 0.999, .eps = 1e-8, .weight_decay = 0.1 });
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -901,7 +901,7 @@ test "optim golden: Muon matches the Keller reference over 3 steps (both scales)
         // 3x2 is tall, so the Newton-Schulz transpose trick is exercised.
         var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 3, 2 }, &w0);
         defer w.deinit();
-        var opt = optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01, .scale = case[0] });
+        var opt = try optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01, .scale = case[0] });
         defer opt.deinit();
         try opt.addParam(&w);
         for (&grads) |*g| try applyGrad(&ctx, &w, .{ .out, .in }, .{ 3, 2 }, g, &opt);
@@ -925,7 +925,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
             1.0, -2.0, 0.5, 3.0, -0.25, 1.5, 0.75, -1.25, 2.25, -0.5, 0.3, -1.8,
         });
         defer w.deinit();
-        var opt = optim.Apollo.init(allocator, .{
+        var opt = try optim.Apollo.init(allocator, .{
             .lr = 0.02,
             .rank = 2,
             .weight_decay = 0.1,
@@ -957,7 +957,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
             0.5, -1.5, 2.0, -0.25, 1.0, 0.75, -0.5, 1.25, -2.0, 0.3, -0.8, 0.6, -1.1, 0.9, -0.4,
         });
         defer w.deinit();
-        var opt = optim.Apollo.init(allocator, .{
+        var opt = try optim.Apollo.init(allocator, .{
             .lr = 0.02,
             .rank = 2,
             .weight_decay = 0,
@@ -992,7 +992,7 @@ test "optim golden: APOLLO matches the apollo_torch reference (tall, wide, mini)
         var config = optim.ApolloConfig.mini();
         config.lr = 0.005;
         config.update_proj_gap = 1000;
-        var opt = optim.Apollo.init(allocator, config);
+        var opt = try optim.Apollo.init(allocator, config);
         defer opt.deinit();
         try opt.addParam(&w);
         opt.slots.items[0].state.proj = try ctx.fromSlice(.f32, .{ 1, 3 }, &.{ 0.7, -0.2, 0.5 });
@@ -1027,7 +1027,7 @@ test "optim golden: AdamW tiny gradients pin the eps placement" {
     // 100x the tolerance.
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1.0, -2.0, 0.5, 3.0 });
     defer w.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .weight_decay = 0 });
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -1052,7 +1052,7 @@ test "optim golden: Muon wide matrix exercises the non-transposed Newton-Schulz 
 
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 3 }, &.{ 1.0, -2.0, 0.5, 3.0, -0.25, 1.5 });
     defer w.deinit();
-    var opt = optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
+    var opt = try optim.Muon.init(allocator, .{ .lr = 0.02, .weight_decay = 0.01 });
     defer opt.deinit();
     try opt.addParam(&w);
 
@@ -1079,20 +1079,28 @@ test "optim rejects duplicate parameter registration" {
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
     defer w.deinit();
 
-    var adamw = optim.AdamW.init(allocator, .{});
+    var adamw = try optim.AdamW.init(allocator, .{});
     defer adamw.deinit();
     try adamw.addParam(&w);
     try std.testing.expectError(optim.OptimError.DuplicateParam, adamw.addParam(&w));
 
-    var muon = optim.Muon.init(allocator, .{});
+    var muon = try optim.Muon.init(allocator, .{});
     defer muon.deinit();
     try muon.addParam(&w);
     try std.testing.expectError(optim.OptimError.DuplicateParam, muon.addFallbackParam(&w));
 
-    var apollo = optim.Apollo.init(allocator, .{ .rank = 2 });
+    var apollo = try optim.Apollo.init(allocator, .{ .rank = 2 });
     defer apollo.deinit();
     try apollo.addFallbackParam(&w);
     try std.testing.expectError(optim.OptimError.DuplicateParam, apollo.addParam(&w));
+}
+
+test "optim SGD init rejects nesterov without momentum (PyTorch constructor rule)" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.InvalidOptimizerConfig, optim.SGD.init(alloc, .{ .lr = 0.1, .nesterov = true }));
+    try std.testing.expectError(error.InvalidOptimizerConfig, optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9, .dampening = 0.5, .nesterov = true }));
+    var ok = try optim.SGD.init(alloc, .{ .lr = 0.1, .momentum = 0.9, .nesterov = true });
+    ok.deinit();
 }
 
 test "optim golden: SGD matches torch.optim.SGD (nesterov, dampening, plain)" {
@@ -1119,7 +1127,7 @@ test "optim golden: SGD matches torch.optim.SGD (nesterov, dampening, plain)" {
     inline for (cases) |case| {
         var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 3 }, &w0);
         defer w.deinit();
-        var opt = optim.SGD.init(allocator, case[0]);
+        var opt = try optim.SGD.init(allocator, case[0]);
         defer opt.deinit();
         try opt.addParam(&w);
         for (grads[0..case[1]]) |*g| try applyGrad(&ctx, &w, .{ .out, .in }, .{ 2, 3 }, g, &opt);
@@ -1144,10 +1152,10 @@ test "optim golden: global grad clipping across an OptimizerSet matches torch cl
     var b = try Tensor(.{.out}).variableFromSlice(&ctx, .{2}, &.{ 0.5, -1.0 });
     defer b.deinit();
 
-    var opt_a = optim.SGD.init(allocator, .{ .lr = 0.1, .momentum = 0.9 });
+    var opt_a = try optim.SGD.init(allocator, .{ .lr = 0.1, .momentum = 0.9 });
     defer opt_a.deinit();
     try opt_a.addParam(&a);
-    var opt_b = optim.SGD.init(allocator, .{ .lr = 0.1, .momentum = 0.9 });
+    var opt_b = try optim.SGD.init(allocator, .{ .lr = 0.1, .momentum = 0.9 });
     defer opt_b.deinit();
     try opt_b.addParam(&b);
 
@@ -1197,7 +1205,7 @@ test "optim LrSchedule rescales attached lrs from their bases" {
     defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
     const allocator = gpa.allocator();
 
-    var muon = optim.Muon.init(allocator, .{ .lr = 0.02, .fallback = .{ .lr = 0.004 } });
+    var muon = try optim.Muon.init(allocator, .{ .lr = 0.02, .fallback = .{ .lr = 0.004 } });
     defer muon.deinit();
 
     var sched = optim.LrSchedule.init(allocator);
@@ -1238,10 +1246,10 @@ test "optim OptimizerSet checkpoint roundtrip is exact across members" {
     var b_target = try Tensor(.{.out}).fromSlice(&ctx, .{2}, &.{ 0, 0 });
     defer b_target.deinit();
 
-    var opt_w = optim.AdamW.init(allocator, .{ .lr = 0.05 });
+    var opt_w = try optim.AdamW.init(allocator, .{ .lr = 0.05 });
     defer opt_w.deinit();
     try opt_w.addParam(&w);
-    var opt_b = optim.SGD.init(allocator, .{ .lr = 0.05, .momentum = 0.9 });
+    var opt_b = try optim.SGD.init(allocator, .{ .lr = 0.05, .momentum = 0.9 });
     defer opt_b.deinit();
     try opt_b.addParam(&b);
 
@@ -1326,7 +1334,7 @@ test "optim AdamW.loadState is transactional: a truncated record leaves prior sl
     var b = try Tensor(.{.out}).variableFromSlice(&ctx, .{2}, &.{ 3, 4 });
     defer b.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
     defer opt.deinit();
     try opt.addParamNamed(&a, "a");
     try opt.addParamNamed(&b, "b");
@@ -1345,7 +1353,7 @@ test "optim AdamW.loadState is transactional: a truncated record leaves prior sl
     const truncated = writer.buffered()[0 .. writer.buffered().len - 2];
 
     // Fresh optimizer; sentinel its first slot ("a") before the load.
-    var opt2 = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+    var opt2 = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
     defer opt2.deinit();
     try opt2.addParamNamed(&a, "a");
     try opt2.addParamNamed(&b, "b");
@@ -1377,7 +1385,7 @@ test "optim OptimizerSet rejects the same variable registered into two member op
     defer w.deinit();
 
     // Group 1 (AdamW) owns `w` and `shared`.
-    var g1 = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+    var g1 = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
     defer g1.deinit();
     try g1.addParam(&w);
     try g1.addParam(&shared);
@@ -1386,7 +1394,7 @@ test "optim OptimizerSet rejects the same variable registered into two member op
 
     // Group 2 (SGD) also registers `shared` — legal per-instance; the
     // cross-instance check is the OptimizerSet's responsibility.
-    var g2 = optim.SGD.init(allocator, .{ .lr = 0.1 });
+    var g2 = try optim.SGD.init(allocator, .{ .lr = 0.1 });
     defer g2.deinit();
     try g2.addParam(&shared);
 
@@ -1437,7 +1445,7 @@ test "optim bf16 state: AdamW kernel matches the widen-narrow reference exactly"
     inline for (.{ false, true }) |v_bf16| {
         var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 5 }, &w0);
         defer w.deinit();
-        var opt = optim.AdamW.init(allocator, .{
+        var opt = try optim.AdamW.init(allocator, .{
             .lr = lr,
             .weight_decay = wd,
             .state_dtype = .bf16,
@@ -1511,7 +1519,7 @@ test "optim bf16 state: Adam kernel matches the widen-narrow reference exactly" 
 
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 3, 3 }, &w0);
     defer w.deinit();
-    var opt = optim.Adam.init(allocator, .{
+    var opt = try optim.Adam.init(allocator, .{
         .lr = lr,
         .weight_decay = wd,
         .state_dtype = .bf16,
@@ -1568,7 +1576,7 @@ test "optim bf16 state: SGD momentum kernel matches the widen-narrow reference e
 
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 5 }, &w0);
     defer w.deinit();
-    var opt = optim.SGD.init(allocator, .{
+    var opt = try optim.SGD.init(allocator, .{
         .lr = lr,
         .momentum = momentum,
         .weight_decay = wd,
@@ -1623,7 +1631,7 @@ test "optim bf16 state: Muon momentum kernel matches the widen-narrow reference 
     // 5x2 is tall, so the Newton-Schulz transpose trick is exercised.
     var w = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 5, 2 }, &w0);
     defer w.deinit();
-    var opt = optim.Muon.init(allocator, .{ .lr = lr, .weight_decay = wd, .state_dtype = .bf16 });
+    var opt = try optim.Muon.init(allocator, .{ .lr = lr, .weight_decay = wd, .state_dtype = .bf16 });
     defer opt.deinit();
     try opt.addParam(&w);
     for (&grads) |*g| try applyGrad(&ctx, &w, .{ .out, .in }, .{ 5, 2 }, g, &opt);
@@ -1673,7 +1681,7 @@ test "optim bf16 state: AdamW converges on a quadratic" {
     var target = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, 3 }, &.{ -0.5, 0.25, 1, -1, 0.75, 0 });
     defer target.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{
+    var opt = try optim.AdamW.init(allocator, .{
         .lr = 0.05,
         .weight_decay = 0,
         .state_dtype = .bf16,
@@ -1727,18 +1735,18 @@ test "optim bf16 state checkpoint resume is bit-exact (AdamW, Adam, Muon, SGD)" 
         defer b_target.deinit();
 
         var opt = if (comptime std.mem.eql(u8, kind, "adam"))
-            optim.Adam.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
+            try optim.Adam.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
         else if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
         else if (comptime std.mem.eql(u8, kind, "muon"))
-            optim.Muon.init(allocator, .{
+            try optim.Muon.init(allocator, .{
                 .lr = 0.02,
                 .weight_decay = 0.01,
                 .state_dtype = .bf16,
                 .fallback = .{ .lr = 3e-4, .beta1 = 0.9, .beta2 = 0.95, .eps = 1e-10, .weight_decay = 0, .state_dtype = .bf16 },
             })
         else
-            optim.SGD.init(allocator, .{ .lr = 0.05, .momentum = 0.9, .state_dtype = .bf16 });
+            try optim.SGD.init(allocator, .{ .lr = 0.05, .momentum = 0.9, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParam(&w);
         try opt.addParam(&b);
@@ -1807,9 +1815,9 @@ test "optim bf16 state v4 named resume is bit-exact under permuted registration"
         defer b_target.deinit();
 
         var opt = if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
         else
-            optim.Muon.init(allocator, .{
+            try optim.Muon.init(allocator, .{
                 .lr = 0.02,
                 .weight_decay = 0.01,
                 .state_dtype = .bf16,
@@ -1851,9 +1859,9 @@ test "optim bf16 state v4 named resume is bit-exact under permuted registration"
 
         // Fresh optimizer registering the SAME names in REVERSED order.
         var opt2 = if (comptime std.mem.eql(u8, kind, "adamw"))
-            optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
+            try optim.AdamW.init(allocator, .{ .lr = 0.05, .state_dtype = .bf16, .second_moment_dtype = .bf16 })
         else
-            optim.Muon.init(allocator, .{
+            try optim.Muon.init(allocator, .{
                 .lr = 0.02,
                 .weight_decay = 0.01,
                 .state_dtype = .bf16,
@@ -1901,7 +1909,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
     // f32-configured save writes the v3 magic...
     var writer_v3 = std.Io.Writer.fixed(&buf);
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_v3);
@@ -1911,7 +1919,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
 
     // ...which a bf16-configured optimizer must refuse (v3 implies f32).
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         var reader = std.Io.Reader.fixed(snapshot_v3);
@@ -1922,7 +1930,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
     var buf_v4: [4096]u8 = undefined;
     var writer_v4 = std.Io.Writer.fixed(&buf_v4);
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_v4);
@@ -1932,7 +1940,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
 
     // ...which an f32-configured optimizer must refuse...
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         var reader = std.Io.Reader.fixed(snapshot_v4);
@@ -1940,7 +1948,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
     }
     // ...and so must a bf16-m one whose v dtype differs (m bf16 + v bf16).
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16, .second_moment_dtype = .bf16 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16, .second_moment_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         var reader = std.Io.Reader.fixed(snapshot_v4);
@@ -1951,7 +1959,7 @@ test "optim checkpoint cross-dtype loads are rejected without conversion" {
     // the frame stays v3 regardless.
     var writer_sgd = std.Io.Writer.fixed(&buf);
     {
-        var opt = optim.SGD.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt = try optim.SGD.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_sgd);
@@ -1977,7 +1985,7 @@ test "optim Adam frames carry their own magics, not AdamW's" {
     var buf: [4096]u8 = undefined;
     var writer_v3 = std.Io.Writer.fixed(&buf);
     {
-        var opt = optim.Adam.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.Adam.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_v3);
@@ -1987,7 +1995,7 @@ test "optim Adam frames carry their own magics, not AdamW's" {
     var buf_v4: [4096]u8 = undefined;
     var writer_v4 = std.Io.Writer.fixed(&buf_v4);
     {
-        var opt = optim.Adam.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt = try optim.Adam.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_v4);
@@ -2019,7 +2027,7 @@ test "optim v5 frames carry per-optimizer magics for both moment-pair twins" {
     var buf_adamw: [8192]u8 = undefined;
     var writer_adamw = std.Io.Writer.fixed(&buf_adamw);
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_adamw);
@@ -2029,7 +2037,7 @@ test "optim v5 frames carry per-optimizer magics for both moment-pair twins" {
     var buf_adam: [8192]u8 = undefined;
     var writer_adam = std.Io.Writer.fixed(&buf_adam);
     {
-        var opt = optim.Adam.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.Adam.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&w, "w");
         try opt.saveState(&writer_adam);
@@ -2051,7 +2059,7 @@ test "optim v4 loadState is transactional: a truncated record leaves prior slot 
     defer b.deinit();
 
     const config = optim.AdamWConfig{ .lr = 0.1, .state_dtype = .bf16, .second_moment_dtype = .bf16 };
-    var opt = optim.AdamW.init(allocator, config);
+    var opt = try optim.AdamW.init(allocator, config);
     defer opt.deinit();
     try opt.addParamNamed(&a, "a");
     try opt.addParamNamed(&b, "b");
@@ -2068,7 +2076,7 @@ test "optim v4 loadState is transactional: a truncated record leaves prior slot 
     // Truncate mid-second-record (slot "b"): "a" reads in full, "b" is short.
     const truncated = writer.buffered()[0 .. writer.buffered().len - 2];
 
-    var opt2 = optim.AdamW.init(allocator, config);
+    var opt2 = try optim.AdamW.init(allocator, config);
     defer opt2.deinit();
     try opt2.addParamNamed(&a, "a");
     try opt2.addParamNamed(&b, "b");
@@ -2101,7 +2109,7 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
     // Default (all-f32) config: the frame must be byte-for-byte the v3 wire
     // format — no tags, raw f32 state — so pre-bf16 builds keep reading it.
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1 });
         defer opt.deinit();
         try opt.addParamNamed(&a, "a");
         opt.slots.items[0].state.step = 3;
@@ -2128,7 +2136,7 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
 
     // bf16 m + f32 v: v4 frame with one u8 StateDType tag per state buffer.
     {
-        var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt.deinit();
         try opt.addParamNamed(&a, "a");
         opt.slots.items[0].state.step = 3;
@@ -2155,7 +2163,7 @@ test "optim state frames: all-f32 writes byte-identical v3; bf16 writes dtype-ta
         try std.testing.expectEqualSlices(u8, exp.buffered(), writer.buffered());
 
         // And the v4 frame round-trips into an identically-configured optimizer.
-        var opt2 = optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
+        var opt2 = try optim.AdamW.init(allocator, .{ .lr = 0.1, .state_dtype = .bf16 });
         defer opt2.deinit();
         try opt2.addParamNamed(&a, "a");
         var reader = std.Io.Reader.fixed(writer.buffered());
@@ -2277,7 +2285,7 @@ const AccumWindowResult = struct {
 fn runAccumWindow(ctx: *ExecContext, allocator: std.mem.Allocator, xs: []const f32) !AccumWindowResult {
     var model = try AccumMlp.init(ctx, 0xB16B);
     defer model.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0.01 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0.01 });
     defer opt.deinit();
     try opt.addParam(&model.w1);
     try opt.addParam(&model.w2);
@@ -2358,7 +2366,7 @@ test "optim clip once after the accumulation window equals clipping the summed g
     var model = try AccumMlp.init(&ctx, 0xC11F);
     defer model.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try opt.addParam(&model.w1);
     try opt.addParam(&model.w2);
@@ -2458,7 +2466,7 @@ test "optim 16-bit params step through f32 masters, tracking the f32 twin exactl
         // f32 twin.
         var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &w0);
         defer w32.deinit();
-        var opt32 = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+        var opt32 = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
         defer opt32.deinit();
         try opt32.addParam(&w32);
 
@@ -2470,7 +2478,7 @@ test "optim 16-bit params step through f32 masters, tracking the f32 twin exactl
         const HalfT = @TypeOf(narrow_source);
         var w16 = try HalfT.variable(&ctx, try narrow_source.asRawTensor().cloneView());
         defer w16.deinit();
-        var opt16 = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+        var opt16 = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
         defer opt16.deinit();
         try opt16.addParam(&w16);
 
@@ -2536,7 +2544,7 @@ test "optim v5 frames persist masters for bit-exact 16-bit resume" {
 
     var w = try BF16.variable(&ctx, try narrow_source.asRawTensor().cloneView());
     defer w.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
     defer opt.deinit();
     try opt.addParamNamed(&w, "w");
 
@@ -2576,7 +2584,7 @@ test "optim v5 frames persist masters for bit-exact 16-bit resume" {
     // two steps must land on the same bytes.
     var w_resumed = try BF16.variableFromSlice(&ctx, .{ 2, 2 }, saved_values);
     defer w_resumed.deinit();
-    var opt_resumed = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+    var opt_resumed = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
     defer opt_resumed.deinit();
     try opt_resumed.addParamNamed(&w_resumed, "w");
 
@@ -2619,7 +2627,7 @@ test "optim Muon and SGD step 16-bit params through masters" {
         defer w32.deinit();
         var bias32 = try Tensor(.{.out}).variableFromSlice(&ctx, .{2}, &.{ 0.25, -0.75 });
         defer bias32.deinit();
-        var opt32 = optim.Muon.init(allocator, .{ .lr = 0.02 });
+        var opt32 = try optim.Muon.init(allocator, .{ .lr = 0.02 });
         defer opt32.deinit();
         try opt32.addParam(&w32);
         try opt32.addParam(&bias32);
@@ -2632,7 +2640,7 @@ test "optim Muon and SGD step 16-bit params through masters" {
         defer bias_narrow.deinit();
         var bias16 = try @TypeOf(bias_narrow).variable(&ctx, try bias_narrow.asRawTensor().cloneView());
         defer bias16.deinit();
-        var opt16 = optim.Muon.init(allocator, .{ .lr = 0.02 });
+        var opt16 = try optim.Muon.init(allocator, .{ .lr = 0.02 });
         defer opt16.deinit();
         try opt16.addParam(&w16);
         try opt16.addParam(&bias16);
@@ -2687,13 +2695,13 @@ test "optim Muon and SGD step 16-bit params through masters" {
     {
         var w32 = try Tensor(.{ .out, .in }).variableFromSlice(&ctx, .{ 2, 2 }, &w0);
         defer w32.deinit();
-        var opt32 = optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
+        var opt32 = try optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
         defer opt32.deinit();
         try opt32.addParam(&w32);
 
         var w16 = try BF16.variableFromSlice(&ctx, .{ 2, 2 }, try narrow_source.dataConst());
         defer w16.deinit();
-        var opt16 = optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
+        var opt16 = try optim.SGD.init(allocator, .{ .lr = 1e-3, .momentum = 0.9 });
         defer opt16.deinit();
         try opt16.addParam(&w16);
 

@@ -331,7 +331,7 @@ pub fn main(init: std.process.Init) !void {
     const input_ids = ids[0..seq_len];
     const labels = ids[1 .. seq_len + 1];
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 3e-4, .beta1 = 0.9, .beta2 = 0.95, .eps = 1e-8, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 3e-4, .beta1 = 0.9, .beta2 = 0.95, .eps = 1e-8, .weight_decay = 0 });
     defer opt.deinit();
     try opt.addParam(&model.wte);
     try opt.addParam(&model.w_lm);

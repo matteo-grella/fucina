@@ -266,7 +266,7 @@ test "gemma4_train dense trainer loss backward smoke" {
     var trainer = try Trainer(.{ .q = true, .v = true }).init(&ctx, &model, .{ .rank = 2, .alpha = 4 }, 17);
     defer trainer.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.02, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -606,7 +606,7 @@ test "gemma4 distillation pulls a random cartridge toward the teacher (MoE, sink
     );
     defer cart.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 2e-2, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 2e-2, .weight_decay = 0 });
     defer opt.deinit();
     try cart.registerParams(&opt);
 

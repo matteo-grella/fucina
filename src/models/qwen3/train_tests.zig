@@ -353,7 +353,7 @@ test "loss decreases over AdamW steps on a fixed batch" {
     var trainer = try DefaultTrainer.init(&ctx, &model, tiny_lora, 2);
     defer trainer.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -415,7 +415,7 @@ test "bf16 frozen base: trainable forward matches inference and loss decreases" 
 
     // Gradients flow through the frozen bf16 base into the adapters: the
     // loss must actually descend under AdamW.
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -648,7 +648,7 @@ test "frozen weights stay bitwise unchanged; only adapters carry grads" {
     const norm_before = try allocator.dupe(f32, norm_data);
     defer allocator.free(norm_before);
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -805,7 +805,7 @@ test "loss decreases over AdamW steps at seq 64 (tiled attention path)" {
     var trainer = try DefaultTrainer.init(&ctx, &model, tiny_lora, 8);
     defer trainer.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -876,7 +876,7 @@ test "full-stack gradcheck: finite differences through Trainer.loss match backwa
     var trainer = try DefaultTrainer.init(&ctx, &model, tiny_lora, 41);
     defer trainer.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
 
@@ -1101,7 +1101,7 @@ test "adapter persistence: save, load into a fresh trainer, bitwise eval" {
     var trained = try DefaultTrainer.init(&ctx, &model, tiny_lora, 11);
     defer trained.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trained.registerAllParams(&opt);
     for (0..3) |_| _ = try lossStep(&ctx, &trained, &opt);
@@ -1255,10 +1255,10 @@ test "rope cache: gradient accumulation across seq lengths matches checkpoint-of
     defer ckpt.deinit();
     ckpt.checkpoint_layers = true;
 
-    var popt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var popt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer popt.deinit();
     try plain.registerAllParams(&popt);
-    var copt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var copt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer copt.deinit();
     try ckpt.registerAllParams(&copt);
 
@@ -1369,7 +1369,7 @@ test "dropout step counter persists through checkpoint directory state" {
     const dropout_lora = fucina.lora.Config{ .rank = 4, .alpha = 8, .dropout_p = 0.2 };
     var trained = try DefaultTrainer.init(&ctx, &model, dropout_lora, 13);
     defer trained.deinit();
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try trained.registerAllParams(&opt);
     for (0..2) |_| _ = try lossStep(&ctx, &trained, &opt);
@@ -2030,7 +2030,7 @@ test "engram graft: zero-init is bitwise identity and trains through the frozen 
 
     // Training: loss decreases over AdamW steps on the engram params alone
     // (frozen trunk, LoRA untouched), driven through lossForwardExt.
-    var opt = optim.AdamW.init(allocator, .{ .lr = 5e-2, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 5e-2, .weight_decay = 0 });
     defer opt.deinit();
     try graft.registerParams(&opt);
 

@@ -918,7 +918,7 @@ test "checkpointed hidden layers train bitwise-identically to plain (SGD)" {
     {
         var model = try Model.initRandom(&ctx, 42);
         defer model.deinit();
-        var opt = optim.SGD.init(allocator, .{ .lr = 0.2 });
+        var opt = try optim.SGD.init(allocator, .{ .lr = 0.2 });
         defer opt.deinit();
         try opt.addParam(&model.w1);
         try opt.addParam(&model.b1);
@@ -940,7 +940,7 @@ test "checkpointed hidden layers train bitwise-identically to plain (SGD)" {
     {
         var model = try Model.initRandom(&ctx, 42);
         defer model.deinit();
-        var opt = optim.SGD.init(allocator, .{ .lr = 0.2 });
+        var opt = try optim.SGD.init(allocator, .{ .lr = 0.2 });
         defer opt.deinit();
         try opt.addParam(&model.w1);
         try opt.addParam(&model.b1);

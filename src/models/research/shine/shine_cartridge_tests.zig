@@ -378,7 +378,7 @@ test "initRandom + AdamW loop: deterministic init, loss decreases on one triple"
     );
     try std.testing.expectEqualSlices(f32, try trainer.m2p[0].in_w.dataConst(), try twin.m2p[0].in_w.dataConst());
 
-    var opt = fucina.optim.AdamW.init(allocator, .{ .lr = 5e-3, .weight_decay = 0 });
+    var opt = try fucina.optim.AdamW.init(allocator, .{ .lr = 5e-3, .weight_decay = 0 });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
     var set = fucina.optim.OptimizerSet.init(allocator);

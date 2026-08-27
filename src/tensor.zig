@@ -351,11 +351,15 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             return storageElementCountAssumeValid(tensor_dtype, self.shape.slice());
         }
 
+        /// Deprecated rank-2 sugar (no in-tree callers): read
+        /// `shape.at(0)` at the call site instead.
         pub fn rows(self: *const Self) !usize {
             if (self.shape.len != 2) return TensorError.InvalidShape;
             return self.shape.at(0);
         }
 
+        /// Deprecated rank-2 sugar (no in-tree callers): read
+        /// `shape.at(1)` at the call site instead.
         pub fn cols(self: *const Self) !usize {
             if (self.shape.len != 2) return TensorError.InvalidShape;
             return self.shape.at(1);
@@ -383,6 +387,10 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             return self.offset == 0 and self.isContiguous() and self.buffer.isUnique();
         }
 
+        /// Recoverable mutable element view: `error.UnsupportedView` on a
+        /// non-contiguous view. The public facade's `data` reaches storage
+        /// only through this pair, so the panicking fast path below never
+        /// surfaces through the public API.
         pub fn dataChecked(self: *Self) ![]Elem {
             if (!self.isContiguous()) return TensorError.UnsupportedView;
             self.buffer.waitMutable();
@@ -395,12 +403,18 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }
 
+        /// INTERNAL fast path: PANICS on a non-contiguous view. For call
+        /// sites that already hold the contiguity invariant (kernels behind
+        /// `prepareContiguous`, freshly allocated outputs); everything else
+        /// takes `dataChecked`, and the public facade always does.
         pub fn data(self: *Self) []Elem {
             self.requireContiguousData();
             self.buffer.waitMutable();
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }
 
+        /// Const sibling of `data`: same PANICKING contiguity contract;
+        /// `dataConstChecked` is the recoverable form.
         pub fn dataConst(self: *const Self) []const Elem {
             self.requireContiguousData();
             self.buffer.waitReady();

@@ -18,7 +18,7 @@ and `zig build finetune` and unit-tested in `src/optim_tests.zig` /
 const fucina = @import("fucina");
 const optim = fucina.optim;
 
-var opt = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.01 });
+var opt = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.01 });
 defer opt.deinit();
 try opt.addParam(&w1);                            // params must outlive opt
 try opt.addParam(&b1);
@@ -173,8 +173,8 @@ views of their storage plus their GradState pointers).
 makes N instances feel like one optimizer:
 
 ```zig
-var decay = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
-var no_decay = optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0 });
+var decay = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0.1 });
+var no_decay = try optim.AdamW.init(allocator, .{ .lr = 1e-3, .weight_decay = 0 });
 // ... addParam matrices to `decay`, biases/norms to `no_decay` ...
 var set = optim.OptimizerSet.init(allocator);
 try set.add(&decay);
@@ -811,8 +811,9 @@ q/k/v, never from the forward output.
   `error.DuplicateParam`. Registering it with two *different* optimizers
   (e.g. two groups of an OptimizerSet) is NOT detected: it double-steps and
   double-counts in `clipGradNorm`. Keep group memberships disjoint.
-- `nesterov` SGD with dampening or zero momentum → panics at init in every
-  build mode (PyTorch constructor rule).
+- `nesterov` SGD with dampening or zero momentum →
+  `error.InvalidOptimizerConfig` at init, checked in every build mode
+  (PyTorch constructor rule).
 - Reusing a dropout seed across calls → identical masks (correlated dropout).
   Derive a fresh seed per step/layer with `rng.at` (§6).
 - A checkpoint block that is not deterministic in (`extra`, `inputs`) →

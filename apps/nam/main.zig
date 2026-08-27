@@ -687,7 +687,7 @@ fn train(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
         model = try spec.initTrainable(allocator, &ctx, seed);
     }
     defer model.deinit();
-    var opt = fucina.optim.Adam.init(allocator, .{ .lr = lr0, .weight_decay = weight_decay });
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = lr0, .weight_decay = weight_decay });
     defer opt.deinit();
     try model.registerParams(&opt);
 

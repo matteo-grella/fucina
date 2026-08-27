@@ -140,7 +140,7 @@ test "lora AdamW step trains A and B end-to-end" {
     var base = try Tensor(.{ .batch, .out }).fromSlice(&ctx, .{ 3, 4 }, &base_vals);
     defer base.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.1, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.1, .weight_decay = 0 });
     defer opt.deinit();
     try adapter.registerParams(&opt, "layer0");
 
@@ -429,7 +429,7 @@ test "lora scoped train loop over a frozen f16 base is leak-free and the loss de
     var target = try Tensor(.{ .batch, .out }).fromSlice(&ctx, .{ 4, 5 }, &target_vals);
     defer target.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try adapter.registerParams(&opt, "l0");
 
@@ -492,7 +492,7 @@ test "lora scoped train loop over a frozen bf16 base is leak-free and the loss d
     var target = try Tensor(.{ .batch, .out }).fromSlice(&ctx, .{ 4, 5 }, &target_vals);
     defer target.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 0.05, .weight_decay = 0 });
     defer opt.deinit();
     try adapter.registerParams(&opt, "l0");
 

@@ -65,10 +65,11 @@ const SgdKernel = struct {
     };
 
     /// PyTorch constructor rule, enforced in every build mode (a debug
-    /// assert would vanish exactly where training runs: ReleaseFast).
-    pub fn checkConfig(config: SgdConfig) void {
+    /// assert would vanish exactly where training runs: ReleaseFast):
+    /// nesterov requires momentum > 0 and dampening == 0.
+    pub fn checkConfig(config: SgdConfig) !void {
         if (config.nesterov and (config.momentum == 0 or config.dampening != 0)) {
-            @panic("SGD: nesterov requires momentum > 0 and dampening == 0");
+            return error.InvalidOptimizerConfig;
         }
     }
 

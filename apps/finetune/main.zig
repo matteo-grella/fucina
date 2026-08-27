@@ -247,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
     trainer.checkpoint_layers = checkpoint_layers;
     trainer.widen_frozen = widen_frozen;
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 0, .state_dtype = state_dtype });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = lr, .weight_decay = 0, .state_dtype = state_dtype });
     defer opt.deinit();
     try trainer.registerAllParams(&opt);
     var set = optim.OptimizerSet.init(allocator);
@@ -694,7 +694,7 @@ fn verifyGrads(
     try out.print("    bitwise memcpy of raw f32 snapshots of all A/B taken at theta0 (not the state-dict)\n", .{});
     const snaps = try snapshotAdapters(allocator, trainer);
     defer freeSnapshots(allocator, snaps);
-    var sgd = optim.SGD.init(allocator, .{ .lr = 0, .momentum = 0, .dampening = 0, .weight_decay = 0 });
+    var sgd = try optim.SGD.init(allocator, .{ .lr = 0, .momentum = 0, .dampening = 0, .weight_decay = 0 });
     defer sgd.deinit();
     try trainer.registerAllParams(&sgd);
     // Reference L0 from the SAME code path as the trial L1s (forward-only),

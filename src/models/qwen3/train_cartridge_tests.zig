@@ -107,7 +107,7 @@ test "distillation pulls a random cartridge toward the teacher (sink frozen)" {
     );
     defer cart.deinit();
 
-    var opt = optim.AdamW.init(allocator, .{ .lr = 2e-2, .weight_decay = 0 });
+    var opt = try optim.AdamW.init(allocator, .{ .lr = 2e-2, .weight_decay = 0 });
     defer opt.deinit();
     try cart.registerParams(&opt);
 
