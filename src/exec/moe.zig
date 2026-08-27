@@ -218,7 +218,7 @@ fn validateMoeRhsStorage(rhs: *const MoeRhs, rows: usize, k: usize) !void {
     const expected_bpc = if (rhs.wantsQ8_0Lhs()) blk: {
         if (k == 0 or k % 32 != 0) return tensor.TensorError.InvalidShape;
         break :blk k / 32;
-    } else qm.q8k.qkBlockCount(k) catch return tensor.TensorError.InvalidShape;
+    } else qm.blockCountForDType(.q8_k, k) catch return tensor.TensorError.InvalidShape;
     const expected_blocks = std.math.mul(usize, rows, expected_bpc) catch return tensor.TensorError.ShapeMismatch;
     if (rhs.rows() != rows or rhs.k() != k) return tensor.TensorError.ShapeMismatch;
     if (rhs.blocksPerColumn() != expected_bpc or rhs.blockLen() != expected_blocks) return tensor.TensorError.ShapeMismatch;
@@ -405,7 +405,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
         .q8_0 => {
             const blocks = @as([*]const dtype_mod.BlockQ8_0, @ptrCast(@alignCast(w.planes[0])))[0 .. out_dim * bpc];
             const view = q8_0View(blocks, w.k, out_dim, bpc);
-            qm.q8_0.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulQ8_0RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
         },
         .mxfp4 => {
             // Same sound @constCast borrow as tq2_0View: allocator is
@@ -416,7 +416,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
                 .k = w.k,
                 .n = out_dim,
             };
-            qm.mxfp4.matmulMXFP4RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulMXFP4RhsTile(out, qlhs8, &view, out_dim, 0, m, c0, c1);
         },
         .tq2_0, .tq2_0_fx4 => {
             if (w.folded) {
@@ -427,7 +427,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
                 // when out_dim % 4 == 0, so c1 == out_dim is aligned too.
                 const fg = (out_dim / 4) * bpc;
                 const blocks = @as([*]const qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(w.planes[0])))[0..fg];
-                qm.ternary.matmulTQ2_0FoldedX4RhsTile(out, qlhs, blocks, bpc, out_dim, 0, m, c0, c1);
+                backend_mod.kernels.matmulTQ2_0FoldedX4RhsTile(out, qlhs, blocks, bpc, out_dim, 0, m, c0, c1);
                 return;
             }
             // `plane_count` same-geometry ternary planes; plane_count == 1
@@ -461,7 +461,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
             const dt = comptime @field(fucina_dtype.DType, @tagName(q));
             const blocks = @as([*]const dtype_mod.Storage(dt), @ptrCast(@alignCast(w.planes[0])))[0 .. out_dim * bpc];
             const view = tableView(dt, blocks, w.k, out_dim, bpc);
-            qm.cold.matmulTableQ8_KRhsTile(dt, out, qlhs, &view, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulTableQ8_KRhsTile(dt, out, qlhs, &view, out_dim, 0, m, c0, c1);
         },
     }
 }
@@ -529,8 +529,7 @@ fn moePtqtpTileDotRange(
     c0: usize,
     c1: usize,
 ) void {
-    const qm = backend_mod.quantized_matmul;
-    qm.ternary.matmulTQ2_0RhsTile(out, qlhs, &planes[0], out_dim, 0, m, c0, c1);
+    backend_mod.kernels.matmulTQ2_0RhsTile(out, qlhs, &planes[0], out_dim, 0, m, c0, c1);
     if (planes.len == 1) return;
     const bpc = planes[0].rows.blocks_per_row;
     var tmp: [ptqtp_acc_rows * ptqtp_acc_cols]f32 = undefined;
@@ -548,7 +547,7 @@ fn moePtqtpTileDotRange(
             while (cc < c1) : (cc += ptqtp_acc_cols) {
                 const cols_now = @min(cc + ptqtp_acc_cols, c1) - cc;
                 const sub = tq2_0View(plane.rows.blocks[cc * bpc ..][0 .. cols_now * bpc], plane.k, cols_now, bpc);
-                qm.ternary.matmulTQ2_0RhsTile(tmp[0 .. rows_now * cols_now], lhs, &sub, cols_now, 0, rows_now, 0, cols_now);
+                backend_mod.kernels.matmulTQ2_0RhsTile(tmp[0 .. rows_now * cols_now], lhs, &sub, cols_now, 0, rows_now, 0, cols_now);
                 for (0..rows_now) |r| {
                     const orow = out[(r0 + r) * out_dim + cc ..][0..cols_now];
                     for (orow, tmp[r * cols_now ..][0..cols_now]) |*o, s| o.* += s;
@@ -795,9 +794,9 @@ fn runMoeExpertTask(task: *const MoeExpertTask) void {
     const swiglu_requant_start = moe_chain.MoeTaskProfiler.start(task.profiler);
     gatedPairs(task.gated, task.g_buf, task.gate_buf, task.up_buf);
     const requant_ok = if (task.down.wantsQ8_0Lhs())
-        backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(task.qg8, task.g_buf)
+        backend_mod.kernels.quantizeRowQ8_0Into(task.qg8, task.g_buf)
     else
-        backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(task.qg, task.g_buf);
+        backend_mod.kernels.quantizeRowQ8_KInto(task.qg, task.g_buf);
     requant_ok catch {
         @memset(task.out, 0);
         return;
@@ -854,9 +853,9 @@ fn runMoeDecodeChainTask(task: *MoeDecodeChainTask, chain: *const thread.Chain) 
                 const swiglu_requant_start = moe_chain.MoeTaskProfiler.start(state.profiler);
                 gatedPairs(state.gated, state.g_buf, state.gate_buf, state.up_buf);
                 if (state.down.wantsQ8_0Lhs())
-                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked(state.qg8, state.g_buf)
+                    backend_mod.kernels.quantizeRowQ8_0IntoUnchecked(state.qg8, state.g_buf)
                 else
-                    backend_mod.quantized_matmul.q8k.quantizeRowQ8_KIntoUnchecked(state.qg, state.g_buf);
+                    backend_mod.kernels.quantizeRowQ8_KIntoUnchecked(state.qg, state.g_buf);
                 moe_chain.MoeTaskProfiler.add(state.profiler, .swiglu_requant, swiglu_requant_start);
                 chain.enqueue(state.down_task0);
                 chain.enqueue(state.down_task0 + 1);
@@ -1040,9 +1039,9 @@ pub fn moeExpertFfn(
     const gate_up_qk = !gate.wantsQ8_0Lhs() or !up.wantsQ8_0Lhs();
     const down_q8 = down.wantsQ8_0Lhs();
 
-    const blocks_per_g = if (down_q8) 0 else try qm.q8k.qkBlockCount(out_pe);
+    const blocks_per_g = if (down_q8) 0 else try qm.blockCountForDType(.q8_k, out_pe);
     const blocks_per_g8 = if (down_q8) out_pe / 32 else 0;
-    const hidden_blocks_k = if (gate_up_qk) try qm.q8k.qkBlockCount(hidden) else 0;
+    const hidden_blocks_k = if (gate_up_qk) try qm.blockCountForDType(.q8_k, hidden) else 0;
     const chain_task_count = try checkedMoeProduct(4, top_k);
     const chain_initial_count = try checkedMoeProduct(2, top_k);
 
@@ -1068,8 +1067,8 @@ pub fn moeExpertFfn(
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
     const qx = sv.qx;
     const x_data = try x.dataConstChecked();
-    if (gate_up_qk) try qm.q8k.quantizeRowQ8_KInto(qx, x_data);
-    if (gate_up_q8) try qm.q8k.quantizeRowQ8_0Into(qx8, x_data);
+    if (gate_up_qk) try backend_mod.kernels.quantizeRowQ8_KInto(qx, x_data);
+    if (gate_up_q8) try backend_mod.kernels.quantizeRowQ8_0Into(qx8, x_data);
     if (profile) |p| p.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, io);
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
@@ -1188,7 +1187,6 @@ const MoeBatchTask = struct {
 };
 
 fn runMoeBatchTask(task: *const MoeBatchTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const out_pe = task.out_pe;
@@ -1206,9 +1204,9 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * hidden ..][0..hidden];
         const quant_err = if (q8_lhs)
-            qm.q8k.quantizeRowQ8_0Into(task.qx8[(base + i) * bpc_in ..][0..bpc_in], src)
+            backend_mod.kernels.quantizeRowQ8_0Into(task.qx8[(base + i) * bpc_in ..][0..bpc_in], src)
         else
-            qm.q8k.quantizeRowQ8_KInto(task.qx[(base + i) * bpc_in ..][0..bpc_in], src);
+            backend_mod.kernels.quantizeRowQ8_KInto(task.qx[(base + i) * bpc_in ..][0..bpc_in], src);
         quant_err catch {
             @memset(task.down_buf[base * hidden ..][0 .. m * hidden], 0);
             return;
@@ -1233,9 +1231,9 @@ fn runMoeBatchTask(task: *const MoeBatchTask) void {
     gatedPairs(task.gated, g_out, gate_out, up_out);
     for (0..m) |i| {
         const quant_err = if (q8_lhs)
-            qm.q8k.quantizeRowQ8_0Into(task.qg8[(base + i) * bpc_g ..][0..bpc_g], g_out[i * out_pe ..][0..out_pe])
+            backend_mod.kernels.quantizeRowQ8_0Into(task.qg8[(base + i) * bpc_g ..][0..bpc_g], g_out[i * out_pe ..][0..out_pe])
         else
-            qm.q8k.quantizeRowQ8_KInto(task.qg[(base + i) * bpc_g ..][0..bpc_g], g_out[i * out_pe ..][0..out_pe]);
+            backend_mod.kernels.quantizeRowQ8_KInto(task.qg[(base + i) * bpc_g ..][0..bpc_g], g_out[i * out_pe ..][0..out_pe]);
         quant_err catch {
             @memset(task.down_buf[base * hidden ..][0 .. m * hidden], 0);
             return;
@@ -1270,7 +1268,6 @@ const MoeBatchGatherTask = struct {
 };
 
 fn runMoeBatchGatherTask(task: *const MoeBatchGatherTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
@@ -1279,9 +1276,9 @@ fn runMoeBatchGatherTask(task: *const MoeBatchGatherTask) void {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * task.hidden ..][0..task.hidden];
         const quant_err = if (task.qx8.len != 0)
-            qm.q8k.quantizeRowQ8_0Into(task.qx8[(base + i) * task.bpc_in ..][0..task.bpc_in], src)
+            backend_mod.kernels.quantizeRowQ8_0Into(task.qx8[(base + i) * task.bpc_in ..][0..task.bpc_in], src)
         else
-            qm.q8k.quantizeRowQ8_KInto(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src);
+            backend_mod.kernels.quantizeRowQ8_KInto(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src);
         quant_err catch return;
     }
     // The lane-packed kernel only engages at m >= 4 (runMoeBatchMatmulTask),
@@ -1290,7 +1287,7 @@ fn runMoeBatchGatherTask(task: *const MoeBatchGatherTask) void {
     // unaffected.
     if (task.qx_x4.len > 0 and m >= 4) {
         const groups = (m + 3) / 4;
-        qm.q8k.packRowsQ8_Kx4PaddedInto(
+        backend_mod.kernels.packRowsQ8_Kx4PaddedInto(
             task.qx_x4[task.x4_group_start * task.bpc_in ..][0 .. groups * task.bpc_in],
             task.qx[base * task.bpc_in ..][0 .. m * task.bpc_in],
             m,
@@ -1376,7 +1373,6 @@ const MoeBatchSwiGluTask = struct {
 };
 
 fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
@@ -1388,15 +1384,15 @@ fn runMoeBatchSwiGluTask(task: *const MoeBatchSwiGluTask) void {
     gatedPairs(task.gated, g_out, gate_out, up_out);
     for (0..m) |i| {
         const quant_err = if (task.qg8.len != 0)
-            qm.q8k.quantizeRowQ8_0Into(task.qg8[(base + i) * task.blocks_per_g ..][0..task.blocks_per_g], g_out[i * out_pe ..][0..out_pe])
+            backend_mod.kernels.quantizeRowQ8_0Into(task.qg8[(base + i) * task.blocks_per_g ..][0..task.blocks_per_g], g_out[i * out_pe ..][0..out_pe])
         else
-            qm.q8k.quantizeRowQ8_KInto(task.qg[(base + i) * task.blocks_per_g ..][0..task.blocks_per_g], g_out[i * out_pe ..][0..out_pe]);
+            backend_mod.kernels.quantizeRowQ8_KInto(task.qg[(base + i) * task.blocks_per_g ..][0..task.blocks_per_g], g_out[i * out_pe ..][0..out_pe]);
         quant_err catch return;
     }
     // Same m >= 4 gate as the gather repack: m < 4 packed groups are dead.
     if (task.qg_x4.len > 0 and m >= 4) {
         const groups = (m + 3) / 4;
-        qm.q8k.packRowsQ8_Kx4PaddedInto(
+        backend_mod.kernels.packRowsQ8_Kx4PaddedInto(
             task.qg_x4[task.x4_group_start * task.blocks_per_g ..][0 .. groups * task.blocks_per_g],
             task.qg[base * task.blocks_per_g ..][0 .. m * task.blocks_per_g],
             m,
@@ -1735,11 +1731,11 @@ pub fn moeExpertFfnBatch(
     const bpc_in = if (q8_lhs) blk: {
         if (hidden == 0 or hidden % 32 != 0) return tensor.TensorError.InvalidShape;
         break :blk hidden / 32;
-    } else try qm.q8k.qkBlockCount(hidden);
+    } else try qm.blockCountForDType(.q8_k, hidden);
     const bpc_g = if (q8_lhs) blk: {
         if (out_pe == 0 or out_pe % 32 != 0) return tensor.TensorError.InvalidShape;
         break :blk out_pe / 32;
-    } else try qm.q8k.qkBlockCount(out_pe);
+    } else try qm.blockCountForDType(.q8_k, out_pe);
 
     // Counting sort of (token,expert) pairs by expert.
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);

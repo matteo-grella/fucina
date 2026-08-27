@@ -91,7 +91,6 @@ fn GuDecodeEngine(comptime Bind: type) type {
         };
 
         fn runChainTask(task: *ChainTask, chain: *const thread.Chain) void {
-            const qm = backend_mod.quantized_matmul;
             const state = task.state;
             switch (task.kind) {
                 .gate_up => {
@@ -104,7 +103,7 @@ fn GuDecodeEngine(comptime Bind: type) type {
                         for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                             g.* = up_v * backend_ops.geluQuantScalar(gate_v);
                         }
-                        qm.q8k.quantizeRowQ8_0IntoUnchecked(state.qg, state.g_buf);
+                        backend_mod.kernels.quantizeRowQ8_0IntoUnchecked(state.qg, state.g_buf);
                         moe_chain.MoeTaskProfiler.add(state.profiler, .swiglu_requant, geglu_requant_start);
                         chain.enqueue(state.down_task0);
                         chain.enqueue(state.down_task0 + 1);
@@ -125,7 +124,6 @@ fn GuDecodeEngine(comptime Bind: type) type {
         /// phases full-width over the same carved state, with the checked
         /// requantize (the chain path pre-validates and runs unchecked).
         fn runSerial(state: *State) void {
-            const qm = backend_mod.quantized_matmul;
             const gate_up_start = moe_chain.MoeTaskProfiler.start(state.profiler);
             state.bind.decodeGateUp(state.expert, state.gate_buf, state.up_buf, state.qx, state.out_pe, 0, state.out_pe);
             moe_chain.MoeTaskProfiler.add(state.profiler, .gate_up, gate_up_start);
@@ -134,7 +132,7 @@ fn GuDecodeEngine(comptime Bind: type) type {
             for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
                 g.* = up_v * backend_ops.geluQuantScalar(gate_v);
             }
-            qm.q8k.quantizeRowQ8_0Into(state.qg, state.g_buf) catch {
+            backend_mod.kernels.quantizeRowQ8_0Into(state.qg, state.g_buf) catch {
                 @memset(state.out, 0);
                 return;
             };
@@ -173,17 +171,17 @@ fn guDecodeBody(
     var task_prof: moe_chain.MoeTaskProfiler = undefined;
     const prof = moe_chain.MoeTaskProfiler.arm(&task_prof, profile_enabled, io);
 
-    const blocks_per_g = try qm.q8k.q8_0BlockCount(out_pe);
+    const blocks_per_g = try qm.blockCountForDType(.q8_0, out_pe);
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     ExecContext.lockMoeDecodeScratch(ctx);
     defer ExecContext.unlockMoeDecodeScratch(ctx);
-    const sv = try ExecContext.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.q8k.qkBlockCount(hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try ExecContext.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.blockCountForDType(.q8_k, hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
-    try qm.q8k.quantizeRowQ8_KInto(sv.qx, try x.dataConstChecked());
+    try backend_mod.kernels.quantizeRowQ8_KInto(sv.qx, try x.dataConstChecked());
     if (profile) |p| p.gather_quant_ns += moeBatchProfileElapsed(gather_quant_start, io);
 
     const gate_split = moeDecodeColumnSplit(out_pe, 32);
@@ -307,12 +305,12 @@ const PackedExpertBind = struct {
     /// Decode gate|up over columns [c0, c1): the fused pair tile reads
     /// each Q8_K input block once for both projections.
     fn decodeGateUp(self: PackedExpertBind, e: usize, gate_buf: []f32, up_buf: []f32, qx: []const dtype_mod.BlockQ8_K, out_pe: usize, c0: usize, c1: usize) void {
-        backend_mod.quantized_matmul.q6_k.matmulQ6_Kx4RhsPairTile(gate_buf, up_buf, qx, self.gu(e, false), self.gu(e, true), out_pe, 0, 1, c0, c1);
+        backend_mod.kernels.matmulQ6_Kx4RhsPairTile(gate_buf, up_buf, qx, self.gu(e, false), self.gu(e, true), out_pe, 0, 1, c0, c1);
     }
 
     /// Decode down projection over columns [c0, c1).
     fn decodeDown(self: PackedExpertBind, e: usize, out: []f32, qg: []const dtype_mod.BlockQ8_0, hidden: usize, c0: usize, c1: usize) void {
-        backend_mod.quantized_matmul.q8_0.matmulQ8_0x4RhsTile(out, qg, self.dn(e), hidden, 0, 1, c0, c1);
+        backend_mod.kernels.matmulQ8_0x4RhsTile(out, qg, self.dn(e), hidden, 0, 1, c0, c1);
     }
 };
 
@@ -343,7 +341,7 @@ const RawExpertBind = struct {
     /// Decode down projection over columns [c0, c1).
     fn decodeDown(self: RawExpertBind, e: usize, out: []f32, qg: []const dtype_mod.BlockQ8_0, hidden: usize, c0: usize, c1: usize) void {
         const down_view = self.dn(e);
-        backend_mod.quantized_matmul.q8_0.matmulQ8_0RhsTile(out, qg, &down_view, hidden, 0, 1, c0, c1);
+        backend_mod.kernels.matmulQ8_0RhsTile(out, qg, &down_view, hidden, 0, 1, c0, c1);
     }
 };
 
@@ -638,8 +636,8 @@ pub fn batchPacked(
         if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
     }
 
-    const bpc_in = try qm.q8k.qkBlockCount(hidden);
-    const bpc_g = try qm.q8k.q8_0BlockCount(out_pe);
+    const bpc_in = try qm.blockCountForDType(.q8_k, hidden);
+    const bpc_g = try qm.blockCountForDType(.q8_0, out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -969,17 +967,16 @@ fn guRawGuMatmul(
     c0: usize,
     c1: usize,
 ) void {
-    const qm = backend_mod.quantized_matmul;
     switch (view.*) {
         .q6_k => |*v| if (m >= 4) {
-            qm.q6_k.matmulQ6_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulQ6_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
         } else {
-            qm.q6_k.matmulQ6_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulQ6_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
         },
         .q4_k => |*v| if (m >= 4) {
-            qm.q4_k.matmulQ4_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulQ4_KRhsCompactColOuter(out, qlhs, v, out_dim, 0, m, c0, c1);
         } else {
-            qm.q4_k.matmulQ4_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
+            backend_mod.kernels.matmulQ4_KRhsTile(out, qlhs, v, out_dim, 0, m, c0, c1);
         },
     }
 }
@@ -1084,14 +1081,13 @@ const GuRawQ8MatmulTask = struct {
 };
 
 fn runGuRawQ8MatmulTask(task: *const GuRawQ8MatmulTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.q8_0.matmulQ8_0RhsTile(out, q, &task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    backend_mod.kernels.matmulQ8_0RhsTile(out, q, &task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     moe_chain.MoeTaskProfiler.add(task.profiler, .down, start);
 }
 
@@ -1134,8 +1130,8 @@ pub fn batchRaw(
     if (gw.guBlockCount() != n_expert * 2 * out_pe * (hidden / 256)) return tensor.TensorError.ShapeMismatch;
     if (gw.dn_blocks.len != n_expert * hidden * (out_pe / 32)) return tensor.TensorError.ShapeMismatch;
 
-    const bpc_in = try qm.q8k.qkBlockCount(hidden);
-    const bpc_g = try qm.q8k.q8_0BlockCount(out_pe);
+    const bpc_in = try qm.blockCountForDType(.q8_k, hidden);
+    const bpc_g = try qm.blockCountForDType(.q8_0, out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -1194,7 +1190,6 @@ const GuGatherTask = struct {
 };
 
 fn runGuGatherTask(task: *const GuGatherTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
@@ -1202,7 +1197,7 @@ fn runGuGatherTask(task: *const GuGatherTask) void {
     for (0..m) |i| {
         const token = task.order[base + i] / task.top_k;
         const src = task.x_data[token * task.hidden ..][0..task.hidden];
-        qm.q8k.quantizeRowQ8_KIntoUnchecked(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src);
+        backend_mod.kernels.quantizeRowQ8_KIntoUnchecked(task.qx[(base + i) * task.bpc_in ..][0..task.bpc_in], src);
     }
     moe_chain.MoeTaskProfiler.add(task.profiler, .gather_quant, start);
 }
@@ -1226,14 +1221,13 @@ const GuQ6MatmulTask = struct {
 };
 
 fn runGuQ6MatmulTask(task: *const GuQ6MatmulTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.q6_k.matmulQ6_Kx4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    backend_mod.kernels.matmulQ6_Kx4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     moe_chain.MoeTaskProfiler.add(task.profiler, .gate_up, start);
 }
 
@@ -1255,7 +1249,6 @@ const GuGegluTask = struct {
 };
 
 fn runGuGegluTask(task: *const GuGegluTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
@@ -1268,7 +1261,7 @@ fn runGuGegluTask(task: *const GuGegluTask) void {
         g.* = up_v * backend_ops.geluQuantScalar(gate_v);
     }
     for (0..m) |i| {
-        qm.q8k.quantizeRowQ8_0IntoUnchecked(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]);
+        backend_mod.kernels.quantizeRowQ8_0IntoUnchecked(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]);
     }
     moe_chain.MoeTaskProfiler.add(task.profiler, .swiglu_requant, start);
 }
@@ -1292,14 +1285,13 @@ const GuQ8MatmulTask = struct {
 };
 
 fn runGuQ8MatmulTask(task: *const GuQ8MatmulTask) void {
-    const qm = backend_mod.quantized_matmul;
     const m = task.m;
     if (m == 0) return;
     const start = moe_chain.MoeTaskProfiler.start(task.profiler);
     const base = task.row_start;
     const q = task.qlhs[base * task.bpc ..][0 .. m * task.bpc];
     const out = task.out[base * task.out_dim ..][0 .. m * task.out_dim];
-    qm.q8_0.matmulQ8_0x4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
+    backend_mod.kernels.matmulQ8_0x4RhsTile(out, q, task.rhs, task.out_dim, 0, m, task.c0, task.c1);
     moe_chain.MoeTaskProfiler.add(task.profiler, .down, start);
 }
 

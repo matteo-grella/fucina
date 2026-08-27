@@ -109,7 +109,7 @@ pub fn quantizeF32RowsToQ8_0Into(ctx: *ExecContext, x: *const tensor.Tensor, dst
     x.buffer.waitReady();
     const data = x.buffer.data;
     if (x.isContiguous()) {
-        try backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(dst, data[x.offset..][0..x.len()]);
+        try kernels.quantizeRowQ8_0Into(dst, data[x.offset..][0..x.len()]);
         return;
     }
     if (x.shape.len == 3 and x.strides.at(2) == 1 and x.strides.at(1) == x.shape.at(2)) {
@@ -119,7 +119,7 @@ pub fn quantizeF32RowsToQ8_0Into(ctx: *ExecContext, x: *const tensor.Tensor, dst
         const row_blocks = row / q8_0_block_size;
         const row_stride = x.strides.at(0);
         for (0..rows) |i| {
-            try backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(
+            try kernels.quantizeRowQ8_0Into(
                 dst[i * row_blocks ..][0..row_blocks],
                 data[x.offset + i * row_stride ..][0..row],
             );
@@ -134,5 +134,5 @@ pub fn quantizeF32RowsToQ8_0Into(ctx: *ExecContext, x: *const tensor.Tensor, dst
 /// q8_0-KV gradient fallback.
 pub fn dequantizeQ8_0RowsInto(ctx: *ExecContext, dst: []f32, blocks: []const BlockQ8_0) !void {
     _ = ctx;
-    try backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(dst, blocks);
+    try kernels.dequantizeRowQ8_0Into(dst, blocks);
 }

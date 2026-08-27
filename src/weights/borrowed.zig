@@ -10,6 +10,7 @@ const exec_mod = @import("../exec.zig");
 const ag_mod = @import("../ag.zig");
 
 const common = @import("common.zig");
+const backend_kernels = @import("../backend.zig").kernels;
 
 const Tensor = ag_mod.Tensor;
 const DType = dtype_mod.DType;
@@ -63,7 +64,6 @@ pub fn packGroupedQ8_0Rhs(
     rank: usize,
     group_dim: usize,
 ) ![]backend_quant.QuantizedMatmulRhsQ8_0x4 {
-    const qm = backend_quant;
     if (group_dim % 32 != 0 or rank % 4 != 0 or n_groups == 0) return Error.InvalidWeightShape;
     const bpr = group_dim / 32;
     const row_bytes = bpr * @sizeOf(dtype_mod.BlockQ8_0);
@@ -76,7 +76,7 @@ pub fn packGroupedQ8_0Rhs(
     }
     const all = std.mem.bytesAsSlice(dtype_mod.BlockQ8_0, weight_bytes);
     for (0..n_groups) |g| {
-        packs[g] = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
+        packs[g] = try backend_kernels.packMatmulRhsQ8_0x4(allocator, @alignCast(all[g * rank * bpr ..][0 .. rank * bpr]), rank, group_dim, bpr);
         built += 1;
     }
     return packs;
@@ -90,7 +90,6 @@ pub fn groupedQ8_0GemvFusedInto(
     group_dim: usize,
     out: []f32,
 ) !void {
-    const qm = backend_quant;
     const n_groups = rhs_packs.len;
     if (group_dim % 32 != 0 or n_groups == 0 or n_groups > 8) return Error.InvalidWeightShape;
     const bpr = group_dim / 32;
@@ -100,7 +99,7 @@ pub fn groupedQ8_0GemvFusedInto(
     const lhs = try allocator.alloc(dtype_mod.BlockQ8_0, n_groups * bpr);
     defer allocator.free(lhs);
     for (0..n_groups) |g| {
-        try qm.q8k.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
+        try backend_kernels.quantizeRowQ8_0Into(lhs[g * bpr ..][0..bpr], x[g * group_dim ..][0..group_dim]);
     }
 
     const Task = struct {
@@ -110,7 +109,7 @@ pub fn groupedQ8_0GemvFusedInto(
         n: usize,
 
         fn run(task: *const @This()) void {
-            qm.q8_0.matmulQ8_0x4RhsTile(task.out, task.lhs, task.rhs, task.n, 0, 1, 0, task.n);
+            backend_kernels.matmulQ8_0x4RhsTile(task.out, task.lhs, task.rhs, task.n, 0, 1, 0, task.n);
         }
     };
     var tasks: [8]Task = undefined;

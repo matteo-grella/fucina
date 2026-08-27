@@ -340,6 +340,74 @@ pub const kernels = struct {
     pub const pool_free_scanColumns = true;
     pub const selectRow = vector.rows.selectRow;
     pub const pool_free_selectRow = true;
+    // The per-format quantized row/pack/tile kernels the exec MoE
+    // streams, the gemma fused-MoE skeleton, the PTQTP/borrowed weight
+    // containers and the ternary-LoRA backward reach (previously named
+    // as quant/<fmt> members): registered here so every band above the
+    // backend goes through the conformed table.
+    pub const quantizeRowQ8_0Into = quantized_matmul.q8k.quantizeRowQ8_0Into;
+    pub const pool_free_quantizeRowQ8_0Into = true;
+    pub const quantizeRowQ8_0IntoUnchecked = quantized_matmul.q8k.quantizeRowQ8_0IntoUnchecked;
+    pub const pool_free_quantizeRowQ8_0IntoUnchecked = true;
+    pub const quantizeRowQ8_KInto = quantized_matmul.q8k.quantizeRowQ8_KInto;
+    pub const pool_free_quantizeRowQ8_KInto = true;
+    pub const quantizeRowQ8_KIntoUnchecked = quantized_matmul.q8k.quantizeRowQ8_KIntoUnchecked;
+    pub const pool_free_quantizeRowQ8_KIntoUnchecked = true;
+    pub const packRowsQ8_Kx4PaddedInto = quantized_matmul.q8k.packRowsQ8_Kx4PaddedInto;
+    pub const pool_free_packRowsQ8_Kx4PaddedInto = true;
+    pub const dequantizeRowQ8_0Into = quantized_matmul.q8k.dequantizeRowQ8_0Into;
+    pub const pool_free_dequantizeRowQ8_0Into = true;
+    pub const matmulQ8_0x4RhsTile = quantized_matmul.q8_0.matmulQ8_0x4RhsTile;
+    pub const pool_free_matmulQ8_0x4RhsTile = true;
+    pub const matmulQ8_0RhsTile = quantized_matmul.q8_0.matmulQ8_0RhsTile;
+    pub const pool_free_matmulQ8_0RhsTile = true;
+    pub const splitSwiGluRowInto = quantized_matmul.q8_0.splitSwiGluRowInto;
+    pub const pool_free_splitSwiGluRowInto = true;
+    pub const quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto = quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto;
+    pub const pool_free_quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto = true;
+    pub const packMatmulRhsQ8_0x4 = quantized_matmul.q8_0.packMatmulRhsQ8_0x4;
+    pub const pool_free_packMatmulRhsQ8_0x4 = true;
+    pub const matmulQ6_Kx4RhsTile = quantized_matmul.q6_k.matmulQ6_Kx4RhsTile;
+    pub const pool_free_matmulQ6_Kx4RhsTile = true;
+    pub const matmulQ6_Kx4RhsPairTile = quantized_matmul.q6_k.matmulQ6_Kx4RhsPairTile;
+    pub const pool_free_matmulQ6_Kx4RhsPairTile = true;
+    pub const matmulQ6_KRhsTile = quantized_matmul.q6_k.matmulQ6_KRhsTile;
+    pub const pool_free_matmulQ6_KRhsTile = true;
+    pub const matmulQ6_KRhsCompactColOuter = quantized_matmul.q6_k.matmulQ6_KRhsCompactColOuter;
+    pub const pool_free_matmulQ6_KRhsCompactColOuter = true;
+    pub const matmulQ4_KRhsTile = quantized_matmul.q4_k.matmulQ4_KRhsTile;
+    pub const pool_free_matmulQ4_KRhsTile = true;
+    pub const matmulQ4_KRhsCompactColOuter = quantized_matmul.q4_k.matmulQ4_KRhsCompactColOuter;
+    pub const pool_free_matmulQ4_KRhsCompactColOuter = true;
+    pub const matmulMXFP4RhsTile = quantized_matmul.mxfp4.matmulMXFP4RhsTile;
+    pub const pool_free_matmulMXFP4RhsTile = true;
+    pub const quantizedMatmulRhsTQ2_0FromBorrowedBlocks = quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks;
+    pub const pool_free_quantizedMatmulRhsTQ2_0FromBorrowedBlocks = true;
+    pub const quantizedMatmulRhsTQ2_0FromF32Absmean = quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean;
+    pub const pool_free_quantizedMatmulRhsTQ2_0FromF32Absmean = true;
+    pub const matmulTQ2_0RhsTile = quantized_matmul.ternary.matmulTQ2_0RhsTile;
+    pub const pool_free_matmulTQ2_0RhsTile = true;
+    pub const matmulTQ2_0FoldedX4RhsTile = quantized_matmul.ternary.matmulTQ2_0FoldedX4RhsTile;
+    pub const pool_free_matmulTQ2_0FoldedX4RhsTile = true;
+    pub const matmulTQ2_0X4RhsTile = quantized_matmul.ternary.matmulTQ2_0X4RhsTile;
+    pub const pool_free_matmulTQ2_0X4RhsTile = true;
+    pub const matmulTQ2_0X4RhsTileAcc = quantized_matmul.ternary.matmulTQ2_0X4RhsTileAcc;
+    pub const pool_free_matmulTQ2_0X4RhsTileAcc = true;
+    pub const packMatmulRhsTQ2_0x4 = quantized_matmul.ternary.packMatmulRhsTQ2_0x4;
+    pub const pool_free_packMatmulRhsTQ2_0x4 = true;
+    pub const packMatmulRhsTQ2_0Foldedx4 = quantized_matmul.ternary.packMatmulRhsTQ2_0Foldedx4;
+    pub const pool_free_packMatmulRhsTQ2_0Foldedx4 = true;
+    pub const packMatmulRhsTQ2_0Foldedx4Into = quantized_matmul.ternary.packMatmulRhsTQ2_0Foldedx4Into;
+    pub const pool_free_packMatmulRhsTQ2_0Foldedx4Into = true;
+    pub const packMatmulRhsTQ2_0FoldedRows = quantized_matmul.ternary.packMatmulRhsTQ2_0FoldedRows;
+    pub const pool_free_packMatmulRhsTQ2_0FoldedRows = true;
+    pub const packMatmulRhsTQ2_0FoldedRowsFromX4 = quantized_matmul.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4;
+    pub const pool_free_packMatmulRhsTQ2_0FoldedRowsFromX4 = true;
+    pub const matmulTableQ8_KRhsTile = quantized_matmul.cold.matmulTableQ8_KRhsTile;
+    pub const pool_free_matmulTableQ8_KRhsTile = true;
+    pub const dequantizeRowTQ2_0Into = quantized_matmul.cold.dequantizeRowTQ2_0Into;
+    pub const pool_free_dequantizeRowTQ2_0Into = true;
+    pub const matmul2DTQ2_0F32RhsInto = vector.matmul_quant.matmul2DTQ2_0F32RhsInto;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32

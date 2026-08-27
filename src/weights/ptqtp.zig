@@ -113,7 +113,7 @@ pub fn linearSeqPtqtpFused(
             const blocks = p.asRawTensor().dataConstChecked() catch return null;
             // Borrow is sound: the matmul path never mutates RHS blocks
             // (same stance as the exec-tier tensor-RHS wrapper).
-            rhs[plane_count] = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch return null;
+            rhs[plane_count] = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch return null;
             if (px4_ready) px4s[plane_count] = weight.px4[slot].?;
             plane_count += 1;
         }
@@ -123,7 +123,7 @@ pub fn linearSeqPtqtpFused(
     const lhs = try allocator.alloc(dtype_mod.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
-        try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
+        try backend_mod.kernels.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
     // The kernels tile straight into the result tensor; only the multi-plane
     // accumulate keeps a scratch.
@@ -148,19 +148,19 @@ pub fn linearSeqPtqtpFused(
 
         fn run(task: *const @This()) void {
             if (task.pfold.len != 0) {
-                backend_quant.ternary.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pfold, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                backend_mod.kernels.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pfold, task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 return;
             }
             if (task.px4.len != 0) {
-                backend_quant.ternary.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                backend_mod.kernels.matmulTQ2_0X4RhsTile(task.out, task.lhs, task.px4[0], task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 for (task.px4[1..]) |pack| {
-                    backend_quant.ternary.matmulTQ2_0X4RhsTileAcc(task.out, task.lhs, pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+                    backend_mod.kernels.matmulTQ2_0X4RhsTileAcc(task.out, task.lhs, pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
                 }
                 return;
             }
-            backend_quant.ternary.matmulTQ2_0RhsTile(task.out, task.lhs, &task.rhs[0], task.n, 0, task.m, task.c0, task.c1);
+            backend_mod.kernels.matmulTQ2_0RhsTile(task.out, task.lhs, &task.rhs[0], task.n, 0, task.m, task.c0, task.c1);
             for (task.rhs[1..]) |*plane_rhs| {
-                backend_quant.ternary.matmulTQ2_0RhsTile(task.tmp, task.lhs, plane_rhs, task.n, 0, task.m, task.c0, task.c1);
+                backend_mod.kernels.matmulTQ2_0RhsTile(task.tmp, task.lhs, plane_rhs, task.n, 0, task.m, task.c0, task.c1);
                 for (0..task.m) |r| {
                     const orow = task.out[r * task.n ..][0..task.n];
                     const srow = task.tmp[r * task.n ..][0..task.n];
@@ -284,7 +284,7 @@ pub fn linearSeqFx4(
     const lhs = try allocator.alloc(dtype_mod.BlockQ8_K, m * blocks_per_row);
     defer allocator.free(lhs);
     for (0..m) |r| {
-        try backend_quant.q8k.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
+        try backend_mod.kernels.quantizeRowQ8_KInto(lhs[r * blocks_per_row ..][0..blocks_per_row], x[r * k ..][0..k]);
     }
     var out_t = try Tensor(.{ .seq, out_tag }).empty(ctx, .{ m, n });
     errdefer out_t.deinit();
@@ -301,7 +301,7 @@ pub fn linearSeqFx4(
         c1: usize,
 
         fn run(task: *const @This()) void {
-            backend_quant.ternary.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
+            backend_mod.kernels.matmulTQ2_0FoldedX4RhsTile(task.out, task.lhs, task.pack, task.bpr, task.n, 0, task.m, task.c0, task.c1);
         }
     };
     const base = Task{ .out = out, .lhs = lhs, .pack = weight.pack, .bpr = blocks_per_row, .m = m, .n = n, .c0 = 0, .c1 = n };
@@ -457,10 +457,10 @@ pub const WeightPtqtp = struct {
                 const k = self.p1.dim(.in);
                 const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
                 const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
-                const r1 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
-                const r2 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+                const r1 = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+                const r2 = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
                 const px4_alloc = self.px4_allocator orelse break :fold;
-                const rows = backend_quant.ternary.packMatmulRhsTQ2_0FoldedRows(px4_alloc, &r1, &r2) catch break :fold;
+                const rows = backend_mod.kernels.packMatmulRhsTQ2_0FoldedRows(px4_alloc, &r1, &r2) catch break :fold;
                 defer px4_alloc.free(rows);
                 const bytes = std.mem.sliceAsBytes(rows);
                 const dev = gpu.allocResidentBytes(bytes.len) orelse break :fold;
@@ -515,8 +515,8 @@ pub const WeightPtqtp = struct {
             const plane = maybe_plane orelse continue;
             const ok = blk: {
                 const blocks = plane.asRawTensor().dataConstChecked() catch break :blk false;
-                const rhs = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch break :blk false;
-                self.px4[i] = backend_quant.ternary.packMatmulRhsTQ2_0x4(allocator, &rhs) catch break :blk false;
+                const rhs = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(blocks)) catch break :blk false;
+                self.px4[i] = backend_mod.kernels.packMatmulRhsTQ2_0x4(allocator, &rhs) catch break :blk false;
                 break :blk true;
             };
             if (!ok) {
@@ -531,9 +531,9 @@ pub const WeightPtqtp = struct {
         if (self.tied and self.p2 != null and self.p3 == null) fold: {
             const b1 = self.p1.asRawTensor().dataConstChecked() catch break :fold;
             const b2 = self.p2.?.asRawTensor().dataConstChecked() catch break :fold;
-            const r1 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
-            const r2 = backend_quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
-            self.pfold = backend_quant.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &r1, &r2) catch null;
+            const r1 = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b1)) catch break :fold;
+            const r2 = backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, @constCast(b2)) catch break :fold;
+            self.pfold = backend_mod.kernels.packMatmulRhsTQ2_0Foldedx4(allocator, &r1, &r2) catch null;
         }
     }
 
@@ -599,7 +599,7 @@ pub const WeightPtqtpFx4 = struct {
         if (comptime !(gpu.enabled and gpu.has_quant_gemm and offload.supportsQuant(.tq2_0))) return;
         if (comptime !offload.supportsQuant(.tq2_0_folded)) return;
         if (self.gpu_fold != null) return;
-        const rows = backend_quant.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
+        const rows = backend_mod.kernels.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, self.pack, self.n, self.k / 256) catch return;
         defer allocator.free(rows);
         const bytes = std.mem.sliceAsBytes(rows);
         const dev = gpu.allocResidentBytes(bytes.len) orelse return;

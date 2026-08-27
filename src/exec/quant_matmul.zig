@@ -572,7 +572,7 @@ fn fusedKQuantGemm(
     pinned: bool,
 ) !void {
     const qm = backend_mod.quantized_matmul;
-    const blocks_per_row = try qm.q8k.qkBlockCount(k);
+    const blocks_per_row = try qm.blockCountForDType(.q8_k, k);
     const n = rhs.n;
     const out_data = out.data();
 
@@ -665,7 +665,7 @@ pub fn gegluQuantMatmulPacked(self: *ExecContext, gate: *const Tensor, up: *cons
 /// shared.
 fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.FusedActKind, lhs: Lhs, rhs: anytype, m: usize, k: usize) !void {
     const qm = backend_mod.quantized_matmul;
-    const blocks_per_row = try qm.q8k.q8_0BlockCount(k);
+    const blocks_per_row = try qm.blockCountForDType(.q8_0, k);
     const n = rhs.n;
     switch (comptime act) {
         .split_swiglu => {
@@ -684,7 +684,7 @@ fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.Fuse
             if (m == 1) {
                 var fused = try self.empty(.f32, .{ 1, k });
                 defer fused.deinit();
-                qm.q8_0.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
+                kernels.splitSwiGluRowInto(fused.data(), gg.tensor().dataConst(), k);
                 self.enableNativeMatmulPoolForWork(.q8_0, 1, n, k);
                 return kernels.matmulPacked(self.pc(), self.allocator, out, &fused, rhs, 1, n, k);
             }
@@ -713,7 +713,7 @@ fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.Fuse
             };
             const pooled = m * k >= parallel.fused_chain_len_threshold and
                 self.dispatchRange(SplitSwiGluQuantQ8_0x4Task, "row_group_start", "row_group_end", base, row_groups, runSplitSwiGluQuantQ8_0x4Task);
-            if (!pooled) qm.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
+            if (!pooled) kernels.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
                 qlhs_blocks,
                 input,
                 m,

@@ -371,7 +371,7 @@ pub fn Ops(comptime Self: type) type {
             defer weight_ready.deinit();
 
             // Per-tensor absmean scale + round-clip encode of the latent weight.
-            var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator, k, n, weight_ready.dataConst());
+            var rhs = try backend_mod.kernels.quantizedMatmulRhsTQ2_0FromF32Absmean(ctx.allocator, k, n, weight_ready.dataConst());
             var rhs_owned = true;
             errdefer if (rhs_owned) rhs.deinit();
 
@@ -379,7 +379,7 @@ pub fn Ops(comptime Self: type) type {
                 var product = try ctx.empty(.f32, .{ m, n });
                 errdefer product.deinit();
                 const work = parallel.saturatedMul3(m, n, k);
-                const config: backend_mod.vector_impl.ParallelConfig =
+                const config: backend_mod.ParallelConfig =
                     if (work >= parallel.vector_matmul_work_threshold) .{ .pool = ctx.workPool() } else .{};
                 // Deliberately the vector kernel on BOTH backend kinds
                 // (including -Dbackend=scalar): the mul-free f32 kernel is
@@ -387,7 +387,7 @@ pub fn Ops(comptime Self: type) type {
                 // identical on every target by construction, so the scalar
                 // leg exercises the same numerics (the quant matmuls instead
                 // select their scalar accumulators through backend/isa.zig).
-                backend_mod.vector_impl.matmul_quant.matmul2DTQ2_0F32RhsInto(config, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
+                backend_mod.kernels.matmul2DTQ2_0F32RhsInto(config, product.data(), left_matrix.dataConst(), &rhs, m, n, k);
                 if (std.mem.eql(usize, product.shape.slice(), result_shape[0..])) break :forward product;
                 const reshaped = try product.reshape(result_shape[0..]);
                 product.deinit();

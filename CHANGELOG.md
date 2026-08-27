@@ -296,6 +296,14 @@ this point; earlier history is `git log`.
   inside the kernel and `ops.ScanOp` as the shared vocabulary), and the
   masked-reduce select row. Each carries its serial reference arm; the
   elementwise ones are bit-exact against it by construction.
+- Every production reach past the backend facade is gone: the ~55 sites
+  in exec/ag/weights/models/store that named `backend.quantized_matmul.
+  <fmt>.<fn>` or `backend.vector_impl` internals now go through the
+  conformed `backend.kernels` table (31 per-format quantized
+  row/pack/tile kernels and `matmul2DTQ2_0F32RhsInto` registered),
+  `backend.ParallelConfig`, `quantized_matmul.blockCountForDType` (the
+  `q8k.qkBlockCount`/`q8_0BlockCount` spellings), or the curated
+  `backend.simd` seam (`dotF32F16` added for the SubQ research kernels).
 - `store/expert_store.zig` is now the facade over five concern files —
   `store/io.zig` (platform I/O shims + the store error set),
   `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout

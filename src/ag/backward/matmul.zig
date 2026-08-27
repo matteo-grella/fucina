@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const backend_quant = @import("../../backend.zig").quantized_matmul;
+const backend_kernels = @import("../../backend.zig").kernels;
 const tensor_mod = @import("../../tensor.zig");
 const dtype_mod = @import("../../dtype.zig");
 const exec_mod = @import("../../exec.zig");
@@ -452,7 +453,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
                 defer right_f32.deinit();
                 const rows = right_f32.data();
                 for (0..n) |row| {
-                    try backend_quant.cold.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
+                    try backend_kernels.dequantizeRowTQ2_0Into(rows[row * k ..][0..k], self.rhs.columnBlocks(row));
                 }
                 var dx = try ctx.matmul(.f32, .plain, &gy2d, &right_f32);
                 errdefer dx.deinit();

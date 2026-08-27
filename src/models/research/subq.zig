@@ -1770,7 +1770,7 @@ fn dot2F32(a0: []const f32, a1: []const f32, b: []const f32) [2]f32 {
     return .{ t0, t1 };
 }
 
-const dotF16 = fucina.internal.backend_mod.vector_impl.primitives.dotF32F16;
+const dotF16 = fucina.internal.backend_mod.simd.dotF32F16;
 
 /// One exact-read batch under the shared online softmax gauge: score all
 /// rows, raise the gauge if the batch's max score exceeds it (rescaling the

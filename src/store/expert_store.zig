@@ -1096,7 +1096,7 @@ pub const ExpertStore = struct {
         }
         const fg = (g.out_dim / 4) * g.blocks_per_column;
         const out = @as([*]qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(section.ptr)))[0..fg];
-        qm.ternary.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
+        backend_mod.kernels.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
     }
 
     /// Module-internal seam (`tiers` hints and reads through the routed

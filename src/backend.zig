@@ -143,6 +143,7 @@ pub const simd = struct {
     pub const tanhVec = vector_primitives.tanhVec;
     pub const unaryVjpVectorizes = vector_primitives.unaryVjpVectorizes;
     pub const vecUnaryVjp = vector_primitives.vecUnaryVjp;
+    pub const dotF32F16 = vector_primitives.dotF32F16;
 };
 
 /// conv2d geometry (channel-last [H,W,Cin] -> [OH,OW,Cout]); see vector/conv.zig.
