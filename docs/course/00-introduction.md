@@ -216,12 +216,12 @@ because they are also the reasons this course can exist:
 - **The performance ceiling is higher than the folklore says.** This is the
   claim that needs numbers, so here is exactly how the project states them.
 
-`docs/BENCHMARK.md` opens with two ground rules (docs/BENCHMARK.md:13-19):
+`docs/BENCHMARK.md` opens with two ground rules (docs/BENCHMARK.md:14-20):
 every number carries its hardware and measurement conditions, and "**Losses
 are recorded as plainly as wins.**" The whole record "is one snapshot, taken
-as of 2026-07-04" (docs/BENCHMARK.md:9) against a pinned llama.cpp build,
+as of 2026-07-04" (docs/BENCHMARK.md:10) against a pinned llama.cpp build,
 same GGUF file, same thread count, CPU-only on both sides. Within those
-caveats, the README's summary (README.md:173-182): on an Apple M1 Max, of
+caveats, the README's summary (README.md:256-266): on an Apple M1 Max, of
 236 paired sweep cells across several model families, Fucina was faster in
 221 and at parity in 13 — dense prefill geomeans 1.18–1.81x per format —
 with two cells on llama.cpp's side, one of them Qwen3.5-0.8B at prompt
@@ -300,35 +300,41 @@ something real*. That is precisely the deal this course offers you.
 
 ## 0.6 A library grown through real applications
 
-Fucina's `examples/` directory is not a demo folder. The README states the
-growth model plainly (README.md:117-121):
+Fucina's application tree is not a demo folder. The README states the
+growth model plainly (README.md:171-177):
 
-> These applications live in `examples/` and each will eventually graduate
-> into its own repository. They use the library; they are not the library.
-> Keeping them in-tree during this phase is deliberate: with the Tensor core
-> in place, Fucina grows and gets tested through real applications, so the
-> runtime and the things built on it develop side by side.
+> With the tensor core in place, Fucina grows and gets tested through real
+> applications, so the runtime and the things built on it develop side by
+> side. Every family below is ordinary consumer code of the same public
+> `fucina`/`fucina_models` surface wired in Getting started, split across
+> two homes: `examples/` holds single-file teaching programs meant to be
+> read and copied, and `apps/` holds the product- and port-shaped programs
+> (multi-file, own tests, shims, goldens, real CLI surfaces).
 
-What runs today (condensed from the README's table, README.md:86-101): chat
+The applications use the library; they are not the library — "these
+applications will eventually graduate into their own repositories"
+(README.md:245).
+
+What runs today (condensed from the README's tables, README.md:218-243): chat
 LLMs dense and mixture-of-experts (Qwen3, DeepSeek V2/V3 and V4 Flash,
 GLM-4.5, Gemma 4, Qwen3.5), a text-diffusion decoder, a multimodal decoder
 with image and audio input towers (Inkling), karpathy's nanochat ported
 whole and *trained from scratch on CPU*, speech-to-text (Parakeet),
 text-to-speech with voice cloning (OmniVoice), an open-vocabulary detection
 VLM, face detection and recognition — plus, from the quick start rather
-than the table, an OpenAI-compatible HTTP server (README.md:146-148) — and
+than the tables, an OpenAI-compatible HTTP server (README.md:204-206) — and
 the Neural Amp Modeler. MoE models bigger than RAM are first-class: expert
 streaming is "how the 142 GB Qwen3-235B and the 164.6 GB V4 Flash decode on
-a 64 GB machine" (README.md:103-106).
+a 64 GB machine" (README.md:229-233).
 
 Each of those applications forced something into the core — new ops, new
 dtypes, new scheduler behaviour — and each earned its place the same way
-(README.md:108-111):
+(README.md:179-183):
 
-> Every family is validated against its reference implementation, and that
-> discipline is the core of the project: token-ID-exact tokenizers vs
-> `llama-tokenize`, logit-parity oracles vs llama.cpp, byte-exact quantization
-> encoders vs ggml, byte-identical GGUF re-emit.
+> Every family is validated against its reference implementation, a
+> discipline that is the core of the project: token-ID-exact tokenizers vs
+> `llama-tokenize`, logit-parity oracles vs llama.cpp, byte-exact
+> quantization encoders vs ggml, byte-identical GGUF re-emit.
 
 This is the second thread that runs through the whole course, alongside
 "what you read is what runs": **you don't optimize what you can't verify**
@@ -341,9 +347,10 @@ is a character in this story, introduced piece by piece and assembled in
 [Chapter 16](16-the-craft.md).
 
 > **Zig note** — Even the documentation is under test: `zig build
-> snippet-check` extracts the runnable code blocks from `docs/REFERENCE.md`
-> and compiles and runs them against the real modules. When this course
-> quotes a REFERENCE.md snippet, you are reading machine-verified code.
+> snippet-check` extracts the runnable code blocks from the
+> `docs/reference/` chapters and compiles and runs them against the real
+> modules. When this course quotes a reference snippet, you are reading
+> machine-verified code.
 
 ## 0.7 Honest expectations
 
@@ -529,10 +536,10 @@ statement of method rather than instruction.
 
 **Either way, run things.** The course's code comes in two flavours, always
 labelled: verbatim repo code, cited by path (when it comes from
-`docs/REFERENCE.md`, it is machine-verified against the real modules); and
+`docs/reference/`, it is machine-verified against the real modules); and
 minimal build-it-yourself course code, which compiles under the pinned Zig
-0.16.0. Get the toolchain now — the quick start is the README's
-(README.md:135-149):
+0.16.0. Get the toolchain now — the start of the README's quick start
+(README.md:190-209):
 
 ```sh
 git clone https://github.com/matteo-grella/fucina
@@ -543,7 +550,7 @@ zig build test          # unit tests, no model files needed
 That `zig build test` needs no model weights and no network beyond the
 clone. When it passes, you hold a working forge. One habit to adopt
 immediately, straight from the README: build with `-Doptimize=ReleaseFast`
-whenever speed matters — "Debug is 10–50x slower" (README.md:151-152).
+whenever speed matters — "Debug is 10–50x slower" (README.md:157-158).
 
 ## What you now know
 

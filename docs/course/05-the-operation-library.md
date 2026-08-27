@@ -16,7 +16,7 @@ One orientation note first: everything in this chapter is *eager*. When you
 call an op, the kernel runs, and you get a finished tensor back. There is no
 graph object, no session, no compile step, no lazy evaluation — "an op call
 runs the kernel and returns an owned result immediately"
-(docs/REFERENCE.md §6). You can single-step an entire transformer forward
+(`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6). You can single-step an entire transformer forward
 pass in a debugger, one op at a time. Hold on to that; it is the most
 load-bearing design fact in the library.
 
@@ -32,7 +32,7 @@ Every op in Fucina takes `ctx: *ExecContext` as its first runtime argument.
 The context is the entire runtime, in one value you create and destroy
 yourself: it owns the allocator wrapper, the backend instance, the
 transient-buffer pool, the lazily created worker team, and the exec-scope
-stack (docs/REFERENCE.md §6; the struct lives in `src/exec.zig`). There are
+stack (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6; the struct lives in `src/exec.zig`). There are
 no globals anywhere: two contexts are two fully independent worlds, and
 destroying one cannot disturb the other.
 
@@ -46,7 +46,7 @@ driver, not a naive free* — releasing a tensor returns its buffer to a free
 list, and a same-sized successor gets the very same address back, warm in
 cache. That is asserted behavior, not folklore — Chapter 3 pins it with the
 pointer-equality recycling test (machine-verified from
-docs/REFERENCE.md §6.2). What matters for this chapter: op results come
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2). What matters for this chapter: op results come
 from the pool; kernels never allocate.
 
 > **Zig note** — Note the creation idiom every runnable snippet in this
@@ -58,7 +58,7 @@ from the pool; kernels never allocate.
 > copy the struct and the interior pointer would dangle. Taking
 > `self: *ExecContext` and returning `void` forces initialization *in
 > place*, at the address where the context will live — and it must never be
-> moved or copied afterwards (docs/REFERENCE.md §6.1). This "pinned struct"
+> moved or copied afterwards (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.1). This "pinned struct"
 > idiom appears throughout systems Zig. Its mirror image lives in `deinit`
 > (`src/exec.zig`): after teardown, `self.* = undefined;` — so a
 > use-after-deinit trips loudly in safety builds instead of reading stale
@@ -67,12 +67,12 @@ from the pool; kernels never allocate.
 The pool also gives you leak detection for free: `BufferPool.deinit` — run by
 `ExecContext.deinit` — asserts that no pooled buffer is still outstanding, so
 a tensor leaked past context teardown fails an assertion in safety builds
-instead of silently leaking (docs/REFERENCE.md §6.1).
+instead of silently leaking (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.1).
 
 **The worker team.** CPU kernels parallelize over a persistent fork-join
 team owned by the context — created lazily, on the first op big enough to
 want it: "A context that only ever runs small/serial ops never starts a
-thread" (docs/REFERENCE.md §6.6). The team's mechanics are
+thread" (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.6). The team's mechanics are
 [Chapter 6](06-going-fast-on-cpus.md)'s material.
 
 Finally, layering. `ExecContext` is a thin forwarding facade over `Runtime`
@@ -81,7 +81,7 @@ under `src/exec/` — `elementwise.zig`, `matmul.zig`, `softmax.zig`,
 `moe.zig`, and friends — which receive `*Runtime` explicitly and never
 import `exec.zig` back. Only `src/exec.zig` is public API: "the domain
 modules under `src/exec/` it forwards to are not public API"
-(docs/REFERENCE.md §6.4). They are excellent *reading* — we will quote them
+(`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.4). They are excellent *reading* — we will quote them
 — but you write programs against `ExecContext` and the tagged facade, not
 against the leaves.
 
@@ -89,8 +89,8 @@ against the leaves.
 
 Fucina's op surface is large — the tagged facade in `src/ag/tensor.zig` spans
 well over a hundred methods, and the raw surface beneath it roughly 300
-`pub fn`s in `src/exec.zig` (docs/REFERENCE.md §6.4). What makes it learnable
-is that every single op honors one contract (docs/REFERENCE.md §4.1):
+`pub fn`s in `src/exec.zig` (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.4). What makes it learnable
+is that every single op honors one contract (`docs/reference/04-tensor-operations.md` §4.1):
 
 1. **Signature shape.** Ops are methods on `Tensor(tags)` taking
    `ctx: *ExecContext` first. Axes are chosen by **comptime tag**: misnaming
@@ -188,7 +188,7 @@ trailing block, recognised by `tailBroadcastInfo`)? Then a specialised
 loop that reads the small operand in place. Anything else is materialized
 to contiguous through the pool and takes the first path. And one more discipline holds
 across the whole kernel tier: **kernels never allocate** — every transient
-buffer they need flows through the context's pool (docs/REFERENCE.md §6.5).
+buffer they need flows through the context's pool (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.5).
 What the kernels look like inside — `@Vector`, thresholds, the worker team —
 is [Chapter 6](06-going-fast-on-cpus.md).
 
@@ -199,7 +199,7 @@ is [Chapter 6](06-going-fast-on-cpus.md).
 > implementation *at compile time*. Option arguments use the same trick:
 > `softmax(ctx, .src, .{ .scale = s })` takes a comptime-validated struct
 > literal, and a misspelled field is a compile error, not a silently
-> ignored setting (docs/REFERENCE.md §4.10).
+> ignored setting (`docs/reference/04-tensor-operations.md` §4.10).
 
 ## 5.3 Ownership in practice: deinit-ASAP, `replace`, and exec scopes
 
@@ -213,7 +213,7 @@ defer y.deinit();
 
 and the pool turns that discipline into an O(1) working set — a chain of
 same-shaped ops recycles the same couple of buffers over and over, warm in
-cache (docs/REFERENCE.md §6.2).
+cache (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2).
 
 Loops that *carry* a value — a residual stream advancing through transformer
 blocks — get a dedicated helper, `ctx.replace`, which frees the old value and
@@ -236,7 +236,7 @@ test "ctx.replace advances a carried tensor" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §6.2)*
+*(machine-verified snippet from `docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2)*
 
 Training breaks deinit-ASAP: every intermediate between the parameters and
 the loss must stay alive until `backward()` runs. **Exec scopes** solve this
@@ -245,7 +245,7 @@ without changing your forward code. While a scope is open on the context
 every facade-op result is adopted by the scope; the value you receive is a
 borrow whose `deinit` is a safe no-op, and `closeExecScope` releases
 everything at once, newest first. The canonical training step
-(docs/REFERENCE.md §6.3) divides ownership three ways: *parameters* are
+(`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.3) divides ownership three ways: *parameters* are
 caller-owned (`defer w.deinit()` outside the loop), *intermediates* are
 scope-owned borrows (no defers at all), and *fetched gradients* are
 caller-owned again. Because `deinit` on a scope-owned borrow is a no-op, the
@@ -322,7 +322,7 @@ test "pointwise add broadcasts by tag" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.2)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.2)*
 
 > **ML note** — This tiny test is half of a neural network already. A
 > "linear layer" is a matrix multiply plus a **bias**: per-feature offsets
@@ -334,7 +334,7 @@ test "pointwise add broadcasts by tag" {
 > sum of 2 row-gradients — here `{2, 2}`). The tag rule makes both
 > directions automatic.
 
-Three more binary ops share the tag-broadcast rule (docs/REFERENCE.md §4.2):
+Three more binary ops share the tag-broadcast rule (`docs/reference/04-tensor-operations.md` §4.2):
 `maximum`/`minimum` follow torch's NaN-propagating semantics (a NaN in
 either operand wins — deliberately *not* the IEEE rule Zig's bare `@max`
 follows), and `pow` follows `std.math.pow` domain semantics with torch's
@@ -343,11 +343,10 @@ gradient conventions.
 **Scalar variants** cover the ubiquitous tensor-with-a-number cases without
 building a scalar tensor first: `scale(ctx, s)`, `addScalar`, `subScalar`,
 `divScalar`, `powScalar` — all differentiable, all returning new tensors
-(docs/REFERENCE.md §4.3).
+(`docs/reference/04-tensor-operations.md` §4.3).
 
 **In-place and no-grad helpers** exist for inference hot paths, where the
-"always a new tensor" rule would cost real bandwidth (docs/REFERENCE.md
-§4.3): `addAxisVectorInPlace` (bias-add along the last axis, mutating
+"always a new tensor" rule would cost real bandwidth (`docs/reference/04-tensor-operations.md` §4.3): `addAxisVectorInPlace` (bias-add along the last axis, mutating
 `self`), `addAxisVectorUnaryInPlace` (fused bias + activation),
 `addScaledInPlace` (`self += alpha·other`), and the two *consuming* ops
 `takeAddNoGrad`/`takeScaleNoGrad`, which take ownership of `self` and reuse
@@ -362,7 +361,7 @@ otherwise a stack of matrix multiplies collapses into one matrix multiply.
 Fucina's elementwise nonlinearities live in one closed kernel enum,
 `exec.UnaryOp` — twenty-seven members today, most with a direct method alias
 (`x.relu(&ctx)` is `x.unary(&ctx, .relu)`); the full table is
-docs/REFERENCE.md §4.4. A curated sample, because the zoo *is* a history of
+`docs/reference/04-tensor-operations.md` §4.4. A curated sample, because the zoo *is* a history of
 deep learning:
 
 | Op | What it is | Why it exists |
@@ -386,7 +385,7 @@ Alongside the enum: `leakyRelu(ctx, negative_slope)` and
 `dropout(ctx, p, seed)` — deferred to §5.12, because its design is the
 determinism story in miniature.
 
-**Gated activations** are the modern FFN's shape (docs/REFERENCE.md §4.5).
+**Gated activations** are the modern FFN's shape (`docs/reference/04-tensor-operations.md` §4.5).
 `exec.GatedOp` is `{ .glu, .swiglu, .geglu, .situ }`; the
 two-operand form computes `self · act(other)` — the **second** operand is
 the gate — so `up.swiglu(&ctx, &gate)` is `up · silu(gate)`. `splitGated`
@@ -414,7 +413,7 @@ function over the same machinery.
 
 Deep learning code is full of decisions applied elementwise: which attention
 positions are visible, which tokens are padding, which logits to suppress.
-The vocabulary for that is masks (docs/REFERENCE.md §4.6):
+The vocabulary for that is masks (`docs/reference/04-tensor-operations.md` §4.6):
 
 - `compare(ctx, op, other)` produces a `.bool` tensor (`op` is one of
   `.eq .ne .lt .le .gt .ge`; `other` a same-tagged tensor or scalar, chosen
@@ -431,7 +430,7 @@ The vocabulary for that is masks (docs/REFERENCE.md §4.6):
 The reference's own demonstration builds relu out of masks:
 `x.maskedFill(&ctx, &neg, 0)` where `neg = x.compare(&ctx, .lt, 0)` — and
 counting the mask with `neg.sumAll(&ctx)` returns an **i64** scalar, the
-mask-counting idiom (docs/REFERENCE.md §4.6; Exercise 1 has you write it).
+mask-counting idiom (`docs/reference/04-tensor-operations.md` §4.6; Exercise 1 has you write it).
 Two details from that snippet matter beyond the toy. First, the ownership
 fine print from §5.3: `.bool` results are typed constants, so they stay
 **caller-owned even under an exec scope** — the mask's `deinit` is
@@ -451,7 +450,7 @@ var s = try x.sum(&ctx, .col); // x: Tensor(.{ .row, .col }) -> s: Tensor(.{ .ro
 The compiler now knows the column axis is gone — pass `s` where a
 `.{ .row, .col }` tensor is expected and the mistake is a compile error, not
 a shape crash three layers later. `sumAll` reduces everything to the scalar
-`Tensor(.{})`, read with `item()`. The family (docs/REFERENCE.md §4.7):
+`Tensor(.{})`, read with `item()`. The family (`docs/reference/04-tensor-operations.md` §4.7):
 `sum`, `mean`, `sumMany` (several tags at once), `sumAll`,
 `variance(ctx, tag, options)`, `max`/`min` (values only — indices are §5.11's
 business), `prod`, the scans `cumsum`/`cumprod` (shape-preserving prefix
@@ -471,7 +470,7 @@ Two behaviors here foreshadow §5.12. `max`/`min` route the gradient to the
 `torch.max` over a dim). And `cumsum`/`cumprod` are serial per row *by
 default* precisely so their results are bitwise deterministic for any
 thread count; the opt-in `-Dvector-scan` build flag vectorizes them with
-the reassociation trade-off documented on the flag (docs/REFERENCE.md §2.2,
+the reassociation trade-off documented on the flag (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.2,
 §4.7). Floating-point addition is not associative; this library treats the
 order of summation as part of an op's contract.
 
@@ -489,7 +488,7 @@ pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contra
 
 *(signature from `src/ag/tensor.zig:3747`)*
 
-At comptime every tag falls into one of three roles (docs/REFERENCE.md §4.8):
+At comptime every tag falls into one of three roles (`docs/reference/04-tensor-operations.md` §4.8):
 the **contract** tag (named by you, removed from the result), **batch** tags
 (every other tag shared by both operands — sizes must match exactly), and
 **free** tags (private to one operand). The result order is
@@ -514,7 +513,7 @@ test "dot with a shared batch tag lowers to bmm" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.8)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.8)*
 
 The shared `.b` tag became a batch axis automatically; in positional
 frameworks that is a separate `bmm` entry point you must remember to use.
@@ -523,7 +522,7 @@ collapse — belongs to [Chapter 4](04-axes-with-names.md); the GEMM kernels
 themselves to [Chapter 6](06-going-fast-on-cpus.md).
 
 `other`'s dtype is comptime-dispatched, and this is where frozen weights
-enter the picture (docs/REFERENCE.md §4.8): an f32 RHS gets the full
+enter the picture (`docs/reference/04-tensor-operations.md` §4.8): an f32 RHS gets the full
 two-operand backward; an f16/bf16 *constant* RHS is a frozen weight —
 gradient flows to `self` only, through mixed kernels that widen in-register
 (a grad-requiring 16-bit *variable* RHS still receives its own f32
@@ -540,7 +539,7 @@ tuple is the equation*:
 result[out_tags] = Σ over every tag not in out_tags of self ⊙ other
 ```
 
-The rule is pure membership (docs/REFERENCE.md §4.8): shared tags kept in
+The rule is pure membership (`docs/reference/04-tensor-operations.md` §4.8): shared tags kept in
 `out_tags` are batch axes; shared tags dropped are contractions (any number
 of them); private tags kept are free; private tags dropped are summed away.
 So `a.einsum(&ctx, &b, .{.n})` with `a[.s, .k]` and `b[.k, .n]` contracts
@@ -571,21 +570,21 @@ test "einsumMany: a LoRA delta as one three-operand equation" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.8)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.8)*
 
 Internally, `dot` **is** einsum — `taggedDot` delegates to `taggedEinsum`
-with the canonical dot result order as the equation (docs/REFERENCE.md §4.8).
+with the canonical dot result order as the equation (`docs/reference/04-tensor-operations.md` §4.8).
 One contraction engine, not two. And contractions are closed under
 differentiation: each operand's gradient is *another einsum* (the output
 gradient contracted with the other operand), so both backward branches stay
 on GEMM kernels for every tag structure. That closure retired an old
 broadcast-multiply backward fallback — "`zig build bench-einsum` measured
-that case at two orders of magnitude" (docs/REFERENCE.md §4.8).
+that case at two orders of magnitude" (`docs/reference/04-tensor-operations.md` §4.8).
 
 Rounding out the family: `matmul(ctx, other, kind, out_tags)` is the
 explicit escape hatch that bypasses the tag algebra entirely — you name the
 result axes and pick `.plain`/`.trans_a`/`.trans_b` yourself
-(docs/REFERENCE.md §4.9). The packed-RHS entries next to it (`dotPacked`,
+(`docs/reference/04-tensor-operations.md` §4.9). The packed-RHS entries next to it (`dotPacked`,
 `rmsNormMulDotPacked`, `splitSwiGluDotPacked`, …) are **inference-only**
 fused quantized GEMMs; they belong to
 [Chapter 11](11-model-files-and-quantization.md)'s quantization story.
@@ -605,7 +604,7 @@ exponentiating, so `exp` never overflows); the kernel's SIMD anatomy waits
 in [Chapter 6](06-going-fast-on-cpus.md).
 
 The options struct is a compressed tour of a decade of attention
-engineering (docs/REFERENCE.md §4.10) — the effective pre-softmax logit is
+engineering (`docs/reference/04-tensor-operations.md` §4.10) — the effective pre-softmax logit is
 `x·scale + slope·mask`:
 
 - `.scale` — fold attention's `1/sqrt(d)` into the kernel, no separate pass;
@@ -619,7 +618,7 @@ engineering (docs/REFERENCE.md §4.10) — the effective pre-softmax logit is
   rows `{0.5, 0.5}`; adding `.causal` turns row 0 into `{1, 0}` — query 0
   attends source 0 only, and the masked-out tail is *exactly* 0, not
   merely tiny (pinned by the machine-verified test in
-  docs/REFERENCE.md §4.10).
+  `docs/reference/04-tensor-operations.md` §4.10).
 
 Two log-domain companions, `logsumexp` and `logSoftmax`, share the same
 max-shifted row machinery as fused single-node kernels — though when the
@@ -630,7 +629,7 @@ next step is a loss, prefer `crossEntropy` (§5.10), which fuses further.
 Deep stacks drift — activations grow or shrink layer by layer until
 training destabilizes. Normalization layers re-center and re-scale along the
 feature axis, and the two dominant recipes sit side by side
-(docs/REFERENCE.md §4.11):
+(`docs/reference/04-tensor-operations.md` §4.11):
 
 - `layerNorm(ctx, tag, eps, options)` — `(x − μ)/sqrt(σ² + eps)`, biased
   variance (§5.7's `ddof = 0`), optional fused affine
@@ -641,12 +640,12 @@ feature axis, and the two dominant recipes sit side by side
 
 On the row `{1, 3}`, layerNorm gives `{-1, 1}` (center, then scale to unit
 variance) while rmsNorm gives `x / sqrt((1 + 9)/2)` — no centering; the
-reference pins both numerically (docs/REFERENCE.md §4.11).
+reference pins both numerically (`docs/reference/04-tensor-operations.md` §4.11).
 
 The family's option surfaces record real interop traps: `standardizeAxis`
 lets you choose where the epsilon goes — `sqrt(var) + eps` versus
 `sqrt(var + eps)` — because reference models genuinely differ, and the two
-placements do not produce the same numbers (docs/REFERENCE.md §4.11). Fused
+placements do not produce the same numbers (`docs/reference/04-tensor-operations.md` §4.11). Fused
 variants (`rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`) exist
 because norm → scale → next-op chains are the hottest few lines of an LLM
 forward; all stay differentiable in every tensor operand, statistics
@@ -665,7 +664,7 @@ pub fn rope(self, ctx, comptime position_tag: Tag, comptime feature_tag: Tag,
             source: anytype, comptime mode: RopeMode) !Self
 ```
 
-*(signature from docs/REFERENCE.md §4.12; impl `src/ag/tensor.zig`)*
+*(signature from `docs/reference/04-tensor-operations.md` §4.12; impl `src/ag/tensor.zig`)*
 
 `mode` picks the pairing layout (`.half` pairs feature `i` with `i + d/2`,
 NEOX/Llama-style; `.interleaved` pairs adjacent features) — another interop
@@ -673,7 +672,7 @@ fork made explicit. The production path builds a `RopeTable` of factors once
 with `ctx.prepareRopeTable(...)` and reuses it per layer; the table's
 `feature_dim` is the authoritative rotary span (smaller than the axis =
 partial rotation), and "negative positions rotate backwards, so re-roping
-cached values to a new offset is a valid pattern" (docs/REFERENCE.md §4.12)
+cached values to a new offset is a valid pattern" (`docs/reference/04-tensor-operations.md` §4.12)
 — a sentence that will make full sense when the KV cache arrives in
 [Chapter 12](12-a-transformer-from-scratch.md), which owns the why and the
 geometry.
@@ -688,7 +687,7 @@ pub fn groupedAttention(self, ctx, k: anytype, v: anytype, kv_head_for_head: []c
     !Tensor(.{ .seq, out_tag })
 ```
 
-*(signature from docs/REFERENCE.md §4.13; impl `src/ag/tensor.zig`)*
+*(signature from `docs/reference/04-tensor-operations.md` §4.13; impl `src/ag/tensor.zig`)*
 
 The query *must* be tagged `.{ .seq, .head, .d }` — a compile error
 otherwise — and `kv_head_for_head` maps query heads to KV heads: that is
@@ -696,7 +695,7 @@ grouped-query attention (several query heads sharing one KV head) as a plain
 slice. The K/V representation is comptime-dispatched from `@TypeOf(k)`: f32
 tensors (training — full q/k/v backward), f16 (decode caches — q-gradient
 only), raw q8_0 blocks, and two ragged multi-stream forms (inference-only)
-all route through this one name (docs/REFERENCE.md §4.13). The smallest true
+all route through this one name (`docs/reference/04-tensor-operations.md` §4.13). The smallest true
 statement about attention makes a satisfying test — with a single cached
 position, attention over it returns exactly `v`:
 
@@ -704,7 +703,7 @@ position, attention over it returns exactly `v`:
 var y = try q.groupedAttention(&ctx, &k, &v, &.{0}, .out, 1.0, .{});
 ```
 
-*(from the machine-verified snippet in docs/REFERENCE.md §4.13)*
+*(from the machine-verified snippet in `docs/reference/04-tensor-operations.md` §4.13)*
 
 Everything deeper — scores, caches, masks, windows — is
 [Chapter 12](12-a-transformer-from-scratch.md).
@@ -720,7 +719,7 @@ channel-last 2-D family (`conv2d`, `maxPool2d`, `avgPool2d`, `prelu`, …)
 serves the vision stack. Both get their proper treatment later; for now,
 note only that they obey the same contract as everything else — named axes,
 owned results, differentiable unless documented otherwise
-(docs/REFERENCE.md §4.14).
+(`docs/reference/04-tensor-operations.md` §4.14).
 
 ## 5.10 Losses: measuring wrongness
 
@@ -729,7 +728,7 @@ centerpiece is cross-entropy — and Fucina's is *fused*: log-softmax and
 negative-log-likelihood as one op, one backward record.
 `crossEntropy(ctx, class_tag, labels)` takes its labels as plain host-side
 `[]const usize` — no label tensor ceremony — and returns the scalar
-`Tensor(.{})` (docs/REFERENCE.md §4.15). The best sanity check in the whole
+`Tensor(.{})` (`docs/reference/04-tensor-operations.md` §4.15). The best sanity check in the whole
 library: on uniform logits over `K` classes, the loss must be exactly
 `ln(K)` — the entropy of pure ignorance:
 
@@ -752,7 +751,7 @@ test "crossEntropy on uniform logits is ln(K)" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.15)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.15)*
 
 `crossEntropy` adds the practical options with PyTorch parity:
 `ignore_index` (padding contributes nothing — and when *every* position is
@@ -766,13 +765,13 @@ projection *into* the loss. For an LLM, the logit matrix is `[rows, vocab]`
 logits once, keeps them on the backward record with the per-row softmax
 statistics, and folds probability panels directly into the two input
 gradients, reusing that saved buffer in place — "so the `[rows, classes]`
-logit **gradient** is never materialized" (docs/REFERENCE.md §4.15).
+logit **gradient** is never materialized" (`docs/reference/04-tensor-operations.md` §4.15).
 Differentiable in both operands — the kind of memory-shape decision that
 separates a library that can train language models on a CPU from one that
 cannot ([Chapter 15](15-training-llms-on-cpu.md)).
 
 The elementwise losses — `mseLoss`, `huberLoss`, `bceLoss`, `klDivLoss` —
-follow the same option-struct pattern (docs/REFERENCE.md §4.15). One design
+follow the same option-struct pattern (`docs/reference/04-tensor-operations.md` §4.15). One design
 detail worth noticing: `bceLoss(.{ .from_logits = true })` uses the
 numerically stable `max(x,0) − x·y + log1p(exp(−|x|))` form, and the
 probability path clamps to `[1e-7, 1 − 1e-7]` (`bce_eps` in
@@ -787,7 +786,7 @@ and `cosineSimilarity` require an exec scope under gradients (§5.3).
 One convention rules this corner of the library: **index outputs are
 constant i64 tensors** — torch's index dtype, exact at any axis length —
 and, being typed constants, they stay caller-owned even under a scope
-(docs/REFERENCE.md §4.16).
+(`docs/reference/04-tensor-operations.md` §4.16).
 
 ```zig
 test "argmax, topK, and routerTopK" {
@@ -824,7 +823,7 @@ test "argmax, topK, and routerTopK" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.16)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.16)*
 
 The gradient rules encode what each op *means*: `argmax` is no-grad by
 design ("like sampling" — a hard choice has no useful derivative); `topK`'s
@@ -838,7 +837,7 @@ below-facade MoE entries we meet in a moment.
 
 ### Moving data: gather, scatter, and the functional updates
 
-The indexing family (docs/REFERENCE.md §4.17) is where the "embedding
+The indexing family (`docs/reference/04-tensor-operations.md` §4.17) is where the "embedding
 lookup" of every language model lives: `gather(ctx, tag, indices, out_tag)`
 selects rows along a tag — token IDs in, embedding rows out. Its adjoint is
 scatter-add: gradients from duplicate indices *accumulate*, which is exactly
@@ -867,8 +866,7 @@ embedding path of every GGUF model
 Mixture-of-experts is conditional computation: a router picks `k` experts
 per token and only those run — a model holds far more parameters than any
 token's compute touches. The routed expert FFN runs *below* the tag facade,
-directly on `ExecContext`, and is **inference-only** (docs/REFERENCE.md
-§4.18):
+directly on `ExecContext`, and is **inference-only** (`docs/reference/04-tensor-operations.md` §4.18):
 
 ```zig
 pub fn moeExpertFfn(self: *ExecContext, x: *const Tensor,
@@ -907,7 +905,7 @@ distinct stories that must not be conflated.
 The repo owns its RNG (`src/rng.zig`) instead of using `std.Random`,
 because its "(seed → values) mappings are **checkpoint contracts**:
 consumers store a seed and regenerate values instead of serializing them, so
-none of these functions may ever change behavior" (docs/REFERENCE.md §6.8).
+none of these functions may ever change behavior" (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.8).
 The core is counter-based random access — the i-th output of a stream in
 O(1), no sequential state:
 
@@ -950,7 +948,7 @@ test "counter-based rng reproduces the sequential stream chunk by chunk" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §6.8)*
+*(machine-verified snippet from `docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.8)*
 
 **Dropout is this contract turned into an op.** Dropout randomly zeroes
 elements during training (a regularizer — the network cannot rely on any
@@ -970,7 +968,7 @@ pub fn dropout(self: *const Self, ctx: *ExecContext, p: f32, seed: u64) !Self {
 
 Element `i` survives iff the uniform draw of `rng.at(seed, i)` falls below
 `1 − p`; "the mask is never stored: forward, backward, and checkpoint
-recompute regenerate it from `(seed, index)`" (docs/REFERENCE.md §4.4). Look
+recompute regenerate it from `(seed, index)`" (`docs/reference/04-tensor-operations.md` §4.4). Look
 at what the backward record captures: `(p, seed)` — two scalars, not a mask
 tensor. The op is a pure function of `(input, p, seed)`, bitwise stable
 under any parallel chunking. Two caller-side rules follow: pass a *fresh*
@@ -984,14 +982,14 @@ never touch a checkpoint file. One precision matters:
 `gaussianFillAtFast`, the vectorized fill ES uses, is a **distinct**
 (seed → values) mapping from `gaussianFillAt` — values agree to a few ulps
 but are *not bitwise equal* — so it is a separate checkpoint contract,
-equally chunking-invariant (docs/REFERENCE.md §6.8). Swapping one for the
+equally chunking-invariant (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.8). Swapping one for the
 other under an existing seed is a silent behavior change.
 
 ### Story two: threaded kernels say exactly what they promise
 
 A reduction split across threads *can* legitimately differ in the last bits
 from its serial order. Fucina does not paper over this with a blanket
-claim; it draws the line per kernel class (docs/REFERENCE.md §9.4):
+claim; it draws the line per kernel class (`docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md` §9.4):
 
 > "Parallel splits are deterministic: tasks own disjoint output ranges, so
 > the threaded result is bit-identical to the serial path for elementwise,
@@ -1004,10 +1002,10 @@ Where tasks must combine partial sums — reductions and GEMM — the result is
 tolerance-equivalent, not bit-identical, and the cross-backend parity suite
 states the tolerance explicitly: sums and dots agree within `1e-6·n`
 (scaling with the accumulation count), matmuls within `1e-5·k`
-(docs/REFERENCE.md §9.3). "No blanket bitwise-reproducibility claim is made
+(`docs/reference/09-backends-cpu-simd-blas-threading-and-gpu-offload.md` §9.3). "No blanket bitwise-reproducibility claim is made
 for every parallel reduction at every thread count; where a kernel
 guarantees serial/parallel parity, the guarantee is pinned by its tests"
-(docs/REFERENCE.md §6.8).
+(`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.8).
 
 Keep the two stories separate in your head: *seed-driven randomness* is
 bitwise reproducible across runs, thread counts, and chunk decompositions;
@@ -1018,11 +1016,11 @@ say so, and tolerance-equivalent where summation order is at stake.
 
 The same temperament shows up in op semantics. `scatter` resolves duplicate
 indices "deterministically to the LAST row-major write (torch leaves the
-order unspecified; this pins it)" (docs/REFERENCE.md §4.17); `cumsum` is
+order unspecified; this pins it)" (`docs/reference/04-tensor-operations.md` §4.17); `cumsum` is
 serial-per-row by default so sequences are exact (§5.7); `sort` documents
 its NaN placement; integer tensors get no `div` at all — torch silently
 promotes to float, Fucina makes you choose `divTrunc` or `divFloor`
-(docs/REFERENCE.md §4.19). The pattern: match PyTorch semantics wherever
+(`docs/reference/04-tensor-operations.md` §4.19). The pattern: match PyTorch semantics wherever
 reasonable, and where PyTorch is unspecified or surprising, *pick a
 behavior, document it as a divergence, and pin it with a test*.
 
@@ -1046,7 +1044,7 @@ const Square = struct {
 };
 ```
 
-*(machine-verified helper from docs/REFERENCE.md §4.4)*
+*(machine-verified helper from `docs/reference/04-tensor-operations.md` §4.4)*
 
 and lift them with `elementalUnary`:
 
@@ -1072,13 +1070,13 @@ test "elementalUnary" {
 }
 ```
 
-*(machine-verified snippet from docs/REFERENCE.md §4.4)*
+*(machine-verified snippet from `docs/reference/04-tensor-operations.md` §4.4)*
 
 "The user writes scalar math only; the adapter owns buffer plumbing,
 strided-input materialization, tag-driven broadcasting, broadcast-gradient
 sum-reduction, `needs_grad` pruning, and the worker-team chunking of the
 scalar loops" — chunking that is "bitwise thread-count-neutral: disjoint
-pure writes" (docs/REFERENCE.md §4.4) — §5.12's story two holding for your
+pure writes" (`docs/reference/04-tensor-operations.md` §4.4) — §5.12's story two holding for your
 code too. `elementalBinary` does the same for two-operand ops, with the
 full §5.4 broadcast rule and per-operand `backwardA`/`backwardB`.
 
@@ -1153,7 +1151,7 @@ material.
   `src/exec/moe.zig` — leaf modules (not public API, but the best reading on
   how each family really works).
 - `src/rng.zig` — the counter-based RNG contract, six lines at its core.
-- `docs/REFERENCE.md` §4 and §6 — the machine-verified catalogue this
+- `docs/reference/04-tensor-operations.md` §4 and §6 — the machine-verified catalogue this
   chapter sampled; every snippet above runs in CI.
 - `docs/MEMORY-MODEL.md` — the design record behind ownership, the pool,
   and the scope adjudications.

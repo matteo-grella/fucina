@@ -19,7 +19,7 @@ that records *why* the memory model looks the way it does.
 One honest framing before we start: the raw tensor layer we study here is
 **deliberately not public API** — exporting it at the root is a compile error
 (§3.13), and the reference manual warns "Expect this surface to change without
-compatibility notice" (docs/REFERENCE.md §8). Everything in this chapter is
+compatibility notice" (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8). Everything in this chapter is
 "how it is built", not "what you should call"; the supported surface is the
 tagged facade of [Chapter 04](04-axes-with-names.md). We study the internals
 anyway, because building them is the best way to understand any tensor
@@ -124,7 +124,7 @@ Two Zig ideas carry this snippet, and they carry the whole library.
 > CPUs, **memory bandwidth is the budget**. An f32 weight costs 4 bytes to
 > fetch; bf16 halves that; a 4-bit block format like Q4_K costs about 0.56
 > bytes per weight (144 bytes per 256 elements — see the table in
-> docs/REFERENCE.md §8.1). For large models, moving bytes — not multiplying
+> `docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.1). For large models, moving bytes — not multiplying
 > numbers — is what you wait for. [Chapter 11](11-model-files-and-quantization.md)
 > is devoted to those packed formats; this chapter only needs to *count* them
 > correctly.
@@ -169,7 +169,7 @@ pretend you did not see it; we earn it in §3.6.
 > automatically, and only on the error path. Constructor choreography like
 > this — allocate, `errdefer` the rollback, allocate the next thing — is the
 > manual-memory equivalent of exception safety, visible in `create` at
-> src/storage.zig:28-38.
+> src/storage.zig:59-70.
 
 ## 3.4 Step 3: shape and strides — the interpretation
 
@@ -203,15 +203,15 @@ const Tensor = struct {
 Why fixed arrays instead of slices? Because then a tensor is a plain *value*:
 creating a view (or passing a tensor around) allocates nothing. Fucina makes
 the same call with two `[8]usize` arrays — a raw tensor is exactly four
-fields, `buffer`, `shape`, `strides`, `offset` (src/tensor.zig:95-98), and
-the docs call it out: "no allocation per view" (docs/REFERENCE.md §8.5).
+fields, `buffer`, `shape`, `strides`, `offset` (src/tensor.zig:129-132), and
+the docs call it out: "no allocation per view" (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.5).
 Rank above 8 is simply not representable, and nobody has missed it.
 
 Fresh tensors get **row-major** ("C order") strides: the last axis is
 contiguous, and each earlier axis strides by the product of everything after
 it. For shape `{2, 3}` that is strides `{3, 1}`; for `{4, 2, 3}` it is
 `{6, 3, 1}`. The code that computes this is nine lines, and it is worth
-staring at until it is obvious — from `src/tensor.zig:639-647`:
+staring at until it is obvious — from `src/tensor.zig:687-695`:
 
 ```zig
 fn writeContiguousStrides(out: []usize, shape: []const usize) void {
@@ -228,7 +228,7 @@ fn writeContiguousStrides(out: []usize, shape: []const usize) void {
 Walk the shape backwards, carrying a running product. That's it.
 
 **Contiguity** is the exact inverse question: are this tensor's strides
-*precisely* the row-major strides of its shape? From `src/tensor.zig:289-298`:
+*precisely* the row-major strides of its shape? From `src/tensor.zig:327-336`:
 
 ```zig
 pub fn isContiguous(self: *const Self) bool {
@@ -304,7 +304,7 @@ correct, and the reason `data()` will refuse to hand out a flat slice for it.
 
 **Broadcast** is the stride-0 trick, and it is worth seeing Fucina's real
 implementation because NumPy's celebrated broadcasting rules turn out to be
-fifteen lines. From `src/tensor.zig:464-483` (inside `broadcastFromRankToRank`;
+fifteen lines. From `src/tensor.zig:512-527` (inside `broadcastFromRankToRank`;
 `rank_diff` is how many new leading axes the target adds):
 
 ```zig
@@ -345,7 +345,7 @@ broadcast to `{4, 3}` is still three floats in memory, read twelve times.
 copying is only possible when the logical order of elements equals the
 physical order — that is, when the tensor is contiguous. So `reshape` in
 Fucina *requires* contiguity and returns `error.UnsupportedView` otherwise
-(src/tensor.zig:224-236); a transposed view must be materialized before it
+(src/tensor.zig:258-272); a transposed view must be materialized before it
 can be reshaped. A reshape that succeeds is pure relabeling: same buffer,
 same offset, new shape, fresh row-major strides.
 
@@ -449,7 +449,7 @@ mechanism: **copying the tensor struct does not retain.** `var y = x;` gives
 you a second struct pointing at the same buffer with no extra reference —
 deinit both and you double-free. Only the sanctioned constructors and view
 methods create owned values. In exchange, `deinit` poisons the struct
-(`self.* = undefined`, src/tensor.zig:176-179), so a dead tensor holds
+(`self.* = undefined`, src/tensor.zig:210-213), so a dead tensor holds
 recognizable garbage (Debug builds fill undefined memory with a poison
 pattern) and using — or re-deiniting — one typically crashes loudly rather
 than quietly reading freed memory: a debugging aid, not a guaranteed check.
@@ -535,13 +535,13 @@ pool — six steps, each forced by the previous one. Now, the production version
 
 ## 3.8 The real dtype system (`src/dtype.zig`)
 
-Fucina's `DType` has 38 tags (src/dtype.zig:3-42, abridged):
+Fucina's `DType` has 40 tags (src/dtype.zig:8-49, abridged):
 
 ```zig
 pub const DType = enum {
     bool,
     u8, u16, i8, i16, i32, i64,
-    f16, bf16, f32, f64,
+    f16, bf16, f32, f64, f8_e4m3, f8_e5m2,
     q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1,
     q2_k, q3_k, q4_k, q5_k, q6_k, q8_k,
     iq1_s, iq1_m, iq2_xxs, iq2_xs, iq2_s, iq3_xxs, iq3_s, iq4_nl, iq4_xs,
@@ -549,19 +549,19 @@ pub const DType = enum {
 };
 ```
 
-Every tag is one of two *kinds* (`DTypeKind`, src/dtype.zig:50): **scalar**
-(one storage element per logical element — the first eleven) or
+Every tag is one of two *kinds* (`DTypeKind`, src/dtype.zig:62): **scalar**
+(one storage element per logical element — the first thirteen) or
 **block-quantized** (one packed struct per block of 32–256 logical elements —
 the other 27, all GGML-compatible wire formats). Three comptime type
 functions map tags to Zig types, and their domains encode policy:
 
-- `Scalar(dtype)` (src/dtype.zig:258) — the per-logical-element type.
+- `Scalar(dtype)` (src/dtype.zig:353) — the per-logical-element type.
   Compile error for block dtypes, exactly like our miniature's `.q4` arm.
-- `Storage(dtype)` (src/dtype.zig:302) — the per-*storage*-element type:
+- `Storage(dtype)` (src/dtype.zig:373) — the per-*storage*-element type:
   `Scalar(dtype)` for scalars, the block struct for block formats. Buffers
   are sized in `Storage(dtype)` units — which is why our from-scratch layer
   can carry quantized data it cannot decode: it only has to count blocks.
-- `Accumulator(dtype)` (src/dtype.zig:335) — the type reductions accumulate
+- `Accumulator(dtype)` (src/dtype.zig:378) — the type reductions accumulate
   in: `f32` for `.f16`/`.bf16`/`.f32`, `f64` for `.f64`, `i64`/`u64` for the
   integers.
 
@@ -629,7 +629,7 @@ properly. To the tensor layer of this chapter, a `BlockQ4_K` is an opaque
 144-byte payload.
 
 Finally, dtype policy. Two comptime functions, `computeDType` and
-`outputDType` (src/dtype.zig:579, :600), encode one policy table for the
+`outputDType` (src/dtype.zig:496, :517), encode one policy table for the
 whole op library of [Chapter 05](05-the-operation-library.md). The rules
 that matter now:
 
@@ -639,7 +639,7 @@ that matter now:
   `.f32` — summing ten thousand halves into a half would throw away the
   accumulator's precision at the last step. Integer reductions return `.i64`.
   This is visible in public result *types*, and a machine-verified snippet in
-  docs/REFERENCE.md §8.3 pins it.
+  `docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.3 pins it.
 - **Nothing promotes silently.** Mixed-dtype math is a compile error on the
   facade; casts are explicit ops. Where a cast must exist, its edge cases are
   *defined*: `castScalar` documents that float→int truncates toward zero and
@@ -647,7 +647,7 @@ that matter now:
   CPU float-to-int overflow is unspecified" (src/dtype.zig:729-734).
 - **Only float dtypes can carry gradients** (`supportsGrad`,
   src/dtype.zig:442) — and in practice only `.f32` does
-  (docs/REFERENCE.md §8.2). Gradients are [Chapter 07](07-autograd.md)'s story.
+  (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.2). Gradients are [Chapter 07](07-autograd.md)'s story.
 
 > **ML note** — "Accumulate wider than you store" is likely your first
 > numerical-precision lesson, and it generalizes: the *storage* dtype is a
@@ -658,8 +658,8 @@ that matter now:
 
 ## 3.9 The real storage (`src/storage.zig`)
 
-The production buffer is our miniature plus the hook fields plus four GPU
-fields, generic over dtype — `src/storage.zig:8-26`:
+The production buffer is our miniature plus the hook fields plus two
+accelerator slots, generic over dtype — `src/storage.zig:43-58`:
 
 ```zig
 pub fn BufferOf(comptime buffer_dtype: DType) type {
@@ -671,12 +671,8 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         refs: std.atomic.Value(u32),
         release_ctx: ?*anyopaque = null,
         release_fn: ?*const fn (*anyopaque, *Self) void = null,
-        pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
-        pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
-        accelerator_resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
-        /// Exclusive completion claim for `waitReady`: only the claim holder
-        /// may dereference (and release) `pending_work` — see `waitReady`.
-        pending_claim: std.atomic.Value(bool) = .init(false),
+        accel: AcceleratorSlots = .{},
+        host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
         const Self = @This();
         pub const dtype = buffer_dtype;
@@ -685,20 +681,21 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
 
 `BufferOf` is a comptime function returning a struct type — one source, a
 family of concrete buffer types, with `pub const Buffer = BufferOf(.f32);`
-(src/storage.zig:264) as the workhorse alias. Note `pub const dtype` *inside*
+(src/storage.zig:329) as the workhorse alias. Note `pub const dtype` *inside*
 the struct: types can carry constants, so any code holding a buffer type can
 ask it what format it stores at compile time.
 
-The four `pending_*`/`accelerator_resource` fields are **out of scope for
-this chapter**: they are fences and cache metadata for asynchronous GPU
-offload (Metal/CUDA), which enters the story as a backend seam much later.
-All you need here is that they exist on the buffer and that `release` and
-`destroy` drain them before storage is recycled — host-side code like ours
-never sees them set on a CPU build.
+The `accel`/`host_shadow` slots are **out of scope for this chapter**:
+`AcceleratorSlots` holds the fences and cache metadata for asynchronous GPU
+offload (Metal/CUDA) — a zero-byte struct when no GPU provider is compiled
+in (`src/storage.zig:21-28`) — and `host_shadow` ties a derived host copy to
+the allocation's lifetime. All you need here is that they exist on the
+buffer and that `release` and `destroy` drain them before storage is
+recycled — host-side code like ours never sees them set on a CPU build.
 
 What *is* this chapter's business is the constructor family, because it
 enumerates every ownership pattern the library needs (all return `refs == 1`;
-the table is docs/REFERENCE.md §8.4):
+the table is `docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.4):
 
 | Constructor | Data ownership | At `refs == 0` |
 |---|---|---|
@@ -718,7 +715,7 @@ zero differs. Two contracts keep this sound:
 - **A release hook takes full cleanup duty**: dispose of the external bytes
   *and* free the header via `destroyHeader()` — and call `destroyHeader()`
   *before* freeing the bytes, because provider teardown may still need the
-  live address (docs/REFERENCE.md §8.4 shows a complete worked example that
+  live address (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.4 shows a complete worked example that
   wraps an mmap and munmaps it from the hook, exactly once, at the last
   release). One caution from the same section: Fucina's own GGUF loader does
   *not* use hooks for mmap'd weights — that lifetime is holder-managed
@@ -736,7 +733,7 @@ has exclusive access". We meet its canonical consumer in §3.10.
 
 ## 3.10 The real tensor (`src/tensor.zig`)
 
-The value type, `src/tensor.zig:94-101` and `:176-179`:
+The value type, `src/tensor.zig:128-135` and `:210-213`:
 
 ```zig
 return struct {
@@ -755,21 +752,21 @@ return struct {
 ```
 
 `Shape` is a `u8` rank plus an inline `[max_rank]usize` with `max_rank = 8`
-(src/tensor.zig:9,21-23) — our miniature's design, hardened. Everything is
+(src/tensor.zig:15,37-39) — our miniature's design, hardened. Everything is
 measured in *storage elements* (for block dtypes, strides count blocks). Two
 deliberate restrictions:
 
 - **No rank 0.** `Shape.init` rejects empty shapes and zero-sized dims
-  (src/tensor.zig:25-34) — a zero-size tensor is unrepresentable by
+  (src/tensor.zig:41-51) — a zero-size tensor is unrepresentable by
   construction. A "scalar" is a rank-1 `{1}` tensor; the facade's scalar-tag
   type wraps exactly that.
 - **Block dtypes admit only whole-tensor views.** `reshape` and the
   `viewWithStrides*` family accept only the identity view for block formats
-  (src/tensor.zig:201-205) — blocks are indivisible, so you cannot slice
+  (src/tensor.zig:235-240, :259-262) — blocks are indivisible, so you cannot slice
   through the middle of one.
 
 **Checked views.** Our miniature's `transpose` trusted its caller. The real
-general-view constructor proves safety instead — `src/tensor.zig:200-222`,
+general-view constructor proves safety instead — `src/tensor.zig:234-256`,
 scalar path:
 
 ```zig
@@ -804,11 +801,11 @@ now recognize from every view.
 One thing you will *not* find here: a `narrow` (slice-along-an-axis) method.
 Narrowing is `viewWithStridesOffset` with a bumped offset and a smaller
 shape, and the library builds it at the exec/facade layers rather than
-duplicating it on the raw type (docs/REFERENCE.md §8.5.3). The primitive is
+duplicating it on the raw type (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.5.3). The primitive is
 the general view; everything else is derived.
 
 **Data access, honest about contiguity.** Four accessors split one decision
-two ways (src/tensor.zig:307-329): `data()`/`dataConst()` return the flat
+two ways (src/tensor.zig:345-378): `data()`/`dataConst()` return the flat
 slice and **panic** on non-contiguous tensors — they are for hot paths that
 have already established contiguity, and the panic message tells you the fix
 ("materialize or use dataChecked"). `dataChecked()`/`dataConstChecked()`
@@ -818,10 +815,10 @@ know. Corollary worth writing down: a broadcast `{1}` view with stride 0 is
 through `dataConst` — panics on it. When you need the contents of an
 arbitrary view, `copyTo` walks the strides, and `clone(allocator)` is
 materialization: fresh contiguous buffer, `copyTo` into it, done
-(src/tensor.zig:181-188).
+(src/tensor.zig:215-222).
 
 For the curious, the strided walk itself, `copyRangeTo`
-(src/tensor.zig:352-421), is a small masterclass: it finds the maximal
+(src/tensor.zig:400-469), is a small masterclass: it finds the maximal
 row-major-contiguous *suffix* of axes and moves that as whole `@memcpy` runs,
 advances the outer coordinates like an odometer with incremental stride
 arithmetic — one coordinate decode per call, never a division per element —
@@ -857,14 +854,14 @@ fn dispatchRank(comptime tensor_dtype: DType, comptime F: anytype, rank: usize, 
 
 Each arm passes a *comptime-known* rank, so the compiler stamps out one
 specialized copy of `F` per rank actually used. `rankView(comptime rank)`
-(src/tensor.zig:250-265) is the same idea as a value: it copies shape and
+(src/tensor.zig:284-298) is the same idea as a value: it copies shape and
 strides into `[rank]usize` arrays so kernels can unroll — note that it
 *borrows* the tensor without retaining, so the ranked view must not outlive
 it. This pair is how [Chapter 06](06-going-fast-on-cpus.md)'s kernels get
 comptime shapes out of runtime tensors.
 
 The reference manual's machine-verified "raw view tour" ties the whole layer
-together (docs/REFERENCE.md §8.5.3, abridged):
+together (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.5.3, abridged):
 
 ```zig
 var x = try RawTensor.fromSlice(alloc, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
@@ -890,7 +887,7 @@ std.debug.assert(m.isContiguous() and m.canTakeInPlace());
 Climb one level. Applications do not call `Buffer.create`; they call *ops* on
 an `ExecContext` (the runtime object [Chapter 05](05-the-operation-library.md)
 dissects). What does ownership look like up there? One sentence, quoted from
-docs/REFERENCE.md §6.2:
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2:
 
 > "every tensor an op returns is owned by the caller and must be
 > deinitialized exactly once — unless an exec scope is open, in which case op
@@ -898,7 +895,7 @@ docs/REFERENCE.md §6.2:
 
 Unpack the first half. Fucina is eager: an op call runs the kernel and
 returns an owned result immediately — no graph object, no deferred execution
-(docs/REFERENCE.md §6). So ownership is a per-value question answered at the
+(`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6). So ownership is a per-value question answered at the
 call site, and the universal idiom is:
 
 ```zig
@@ -909,14 +906,14 @@ defer y.deinit();
 Constructors (`fromSlice`, `zeros`, `variable`, ...) follow the same rule,
 with one refinement: a facade constructor that *consumes* a raw tensor does
 so **on success only** — on error, ownership stays with the caller, so your
-`errdefer` arms remain correct (docs/REFERENCE.md §3.3). The same
+`errdefer` arms remain correct (`docs/reference/03-tensors-types-construction-and-data-access.md` §3.3). The same
 success-only convention governs `fromOwnedBuffer` at the raw layer
-(src/tensor.zig:163-169). Failures never leak, and never double-free.
+(src/tensor.zig:199-205). Failures never leak, and never double-free.
 
 For values that *evolve* — a residual stream flowing through transformer
 layers, an accumulator in a loop — there is `ctx.replace(old, new_value)`:
 deinit the old, rebind the new, in one statement, with the old value left
-intact if the new one's computation failed (docs/REFERENCE.md §6.2 has the
+intact if the new one's computation failed (`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2 has the
 verified snippet). You will use it constantly from
 [Chapter 12](12-a-transformer-from-scratch.md) on.
 
@@ -927,7 +924,7 @@ parameters and the loss must survive until `backward()` has consumed it. Exec
 scopes resolve this without forking the code: open a scope, and op results
 become *scope-owned borrows* whose `deinit` is a safe no-op; close the scope
 after backward and everything is released, newest first. The verified
-snippet from docs/REFERENCE.md §6.3:
+snippet from `docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.3:
 
 ```zig
 test "deinit on a scope-owned result is a safe no-op" {
@@ -1018,7 +1015,7 @@ a leak detector: an atomic `outstanding` counter must be zero at
 builds abort instead of shrugging.
 
 Here is the memory model made *observable* — the machine-verified test from
-docs/REFERENCE.md §6.2, and the single most striking demo in this subsystem:
+`docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2, and the single most striking demo in this subsystem:
 
 ```zig
 test "deinit recycles transient buffers through the pool" {
@@ -1061,7 +1058,7 @@ substantive axes; compressed:
    document's key example: per-step attention reads the KV cache through a
    zero-copy narrow aliasing a *session-lifetime* buffer
    ([Chapter 12](12-a-transformer-from-scratch.md)) — a view that, as
-   docs/REFERENCE.md §6.2 puts it, "has a per-object lifetime no region
+   `docs/reference/06-the-execution-runtime-execcontext-and-the-memory-model.md` §6.2 puts it, "has a per-object lifetime no region
    reset can express". A reset would either free live KV memory or have to
    carve it out entirely, at which point it is no longer one arena.
 4. **It is incorrect for training by construction** — activations must
@@ -1096,7 +1093,7 @@ helper" fix stays unbuilt until that actually bites.
 
 One last design decision, and it is about *restraint*. Everything you built
 in this chapter works; why isn't it the public interface? Fucina answers by
-making the question unaskable — from `src/fucina.zig:33-42`:
+making the question unaskable — from `src/fucina.zig:100-110`:
 
 ```zig
 comptime {
@@ -1115,10 +1112,10 @@ A `comptime` block as an architectural test: if anyone ever adds
 documented rationale is "API shape, not capability" — the tagged facade adds
 negligible forward overhead (the docs' qualitative characterization; no
 figure is claimed), so a public raw type would only split the ecosystem into
-two tensor vocabularies (docs/REFERENCE.md §8.6). Code that genuinely needs
+two tensor vocabularies (`docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8.6). Code that genuinely needs
 the raw layer — backend kernels, format/byte work, the LLM band needing
 exact type identity — names it through the sanctioned escape hatch,
-`fucina.internal.RawTensor` (src/fucina.zig:132-171). For *inspection*, the
+`fucina.internal.RawTensor` (src/fucina.zig:329-345). For *inspection*, the
 facade already crosses the boundary safely: every public tensor exposes
 `asRawTensor()`, a read-only view of the raw metadata you now know how to
 read.
@@ -1175,7 +1172,7 @@ names for the axes, checked at compile time. That is
   comment, size rounding, and the `outstanding` leak assert.
 - `docs/MEMORY-MODEL.md` — the arena adjudication; read it end to end as a
   model of how to document a design decision.
-- `docs/REFERENCE.md` §8 (raw layer) and §6.2–6.5 (ownership, scopes, pool) —
+- `docs/reference/08-data-types-storage-and-the-raw-tensor-layer-internal.md` §8 (raw layer) and §6.2–6.5 (ownership, scopes, pool) —
   the machine-verified snippets this chapter quoted.
 
 ## Exercises
@@ -1184,7 +1181,7 @@ names for the axes, checked at compile time. That is
    `fn sizeOf(comptime dtype: DType) usize` that returns the per-element byte
    size via `@sizeOf(Scalar(dtype))`. Verify with a test that
    `sizeOf(.f64) == 8`. Then look up how the real library answers the same
-   question for block formats (`blockByteSize`, src/dtype.zig:575).
+   question for block formats (`blockByteSize`, src/dtype.zig:492).
 2. **(Easy)** In the mini-tensor, write `fn narrowRows(self: *const Tensor,
    start: usize, count: usize) !Tensor` returning a view of rows
    `[start, start+count)` of a rank-2 tensor: bump `offset` by
@@ -1201,7 +1198,7 @@ names for the axes, checked at compile time. That is
    Allocator) !Tensor` for the mini-tensor: allocate a fresh contiguous
    buffer and copy the view's logical elements into it with a nested stride
    walk. Test it on a transposed view and confirm the result `isContiguous()`.
-   Then read the real `copyRangeTo` (src/tensor.zig:352-421) and identify
+   Then read the real `copyRangeTo` (src/tensor.zig:400-469) and identify
    (a) which axes it absorbs into a `@memcpy` run and (b) why it never
    divides per element.
 5. **(Hard)** Read `reclaimTypedFor` in `src/exec/buffer_pool.zig:250-266`

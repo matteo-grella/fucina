@@ -27,7 +27,7 @@ Fucina is pinned to one exact compiler version. Not "0.16 or newer" — exactly
 
 > Fucina is pinned to **Zig 0.16.0** — `zig version` must print `0.16.0`;
 > other versions do not build.
-> — `docs/REFERENCE.md` §2.1
+> — `docs/reference/02-toolchain-build-and-project-wiring.md` §2.1
 
 Download it from [ziglang.org/download](https://ziglang.org/download/) (the
 toolchain is a single archive — unpack it and put `zig` on your `PATH`; there
@@ -40,13 +40,15 @@ cd fucina
 zig build test     # all test roots; no model files needed
 ```
 
-`zig build test` compiles and runs the unit tests of nine separate test roots
-— the tensor core, the LLM stack, and seven application examples — and all of
-them pass with no model assets on disk (`docs/REFERENCE.md` §2.7). If that
+`zig build test` compiles and runs the unit tests of eleven separate test
+roots — the tensor core, the model stack, the serving band, and eight
+applications — and all of them pass with no model assets on disk
+(`docs/reference/02-toolchain-build-and-project-wiring.md` §2.7). If that
 command is green, your forge is lit.
 
-There is deliberately no package manifest: no `build.zig.zon`, no lock file.
-Every module and option is wired directly in `build.zig` (`AGENTS.md`,
+The package manifest is deliberately thin: `build.zig.zon` names the
+package, pins `minimum_zig_version = "0.16.0"`, and declares no dependencies
+— every module and option is wired directly in `build.zig` (`AGENTS.md`,
 Toolchain). You clone, you build; §1.16 explains how.
 
 For a first taste of the whole machine, run the training demo:
@@ -70,10 +72,12 @@ blog post.
 
 ## 1.2 The whole library in twenty-seven lines
 
-Here is the program this chapter unfolds. It is `docs/REFERENCE.md` §1.4,
-"A first program", quoted verbatim — and it is *machine-verified*: a CI step
-(`zig build snippet-check`) extracts every runnable snippet in that document
-and runs it against the real library, so this code cannot silently rot:
+Here is the program this chapter unfolds. It is
+`docs/reference/01-introduction-and-mental-model.md` §1.4, "A first
+program", quoted verbatim — and it is *machine-verified*: a CI step
+(`zig build snippet-check`) extracts every runnable snippet in the reference
+chapters and runs it against the real library, so this code cannot silently
+rot:
 
 ```zig
 const std = @import("std");
@@ -128,7 +132,8 @@ What it does, in Zig terms, is a checklist of this chapter:
 
 Notice what is *absent*: no graph builder, no `device=`, no framework
 ceremony. Fucina is eager — "What you write is what runs, in the order you
-wrote it" (`docs/REFERENCE.md` §1.2) — so the program reads top to bottom
+wrote it" (`docs/reference/01-introduction-and-mental-model.md` §1.2) — so
+the program reads top to bottom
 like the arithmetic it performs.
 
 > **ML note** — `x.dot(&ctx, &w, .in)` names the axis it contracts instead of
@@ -158,10 +163,10 @@ when the test ends. Fucina's unit tests run under it by convention, which
 means **leak detection is not a tool you run — it is what `zig build test`
 already does**. The context threads that one allocator into the whole
 runtime; the signature is `pub fn init(self: *ExecContext, allocator:
-Allocator) void` (`src/exec.zig:135`).
+Allocator) void` (`src/exec/runtime.zig:117`).
 
 Outside tests, the demo programs use the debug allocator with an explicit
-leak check — from `examples/spirals/main.zig:328-331`:
+leak check — from `examples/spirals/main.zig:336-339`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -214,12 +219,17 @@ real-time audio callback, this explicitness is what makes both possible.
 Zig has no exceptions. A function that can fail returns an **error union**,
 written `!T` — "either a `T` or an error". Errors are ordinary values drawn
 from named error sets. Fucina's raw tensor layer defines a small, closed one
-(`src/tensor.zig:11-19`):
+(`src/tensor.zig:22-36`):
 
 ```zig
 pub const TensorError = error{
     ShapeMismatch,
     InvalidShape,
+    /// A non-shape argument fails its own validity check: a probability
+    /// outside its interval, a non-positive cap, `min > max`, a zero step,
+    /// duplicate scatter indices, an option combination that names no
+    /// target. Shape and layout problems stay `InvalidShape`/`ShapeMismatch`.
+    InvalidArgument,
     InvalidDataLength,
     IndexOutOfBounds,
     UnsupportedView,
@@ -229,7 +239,8 @@ pub const TensorError = error{
 ```
 
 That is the complete list of ways a raw tensor operation can fail. Not an
-exception hierarchy — seven names.
+exception hierarchy — eight names, one of them stating its own rule in a
+doc comment.
 
 At each call site that can fail, you must do something visible:
 
@@ -262,7 +273,7 @@ test "errors are values; try propagates them" {
 }
 ```
 
-The real thing — `Shape.init` in `src/tensor.zig:25-34`, quoted in §1.7 — is
+The real thing — `Shape.init` in `src/tensor.zig:41-51`, quoted in §1.7 — is
 this function grown up. Why a tensor library needs this: shape errors are the
 most common failure in numeric code, and here they are typed, exhaustive, and
 impossible to ignore silently — there is no unchecked-exception escape hatch
@@ -298,7 +309,7 @@ and that document records why.)
 error**. It exists for partial construction: you have built three of six
 things, the fourth fails — the first three must be freed, but only on that
 failure path (on success, the caller takes ownership). Fucina's model
-constructor is a textbook ladder (`examples/spirals/main.zig:54-66`, abridged):
+constructor is a textbook ladder (`examples/spirals/main.zig:62-74`, abridged):
 
 ```zig
 var w1 = try Tensor(.{ .h1, .in }).variableFromSlice(ctx, .{ hidden, 2 }, &w1_buf);
@@ -339,7 +350,7 @@ test "errdefer frees partial state only on the error path" {
 ```
 
 One house convention to notice now: every `deinit` ends with
-`self.* = undefined` (`src/exec.zig:141-145`; `AGENTS.md` house rules mandate
+`self.* = undefined` (`src/exec/runtime.zig:186`; `AGENTS.md` house rules mandate
 it). In Debug builds Zig fills `undefined` memory with a recognizable byte
 pattern, so *using* a deinitialized struct crashes loudly instead of
 corrupting quietly. A tripwire, not carelessness.
@@ -365,7 +376,7 @@ Constness is enforced by the compiler, which turns an ownership doctrine into
 type-checked fact. The repo states the doctrine outright: "Storage is
 refcounted and owned; `[]T` slices/tensor views *borrow*"
 (`AGENTS.md`, house rules). And the lowest-level compute kernels *are* their
-signature — from `src/backend/vector/primitives.zig:52`:
+signature — from `src/backend/vector/primitives.zig:54`:
 
 ```zig
 pub inline fn vecAdd(z: []f32, x: []const f32, y: []const f32) void {
@@ -375,7 +386,7 @@ Mutable output, immutable inputs. A kernel cannot scribble on its inputs
 without the compiler objecting.
 
 The array/slice split also encodes *when the length is known*. Look at a
-tensor constructor (`src/ag/tensor.zig:248`):
+tensor constructor (`src/ag/tensor/float/creation.zig:35`):
 
 ```zig
 pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self
@@ -386,7 +397,7 @@ compile-time fact of the tensor's type. The data is `[]const f32` — a
 **slice**, because how many numbers you pass is a runtime fact. One
 signature, and the design's compile-time/runtime boundary is visible in it.
 The same trick shapes the raw tensor itself: `Shape` stores
-`dims: [max_rank]usize` plus a runtime `len` (`src/tensor.zig:21-23`,
+`dims: [max_rank]usize` plus a runtime `len` (`src/tensor.zig:37-39`,
 `max_rank = 8`) — no allocation, because rank is bounded and small.
 
 Course code:
@@ -431,7 +442,7 @@ plus any declarations you put inside it — constants, functions, other types.
 `*Self`, or `*const Self`); `x.foo(y)` is sugar for `T.foo(x, y)`.
 
 The real `Shape` shows the whole vocabulary in a handful of lines
-(`src/tensor.zig:21-53`, abridged — it also has an `initStrides` variant and
+(`src/tensor.zig:37-69`, abridged — it also has an `initStrides` variant and
 `slice()`/`at()` accessors):
 
 ```zig
@@ -459,7 +470,7 @@ no framework.
 Two more struct facts carry Fucina's architecture:
 
 **A model is just a struct of tensors.** The spirals demo's entire network is
-(`examples/spirals/main.zig:29-35`):
+(`examples/spirals/main.zig:37-43`):
 
 ```zig
 const Model = struct {
@@ -481,7 +492,7 @@ name — `src/param_registry.zig`, met properly in
 **Files are structs.** `@import("dtype.zig")` returns a value — the file
 itself, as a namespace — and you bind it with `const`. Fucina's entire module
 system is this one feature applied at scale; the public API is literally a
-file of re-exports (`src/fucina.zig:15-27`, excerpt):
+file of re-exports (`src/fucina.zig:39-94`, excerpt):
 
 ```zig
 pub const gguf = @import("gguf.zig");
@@ -505,7 +516,7 @@ without deciding what happens when it is null. Three unwrapping tools:
 The first program used the third form: `(try x.grad(&ctx)).?` — "I *know*
 backward has run, give me the gradient." The reason `grad` returns an
 optional is the most instructive field in the library
-(`src/ag/tensor.zig:208-209`):
+(`src/ag/tensor.zig:503-504`):
 
 ```zig
 value: RawTensor,
@@ -520,14 +531,14 @@ literally the model without grad state ([Chapter 07](07-autograd.md) builds
 
 Optionals also give APIs honest defaults. The SIMD width query returns an
 optional — some targets have no vectors — and the kernel layer picks a floor
-(`src/backend/vector/common.zig:24`):
+(`src/backend/vector/common.zig:32`):
 
 ```zig
 pub const vector_len: comptime_int = std.simd.suggestVectorLength(f32) orelse 4;
 ```
 
 And "unspecified end of a slice range" is `end: ?isize = null`
-(`src/ag/tensor.zig:165-169`) — not a magic sentinel like `-1`, an actual
+(`src/ag/tensor.zig:64-68`) — not a magic sentinel like `-1`, an actual
 absence. Course code:
 
 ```zig
@@ -553,18 +564,18 @@ test "optionals must be unwrapped" {
 ## 1.9 Enums and exhaustive `switch`
 
 A Zig enum is a closed set of names. Fucina's dtype universe is one enum with
-38 members (`src/dtype.zig:3-42`) — `bool`, the integers, `f16`/`bf16`/`f32`/
+40 members (`src/dtype.zig:8-49`) — `bool`, the integers, `f16`/`bf16`/`f32`/
 `f64`, and the whole zoo of block-quantized formats (`q4_k`, `q8_0`, ...,
 `tq2_0`) that [Chapter 11](11-model-files-and-quantization.md) decodes.
 
 The power move is `switch`: **a `switch` over an enum must handle every
-member, or it does not compile**. Add a 39th dtype and every switch you
+member, or it does not compile**. Add a 41st dtype and every switch you
 forgot to update becomes a compile error pointing at itself. The repo
 weaponizes this deliberately: "prefer exhaustive `switch` over dtype/backend
 so adding a variant forces edits everywhere" (`AGENTS.md`, house rules).
 
 The most consequential switch in the library selects the compute backend —
-at compile time, from a build option (`src/backend.zig:107-115`):
+at compile time, from a build option (`src/backend.zig:159-170`):
 
 ```zig
 pub const Kind = enum {
@@ -572,19 +583,23 @@ pub const Kind = enum {
     native,
 };
 
+/// Build identity, not a provider choice: `.scalar` means the reference
+/// build (`isa.reference`), whose kernels are the scalar arms inside the
+/// one provider.
 pub const active_kind: Kind = switch (build_options.backend_kind) {
-    .scalar, .cpu => .scalar,
+    .scalar => .scalar,
     .native => .native,
 };
 ```
 
-Two things to read off this. First: Fucina has exactly **two** CPU backends —
-`scalar`, the slow, obvious reference implementation that serves as the
-correctness oracle, and `native`, the fast SIMD one that must always agree
-with it (`cpu` is a deprecated alias for `scalar`, mapped away right here).
-Second: this switch runs *in the compiler* — a few lines below, the same
-pattern selects which implementation file even gets analyzed, so the backend
-you did not choose is not in your binary at all. That is §1.10's subject.
+Two things to read off this. First: Fucina has exactly **two** CPU build
+identities — `scalar`, where every kernel resolves to its slow, obvious
+serial reference arm (the correctness oracle), and `native`, the fast SIMD
+build that must always agree with it. Second: this switch runs *in the
+compiler* — the same pattern selects which GPU provider file even gets
+analyzed (`src/backend/gpu.zig` switches on `build_options.gpu_kind`), so
+the code you did not choose is not in your binary at all. That is §1.10's
+subject.
 
 Course code:
 
@@ -601,7 +616,7 @@ fn bytesPerElement(dt: DType) f32 {
 ```
 
 (That `34.0 / 32.0` is real: a Q8_0 block stores 32 weights in 34 bytes —
-`src/dtype.zig:81-84`, properly decoded in Chapter 11.)
+`src/dtype.zig:93-96`, properly decoded in Chapter 11.)
 
 > **ML note** — dtype dispatch is the plumbing of every framework, usually
 > as string comparisons or virtual calls. Here it is a closed enum the
@@ -630,7 +645,7 @@ which strides the generated code manipulates.
 
 So what *is* `.batch`? A bare `.name` in Zig is an **enum literal** — a
 value whose type is inferred from context. And enum literals have a type you
-can capture. The first "Zig can do THIS" moment — `src/tags.zig:4`, the line
+can capture. The first "Zig can do THIS" moment — `src/tags.zig:8`, the line
 the whole named-axis system stands on:
 
 ```zig
@@ -734,7 +749,7 @@ pub fn Tensor(comptime spec: anytype) type {
 Eight lines that carry the whole design. `Tensor(.{ .batch, .in })` calls this
 function *during compilation*; it returns a freshly built struct type whose
 comptime declarations record the tags (`axis_tags`, `tag_count`,
-`tensor_rank` — `src/ag/tensor.zig:203-206`). `Tensor(.{ .batch, .in })` and
+`tensor_rank` — `src/ag/tensor.zig:494-496`). `Tensor(.{ .batch, .in })` and
 `Tensor(.{ .in, .out })` are as distinct as `V3` and `V4` above — which is
 why contracting a tag a tensor does not have is a *compile* error, not a
 runtime shape crash.
@@ -761,7 +776,7 @@ If tags live at comptime, how do you loop over them? `inline for` unrolls a
 loop at compile time — each iteration is stamped out separately, so each may
 work with *different types or comptime values*, which an ordinary runtime
 loop cannot. Every tag-set function in `src/tags.zig` is built from it; the
-simplest (`src/tags.zig:9-15`):
+simplest (`src/tags.zig:13-19`):
 
 ```zig
 pub fn tagsEqual(comptime a: anytype, comptime b: anytype) bool {
@@ -774,10 +789,10 @@ pub fn tagsEqual(comptime a: anytype, comptime b: anytype) bool {
 ```
 
 There is even a comptime bubble sort in there — `reduceAxesDescending`
-(`src/tags.zig:17-35`) sorts axis indices with nested `inline while` loops,
+(`src/tags.zig:21-39`) sorts axis indices with nested `inline while` loops,
 entirely during compilation. The same tool serves runtime paths whose *trip
 count* is comptime-known: `isContiguous` unrolls over the (comptime) rank so
-stride checking has no loop overhead (`src/tensor.zig:72-80`). Course code:
+stride checking has no loop overhead (`src/tensor.zig:101-108`). Course code:
 
 ```zig
 const std = @import("std");
@@ -801,7 +816,7 @@ handed and branch on the answer — at compile time, so untaken branches (which
 might not even type-check for this instantiation) simply vanish. Fucina uses
 this to make one registration function serve four optimizer types
 (`if (comptime @hasDecl(@TypeOf(opt.*), "addFallbackParam"))`,
-`examples/spirals/main.zig:119`) and to let checkpoints name tensors by walking a
+`examples/spirals/main.zig:127`) and to let checkpoints name tensors by walking a
 model struct's fields (`src/param_registry.zig`). Duck typing, checked by the
 compiler.
 
@@ -811,7 +826,7 @@ Second "Zig can do THIS" moment. You can make compilation fail, on purpose,
 with your own message — and because comptime code is ordinary code, the
 *conditions* for failing can be arbitrarily smart. Fucina uses this for
 misuse ("duplicate tensor tag", `src/tags.zig:161`; "too many tensor tags")
-but also for **architecture**. From `src/fucina.zig:33-42`:
+but also for **architecture**. From `src/fucina.zig:100-110`:
 
 ```zig
 comptime {
@@ -830,7 +845,7 @@ Context: underneath the tagged `Tensor` facade lives a raw, untagged f32
 tensor, and the design decision — recorded in the comment right above this
 guard — is that it stays internal: "the no-grad `Tensor` facade has
 negligible forward overhead, so model/example code carries
-`fucina.Tensor(spec)` end-to-end" (`src/fucina.zig:28-32`; a dedicated
+`fucina.Tensor(spec)` end-to-end" (`src/fucina.zig:95-99`; a dedicated
 microbench, `zig build bench-facade`, keeps that claim measurable). But a
 comment is a wish. This `comptime` block is a *law*: it reflects on the
 module's own declarations (`@hasDecl(@This(), ...)` — a file is a struct,
@@ -850,7 +865,7 @@ first-class type. Arithmetic on it (`+`, `*`, comparisons, `@splat`,
 `@reduce`) compiles to the target's vector instructions — NEON on Apple
 Silicon, AVX on x86 — with no intrinsics and no per-ISA source. The kernel
 layer picks its width by asking the compiler what the target likes
-(`src/backend/vector/common.zig:24-25`):
+(`src/backend/vector/common.zig:32-33`):
 
 ```zig
 pub const vector_len: comptime_int = std.simd.suggestVectorLength(f32) orelse 4;
@@ -891,10 +906,12 @@ test "name" {
 `zig build test`); `std.testing` provides the assertions; returning
 `error.SkipZigTest` skips cleanly — Fucina's model-asset-dependent suites do
 exactly that when assets are missing, so `zig build test` is always green on
-a fresh clone (`docs/REFERENCE.md` §2.7).
+a fresh clone (`docs/reference/02-toolchain-build-and-project-wiring.md`
+§2.7).
 
-Fucina layers a simple convention on top (`docs/REFERENCE.md` §2.7): tests
-live in **sibling files** — `exec.zig` has `exec_tests.zig`, 182 such files
+Fucina layers a simple convention on top
+(`docs/reference/02-toolchain-build-and-project-wiring.md` §2.7): tests
+live in **sibling files** — `exec.zig` has `exec_tests.zig`, 184 such files
 across the tree — and the production file pulls its sibling in with a
 forwarding stanza:
 
@@ -906,13 +923,14 @@ test {
 
 An anonymous test block that merely *references* the test file is enough to
 compile it in. Module roots forward everything — `src/fucina.zig` ends with
-`test { _ = dtype; _ = exec; ... }` (`src/fucina.zig:173-193`) — so nine test
-roots reach every test in the repository.
+`test { _ = dtype; _ = exec; ... }` (`src/fucina.zig:371-398`) — so eleven
+test roots reach every test in the repository.
 
 Then the convention eats its own documentation: `zig build snippet-check`
-extracts every runnable snippet from `docs/REFERENCE.md` (any fenced block
-with a named `test`) and runs it against the real modules, as a CI step
-(`docs/REFERENCE.md` §2.7). The first program in §1.2 is not an illustration
+extracts every runnable snippet from the `docs/reference/` chapters (any
+fenced block with a named `test`) and runs it against the real modules, as a
+CI step (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.7).
+The first program in §1.2 is not an illustration
 that *resembles* the library; it is a test that *runs against* it on every
 push and pull request. Docs that cannot rot. This course borrows the ethic:
 every fresh snippet above was compiled with `zig test` before it was pasted.
@@ -931,20 +949,18 @@ that matters downstream: **project options become compile-time constants**.
 `build.zig` declares its option enums at file scope (`build.zig:3-5`):
 
 ```zig
-const BackendKind = enum { scalar, native, cpu };
+const BackendKind = enum { scalar, native };
 const BlasKind = enum { none, accelerate, openblas, mkl, blis, nvpl, blas };
 const GpuKind = enum { none, metal, cuda };
 ```
 
-collects `-D` flags, and bakes them into a generated module that source files
-import (`build.zig:76-91`, abridged):
+collects `-D` flags into an `OptionValues` struct, and bakes them into a
+generated module that source files import (`build.zig:76-91` and
+`build.zig:654-665`, abridged):
 
 ```zig
-const options = b.addOptions();
-options.addOption(BackendKind, "backend_kind", backend_kind);
-options.addOption(BlasKind, "blas_kind", blas_kind);
-options.addOption(usize, "max_threads", max_threads);
-// ...
+const options = option_values.addTo(b); // addOption per field: backend_kind,
+                                        // blas_kind, max_threads, gpu_kind, ...
 const module = b.addModule("fucina", .{
     .root_source_file = b.path("src/fucina.zig"),
     .target = target,
@@ -956,21 +972,24 @@ module.addOptions("build_options", options);
 Now `@import("build_options").backend_kind` is a comptime value — which is
 how §1.9's backend switch could run in the compiler. The documented
 consequence: "backend dispatch is compiled away, and unused kernel arms are
-not in the binary" (`docs/REFERENCE.md` §2.2). Configuration is not read at
+not in the binary" (`docs/reference/02-toolchain-build-and-project-wiring.md`
+§2.2). Configuration is not read at
 startup; it is a property of the binary.
 
-The options you need this course (full table: `docs/REFERENCE.md` §2.2):
+The options you need this course (full table:
+`docs/reference/02-toolchain-build-and-project-wiring.md` §2.2):
 
 - **`-Doptimize=ReleaseFast`** — the one to remember. "Build with
   `ReleaseFast` whenever speed matters (Debug is 10–50× slower); validate in
-  Debug/ReleaseSafe, bench in ReleaseFast" (`docs/REFERENCE.md` §2.2). The
+  Debug/ReleaseSafe, bench in ReleaseFast"
+  (`docs/reference/02-toolchain-build-and-project-wiring.md` §2.2). The
   companion trap: ReleaseFast *drops safety checks* — "A kernel that only
   behaves because Debug catches it is broken; prove invariants, don't rely on
   checks as logic" (`AGENTS.md`, Zig 0.16 notes).
-- **`-Dbackend=native|scalar`** — the two CPU backends of §1.9: `native`
-  (default, Zig SIMD kernels) and `scalar` (the reference oracle; `cpu` is a
-  deprecated alias). BLAS (`-Dblas=...`) is not a third backend — it is an
-  optional GEMM *provider* backing the native backend's large-matmul arms;
+- **`-Dbackend=native|scalar`** — the two build identities of §1.9: `native`
+  (default, Zig SIMD kernels) and `scalar` (the serial reference arms, the
+  oracle). BLAS (`-Dblas=...`) is not a third backend — it is an
+  optional GEMM *provider* backing the native build's large-matmul arms;
   likewise `-Dgpu=metal|cuda` is a GPU *offload seam*, not a backend
   ([Chapter 06](06-going-fast-on-cpus.md)).
 - **`-Dmax-threads=N`** — a comptime ceiling on the worker team (default 8;
@@ -978,7 +997,8 @@ The options you need this course (full table: `docs/REFERENCE.md` §2.2):
 
 Misconfiguration is a **build-time panic**, not a runtime error:
 `-Dblas=accelerate` off macOS, or `-Dmax-threads=0`, panics inside `build()`
-with a message (`docs/REFERENCE.md` §2.2).
+with a message (`docs/reference/02-toolchain-build-and-project-wiring.md`
+§2.2).
 
 Finally, the caveat that bites people who deploy: **CPU targeting is native
 by default**. With no `-Dtarget`, Zig compiles for the *exact* CPU of the
@@ -1008,7 +1028,7 @@ knowledge predates 0.16 (`AGENTS.md`, "Zig 0.16 notes"; full reference at
 - **Casts infer their destination** from context (`@intCast`, `@ptrCast`,
   `@enumFromInt`, ...); use `@as(T, x)` to state a target type explicitly.
 - **`main` takes `std.process.Init`**, and I/O goes through the new `std.Io`
-  writer API. From `examples/spirals/main.zig:328-340`:
+  writer API. From `examples/spirals/main.zig:336-348`:
 
 ```zig
 pub fn main(init: std.process.Init) !void {
@@ -1033,7 +1053,7 @@ disagrees with something you read elsewhere, imitate this repo — then run
 
 ## What you now know
 
-- Fucina builds with exactly Zig 0.16.0; `zig build test` runs nine test
+- Fucina builds with exactly Zig 0.16.0; `zig build test` runs eleven test
   roots with no model assets, and a leaked byte fails the build.
 - Memory is a parameter: allocators are explicit, `defer`/`errdefer` pair
   every acquire with a visible release, and `deinit` ends in
@@ -1057,21 +1077,24 @@ disagrees with something you read elsewhere, imitate this repo — then run
   blocks live beside the code, and even the reference manual's snippets run
   in CI.
 - The build system is a Zig program; `-D` options become comptime constants;
-  `ReleaseFast` when speed matters (Debug is 10–50× slower); two CPU backends
-  (`scalar` oracle, `native` fast); never ship a bare `-Dtarget` binary.
+  `ReleaseFast` when speed matters (Debug is 10–50× slower); two build
+  identities (`scalar` oracle, `native` fast); never ship a bare `-Dtarget`
+  binary.
 
 ## Explore the source
 
-- `docs/REFERENCE.md` §1–§2 — the mental model and build/toolchain reference
-  this chapter quoted throughout; §1.4 is the first program.
+- `docs/reference/01-introduction-and-mental-model.md` and
+  `docs/reference/02-toolchain-build-and-project-wiring.md` — the mental
+  model and build/toolchain reference this chapter quoted throughout; §1.4
+  is the first program.
 - `src/fucina.zig` — the public root: re-exports, the `internal` seam, the
   `@compileError` guard, the forwarding test stanza.
-- `src/tensor.zig` (first ~80 lines) — `TensorError`, `Shape`,
+- `src/tensor.zig` (first ~110 lines) — `TensorError`, `Shape`,
   `isContiguous`: arrays, slices, error unions, `inline while` at work.
 - `src/tags.zig` — pure comptime programming: `Tag`, `tagEqual`, `tagIndex`,
   the comptime bubble sort. Readable in isolation, no tensors required.
-- `src/ag/tensor.zig` (lines ~150–270) — the `Tensor` type constructor,
-  `grad_state: ?*GradState`, ownership doc-comments, `errdefer` in `variable`.
+- `src/ag/tensor.zig` — the `Tensor` type constructor (line 98), the
+  capability table, `grad_state: ?*GradState`, and ownership doc-comments.
 - `examples/spirals/main.zig` — a complete train/checkpoint/infer program in one
   file; Chapter 08 dissects it line by line.
 - `build.zig` — the build as a program: option enums, panics as validation,
@@ -1086,7 +1109,7 @@ disagrees with something you read elsewhere, imitate this repo — then run
    and confirm the `defer` still frees on the error path.
 2. **Grow `Shape`.** Extend the course `Shape` from §1.7 with a
    `fn equal(a: *const Shape, b: *const Shape) bool` method and a test, then
-   compare with the real one in `src/tensor.zig:21-53`. What does
+   compare with the real one in `src/tensor.zig:37-69`. What does
    `initStrides` allow that `init` rejects, and why might strides
    legitimately contain a zero?
 3. **Provoke the tag system.** In a test that imports the library (easiest:
@@ -1099,7 +1122,7 @@ disagrees with something you read elsewhere, imitate this repo — then run
    `fn Pair(comptime A: type, comptime B: type) type` with fields
    `first: A`, `second: B` and a `swap` method returning `Pair(B, A)`;
    compile-check it with `zig test`. Then read `TopKResult` in
-   `src/ag/tensor.zig:171-187` — a real two-field generic whose second
+   `src/ag/tensor.zig:76-91` — a real two-field generic whose second
    field's *type* is computed from the first's spec.
 5. **(Harder) Read one real comptime function end to end.** Annotate
    `dotResultTags` in `src/tags.zig`: which values exist only at comptime,
