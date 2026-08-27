@@ -252,7 +252,7 @@ intra-pass reuse and a bounded cap.
 
 Training does not break deinit-ASAP: each differentiable result's
 `GradState` is reference-counted and every consumer record retains its
-operands ([§5](05-automatic-differentiation.md), [TRAINING.md](../TRAINING.md) §2), so releasing an
+operands ([§5](05-automatic-differentiation.md), [TRAINING.md §2](../TRAINING.md)), so releasing an
 intermediate handle before `backward()` is always safe. Exec scopes make the
 context the owner of op results on top of that, so a training forward needs
 no handle bookkeeping at all.

@@ -71,8 +71,8 @@ pub const GradState = struct {
     state: std.atomic.Value(u8),       // idle | pending | ongoing
     pending_grads: std.atomic.Value(u32),
     grad_mutex: thread.Mutex,
-    backward_done: bool,               // completed pass consumed this output (§5.2)
-    pass_output: bool,                 // outputs keep their gradient; interiors release on consume (§5.2)
+    backward_done: bool,               // completed pass consumed this output (see 5.2)
+    pass_output: bool,                 // outputs keep their gradient; interiors release on consume (see 5.2)
     refs: std.atomic.Value(u32),       // one per handle / consumer-record operand / scope entry
 };
 ```
@@ -97,7 +97,7 @@ pub const BackwardFunction = struct {
 `operands()` returns one slot per forward operand (`null` for operands that
 were constants); `backward(ctx, gy, out)` must write an owned raw gradient
 into `out[i]` for every operand slot that holds a state (`core.needs`,
-§5.2). The engine consumes and deinits those tensors. This interface is internal; user-defined
+[§5.2](05-automatic-differentiation.md#52-running-backward-srcagcorezig)). The engine consumes and deinits those tensors. This interface is internal; user-defined
 differentiable ops go through `customVjp` ([§5.6](05-automatic-differentiation.md#56-custom-vjps-srcagcustomzig)), which implements it for
 you.
 

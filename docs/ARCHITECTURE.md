@@ -386,7 +386,9 @@ Enforcement:
   tests, are excluded, so sibling-test forwarding stanzas and private test
   helpers do not count as production edges. The step prints the current
   file/edge count; the counts grow with the tree, so they are not pinned
-  here; the root-anchored SCC count is printed too (1 today: `exec`).
+  here; the root-anchored SCC count is printed too (root-with-children
+  module shapes such as `exec.zig` with `src/exec/*.zig`; like the
+  file/edge counts it grows with the tree and is not pinned here).
 
 - The direction bands are the *Layer Stack* table, encoded as `band_table`
   in that same tool: every production file belongs to exactly one band, and
