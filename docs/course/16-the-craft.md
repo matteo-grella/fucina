@@ -110,9 +110,9 @@ An *oracle* is any independent source of truth you can compare against mechanica
 
 ### The scalar backend: a specification you can execute
 
-The deepest oracle is inside the library itself. Fucina has exactly two CPU backends ([Chapter 6](06-going-fast-on-cpus.md)): **scalar** — plain loops, no SIMD, no cleverness — and **native**, the fast one. The scalar backend is not a fallback; it is the *executable specification*. `docs/DEVELOPMENT.md` §1.10:
+The deepest oracle is inside the library itself. Fucina has one CPU kernel provider and two build identities ([Chapter 6](06-going-fast-on-cpus.md)): **scalar** — every kernel entry resolving to its plain serial arm, no SIMD, no cleverness — and **native**, the fast build. The scalar arms are not a fallback; they are the *executable specification*. `docs/DEVELOPMENT.md` §1.10:
 
-> The scalar backend (`-Dbackend=scalar`) is the executable reference: native and scalar must agree, and `src/backend/parity_test.zig` holds them together.
+> `-Dbackend=scalar` is the executable reference leg. It does not select a second provider: it sets `backend/isa.zig`'s `reference` flag, and every kernel entry in the one provider then selects its scalar reference arm at comptime … `src/backend/parity_test.zig` holds each kernel entry to its scalar twin.
 
 A specification written as slow, obvious code beats a specification written in prose, because you can diff against it automatically. The policy even has numeric tiers: "Everything integer is bit-exact across architectures; float tile kernels document association-order tolerance instead" (same section). Here is the whole pattern in miniature — course code, not from the repo:
 

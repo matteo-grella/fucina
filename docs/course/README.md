@@ -106,7 +106,7 @@ matters — Debug builds are 10–50× slower.
 | 03 | [Tensors from scratch](03-tensors-from-scratch.md) | Build a miniature tensor from nothing — dtype tag, flat refcounted buffer, shape and strides, zero-copy views, a buffer pool — then meet the real `src/dtype.zig`, `src/storage.zig`, `src/tensor.zig` and the recorded memory-model rationale. |
 | 04 | [Axes with names: types that know their shape](04-axes-with-names.md) | The library's signature idea: axis names carried in the type — `Tensor(.{ .batch, .in })` is a different type from `Tensor(.{ .in, .batch })`, contraction happens by name, misalignment is a compile error — and the course's real introduction to comptime. |
 | 05 | [The operation library](05-the-operation-library.md) | The verbs, as Fucina implements them: `ExecContext`, the common op contract, ownership in practice, pointwise ops and broadcasting, reductions, `dot` and einsum, the transformer's verbs, losses, determinism as a design stance, and elemental ops for extension. |
-| 06 | [Going fast on CPUs](06-going-fast-on-cpus.md) | The close-to-metal chapter: two backends chosen at compile time, `@Vector` SIMD compiling one source tree to NEON and AVX2, GEMM from three naive loops to a blocked packed kernel, the worker team, and honest numbers with the scalar backend as judge. |
+| 06 | [Going fast on CPUs](06-going-fast-on-cpus.md) | The close-to-metal chapter: one kernel provider with two build identities, `@Vector` SIMD compiling one source tree to NEON and AVX2, GEMM from three naive loops to a blocked packed kernel, the worker team, and honest numbers with the scalar arms as judge. |
 
 ### Part III — Learning
 
@@ -196,7 +196,7 @@ looking at:
 - **Cross-links are relative.** Chapters link to each other as sibling
   files, so the course reads the same on GitHub and in a local clone.
 - **Citations are pinned to a moment.** This edition of the course was
-  reconciled against the tree at commit `58383e3` (2026-07-17): every
+  reconciled against the tree at commit `14fa754` (2026-08-27): every
   `path:line` reference was verified there. The library moves; line
   numbers drift first, then signatures. If the text and the source ever
   disagree, **the source wins** — diff against that commit to see what

@@ -241,10 +241,10 @@ self-deception — the protocol is at least as interesting as the numbers.
 Two structural facts to fix in your mind now, because loose talk about them
 causes real confusion later:
 
-- Fucina has exactly **two CPU backends**: `scalar`, the slow, obvious
-  reference implementation that serves as the executable specification, and
-  `native`, the fast SIMD one that must agree with it. (You may see `cpu` in
-  older invocations; it is a deprecated alias for `scalar`.) Optional CBLAS
+- Fucina has one CPU kernel provider and exactly **two build identities**:
+  `scalar`, where every kernel resolves to its slow, obvious serial
+  reference arm (the executable specification), and
+  `native`, the fast SIMD build that must agree with it. Optional CBLAS
   providers supply GEMM as a *provider* choice within a backend, and the
   Metal/CUDA GPU paths are an *offload seam* for specific shapes — neither
   is a third backend, and the README is explicit that the Metal offload "is
@@ -566,9 +566,9 @@ whenever speed matters — "Debug is 10–50x slower" (README.md:157-158).
 - The performance claims are real but disciplined: dated, machine-specific,
   paired-run snapshots (2026-07-04, `docs/BENCHMARK.md`), losses recorded
   as plainly as wins — never universal claims.
-- Fucina has exactly two CPU backends — `scalar` (the reference oracle) and
-  `native` (the fast one); BLAS is a GEMM provider option and Metal/CUDA an
-  offload seam, not backends.
+- Fucina has one kernel provider and two build identities — `scalar` (the
+  serial reference arms, the oracle) and `native` (the fast build); BLAS is
+  a GEMM provider option and Metal/CUDA an offload seam, not backends.
 - The autograd design descends from spaGO: the graph is implicit in the
   values — each result points at the op that produced it, and `backward()`
   walks the pointers.
