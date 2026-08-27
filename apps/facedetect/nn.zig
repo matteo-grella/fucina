@@ -95,7 +95,7 @@ pub fn batchNormTrain(ctx: *ExecContext, x: *const Map, gamma: *const Channels, 
     defer m.deinit();
     var mu = try m.mean(ctx, .n, .{}); // [c]
     defer mu.deinit();
-    var vr = try m.variance(ctx, .n, 0); // [c] population variance
+    var vr = try m.variance(ctx, .n, .{ .ddof = 0 }); // [c] population variance
     defer vr.deinit();
     var ve = try vr.addScalar(ctx, eps);
     defer ve.deinit();

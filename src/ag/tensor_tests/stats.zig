@@ -60,7 +60,7 @@ fn varianceLossForTest(
 ) !f32 {
     var x = try Tensor(.{ .token, .d }).fromSlice(ctx, .{ rows, cols }, x_values);
     defer x.deinit();
-    var v = try x.variance(ctx, .d, ddof);
+    var v = try x.variance(ctx, .d, .{ .ddof = ddof });
     defer v.deinit();
     var r = try Tensor(.{.token}).fromSlice(ctx, .{rows}, r_values);
     defer r.deinit();
@@ -198,7 +198,7 @@ test "tagged autograd variance matches torch semantics and finite differences" {
     for ([_]u1{ 0, 1 }) |ddof| {
         var x = try Tensor(.{ .token, .d }).variableFromSlice(&ctx, .{ rows, cols }, &x_values);
         defer x.deinit();
-        var v = try x.variance(&ctx, .d, ddof);
+        var v = try x.variance(&ctx, .d, .{ .ddof = ddof });
         defer v.deinit();
         try std.testing.expect(@TypeOf(v).axis_tags.len == 1);
 

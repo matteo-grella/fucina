@@ -552,7 +552,7 @@ test "tagged autograd bf16 RHS dot works under exec scope" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const y = try x.dot(&ctx, &w, .in);
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
 
         var gx = (try x.grad(&ctx)).?;

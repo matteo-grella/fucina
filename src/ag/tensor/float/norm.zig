@@ -48,6 +48,15 @@ pub fn Ops(comptime Self: type) type {
         const TensorObject = plumbing.TensorObject;
         const tensorObjectPtrFrom = plumbing.tensorObjectPtrFrom;
 
+        /// The optional per-channel affine operands for `groupNorm`
+        /// (applied after normalization); both default to null.
+        pub fn GroupNormOptions(comptime channel_tag: Tag) type {
+            return struct {
+                weight: ?*const Tensor(.{channel_tag}) = null,
+                bias: ?*const Tensor(.{channel_tag}) = null,
+            };
+        }
+
         /// GroupNorm over `[time, channel]` rows (ggml semantics; see
         /// `groupNorm`): per group of channel columns, f64-accumulated
         /// mean + biased variance over all time × (C/groups) elements, then
@@ -62,9 +71,10 @@ pub fn Ops(comptime Self: type) type {
             comptime channel_tag: Tag,
             groups: usize,
             eps: f32,
-            weight: ?*const Tensor(.{channel_tag}),
-            bias: ?*const Tensor(.{channel_tag}),
+            options: GroupNormOptions(channel_tag),
         ) !Self {
+            const weight = options.weight;
+            const bias = options.bias;
             const channel_axis = comptime axis(channel_tag);
             comptime {
                 if (tag_rank != 2) @compileError("groupNorm requires a rank-2 input");
@@ -203,15 +213,9 @@ pub fn Ops(comptime Self: type) type {
         /// Parakeet's raw weights; length checked at runtime).
         pub fn layerNorm(self: *const Self, ctx: *ExecContext, comptime tag: Tag, eps: f32, options: anytype) !Self {
             const Options = @TypeOf(options);
-            comptime {
-                if (@typeInfo(Options) != .@"struct") @compileError("layerNorm: options must be a struct literal, e.g. .{} or .{ .weight = &w, .bias = &b }");
-                for (@typeInfo(Options).@"struct".fields) |field| {
-                    if (!std.mem.eql(u8, field.name, "weight") and !std.mem.eql(u8, field.name, "bias"))
-                        @compileError("layerNorm: unknown option ." ++ field.name);
-                }
-                if (@hasField(Options, "weight") != @hasField(Options, "bias"))
-                    @compileError("layerNorm: the affine kernel requires .weight and .bias together");
-            }
+            comptime plumbing.validateOptionFields("layerNorm", Options, &.{ "weight", "bias" }, ".{} or .{ .weight = &w, .bias = &b }");
+            comptime if (@hasField(Options, "weight") != @hasField(Options, "bias"))
+                @compileError("layerNorm: the affine kernel requires .weight and .bias together");
             const norm_axis = comptime axis(tag);
             if (comptime @hasField(Options, "weight")) {
                 comptime {

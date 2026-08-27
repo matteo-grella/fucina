@@ -98,7 +98,7 @@ test "lora backward reaches A and B; the frozen quantized base path gets no grad
         defer ctx.closeExecScope(scope);
         const base = try x.dot(&ctx, &wq, .in);
         const y = try adapter.apply(&ctx, &x, &base, null);
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
 
         var ga = (try adapter.a.grad(&ctx)).?;
@@ -153,7 +153,7 @@ test "lora AdamW step trains A and B end-to-end" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const y = try adapter.apply(&ctx, &x, &base, null);
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
         try opt.step(&ctx);
         opt.zeroGrad();
@@ -441,7 +441,7 @@ test "lora scoped train loop over a frozen f16 base is leak-free and the loss de
         const y = try adapter.apply(&ctx, &x, &base, rng.at(0x10ad, step_i));
         const diff = try y.sub(&ctx, &target);
         const sq = try diff.mul(&ctx, &diff);
-        const loss = try sq.sumAll(&ctx);
+        var loss = try sq.sumAll(&ctx);
         try loss.backward(&ctx);
         try opt.step(&ctx);
         opt.zeroGrad();
@@ -504,7 +504,7 @@ test "lora scoped train loop over a frozen bf16 base is leak-free and the loss d
         const y = try adapter.apply(&ctx, &x, &base, rng.at(0xbf16, step_i));
         const diff = try y.sub(&ctx, &target);
         const sq = try diff.mul(&ctx, &diff);
-        const loss = try sq.sumAll(&ctx);
+        var loss = try sq.sumAll(&ctx);
         try loss.backward(&ctx);
 
         // Mirror the q8 grad-routing test: A and B receive gradient through

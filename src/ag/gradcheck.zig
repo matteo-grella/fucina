@@ -111,7 +111,7 @@ pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, 
 fn analyticalBackward(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype) !void {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try callLoss(loss_fn, ctx, inputs);
+    var loss = try callLoss(loss_fn, ctx, inputs);
     try loss.backward(ctx);
 }
 

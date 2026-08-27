@@ -400,6 +400,29 @@ pub fn Mod(comptime ag_tensor: type) type {
             };
         }
 
+        /// Comptime whitelist for an `anytype` options struct: a misspelled
+        /// field is a compile error naming the op and the field. These option
+        /// sets stay `anytype` (instead of a typed struct) because they carry
+        /// caller-typed tensor operands (a mask, affine weights, an initial
+        /// state, each keeping its own tensor type) or comptime tag fields,
+        /// which one runtime struct type cannot hold.
+        pub fn validateOptionFields(
+            comptime op_name: []const u8,
+            comptime Opts: type,
+            comptime allowed: []const []const u8,
+            comptime example: []const u8,
+        ) void {
+            const info = @typeInfo(Opts);
+            if (info != .@"struct") @compileError(op_name ++ ": options must be a struct literal, e.g. " ++ example);
+            inline for (info.@"struct".fields) |field| {
+                var known = false;
+                for (allowed) |name| {
+                    if (std.mem.eql(u8, field.name, name)) known = true;
+                }
+                if (!known) @compileError(op_name ++ ": unknown option ." ++ field.name);
+            }
+        }
+
         /// Comptime whitelist for the masked-reduction option struct. A misspelled
         /// field is a compile error, never a silently-unmasked reduction — the
         /// `groupedAttention` opts discipline.

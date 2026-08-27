@@ -207,7 +207,7 @@ const ParamAccess = struct {
                 try gv.copyTo(dst);
             }
             fn zeroGrad(p: *const anyopaque) void {
-                const tp: *const T = @ptrCast(@alignCast(p));
+                const tp: *T = @ptrCast(@alignCast(@constCast(p)));
                 tp.zeroGrad();
             }
         };

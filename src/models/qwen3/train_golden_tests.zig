@@ -3367,7 +3367,7 @@ test "qwen3 LoRA fine-tuning: loss and adapter grads match the PyTorch goldens" 
 
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(&ctx, &golden_tokens, &golden_labels);
+    var loss = try trainer.loss(&ctx, &golden_tokens, &golden_labels);
     try loss.backward(&ctx);
 
     const loss_value = try loss.item();

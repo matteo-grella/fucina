@@ -1099,7 +1099,7 @@ test "public f32 Tensor dotTernarySte works under exec scope" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const y = try x.dotTernarySte(&ctx, &w, .in);
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
 
         // gy = ones[m, n]: dW[o][i] = sum_r x[r][i] (STE identity), and

@@ -2230,12 +2230,12 @@ fn accumLossBackward(
     const h = try x.dot(ctx, &model.w1, .in);
     const a = try h.tanh(ctx);
     const logits = try a.dot(ctx, &model.w2, .h1);
-    const ce = try logits.crossEntropy(ctx, .class, labels[first .. first + rows], .{});
+    var ce = try logits.crossEntropy(ctx, .class, labels[first .. first + rows], .{});
     if (loss_scale == 1) {
         try ce.backward(ctx);
         return ce.item();
     }
-    const scaled = try ce.scale(ctx, loss_scale);
+    var scaled = try ce.scale(ctx, loss_scale);
     try scaled.backward(ctx);
     return scaled.item();
 }

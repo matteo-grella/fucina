@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         {
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
-            const loss = if (rows > 0)
+            var loss = if (rows > 0)
                 try trainer.lossCartridge(&ctx, triple.evidence, triple.sample.inputs, triple.sample.labels)
             else
                 try trainer.loss(&ctx, triple.evidence, triple.sample.inputs, triple.sample.labels);

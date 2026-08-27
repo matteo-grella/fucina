@@ -98,17 +98,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn softmax(self: *const Self, ctx: *ExecContext, comptime tag: Tag, options: anytype) !Self {
             const Options = @TypeOf(options);
-            comptime {
-                if (@typeInfo(Options) != .@"struct") @compileError("softmax: options must be a struct literal, e.g. .{} or .{ .scale = s }");
-                const allowed = [_][]const u8{ "scale", "max_bias", "sinks", "head_tag", "causal", "mask" };
-                for (@typeInfo(Options).@"struct".fields) |field| {
-                    var known = false;
-                    for (allowed) |name| {
-                        if (std.mem.eql(u8, field.name, name)) known = true;
-                    }
-                    if (!known) @compileError("softmax: unknown option ." ++ field.name);
-                }
-            }
+            comptime plumbing.validateOptionFields("softmax", Options, &.{ "scale", "max_bias", "sinks", "head_tag", "causal", "mask" }, ".{} or .{ .scale = s }");
             const softmax_axis = comptime axis(tag);
             if (comptime @typeInfo(Options).@"struct".fields.len == 0) {
                 var value = try ctx.softmax(dtype, tag_rank, self.asRawTensor(), softmax_axis);

@@ -248,6 +248,8 @@ comptime {
 pub const PackedRhs = ag.PackedRhs;
 /// Half-open index range for tensor `slice` calls.
 pub const SliceRange = ag.SliceRange;
+/// Options for the `variance` method (`ddof`, defaulting to torch.var's 1).
+pub const VarianceOptions = ag.VarianceOptions;
 /// A contiguous run of ABSOLUTE indices along one axis, `[origin, origin+len)`
 /// — Fortran's array lower bound as a value. Tensor axes here are 0-origin, so
 /// this is how a positional axis's origin travels alongside its length instead

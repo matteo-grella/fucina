@@ -20,6 +20,7 @@ pub const Tensor = tensor.Tensor;
 pub const AgError = core.AgError;
 pub const PackedRhs = tensor.PackedRhs;
 pub const SliceRange = tensor.SliceRange;
+pub const VarianceOptions = tensor.VarianceOptions;
 pub const einsumMany = tensor.einsumMany;
 pub const checkpoint = checkpoint_mod.checkpoint;
 pub const checkpointWithContext = checkpoint_mod.checkpointWithContext;

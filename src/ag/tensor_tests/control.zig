@@ -341,7 +341,7 @@ fn allocationFailureProbeMulScoped(allocator: std.mem.Allocator) !void {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const y = try x.mul(&ctx, &x);
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
     }
 
@@ -437,7 +437,7 @@ test "exec scope owns differentiable intermediates through backward" {
         defer ctx.closeExecScope(scope);
         const y = try x.mul(&ctx, &x);
         const z = try y.mul(&ctx, &x);
-        const loss = try z.sumAll(&ctx);
+        var loss = try z.sumAll(&ctx);
         try loss.backward(&ctx);
 
         var gx = (try x.grad(&ctx)).?; // gradients stay caller-owned

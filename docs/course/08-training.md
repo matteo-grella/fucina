@@ -47,7 +47,7 @@ for (0..total_steps) |step_i| {
     const h = try x.dot(&ctx, &w1, .in);          // no keeps, no defers
     const a = try h.add(&ctx, &b1);
     const z = try a.tanh(&ctx);
-    const loss = try z.crossEntropy(&ctx, .class, labels, .{});
+    var loss = try z.crossEntropy(&ctx, .class, labels, .{});
     try loss.backward(&ctx);
     _ = try opt.clipGradNorm(&ctx, 1.0);          // after backward, before step
     try opt.step(&ctx);
@@ -706,7 +706,7 @@ for (window) |idx| {
     const sample = &samples[idx];
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
+    var loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
         .reduction = .sum,
         .loss_scale = loss_scale,
     });
@@ -986,7 +986,7 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope); // releases the whole step's graph
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
+    var loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();

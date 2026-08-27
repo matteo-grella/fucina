@@ -130,8 +130,8 @@ The facade exposes a single-output entry point, in an implicitly-seeded and
 an explicitly-seeded form:
 
 ```zig
-pub fn backward(self: *const Self, ctx: *ExecContext) !void
-pub fn backwardWithGrad(self: *const Self, ctx: *ExecContext, grad_output: *const Self) !void
+pub fn backward(self: *Self, ctx: *ExecContext) !void
+pub fn backwardWithGrad(self: *Self, ctx: *ExecContext, grad_output: *const Self) !void
 ```
 
 Both error with `error.NoGradientGraph` when called on a tensor without a
@@ -302,7 +302,7 @@ graph over shared leaves ([§5.3](05-automatic-differentiation.md#53-reading-see
 ```zig
 pub fn grad(self: *const Self, ctx: *ExecContext) !?Self     // deep copy
 pub fn gradView(self: *const Self, ctx: *ExecContext) !?Self // refcounted view
-pub fn zeroGrad(self: *const Self) void                      // drop accumulated grad
+pub fn zeroGrad(self: *Self) void                            // drop accumulated grad
 pub fn detach(self: *const Self, ctx: *ExecContext) !Self    // no-grad view of value
 ```
 

@@ -312,6 +312,25 @@ this point; earlier history is `git log`.
   users: `backend.scalar_impl.kernels.X(pc, ...)` becomes the twin
   `backend.vector_impl.<domain>.scalar.X(...)` (no `pc`);
   `backend.native_impl` is unchanged.
+- `variance` takes an options struct: `variance(ctx, tag, ddof)` is now
+  `variance(ctx, tag, options)` with `fucina.VarianceOptions`
+  (`ddof: u1 = 1`, the torch.var default). Rewrite:
+  `x.variance(ctx, .d, 0)` becomes `x.variance(ctx, .d, .{ .ddof = 0 })`;
+  `x.variance(ctx, .d, 1)` becomes `x.variance(ctx, .d, .{})`.
+- `groupNorm` takes an options struct for the affine pair:
+  `groupNorm(ctx, channel_tag, groups, eps, weight, bias)` is now
+  `groupNorm(ctx, channel_tag, groups, eps, options)` with
+  `GroupNormOptions(channel_tag)` (both fields default null). Rewrite:
+  `..., null, null)` becomes `..., .{})`; `..., &w, &b)` becomes
+  `..., .{ .weight = &w, .bias = &b })`.
+- `nonzero` takes the context like every other method:
+  `nonzero(allocator)` is now `nonzero(ctx)`; the returned host slice is
+  owned by the caller and freed with `ctx.allocator`. Rewrite:
+  `x.nonzero(alloc)` becomes `x.nonzero(&ctx)`.
+- `backward`, `backwardWithGrad`, and `zeroGrad` take a mutable receiver
+  (`*Self`): they mutate shared gradient state, and the signature now says
+  so. Rewrite: bind the loss (or the tensor whose gradient you reset) with
+  `var` instead of `const`; call sites are otherwise unchanged.
 - Argument-validity failures error with the new `error.InvalidArgument`
   instead of `error.InvalidShape`: dropout `p` outside `[0, 1)`, `softcap`
   cap not positive, `clamp` with `min > max`, cross-entropy

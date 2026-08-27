@@ -361,7 +361,7 @@ pub fn main(init: std.process.Init) !void {
             {
                 const scope = ctx.openExecScope();
                 defer ctx.closeExecScope(scope);
-                const loss = try trainer.loss(&ctx, sample.inputs, sample.labels);
+                var loss = try trainer.loss(&ctx, sample.inputs, sample.labels);
                 try loss.backward(&ctx);
                 loss_value = try loss.item();
                 _ = try set.clipGradNorm(&ctx, 1.0);
@@ -391,7 +391,7 @@ pub fn main(init: std.process.Init) !void {
                 const sample = &samples[idx];
                 const scope = ctx.openExecScope();
                 defer ctx.closeExecScope(scope);
-                const loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
+                var loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
                     .reduction = .sum,
                     .loss_scale = loss_scale,
                 });
@@ -895,7 +895,7 @@ fn lossOnly(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const models.t
 fn lossBackward(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
+    var loss = try trainer.loss(ctx, sample.inputs, sample.labels);
     try loss.backward(ctx);
     return loss.item();
 }
@@ -905,7 +905,7 @@ fn lossBackward(ctx: *fucina.ExecContext, trainer: *Trainer, sample: *const mode
 fn trainStep(ctx: *fucina.ExecContext, trainer: *Trainer, set: *optim.OptimizerSet, sample: *const models.text.data.Sample) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(ctx, sample.inputs, sample.labels);
+    var loss = try trainer.loss(ctx, sample.inputs, sample.labels);
     try loss.backward(ctx);
     const value = try loss.item();
     _ = try set.clipGradNorm(ctx, 1.0);

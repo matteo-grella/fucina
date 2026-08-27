@@ -325,7 +325,7 @@ test "training step under an exec scope" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope); // releases all adopted intermediates, newest first
         const y = try w.mul(&ctx, &w); // scope-owned borrow: no defer needed
-        const loss = try y.sumAll(&ctx);
+        var loss = try y.sumAll(&ctx);
         try loss.backward(&ctx);
 
         var gw = (try w.grad(&ctx)).?; // fetched gradients stay caller-owned

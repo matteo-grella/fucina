@@ -925,7 +925,7 @@ and this is where the library's headline ergonomic move comes in. From the
 const scope = ctx.openExecScope();
 defer ctx.closeExecScope(scope);
 const logits = try forward(ctx, &model, &x);
-const loss = try logits.crossEntropy(ctx, .class, labels, .{});
+var loss = try logits.crossEntropy(ctx, .class, labels, .{});
 try loss.backward(ctx);
 try opt.step(ctx);
 ```

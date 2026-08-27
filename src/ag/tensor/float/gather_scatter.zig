@@ -158,17 +158,17 @@ pub fn Ops(comptime Self: type) type {
 
         /// Row-major flat indices of the nonzero elements (torch.nonzero
         /// over the flattened tensor; NaN counts as nonzero), returned as
-        /// a HOST slice the caller owns and frees with `allocator` — the
-        /// design keeps data-dependent cardinality host-side, where
+        /// a HOST slice the caller owns and frees with `ctx.allocator` —
+        /// the design keeps data-dependent cardinality host-side, where
         /// `[]usize` pairs directly with `gather`/`setRows`/`indexAdd`/
         /// `oneHot`, so a no-match result is just an empty slice (no
         /// zero-size tensor needed, unlike `maskedSelect`). Reads `self`
         /// host-side; contiguous only (like `maskedSelect`'s mask).
-        pub fn nonzero(self: *const Self, allocator: std.mem.Allocator) ![]usize {
+        pub fn nonzero(self: *const Self, ctx: *ExecContext) ![]usize {
             const values = try self.asRawTensor().dataConstChecked();
             var count: usize = 0;
             for (values) |v| count += @intFromBool(v != 0);
-            const indices = try allocator.alloc(usize, count);
+            const indices = try ctx.allocator.alloc(usize, count);
             var slot: usize = 0;
             for (values, 0..) |v, i| {
                 if (v != 0) {

@@ -453,7 +453,7 @@ The compiler now knows the column axis is gone — pass `s` where a
 a shape crash three layers later. `sumAll` reduces everything to the scalar
 `Tensor(.{})`, read with `item()`. The family (docs/REFERENCE.md §4.7):
 `sum`, `mean`, `sumMany` (several tags at once), `sumAll`,
-`variance(ctx, tag, ddof)`, `max`/`min` (values only — indices are §5.11's
+`variance(ctx, tag, options)`, `max`/`min` (values only — indices are §5.11's
 business), `prod`, the scans `cumsum`/`cumprod` (shape-preserving prefix
 sum/product), and `norm`/`normAll` with `NormOrder = { .l1, .l2, .inf }` —
 all differentiable, with the core of the family machine-verified in the

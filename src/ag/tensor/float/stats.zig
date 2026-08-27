@@ -46,10 +46,11 @@ pub fn Ops(comptime Self: type) type {
         const maskedReduceEmpty = plumbing.maskedReduceEmpty;
         const MaskedMinMaxBackward = backward_stats.MaskedMinMaxBackward;
 
-        /// Variance over `tag` (the tag is removed like sum/mean): ddof 0 =
-        /// biased estimator (the LayerNorm convention), ddof 1 = unbiased
-        /// (the torch.var default).
-        pub fn variance(self: *const Self, ctx: *ExecContext, comptime tag: Tag, ddof: u1) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
+        /// Variance over `tag` (the tag is removed like sum/mean):
+        /// `options.ddof` 0 = biased estimator (the LayerNorm convention),
+        /// 1 = unbiased (the torch.var default, and this default).
+        pub fn variance(self: *const Self, ctx: *ExecContext, comptime tag: Tag, options: ag_tensor.VarianceOptions) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
+            const ddof = options.ddof;
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
             var value = try ctx.varAxis(dtype, tag_rank, self.asRawTensor(), reduce_axis, ddof);

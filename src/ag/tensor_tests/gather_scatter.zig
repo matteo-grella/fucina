@@ -273,14 +273,14 @@ test "public Tensor nonzero returns host indices and indexAdd accumulates" {
     const M = Tensor(.{ .row, .col });
     var x = try M.fromSlice(&ctx, .{ 2, 3 }, &.{ 0, 1.5, 0, -2, 0, std.math.nan(f32) });
     defer x.deinit();
-    const hits = try x.nonzero(alloc);
+    const hits = try x.nonzero(&ctx);
     defer alloc.free(hits);
     try std.testing.expectEqualSlices(usize, &.{ 1, 3, 5 }, hits);
 
     // No match → empty host slice (no zero-size tensor involved).
     var zeros_t = try M.zeros(&ctx, .{ 2, 3 });
     defer zeros_t.deinit();
-    const none = try zeros_t.nonzero(alloc);
+    const none = try zeros_t.nonzero(&ctx);
     defer alloc.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
 

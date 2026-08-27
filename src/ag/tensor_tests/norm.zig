@@ -499,13 +499,13 @@ test "public Tensor groupNorm facade normalizes per group" {
     defer wt.deinit();
     var bt = try Tensor(.{.ch}).fromSlice(&ctx, .{2}, &.{ 10.0, 20.0 });
     defer bt.deinit();
-    var y = try x.groupNorm(&ctx, .ch, 2, eps, &wt, &bt);
+    var y = try x.groupNorm(&ctx, .ch, 2, eps, .{ .weight = &wt, .bias = &bt });
     defer y.deinit();
     const inv = 1.0 / @sqrt(@as(f32, 1.0) + eps);
     try expectCloseSlices(&.{ -inv * 2 + 10, -inv * 3 + 20, inv * 2 + 10, inv * 3 + 20 }, y.asRawTensor().dataConst(), 1e-5);
 
     // No-affine arm.
-    var y_plain = try x.groupNorm(&ctx, .ch, 2, eps, null, null);
+    var y_plain = try x.groupNorm(&ctx, .ch, 2, eps, .{});
     defer y_plain.deinit();
     try expectCloseSlices(&.{ -inv, -inv, inv, inv }, y_plain.asRawTensor().dataConst(), 1e-6);
 }
@@ -578,7 +578,7 @@ test "tagged autograd groupNorm matches finite differences across group configur
         var coef_t = try Tensor(.{ .time, .ch }).fromTensor(&ctx, try ctx.fromSlice(.f32, &.{ rows, cols }, coef));
         defer coef_t.deinit();
 
-        var y = try x.groupNorm(&ctx, .ch, cfg.groups, eps, if (weight) |*w| w else null, if (bias) |*b| b else null);
+        var y = try x.groupNorm(&ctx, .ch, cfg.groups, eps, .{ .weight = if (weight) |*w| w else null, .bias = if (bias) |*b| b else null });
         defer y.deinit();
         var weighted = try y.mul(&ctx, &coef_t);
         defer weighted.deinit();

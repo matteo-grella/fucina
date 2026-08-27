@@ -67,6 +67,12 @@ pub const SliceRange = struct {
     step: usize = 1,
 };
 
+/// Options for `variance`: `ddof` 0 = biased population estimator (the
+/// LayerNorm convention), 1 = Bessel-corrected (the torch.var default).
+pub const VarianceOptions = struct {
+    ddof: u1 = 1,
+};
+
 pub fn TopKResult(comptime tags_spec: anytype) type {
     const result_tags = normalizeTags(tags_spec);
     return struct {
@@ -857,6 +863,7 @@ fn FloatTensor(comptime tags: anytype) type {
             requireCap(dtype, .norms_full);
         }
         pub const groupNorm = norm_ops.groupNorm;
+        pub const GroupNormOptions = norm_ops.GroupNormOptions;
         pub const rmsNormMulRopeHalfPrepared = norm_ops.rmsNormMulRopeHalfPrepared;
         pub const l2Normalize = norm_ops.l2Normalize;
         pub const norm = norm_ops.norm;

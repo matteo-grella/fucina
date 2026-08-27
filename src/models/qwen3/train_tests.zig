@@ -296,7 +296,7 @@ const DefaultTrainer = qwen3_train.Trainer(.{});
 fn lossStepOn(ctx: *ExecContext, trainer: anytype, opt: ?*optim.AdamW, inputs: []const usize, labels: []const usize) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(ctx, inputs, labels);
+    var loss = try trainer.loss(ctx, inputs, labels);
     try loss.backward(ctx);
     if (opt) |o| {
         try o.step(ctx);
@@ -542,14 +542,14 @@ test "widened frozen cache: q8_0 loss and adapter grads track the kernel path" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try cached.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try cached.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
         cached_loss = try loss.item();
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try kernel.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try kernel.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
         kernel_loss = try loss.item();
     }
@@ -657,7 +657,7 @@ test "frozen weights stay bitwise unchanged; only adapters carry grads" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try trainer.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
     }
     try std.testing.expect(!model.token_embedding.dense.f32.requiresGrad());
@@ -708,14 +708,14 @@ test "checkpointed layers: loss and adapter grads bitwise equal to plain" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try plain.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try plain.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
         plain_loss = try loss.item();
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try ckpt.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try ckpt.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
         ckpt_loss = try loss.item();
     }
@@ -765,14 +765,14 @@ test "checkpointed layers at seq 64 (tiled attention): loss and adapter grads bi
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try plain.loss(&ctx, long_inputs, long_labels);
+        var loss = try plain.loss(&ctx, long_inputs, long_labels);
         try loss.backward(&ctx);
         plain_loss = try loss.item();
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try ckpt.loss(&ctx, long_inputs, long_labels);
+        var loss = try ckpt.loss(&ctx, long_inputs, long_labels);
         try loss.backward(&ctx);
         ckpt_loss = try loss.item();
     }
@@ -895,7 +895,7 @@ test "full-stack gradcheck: finite differences through Trainer.loss match backwa
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.loss(&ctx, long_inputs, &fd_labels);
+        var loss = try trainer.loss(&ctx, long_inputs, &fd_labels);
         try loss.backward(&ctx);
     }
     // Frozen base weights are constants: no GradState even after backward.
@@ -1014,7 +1014,7 @@ test "full-stack gradcheck: finite differences through Trainer.loss match backwa
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.loss(&ctx, long_inputs, &fd_labels);
+        var loss = try trainer.loss(&ctx, long_inputs, &fd_labels);
         try loss.backward(&ctx);
     }
     {
@@ -1042,7 +1042,7 @@ test "full-stack gradcheck: finite differences through Trainer.loss match backwa
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.loss(&ctx, long_inputs, &all_masked);
+        var loss = try trainer.loss(&ctx, long_inputs, &all_masked);
         try loss.backward(&ctx);
         try std.testing.expectEqual(@as(f32, 0), try loss.item());
     }
@@ -1227,8 +1227,8 @@ const batch_labels_b = batch_tokens[1..8];
 fn accumulateTwoBatches(ctx: *ExecContext, trainer: *DefaultTrainer, losses: *[2]f32) !void {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss1 = try trainer.loss(ctx, batch_inputs, batch_labels);
-    const loss2 = try trainer.loss(ctx, batch_inputs_b, batch_labels_b);
+    var loss1 = try trainer.loss(ctx, batch_inputs, batch_labels);
+    var loss2 = try trainer.loss(ctx, batch_inputs_b, batch_labels_b);
     try loss1.backward(ctx);
     try loss2.backward(ctx);
     losses[0] = try loss1.item();
@@ -1305,7 +1305,7 @@ test "rope cache: gradient accumulation across seq lengths matches checkpoint-of
 fn lossEvalBackward(ctx: *ExecContext, trainer: *DefaultTrainer, eval_tokens: []const usize, eval_out: []f32) !f32 {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(ctx, batch_inputs, batch_labels);
+    var loss = try trainer.loss(ctx, batch_inputs, batch_labels);
     var logits = try trainer.evalLastLogits(ctx, eval_tokens);
     defer logits.deinit();
     @memcpy(eval_out, try logits.dataConst());
@@ -1495,13 +1495,13 @@ test "fused qkv / gate-up arms match the separate arms (eval + adapter grads)" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try sep_tr.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try sep_tr.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try fused_tr.loss(&ctx, batch_inputs, batch_labels);
+        var loss = try fused_tr.loss(&ctx, batch_inputs, batch_labels);
         try loss.backward(&ctx);
     }
     for (sep_tr.adapters, fused_tr.adapters) |*sads, *fads| {
@@ -1564,14 +1564,14 @@ test "lossExt with default options is bitwise-identical to loss" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try base.loss(&ctx, batch_inputs, batch_labels);
+        var l = try base.loss(&ctx, batch_inputs, batch_labels);
         try l.backward(&ctx);
         base_loss = try l.item();
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try ext.lossExt(&ctx, batch_inputs, batch_labels, .{});
+        var l = try ext.lossExt(&ctx, batch_inputs, batch_labels, .{});
         try l.backward(&ctx);
         ext_loss = try l.item();
     }
@@ -1624,14 +1624,14 @@ test "accumulated scaled grads match manually summed per-batch grads bitwise" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try acc.lossExt(&ctx, batch_inputs, batch_labels, opts);
+        var l = try acc.lossExt(&ctx, batch_inputs, batch_labels, opts);
         try l.backward(&ctx);
         acc_losses[0] = try l.item();
     }
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try acc.lossExt(&ctx, batch_inputs_b, batch_labels_b, opts);
+        var l = try acc.lossExt(&ctx, batch_inputs_b, batch_labels_b, opts);
         try l.backward(&ctx);
         acc_losses[1] = try l.item();
     }
@@ -1647,7 +1647,7 @@ test "accumulated scaled grads match manually summed per-batch grads bitwise" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try man.lossExt(&ctx, batch_inputs, batch_labels, opts);
+        var l = try man.lossExt(&ctx, batch_inputs, batch_labels, opts);
         try l.backward(&ctx);
         man_losses[0] = try l.item();
     }
@@ -1663,7 +1663,7 @@ test "accumulated scaled grads match manually summed per-batch grads bitwise" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try man.lossExt(&ctx, batch_inputs_b, batch_labels_b, opts);
+        var l = try man.lossExt(&ctx, batch_inputs_b, batch_labels_b, opts);
         try l.backward(&ctx);
         man_losses[1] = try l.item();
     }
@@ -1872,7 +1872,7 @@ test "injected forward: causal prefix unchanged, gradient reaches the injected r
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.lossInjected(&ctx, batch_inputs, &labels, .{ .pos = pos, .row = &var_row }, .{});
+        var loss = try trainer.lossInjected(&ctx, batch_inputs, &labels, .{ .pos = pos, .row = &var_row }, .{});
         try loss.backward(&ctx);
         try std.testing.expect(std.math.isFinite(try loss.item()));
     }

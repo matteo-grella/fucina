@@ -274,7 +274,7 @@ test "gemma4_train dense trainer loss backward smoke" {
     const labels = [_]usize{ 5, 9, 13, 2, 7, 3 };
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(&ctx, &inputs, &labels);
+    var loss = try trainer.loss(&ctx, &inputs, &labels);
     try loss.backward(&ctx);
 
     var saw_grad = false;
@@ -404,7 +404,7 @@ test "gemma4_train moe trainer loss backward smoke" {
     const labels = [_]usize{ 5, 9, 13, 2 };
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.loss(&ctx, &inputs, &labels);
+    var loss = try trainer.loss(&ctx, &inputs, &labels);
     try loss.backward(&ctx);
 
     var saw_grad = false;
@@ -452,7 +452,7 @@ test "gemma4_train dense trainer lossExt smoke: defaults match loss, sum/scale b
 
     // Accumulation arm: `.sum` + 1/valid scaling backpropagates into the
     // adapters (mirrors the plain loss-backward smoke above).
-    const scaled = try ext.lossExt(&ctx, &inputs, &labels, .{
+    var scaled = try ext.lossExt(&ctx, &inputs, &labels, .{
         .reduction = .sum,
         .loss_scale = 1.0 / @as(f32, @floatFromInt(labels.len)),
     });

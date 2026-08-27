@@ -634,10 +634,10 @@ test "typed float widened reductions return f32 and scans keep the dtype" {
         comptime std.debug.assert(@TypeOf(product).dtype == .f32);
         try std.testing.expectEqualSlices(f32, &.{ -7.5, -3.0 }, product.asRawTensor().dataConst());
 
-        var spread = try x_t.variance(&ctx, .d, 0);
+        var spread = try x_t.variance(&ctx, .d, .{ .ddof = 0 });
         defer spread.deinit();
         comptime std.debug.assert(@TypeOf(spread).dtype == .f32);
-        var spread_ref = try x32.variance(&ctx, .d, 0);
+        var spread_ref = try x32.variance(&ctx, .d, .{ .ddof = 0 });
         defer spread_ref.deinit();
         try std.testing.expectEqualSlices(f32, spread_ref.asRawTensor().dataConst(), spread.asRawTensor().dataConst());
 

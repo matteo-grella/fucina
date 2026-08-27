@@ -658,7 +658,7 @@ for (0..epochs) |epoch| {
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
             const loss = try model.segmentLossWithOptions(&ctx, example.input, example.target, loss_options);
-            const scaled = try loss.scale(&ctx, 1.0 / @as(f32, @floatFromInt(batch_size)));
+            var scaled = try loss.scale(&ctx, 1.0 / @as(f32, @floatFromInt(batch_size)));
             loss_sum += try loss.item();
             try scaled.backward(&ctx);
         }

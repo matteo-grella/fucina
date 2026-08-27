@@ -638,7 +638,7 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope); // releases the whole step's graph
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
+    var loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();

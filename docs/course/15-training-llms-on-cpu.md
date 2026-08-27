@@ -455,7 +455,7 @@ for (window) |idx| {
     const sample = &samples[idx];
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
+    var loss = try trainer.lossExt(&ctx, sample.inputs, sample.labels, .{
         .reduction = .sum,
         .loss_scale = loss_scale,
     });

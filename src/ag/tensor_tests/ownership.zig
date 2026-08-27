@@ -284,7 +284,7 @@ fn expectUnscopedMatchesScoped(
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try loss_fn(ctx, &x_scoped);
+        var loss = try loss_fn(ctx, &x_scoped);
         try loss.backward(ctx);
     }
     var g_scoped = (try x_scoped.grad(ctx)).?;

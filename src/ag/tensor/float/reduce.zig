@@ -272,13 +272,7 @@ pub fn Ops(comptime Self: type) type {
         /// `initial` receiving `a_0·gh_0`.
         pub fn linearRecurrence(self: *const Self, ctx: *ExecContext, comptime time_tag: Tag, decay: anytype, options: anytype) !Self {
             const Options = @TypeOf(options);
-            comptime {
-                if (@typeInfo(Options) != .@"struct") @compileError("linearRecurrence: options must be a struct literal, e.g. .{} or .{ .initial = &h0 }");
-                for (@typeInfo(Options).@"struct".fields) |field| {
-                    if (!std.mem.eql(u8, field.name, "initial"))
-                        @compileError("linearRecurrence: unknown option ." ++ field.name);
-                }
-            }
+            comptime plumbing.validateOptionFields("linearRecurrence", Options, &.{"initial"}, ".{} or .{ .initial = &h0 }");
             const Decay = TensorObject(@TypeOf(decay));
             comptime {
                 for (Decay.axis_tags) |t| {

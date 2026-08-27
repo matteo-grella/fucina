@@ -296,7 +296,7 @@ test "lossCartridge: gradients reach every leaf and match finite differences" {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.lossCartridge(&ctx, &evidence, &inputs, &labels);
+        var loss = try trainer.lossCartridge(&ctx, &evidence, &inputs, &labels);
         loss0 = try loss.item();
         try std.testing.expect(std.math.isFinite(loss0));
         try loss.backward(&ctx);
@@ -394,7 +394,7 @@ test "initRandom + AdamW loop: deterministic init, loss decreases on one triple"
     for (0..12) |step_i| {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.lossCartridge(&ctx, &evidence, &inputs, &labels);
+        var loss = try trainer.lossCartridge(&ctx, &evidence, &inputs, &labels);
         try loss.backward(&ctx);
         const value = try loss.item();
         _ = try set.clipGradNorm(&ctx, 1.0);

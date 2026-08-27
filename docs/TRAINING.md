@@ -34,7 +34,7 @@ for (0..total_steps) |step_i| {
     const h = try x.dot(&ctx, &w1, .in);          // no keeps, no defers
     const a = try h.add(&ctx, &b1);
     const z = try a.tanh(&ctx);
-    const loss = try z.crossEntropy(&ctx, .class, labels, .{});
+    var loss = try z.crossEntropy(&ctx, .class, labels, .{});
     try loss.backward(&ctx);
     _ = try opt.clipGradNorm(&ctx, 1.0);          // after backward, before step
     try opt.step(&ctx);
@@ -217,7 +217,7 @@ is single-sequence, so accumulation IS their batching mechanism):
 for (0..accum_steps) |_| {                        // one scope PER micro-batch
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
-    const loss = try trainer.lossExt(&ctx, mb.inputs, mb.labels, .{
+    var loss = try trainer.lossExt(&ctx, mb.inputs, mb.labels, .{
         .reduction = .sum,                        // exact token weighting …
         .loss_scale = 1.0 / total_valid,          // … over the window (below)
     });

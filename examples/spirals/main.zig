@@ -153,7 +153,7 @@ fn trainStep(ctx: *ExecContext, model: *const Model, x: *const Tensor(.{ .batch,
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope); // releases the whole step's graph
     const logits = try forwardLogits(ctx, model, x);
-    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
+    var loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();
@@ -419,7 +419,7 @@ fn groupsDemo(
             const scope = run_ctx.openExecScope();
             defer run_ctx.closeExecScope(scope);
             const logits = try forwardLogits(run_ctx, model, run_x);
-            const loss = try logits.crossEntropy(run_ctx, .class, run_labels, .{});
+            var loss = try logits.crossEntropy(run_ctx, .class, run_labels, .{});
             try loss.backward(run_ctx);
             _ = try set.clipGradNorm(run_ctx, 1.0); // after backward, before step
             try set.step(run_ctx);

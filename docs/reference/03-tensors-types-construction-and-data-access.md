@@ -697,7 +697,7 @@ pub fn slice(self, ctx, spec) !Self  // multi-axis basic slicing over a per-tag 
 pub fn diagonal(self, ctx, comptime tag_a, comptime tag_b, comptime out_tag) !Tensor(...)
 pub fn trace(self, ctx, comptime tag_a, comptime tag_b) !Tensor(...)
 pub fn diag(self, ctx, comptime out_tags_spec) !Tensor(normalizeTags(out_tags_spec))
-pub fn nonzero(self, allocator: std.mem.Allocator) ![]usize
+pub fn nonzero(self, ctx) ![]usize  // host slice owned by the caller, freed with ctx.allocator
 pub fn indexAdd(self, ctx, comptime tag, indices: []const usize, update: *const Self) !Self
 pub fn takeAlongAxis(self, ctx, comptime tag, indices) !Self
 pub fn scatterAdd(self, ctx, comptime tag, indices, src: *const Self) !Self

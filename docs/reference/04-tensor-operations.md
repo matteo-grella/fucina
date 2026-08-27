@@ -53,17 +53,31 @@ Every operation below shares one contract, implemented by the shared tails
 - **Thread-safety.** A context is single-threaded at the API surface: run
   ops on one `ExecContext` from one thread ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)). Kernels parallelize
   internally through the context's work pool ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)).
+- **Name suffixes.** Three suffixes mark departures from the ownership
+  contract above, spelled in the name at every site: `*InPlace` mutates
+  `self`'s storage and returns nothing new; `take*` consumes a unique
+  (non-view) input tensor, which must not be used afterwards; `*Into`
+  writes into a caller-provided output instead of allocating. Everything
+  unsuffixed allocates and returns a new owned tensor.
 - **Option types.** Options are passed as literals, so their type names are
   rarely written out. The ones re-exported at the `fucina` root are
   `UnaryOp`, `Reduction`, `CrossEntropyOptions`, `StandardizeOptions`,
   `StandardizeAccumulation`, `StandardizeEpsMode`, `RouterTopKOptions`,
   `RopeMode`, `RopeTable`, `RopeTheta`, `MoeRhs`, `MoeBatchProfile`,
-  `PackedRhs`, `GatedOp`. The remaining option types
+  `PackedRhs`, `GatedOp`, `VarianceOptions`. The remaining option types
   named in this section (`CompareOp`, `MatmulKind`, `MseOptions`,
   `HuberOptions`, `BceOptions`, `KlDivOptions`, `LinearDistillOptions`,
   `SoftmaxExtOptions`, `NormOrder`) live in
   `src/exec.zig` and are reached through enum/struct literals at call sites
   (`.swiglu`, `.lt`, `.trans_b`, `.{ .reduction = .none }`).
+  A few option sets (`softmax`, `layerNorm`, the masked `sum`/`mean`/
+  `max`/`min`, `standardizeAxis`, `linearRecurrence`, `groupedAttention`)
+  are deliberately `anytype` rather than one struct type: they carry
+  caller-typed tensor operands (a mask, affine weights, an initial state,
+  each keeping its own tensor type and tags) or comptime tag fields, which
+  a single runtime struct cannot hold. They validate their fields at
+  comptime the same way (a misspelled field is a compile error naming the
+  op and the field).
 
 Snippets in this section are runnable test blocks and assume:
 
@@ -494,8 +508,9 @@ returns the scalar `Tensor(.{})`.
 - `sumMany(ctx, reduce_tags_spec)` — sums away several tags (innermost
   first); result tags `removeTags(tags, reduce_tags)`.
 - `sumAll(ctx)` — full reduction to `Tensor(.{})`; read with `item()`.
-- `variance(ctx, tag, ddof)` — `ddof: u1`: 0 = biased (LayerNorm
-  convention), 1 = Bessel-corrected (`torch.var` default). Differentiable.
+- `variance(ctx, tag, options)` — `options: VarianceOptions`:
+  `.{ .ddof = 0 }` = biased (LayerNorm convention), `.{}` (ddof 1) =
+  Bessel-corrected (`torch.var` default). Differentiable.
 - `cumsum(ctx, tag)` — inclusive prefix sum, shape-preserving;
   differentiable (gradient = reversed suffix sum). Both passes are serial
   per row by default, so results are bitwise deterministic for any thread
@@ -689,7 +704,7 @@ test "axis reductions and sumAll" {
     var s = try x.sum(&ctx, .col, .{}); // Tensor(.{ .row })
     defer s.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 3, 7 }, try s.dataConst());
-    var v = try x.variance(&ctx, .col, 0); // biased (ddof 0)
+    var v = try x.variance(&ctx, .col, .{ .ddof = 0 }); // biased
     defer v.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.25 }, try v.dataConst());
     var total = try x.sumAll(&ctx); // Tensor(.{}) scalar
@@ -1207,11 +1222,13 @@ backward — nothing extra is saved from the forward).
   Weight/bias are rank-1 `[tag_dim]` tensors, either tagged `.{tag}`
   (comptime-checked) or numeric-tag `Tensor(1)` values (`._0`; runtime
   length check).
-- `groupNorm(ctx, channel_tag, groups, eps, weight, bias)` — ggml GroupNorm
+- `groupNorm(ctx, channel_tag, groups, eps, options)` — ggml GroupNorm
   over rank-2 `[time, channel]` storage: per channel group, f64-accumulated
   mean and biased variance over all `time × (C/groups)` elements, eps inside
-  the sqrt, then the optional per-channel affine (`?*const Tensor(.{channel_tag})`,
-  independently optional) applied after normalization.
+  the sqrt, then the optional per-channel affine applied after
+  normalization (`options: GroupNormOptions(channel_tag)`: `.{}` plain, or
+  `.{ .weight = &w, .bias = &b }` with rank-1 `.{channel_tag}` tensors,
+  independently optional).
 - `standardizeAxis(ctx, tag, options)` — `(x − mean)/denom` over `tag`.
   `options` accepts every `exec.StandardizeOptions` field plus an optional
   `.valid_len` (unknown fields are compile errors): standardize only the
@@ -1914,7 +1931,7 @@ bullets).
   (overwrite zeroes `self`'s gradient at every written slot; on
   duplicates every writer receives the winning slot's gradient — the
   torch formula).
-- `nonzero(allocator)` — host-side `[]usize` of row-major nonzero flat
+- `nonzero(ctx)` — host-side `[]usize` of row-major nonzero flat
   indices ([§3.7](03-tensors-types-construction-and-data-access.md#37-views-and-structural-ops-srcagtensorzig-srctag_opszig-srcexecgather_scatterzig)); pairs with `gather`/`indexAdd`/`oneHot`.
 
 ```zig
@@ -2158,7 +2175,7 @@ test "bf16 forward ops compute through f32 and narrow once" {
     try std.testing.expectEqualSlices(fucina.Bf16, try reference.dataConst(), try activated.dataConst());
 
     // Widened reductions keep the f32 accumulator dtype, like sum/mean.
-    var spread = try half.variance(&ctx, .d, 0);
+    var spread = try half.variance(&ctx, .d, .{ .ddof = 0 });
     defer spread.deinit();
     comptime std.debug.assert(@TypeOf(spread).dtype == .f32);
 }

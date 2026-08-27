@@ -60,7 +60,7 @@ pub fn Ops(comptime Self: type) type {
         /// Drop the accumulated gradient (no-op for constants — and for
         /// f64, which carries no gradient slot at all). Training loops
         /// call this between steps so gradients don't accumulate across them.
-        pub fn zeroGrad(self: *const Self) void {
+        pub fn zeroGrad(self: *Self) void {
             if (comptime @FieldType(Self, "grad_state") != void) {
                 if (self.grad_state) |state| state.zeroGrad();
             }
@@ -85,7 +85,7 @@ pub fn Ops(comptime Self: type) type {
             return try Grad.constant(ctx, value);
         }
 
-        pub fn backward(self: *const Self, ctx: *ExecContext) !void {
+        pub fn backward(self: *Self, ctx: *ExecContext) !void {
             comptime if (dtype != .f32) @compileError("backward runs from an f32 tensor (16-bit tensors are leaves, never losses)");
             const state = self.grad_state orelse return error.NoGradientGraph;
             return core.backwardGradOne(ctx, state, &self.value);
@@ -98,7 +98,7 @@ pub fn Ops(comptime Self: type) type {
         /// (`error.ShapeMismatch`); it is read as a value, its own gradient
         /// state, if any, is ignored, and it replaces any gradient already
         /// accumulated on `self`.
-        pub fn backwardWithGrad(self: *const Self, ctx: *ExecContext, grad_output: *const Self) !void {
+        pub fn backwardWithGrad(self: *Self, ctx: *ExecContext, grad_output: *const Self) !void {
             comptime if (dtype != .f32) @compileError("backwardWithGrad runs from an f32 tensor (16-bit tensors are leaves, never losses)");
             const state = self.grad_state orelse return error.NoGradientGraph;
             // Checked here too so the error exit leaves `self`'s accumulated

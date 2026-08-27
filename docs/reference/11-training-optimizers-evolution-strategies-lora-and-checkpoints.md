@@ -51,7 +51,7 @@ test "one training step: forward, backward, clip, step, zero" {
         defer ctx.closeExecScope(scope);
         const z = try x.dot(&ctx, &w, .in);
         const logits = try z.add(&ctx, &b);
-        const loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
+        var loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
         try loss.backward(&ctx);
         _ = try opt.clipGradNorm(&ctx, 1.0); // after backward, before step
         try opt.step(&ctx);
@@ -431,7 +431,7 @@ test "param groups under one OptimizerSet with a warmup-cosine schedule" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const logits = try (try x.dot(&ctx, &w, .in)).add(&ctx, &b);
-        const loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
+        var loss = try logits.crossEntropy(&ctx, .class, &labels, .{});
         try loss.backward(&ctx);
         _ = try set.clipGradNorm(&ctx, 1.0); // GLOBAL norm across both groups
         try set.step(&ctx);
@@ -554,7 +554,7 @@ test "optimizer state: name-matched slots round-trip; structural config is valid
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try w.sumAll(&ctx);
+        var loss = try w.sumAll(&ctx);
         try loss.backward(&ctx);
         try opt.step(&ctx); // populates the momentum buffer
         opt.zeroGrad();

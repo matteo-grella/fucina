@@ -241,7 +241,7 @@ const Model = struct {
         self.b3.deinit();
     }
 
-    fn zeroGrad(self: *const Model) void {
+    fn zeroGrad(self: *Model) void {
         self.w1.zeroGrad();
         self.b1.zeroGrad();
         self.w2.zeroGrad();
@@ -400,7 +400,7 @@ test "checkpointed middle layer matches plain backward bitwise (exec scope)" {
         const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
         const a2 = try Blocks.layer2(&ctx, &a1, &model.w2, &model.b2);
         const logits = try Blocks.layer3(&ctx, &a2, &model.w3, &model.b3);
-        const loss = try logits.sumAll(&ctx);
+        var loss = try logits.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :plain .{ try snapshotGrads(&ctx, &model, &x), loss_value };
@@ -416,7 +416,7 @@ test "checkpointed middle layer matches plain backward bitwise (exec scope)" {
         const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
         const h2 = try checkpoint(&ctx, Blocks.layer2, .{ &a1, &model.w2, &model.b2 });
         const logits = try Blocks.layer3(&ctx, &h2, &model.w3, &model.b3);
-        const loss = try logits.sumAll(&ctx);
+        var loss = try logits.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ck .{ try snapshotGrads(&ctx, &model, &x), loss_value };
@@ -448,7 +448,7 @@ test "tuple-form block matches the per-parameter block bitwise" {
         const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
         const h2 = try checkpoint(&ctx, Blocks.layer2, .{ &a1, &model.w2, &model.b2 });
         const logits = try Blocks.layer3(&ctx, &h2, &model.w3, &model.b3);
-        const loss = try logits.sumAll(&ctx);
+        var loss = try logits.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ref .{ try snapshotGrads(&ctx, &model, &x), loss_value };
@@ -466,7 +466,7 @@ test "tuple-form block matches the per-parameter block bitwise" {
         const a1 = try Blocks.layer1(&ctx, &x, &model.w1, &model.b1);
         const h2 = try checkpoint(&ctx, Blocks.layer2Tuple, .{ &a1, &model.w2, &model.b2 });
         const logits = try Blocks.layer3(&ctx, &h2, &model.w3, &model.b3);
-        const loss = try logits.sumAll(&ctx);
+        var loss = try logits.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :tup .{ try snapshotGrads(&ctx, &model, &x), loss_value };
@@ -505,7 +505,7 @@ test "checkpointed scalar-output block matches plain backward bitwise" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try Blocks.scalarHead(&ctx, &x, &w, &b);
-        const loss = try h.scale(&ctx, 3);
+        var loss = try h.scale(&ctx, 3);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -525,7 +525,7 @@ test "checkpointed scalar-output block matches plain backward bitwise" {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try checkpoint(&ctx, Blocks.scalarHead, .{ &x, &w, &b });
-        const loss = try h.scale(&ctx, 3);
+        var loss = try h.scale(&ctx, 3);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -565,7 +565,7 @@ test "checkpointed single-element rank-2 output matches plain backward bitwise" 
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try Blocks.onePointLayer(&ctx, &x, &w);
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -582,7 +582,7 @@ test "checkpointed single-element rank-2 output matches plain backward bitwise" 
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try checkpoint(&ctx, Blocks.onePointLayer, .{ &x, &w });
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -753,7 +753,7 @@ test "chained checkpoints with a multi-consumer output match plain backward" {
         const lin = try a2.sumAll(&ctx);
         const sq = try a2.mul(&ctx, &a2);
         const quad = try sq.sumAll(&ctx);
-        const loss = try lin.add(&ctx, &quad);
+        var loss = try lin.add(&ctx, &quad);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :plain .{ try snapshotGradsTwoLayers(&ctx, &model, &x), loss_value };
@@ -771,7 +771,7 @@ test "chained checkpoints with a multi-consumer output match plain backward" {
         const lin = try h2.sumAll(&ctx);
         const sq = try h2.mul(&ctx, &h2);
         const quad = try sq.sumAll(&ctx);
-        const loss = try lin.add(&ctx, &quad);
+        var loss = try lin.add(&ctx, &quad);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ck .{ try snapshotGradsTwoLayers(&ctx, &model, &x), loss_value };
@@ -816,7 +816,7 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
             h = try Blocks.square(&ctx, &h, &w);
         }
         plain_entries = ctx.scopes.entries.items.len - base;
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -842,7 +842,7 @@ test "checkpointing a deep chain retains materially fewer scope entries" {
             h = try checkpoint(&ctx, Blocks.square, .{ &h, &w });
         }
         ck_entries = ctx.scopes.entries.items.len - base;
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -884,7 +884,7 @@ fn trainStep(
     else
         try Blocks.layer2(ctx, &a1, &model.w2, &model.b2);
     const logits = try Blocks.layer3(ctx, &a2, &model.w3, &model.b3);
-    const loss = try logits.crossEntropy(ctx, .class, labels, .{});
+    var loss = try logits.crossEntropy(ctx, .class, labels, .{});
     try loss.backward(ctx);
     try opt.step(ctx);
     opt.zeroGrad();
@@ -1004,7 +1004,7 @@ test "recompute error propagates from backward without leaking" {
     const scope = ctx.openExecScope();
     defer ctx.closeExecScope(scope);
     const h = try checkpoint(&ctx, Hostile.block, .{&x});
-    const loss = try h.sumAll(&ctx);
+    var loss = try h.sumAll(&ctx);
 
     Hostile.fail_recompute = true;
     defer Hostile.fail_recompute = false;
@@ -1047,7 +1047,7 @@ test "nested checkpoint recomputes on its own frame and matches plain backward b
         // The outer recompute re-creates the inner checkpoint node, whose
         // backward runs a recompute of its own inside the outer frame.
         const h = if (which == 0) try checkpoint(&ctx, Nested.outer, .{&x}) else try Nested.plain(&ctx, &x);
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         grads[which] = try gradData(&ctx, &x);
         built = which + 1;
@@ -1096,7 +1096,7 @@ test "checkpoint recomputes on two contexts from two threads run concurrently an
                 const scope = ctx.openExecScope();
                 defer ctx.closeExecScope(scope);
                 const h = try checkpoint(&ctx, block, .{&x});
-                const loss = try h.sumAll(&ctx);
+                var loss = try h.sumAll(&ctx);
                 try loss.backward(&ctx);
                 var grad = (try x.grad(&ctx)) orelse return error.MissingGrad;
                 defer grad.deinit();
@@ -1146,7 +1146,7 @@ test "checkpointed dropout block matches the un-checkpointed block bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try Blocks.dropoutLayer1(&ctx, &x, &w, &b);
         plain_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -1172,7 +1172,7 @@ test "checkpointed dropout block matches the un-checkpointed block bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try checkpoint(&ctx, Blocks.dropoutLayer1, .{ &x, &w, &b });
         ck_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -1219,7 +1219,7 @@ test "checkpointWithContext frozen f16 weight matches plain backward bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try ContextBlocks.frozenLayer(&ctx, &frozen, &x);
         plain_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :plain .{ try gradData(&ctx, &x), loss_value };
@@ -1237,7 +1237,7 @@ test "checkpointWithContext frozen f16 weight matches plain backward bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try checkpointWithContext(&ctx, ContextBlocks.frozenLayer, &frozen, .{&x});
         ck_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ck .{ try gradData(&ctx, &x), loss_value };
@@ -1278,7 +1278,7 @@ test "checkpointWithContext tuple-form block matches the per-parameter form bitw
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try checkpointWithContext(&ctx, ContextBlocks.frozenLayer, &frozen, .{&x});
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ref .{ try gradData(&ctx, &x), loss_value };
@@ -1291,7 +1291,7 @@ test "checkpointWithContext tuple-form block matches the per-parameter form bitw
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
         const h = try checkpointWithContext(&ctx, ContextBlocks.frozenLayerTuple, &frozen, .{&x});
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :tup .{ try gradData(&ctx, &x), loss_value };
@@ -1335,7 +1335,7 @@ test "checkpointWithContext extra with slice and config fields matches plain bit
         defer ctx.closeExecScope(scope);
         const h = try ContextBlocks.biasedLayer(&ctx, biased, &x);
         plain_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :plain .{ try gradData(&ctx, &x), loss_value };
@@ -1351,7 +1351,7 @@ test "checkpointWithContext extra with slice and config fields matches plain bit
         defer ctx.closeExecScope(scope);
         const h = try checkpointWithContext(&ctx, ContextBlocks.biasedLayer, biased, .{&x});
         ck_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ck .{ try gradData(&ctx, &x), loss_value };
@@ -1402,7 +1402,7 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
             h = try ContextBlocks.square(&ctx, &chain_ctx, &h);
         }
         plain_entries = ctx.scopes.entries.items.len - base;
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :plain .{ try gradData(&ctx, &x), loss_value };
@@ -1423,7 +1423,7 @@ test "checkpointing a deep context-block chain retains materially fewer scope en
             h = try checkpointWithContext(&ctx, ContextBlocks.square, &chain_ctx, .{&h});
         }
         ck_entries = ctx.scopes.entries.items.len - base;
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         break :ck .{ try gradData(&ctx, &x), loss_value };
@@ -1478,7 +1478,7 @@ test "context-block failure propagates from forward and recompute without leakin
     // the SAME stored `extra` and hits the (now armed) failure flag.
     fail = false;
     const h = try checkpointWithContext(&ctx, Hostile.block, hostile, .{&x});
-    const loss = try h.sumAll(&ctx);
+    var loss = try h.sumAll(&ctx);
     fail = true;
     try std.testing.expectError(error.InducedContextBlockFailure, loss.backward(&ctx));
 }
@@ -1513,7 +1513,7 @@ test "context-block dropout with seed via extra replays bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try ContextBlocks.dropoutLayer(&ctx, drop, &x, &w, &b);
         plain_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);
@@ -1539,7 +1539,7 @@ test "context-block dropout with seed via extra replays bitwise" {
         defer ctx.closeExecScope(scope);
         const h = try checkpointWithContext(&ctx, ContextBlocks.dropoutLayer, drop, .{ &x, &w, &b });
         ck_out = try allocator.dupe(f32, try h.dataConst());
-        const loss = try h.sumAll(&ctx);
+        var loss = try h.sumAll(&ctx);
         try loss.backward(&ctx);
         const loss_value = try loss.item();
         const gx = try gradData(&ctx, &x);

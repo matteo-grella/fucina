@@ -316,7 +316,7 @@ fn goldenGate(checkpoint_layers: bool) !void {
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const loss = try trainer.loss(&ctx, evidence, inputs, labels);
+        var loss = try trainer.loss(&ctx, evidence, inputs, labels);
         loss_value = try loss.item();
         try loss.backward(&ctx);
     }
@@ -449,7 +449,7 @@ test "SHINE packed step: two copies of one example equal the single-example step
     {
         const scope = ctx.openExecScope();
         defer ctx.closeExecScope(scope);
-        const l = try solo.loss(&ctx, evidence, inputs, labels);
+        var l = try solo.loss(&ctx, evidence, inputs, labels);
         solo_loss = try l.item();
         try l.backward(&ctx);
     }
@@ -458,7 +458,7 @@ test "SHINE packed step: two copies of one example equal the single-example step
         {
             const scope = ctx.openExecScope();
             defer ctx.closeExecScope(scope);
-            const l = try variant.lossPacked(&ctx, &.{ example, example });
+            var l = try variant.lossPacked(&ctx, &.{ example, example });
             variant_loss = try l.item();
             try l.backward(&ctx);
         }
