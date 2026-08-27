@@ -1692,6 +1692,34 @@ test "wave-split acquire: worker read failures surface at finish and release sta
     try std.testing.expectError(error.UnexpectedEndOfFile, store2.acquire(0, &.{0}));
 }
 
+test "abandoned wave-split acquire: unread work slots never promote into the LRU" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var fx: Fixture = undefined;
+    try fx.init(allocator, 1); // cap 1: one bad promotion would poison the whole tier
+    defer fx.deinit();
+
+    // Abandon between start and finish (the failed-op guard path): release
+    // joins the in-flight reads, and the un-finished work slots still carry
+    // invalid_eid — promoting one would evict a real expert for garbage and
+    // leave a slot whose eid the heat victim scan cannot index.
+    _ = try fx.store.acquireStart(0, &.{0});
+    fx.store.release(0);
+    const ls = &fx.store.layers[0];
+    for (ls.slots[0..ls.n_slots]) |*slot| {
+        try std.testing.expect(slot.eid != std.math.maxInt(u32));
+    }
+
+    // Follow-on evicting cycles walk the release-time heat victim scan over
+    // the promoted slots; decode stays bit-exact vs resident.
+    try fx.expectDecodeMatches(&ctx, &.{ 1, 2 }, &.{ 0.6, 0.4 });
+    try fx.expectDecodeMatches(&ctx, &.{ 3, 4 }, &.{ 0.6, 0.4 });
+    try fx.expectDecodeMatches(&ctx, &.{0}, &.{1.0});
+}
+
 test "routing trace: request order round-trips through the sidecar" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;

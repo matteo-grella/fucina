@@ -31,602 +31,40 @@
 //! plane `p` at offset `p * plane_bytes`). Kernels see plain byte views
 //! and `acquire` takes opaque indices. Dense/cyclic weight offload is out
 //! of scope: LRU under cyclic access degenerates to zero hits.
+//!
+//! Layout: this file is the facade -- it owns the store state, the mutex,
+//! and the acquire/release contract above; the concern bodies live in
+//! `store/` (`io` platform shims + the error set, `geometry` formats and
+//! layout math, `tiers` slots/LRU+heat/pinned/staging/L2, `policy`
+//! routing/repin/budget, `persist` the FUCEXPT1/FUCTRCE1 formats).
 const std = @import("std");
-const builtin = @import("builtin");
 const dtype_mod = @import("../dtype.zig");
-const DType = dtype_mod.DType;
 const backend_mod = @import("../backend.zig");
 const thread = @import("../thread.zig");
-const parallel = @import("../parallel.zig");
-const tuning = @import("../tuning.zig");
 
-/// `FUCINA_MOE_LRU=1` forces the pure-LRU victim scan (A/B on one binary);
-/// read once, cached (`tuning.Table.moe_lru`).
-fn envPlainLru() bool {
-    return tuning.get().moe_lru;
-}
+const io = @import("io.zig");
+const geometry = @import("geometry.zig");
+const tiers = @import("tiers.zig");
+const policy = @import("policy.zig");
+const persist = @import("persist.zig");
 
 const Allocator = std.mem.Allocator;
 const qm = backend_mod.quantized_matmul;
+const fd_t = io.fd_t;
+const ProjGeometry = geometry.ProjGeometry;
+const Slot = tiers.Slot;
+const StageMeta = tiers.StageMeta;
+const PilotReq = tiers.PilotReq;
+const MirrorSet = policy.MirrorSet;
+const invalid_eid = tiers.invalid_eid;
+const slab_align = tiers.slab_align;
 
-pub const Error = error{
-    LayerAlreadyRegistered,
-    LayerNotRegistered,
-    InvalidExpertGeometry,
-    StoreNotFinalized,
-    ExpertFileOpenFailed,
-    ExpertFileReadFailed,
-    UsageFileWriteFailed,
-    UnexpectedEndOfFile,
-    L2NoStripeableLayers,
-} || Allocator.Error;
-
-// ---- platform I/O shims -------------------------------------------------
-// The streamed tier wants positional reads and readahead advice without an
-// `std.Io` handle (the MoE ops run with `io == null` in production decode).
-// Linux goes straight to the syscall layer (no libc requirement); everything
-// else uses libc, which is always linked on the Apple targets.
-
-const fd_t = std.posix.fd_t;
-
-fn openReadOnly(allocator: Allocator, path: []const u8) Error!fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-    switch (builtin.os.tag) {
-        .linux => {
-            const linux = std.os.linux;
-            const rc = linux.openat(linux.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-            if (linux.errno(rc) != .SUCCESS) return Error.ExpertFileOpenFailed;
-            return @intCast(rc);
-        },
-        else => {
-            const rc = std.c.open(path_z, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
-            if (rc < 0) return Error.ExpertFileOpenFailed;
-            return rc;
-        },
-    }
-}
-
-fn closeFd(fd: fd_t) void {
-    switch (builtin.os.tag) {
-        .linux => _ = std.os.linux.close(fd),
-        else => _ = std.c.close(fd),
-    }
-}
-
-/// Monotonic nanoseconds for the read-time stat (the exec ops' clock rides
-/// on `std.Io`, which the MoE decode path legitimately runs without).
-fn monotonicNanos() ?u64 {
-    switch (builtin.os.tag) {
-        .linux => {
-            var ts: std.os.linux.timespec = undefined;
-            if (std.os.linux.clock_gettime(.MONOTONIC, &ts) != 0) return null;
-            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-        },
-        else => {
-            var ts: std.c.timespec = undefined;
-            if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return null;
-            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-        },
-    }
-}
-
-/// Short sleep for the pilot thread's empty-ring wait (no std.Thread.sleep
-/// in this std; the syscall detour is fine at a 200 µs cadence).
-fn sleepMicros(us: u64) void {
-    switch (builtin.os.tag) {
-        .linux => {
-            var req = std.os.linux.timespec{ .sec = @intCast(us / 1_000_000), .nsec = @intCast((us % 1_000_000) * 1000) };
-            _ = std.os.linux.nanosleep(&req, null);
-        },
-        else => {
-            const c = struct {
-                extern "c" fn nanosleep(req: *const std.c.timespec, rem: ?*std.c.timespec) c_int;
-            };
-            var req = std.c.timespec{ .sec = @intCast(us / 1_000_000), .nsec = @intCast((us % 1_000_000) * 1000) };
-            _ = c.nanosleep(&req, null);
-        },
-    }
-}
-
-fn preadOnce(fd: fd_t, buf: []u8, offset: u64) Error!usize {
-    switch (builtin.os.tag) {
-        .linux => {
-            const linux = std.os.linux;
-            const rc = linux.pread(fd, buf.ptr, buf.len, @intCast(offset));
-            if (linux.errno(rc) != .SUCCESS) return Error.ExpertFileReadFailed;
-            return rc;
-        },
-        else => {
-            const rc = std.c.pread(fd, buf.ptr, buf.len, @intCast(offset));
-            if (rc < 0) return Error.ExpertFileReadFailed;
-            return @intCast(rc);
-        },
-    }
-}
-
-/// Full positional write (the L2-tier builder's `pwrite` mirror of
-/// `preadOnce`): loops until every byte lands or the write errors.
-fn pwriteFullFd(fd: fd_t, buf: []const u8, offset: u64) Error!void {
-    var done: usize = 0;
-    while (done < buf.len) {
-        switch (builtin.os.tag) {
-            .linux => {
-                const linux = std.os.linux;
-                const rc = linux.pwrite(fd, buf.ptr + done, buf.len - done, @intCast(offset + done));
-                if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
-                done += rc;
-            },
-            else => {
-                const rc = std.c.pwrite(fd, buf.ptr + done, buf.len - done, @intCast(offset + done));
-                if (rc < 0) return Error.UsageFileWriteFailed;
-                done += @intCast(rc);
-            },
-        }
-    }
-}
-
-/// Ask the OS not to page-cache reads on `fd` (macOS `F_NOCACHE`; fcntl.h
-/// value 48 — the `F_RDADVISE` shim above uses the same raw-constant
-/// pattern). Best effort: a failure just leaves normal caching on.
-fn setUncached(fd: fd_t) void {
-    if (builtin.os.tag == .macos) {
-        _ = std.c.fcntl(fd, 48, @as(c_int, 1));
-    }
-}
-
-fn openWriteTrunc(allocator: Allocator, path: []const u8) Error!fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-    switch (builtin.os.tag) {
-        .linux => {
-            const linux = std.os.linux;
-            const rc = linux.openat(linux.AT.FDCWD, path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
-            if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
-            return @intCast(rc);
-        },
-        else => {
-            const rc = std.c.open(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(c_uint, 0o644));
-            if (rc < 0) return Error.UsageFileWriteFailed;
-            return rc;
-        },
-    }
-}
-
-fn writeFull(fd: fd_t, bytes: []const u8) Error!void {
-    var done: usize = 0;
-    while (done < bytes.len) {
-        switch (builtin.os.tag) {
-            .linux => {
-                const linux = std.os.linux;
-                const rc = linux.write(fd, bytes.ptr + done, bytes.len - done);
-                if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
-                done += rc;
-            },
-            else => {
-                const rc = std.c.write(fd, bytes.ptr + done, bytes.len - done);
-                if (rc < 0) return Error.UsageFileWriteFailed;
-                done += @intCast(rc);
-            },
-        }
-    }
-}
-
-fn renamePath(allocator: Allocator, old: []const u8, new: []const u8) Error!void {
-    const old_z = try allocator.dupeZ(u8, old);
-    defer allocator.free(old_z);
-    const new_z = try allocator.dupeZ(u8, new);
-    defer allocator.free(new_z);
-    switch (builtin.os.tag) {
-        .linux => {
-            const linux = std.os.linux;
-            const rc = linux.renameat(linux.AT.FDCWD, old_z, linux.AT.FDCWD, new_z);
-            if (linux.errno(rc) != .SUCCESS) return Error.UsageFileWriteFailed;
-        },
-        else => {
-            if (std.c.rename(old_z, new_z) != 0) return Error.UsageFileWriteFailed;
-        },
-    }
-}
-
-/// Whole small file into an allocated buffer, or null on any failure. Capped
-/// (histograms are tens of KB) so a bogus path can't balloon memory.
-fn readWholeFile(allocator: Allocator, path: []const u8) ?[]u8 {
-    const max_bytes = 16 << 20;
-    const fd = openReadOnly(allocator, path) catch return null;
-    defer closeFd(fd);
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(allocator);
-    var chunk: [65536]u8 = undefined;
-    while (bytes.items.len <= max_bytes) {
-        const n = preadOnce(fd, &chunk, bytes.items.len) catch return null;
-        if (n == 0) return bytes.toOwnedSlice(allocator) catch null;
-        bytes.appendSlice(allocator, chunk[0..n]) catch return null;
-    }
-    return null;
-}
-
-/// Quantized formats an expert stack may stream in: the K-quant family
-/// every real MoE GGUF uses (matching `MoeRhs`'s resident arms). Every
-/// member but `tq2_0_fx4` is spelled exactly like its `DType` tag and
-/// derives its block geometry from `dtype.block_formats`; this enum is the
-/// one place the streamable subset is listed (`fromDType`, `streamable`).
-pub const StreamedQuant = enum {
-    q4_k,
-    q5_k,
-    q6_k,
-    q8_0,
-    tq2_0,
-    q2_k,
-    iq2_xxs,
-    iq3_xxs,
-    iq2_s,
-    iq4_xs,
-    q3_k,
-    mxfp4,
-    /// Tie-fitted K=2 PTQTP pre-folded on disk (`gguf.GgmlType.tq2_0_fx4`):
-    /// one contiguous pack per expert projection (single pread per miss,
-    /// slab bytes == file bytes, L2-stripeable), served by the one-pass
-    /// folded kernel. Resident MoE and dense loaders carry the same format
-    /// (docs/PTQTP.md, "Native folded expert format"). Not a `DType`: its
-    /// 520-byte block spans four columns, outside the one-row block
-    /// contract of `dtype.block_formats`.
-    tq2_0_fx4,
-
-    comptime {
-        for (@typeInfo(StreamedQuant).@"enum".fields) |field| {
-            if (std.mem.eql(u8, field.name, "tq2_0_fx4")) continue;
-            if (!@hasField(DType, field.name))
-                @compileError("StreamedQuant." ++ field.name ++ " must be spelled like its DType tag");
-        }
-    }
-
-    /// The streamed format for a block dtype, or null when expert stacks
-    /// of that dtype are not streamable.
-    pub fn fromDType(dt: DType) ?StreamedQuant {
-        switch (dt) {
-            inline else => |tag| {
-                if (comptime @hasField(StreamedQuant, @tagName(tag))) return @field(StreamedQuant, @tagName(tag));
-                return null;
-            },
-        }
-    }
-
-    pub fn streamable(dt: DType) bool {
-        return fromDType(dt) != null;
-    }
-
-    /// The `DType` this format stores; null for the folded pack.
-    pub fn dtype(self: StreamedQuant) ?DType {
-        return switch (self) {
-            .tq2_0_fx4 => null,
-            inline else => |tag| @field(DType, @tagName(tag)),
-        };
-    }
-
-    /// Bytes per weight block as the slab accounts for them.
-    pub fn blockSize(self: StreamedQuant) usize {
-        return switch (self) {
-            // Amortized per-column bytes: the physical 520-byte
-            // `BlockTQ2_0Foldedx4` spans FOUR columns' 256-element blocks,
-            // so per column it costs 130; geometry math (rows x bpc x
-            // blockSize) then yields exact byte counts (out_dim % 4 == 0
-            // enforced in ProjGeometry.init).
-            .tq2_0_fx4 => @sizeOf(qm.BlockTQ2_0Foldedx4) / 4,
-            inline else => |tag| dtype_mod.blockByteSize(@field(DType, @tagName(tag))),
-        };
-    }
-
-    /// Weight blocks per row for a row of `in_dim` inputs.
-    pub fn blocksPerColumn(self: StreamedQuant, in_dim: usize) Error!usize {
-        const block_len: usize = switch (self) {
-            // The folded pack keeps TQ2_0's 256-element block along k.
-            .tq2_0_fx4 => dtype_mod.blockSize(.tq2_0),
-            inline else => |tag| dtype_mod.blockSize(@field(DType, @tagName(tag))),
-        };
-        if (in_dim == 0 or in_dim % block_len != 0) return Error.InvalidExpertGeometry;
-        return in_dim / block_len;
-    }
-};
-
-/// The three projections of one MoE FFN layer, in slab order.
-pub const Proj = enum(u2) { gate = 0, up = 1, down = 2 };
-
-/// One projection's stacked expert tensor as it sits in the GGUF file:
-/// expert-major contiguous, so expert `e` occupies the byte range
-/// `[file_offset + e*expert_bytes, +expert_bytes)`. PTQTP expert stacks
-/// (docs/PTQTP.md) are `plane_count` such tensors — the `<name>.ptqtpK`
-/// siblings, each plane-major on disk exactly like the dense plane
-/// convention; the store gathers one expert's K plane row-blocks into a
-/// contiguous slab section (expert-major planes in RAM), staying pure byte
-/// plumbing either way.
-pub const ProjSpec = struct {
-    quant: StreamedQuant,
-    /// Which split part (file) holds the tensor; 0 for single-file GGUFs.
-    part: u16 = 0,
-    /// Absolute offset of the tensor's data within its part on disk
-    /// (`gguf.File.partDataOffset(part) + TensorInfo.offset`).
-    file_offset: u64,
-    /// One plane tensor's bytes — all planes are identically sized
-    /// (validated against `n_expert * plane_bytes` per plane).
-    byte_len: usize,
-    in_dim: usize,
-    out_dim: usize,
-    /// Trit-plane count: 1 for every ordinary single-tensor projection;
-    /// 2 or 3 for PTQTP stacks (tq2_0 only), whose plane 0 sits at
-    /// `file_offset` and planes 1..2 at `plane_offsets`.
-    plane_count: u8 = 1,
-    /// Absolute on-disk offsets of planes 1 and 2 within `part`; read only
-    /// when `plane_count` exceeds 1.
-    plane_offsets: [2]u64 = .{ 0, 0 },
-    /// Tie-fitted K=2 PTQTP only (docs/PTQTP.md): the fill folds the two
-    /// plane row-blocks into the 4-bit column-interleaved pack, so the slab
-    /// section serves the one-pass folded kernel instead of two plane
-    /// passes. Disk layout is unchanged (still two plane reads per expert);
-    /// the fold happens in memory on the way into the slab. Requires
-    /// `plane_count == 2`, `quant == .tq2_0`, and `out_dim % 4 == 0`.
-    fold: bool = false,
-};
-
-const ProjGeometry = struct {
-    quant: StreamedQuant,
-    part: u16,
-    /// Per-plane tensor base offsets; entries past `plane_count` unused.
-    plane_offsets: [3]u64,
-    in_dim: usize,
-    out_dim: usize,
-    blocks_per_column: usize,
-    plane_count: usize,
-    /// One plane's bytes for one expert.
-    plane_bytes: usize,
-    /// One expert's slab section: `plane_count * plane_bytes`.
-    expert_bytes: usize,
-    /// Fill-time fold into the 4-bit pack (ProjSpec.fold): the folded
-    /// blocks fit inside the same section (520 vs 528 bytes per 4-column
-    /// group), so slab geometry is unchanged.
-    fold: bool,
-
-    fn init(spec: ProjSpec, n_expert: usize) Error!ProjGeometry {
-        if (spec.plane_count == 0 or spec.plane_count > 3) return Error.InvalidExpertGeometry;
-        // Multi-plane is the PTQTP tq2_0 container only — the MoE dispatch
-        // interprets a >1 plane slab as summed ternary planes.
-        if (spec.plane_count > 1 and spec.quant != .tq2_0) return Error.InvalidExpertGeometry;
-        if (spec.fold and (spec.plane_count != 2 or spec.quant != .tq2_0 or spec.out_dim % 4 != 0))
-            return Error.InvalidExpertGeometry;
-        // The native pre-folded pack: one plane by definition (the fold is
-        // on disk), never fill-folded, 4-column blocks need out_dim % 4.
-        if (spec.quant == .tq2_0_fx4 and (spec.plane_count != 1 or spec.fold or spec.out_dim % 4 != 0))
-            return Error.InvalidExpertGeometry;
-        const bpc = try spec.quant.blocksPerColumn(spec.in_dim);
-        const row_bytes = std.math.mul(usize, bpc, spec.quant.blockSize()) catch return Error.InvalidExpertGeometry;
-        const plane_bytes = std.math.mul(usize, spec.out_dim, row_bytes) catch return Error.InvalidExpertGeometry;
-        const expert_bytes = std.math.mul(usize, plane_bytes, spec.plane_count) catch return Error.InvalidExpertGeometry;
-        const total = std.math.mul(usize, plane_bytes, n_expert) catch return Error.InvalidExpertGeometry;
-        if (total != spec.byte_len or plane_bytes == 0) return Error.InvalidExpertGeometry;
-        return .{
-            .quant = spec.quant,
-            .part = spec.part,
-            .plane_offsets = .{ spec.file_offset, spec.plane_offsets[0], spec.plane_offsets[1] },
-            .in_dim = spec.in_dim,
-            .out_dim = spec.out_dim,
-            .blocks_per_column = bpc,
-            .plane_count = spec.plane_count,
-            .plane_bytes = plane_bytes,
-            .expert_bytes = expert_bytes,
-            .fold = spec.fold,
-        };
-    }
-
-    fn planeFileOffset(self: *const ProjGeometry, eid: usize, plane: usize) u64 {
-        return self.plane_offsets[plane] + @as(u64, eid) * self.plane_bytes;
-    }
-};
-
-/// Block slabs start page-aligned (16 KiB covers Apple Silicon — a superset
-/// of every kernel-load alignment need, K-quant blocks themselves only being
-/// 2-byte aligned): uncached reads (F_NOCACHE) into sub-page-aligned buffers
-/// take the kernel's bounce path; page-aligned slabs keep the DMA fast path.
-const slab_align = 16384;
-const invalid_eid = std.math.maxInt(u32);
-
-/// One expert prefetch request for the pilot's I/O thread (SPSC ring
-/// entry). The worker LOADS the expert into a staging slot — true
-/// asynchronous prefetch, not kernel advice; a lost request is not an
-/// error (staging is advisory, `acquire` always falls back to its own
-/// synchronous read).
-const PilotReq = struct { layer_i: u32, eid: u32 };
-const pilot_ring_cap = 4096;
-
-/// One extra full copy of the model (same split parts, another drive) and
-/// its relative read weight (the primary's weight is 1).
-const MirrorSet = struct { fds: []fd_t, weight: f32 };
-
-/// Staging-slot lifecycle (`stage_mutex` guards every transition; the slab
-/// is worker-owned while `.loading`, so neither consume nor reclaim may
-/// touch it until `.ready`).
-const StageState = enum(u8) { empty, loading, ready };
-const StageMeta = struct { layer_i: u32 = 0, eid: u32 = invalid_eid, state: StageState = .empty, stamp: u64 = 0 };
-
-/// One cached expert: a single slab holding its gate+up+down blocks (loaded
-/// with one coalesced logical fetch), stamped for
-/// LRU. Slots inside a layer all share that layer's slab size; the shared
-/// working-set slots are re-checked per use because layers may differ.
-const Slot = struct {
-    eid: u32 = invalid_eid,
-    used: u64 = 0,
-    slab: []align(slab_align) u8 = &.{},
-
-    fn ensureCapacity(self: *Slot, allocator: Allocator, bytes: usize) !void {
-        if (self.slab.len >= bytes) return;
-        if (self.slab.len > 0) allocator.free(self.slab);
-        self.slab = &.{};
-        self.slab = try allocator.alignedAlloc(u8, comptime std.mem.Alignment.fromByteUnits(slab_align), bytes);
-    }
-
-    fn deinit(self: *Slot, allocator: Allocator) void {
-        if (self.slab.len > 0) allocator.free(self.slab);
-        self.* = undefined;
-    }
-};
-
-pub const LayerState = struct {
-    projs: [3]ProjGeometry,
-    n_expert: usize,
-    /// Per-expert slab layout: projection `p`'s blocks start at `proj_off[p]`.
-    proj_off: [3]usize,
-    slab_bytes: usize,
-    /// Slab-native layer (`addLayerSlab`): the on-disk record IS the RAM
-    /// slab, byte for byte — expert `e` occupies
-    /// `[slab_file_offset + e*slab_bytes, +slab_bytes)` in `slab_part` and
-    /// a miss is ONE contiguous pread (three per-projection reads
-    /// otherwise). The per-projection ProjGeometry stays authoritative for
-    /// serving; only the read path changes.
-    slab_file_offset: ?u64 = null,
-    slab_part: u16 = 0,
-    /// LRU tier (`cap` entries; slabs allocated on first promotion).
-    slots: []Slot = &.{},
-    n_slots: usize = 0,
-    /// Pinned hot tier: experts selected from the persistent usage history at
-    /// finalize (and adapted by `repinPass`); checked before the LRU, never
-    /// evicted by promotions.
-    pinned: []Slot = &.{},
-    /// Resolved pointer per (expert, projection), valid between acquire and
-    /// release for the acquired experts only.
-    resolved: [][3]?[*]const u8 = &.{},
-    /// Persistent routing histogram (one count per routed pair), the raw
-    /// signal for usage-driven pinning. Never decayed.
-    usage: []u64 = &.{},
-    /// Recent-routing heat for live pin adaptation; halved every
-    /// `repinPass` so the pinned tier follows the current workload while
-    /// `usage` keeps the long-term history.
-    heat: []u32 = &.{},
-    /// Pilot prediction marks (epoch-stamped): `pred_marks[e] == pred_epoch`
-    /// means expert `e` was predicted for this layer's next acquire; the
-    /// acquire scores recall and bumps `pred_scored`.
-    pred_marks: []u32 = &.{},
-    pred_epoch: u32 = 0,
-    pred_scored: u32 = 0,
-
-    fn expertSlabOffsets(projs: [3]ProjGeometry) struct { off: [3]usize, total: usize } {
-        var off: [3]usize = undefined;
-        var at: usize = 0;
-        for (projs, 0..) |g, p| {
-            at = std.mem.alignForward(usize, at, slab_align);
-            off[p] = at;
-            at += g.expert_bytes;
-        }
-        return .{ .off = off, .total = std.mem.alignForward(usize, at, slab_align) };
-    }
-
-    fn isPinned(self: *const LayerState, eid: u32) bool {
-        for (self.pinned) |*slot| {
-            if (slot.eid == eid) return true;
-        }
-        return false;
-    }
-};
-
-/// Pick one pinned slot to replace from recent routing heat: the coldest
-/// pinned expert vs the hottest unpinned one. The fixed +4 margin handles
-/// tiny samples; the 25% margin prevents ping-pong (tier hysteresis).
-fn tierPickSwap(ls: *const LayerState) ?struct { slot: usize, eid: u32 } {
-    if (ls.pinned.len == 0 or ls.heat.len == 0) return null;
-    var cold: usize = 0;
-    for (ls.pinned, 0..) |*slot, i| {
-        if (slot.eid == invalid_eid) return .{ .slot = i, .eid = hottestUnpinned(ls) orelse return null };
-        if (ls.heat[slot.eid] < ls.heat[ls.pinned[cold].eid]) cold = i;
-    }
-    const hot = hottestUnpinned(ls) orelse return null;
-    const fc = ls.heat[ls.pinned[cold].eid];
-    const fh = ls.heat[hot];
-    if (fh <= fc + (fc >> 2) + 4) return null;
-    return .{ .slot = cold, .eid = hot };
-}
-
-fn hottestUnpinned(ls: *const LayerState) ?u32 {
-    var best: ?u32 = null;
-    var best_heat: u32 = 0;
-    for (ls.heat, 0..) |h, e| {
-        const eid: u32 = @intCast(e);
-        if (h == 0 or ls.isPinned(eid)) continue;
-        if (best == null or h > best_heat) {
-            best = eid;
-            best_heat = h;
-        }
-    }
-    return best;
-}
-
-/// Best-effort async readahead hint for a file range: tells the kernel to
-/// start reading in the background so the synchronous `pread` that follows
-/// (or follows several other hinted reads) finds the page cache warm. A
-/// failed hint is not an error — it only costs the overlap.
-fn hintWillNeed(fd: fd_t, offset: u64, len: usize) void {
-    switch (builtin.os.tag) {
-        .linux => {
-            _ = std.os.linux.fadvise(fd, @intCast(offset), @intCast(len), std.os.linux.POSIX_FADV.WILLNEED);
-        },
-        .macos, .ios => {
-            // struct radvisory + F_RDADVISE (fcntl.h): macOS's readahead advice.
-            const radvisory = extern struct { ra_offset: i64, ra_count: c_int };
-            var adv = radvisory{
-                .ra_offset = @intCast(offset),
-                .ra_count = @intCast(@min(len, std.math.maxInt(c_int))),
-            };
-            _ = std.c.fcntl(fd, 44, @intFromPtr(&adv));
-        },
-        else => {},
-    }
-}
-
-/// Currently-available physical memory, best effort: Linux reads
-/// `MemAvailable` (free + reclaimable page cache); macOS sums the free,
-/// speculative, and purgeable page pools — deliberately NOT the inactive or
-/// external (file-cache) pools, so the number still understates what the OS
-/// could reclaim but never counts page cache that consumers (streamed
-/// experts, the lmserve KV guard) exist to protect. `null` when
-/// undeterminable.
-pub fn memAvailableBytes() ?u64 {
-    switch (builtin.os.tag) {
-        .linux => {
-            const linux = std.os.linux;
-            const open_rc = linux.openat(linux.AT.FDCWD, "/proc/meminfo", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-            if (linux.errno(open_rc) != .SUCCESS) return null;
-            const fd: fd_t = @intCast(open_rc);
-            defer closeFd(fd);
-            var buf: [4096]u8 = undefined;
-            const read_rc = linux.read(fd, &buf, buf.len);
-            if (linux.errno(read_rc) != .SUCCESS) return null;
-            const n = read_rc;
-            var it = std.mem.splitScalar(u8, buf[0..n], '\n');
-            while (it.next()) |line| {
-                const prefix = "MemAvailable:";
-                if (!std.mem.startsWith(u8, line, prefix)) continue;
-                const rest = std.mem.trim(u8, line[prefix.len..], " ");
-                const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
-                const kb = std.fmt.parseInt(u64, rest[0..end], 10) catch return null;
-                return kb * 1024;
-            }
-            return null;
-        },
-        .macos => {
-            var total_pages: u64 = 0;
-            inline for (.{ "vm.page_free_count", "vm.page_speculative_count", "vm.page_purgeable_count" }) |name| {
-                var pages: c_int = 0;
-                var len: usize = @sizeOf(c_int);
-                if (std.c.sysctlbyname(name, &pages, &len, null, 0) != 0) return null;
-                if (pages < 0) return null;
-                total_pages += @intCast(pages);
-            }
-            var page_size: c_int = 0;
-            var len: usize = @sizeOf(c_int);
-            if (std.c.sysctlbyname("hw.pagesize", &page_size, &len, null, 0) != 0) return null;
-            if (page_size <= 0) return null;
-            return total_pages * @as(u64, @intCast(page_size));
-        },
-        else => return null,
-    }
-}
+pub const Error = io.Error;
+pub const StreamedQuant = geometry.StreamedQuant;
+pub const Proj = geometry.Proj;
+pub const ProjSpec = geometry.ProjSpec;
+pub const LayerState = tiers.LayerState;
+pub const memAvailableBytes = policy.memAvailableBytes;
 
 pub const ExpertStore = struct {
     pub const Options = struct {
@@ -905,10 +343,10 @@ pub const ExpertStore = struct {
         const fds = try allocator.alloc(fd_t, gguf_paths.len);
         errdefer allocator.free(fds);
         var n_open: usize = 0;
-        errdefer for (fds[0..n_open]) |fd| closeFd(fd);
+        errdefer for (fds[0..n_open]) |fd| io.closeFd(fd);
         for (gguf_paths) |path| {
-            fds[n_open] = try openReadOnly(allocator, path);
-            if (options.uncached) setUncached(fds[n_open]);
+            fds[n_open] = try io.openReadOnly(allocator, path);
+            if (options.uncached) io.setUncached(fds[n_open]);
             n_open += 1;
         }
 
@@ -971,18 +409,18 @@ pub const ExpertStore = struct {
         allocator.free(self.read_slots);
         allocator.free(self.read_failed);
         for (self.mirrors) |m| {
-            for (m.fds) |fd| closeFd(fd);
+            for (m.fds) |fd| io.closeFd(fd);
             allocator.free(m.fds);
         }
         allocator.free(self.mirrors);
         allocator.free(self.route_cum);
         allocator.free(self.copy_bytes);
-        for (self.l2_fds) |fd| closeFd(fd);
+        for (self.l2_fds) |fd| io.closeFd(fd);
         if (self.l2_fds.len > 0) allocator.free(self.l2_fds);
         for (self.l2_present) |p| if (p.len > 0) allocator.free(p);
         if (self.l2_present.len > 0) allocator.free(self.l2_present);
         if (self.l2_prefix.len > 0) allocator.free(self.l2_prefix);
-        for (self.fds) |fd| closeFd(fd);
+        for (self.fds) |fd| io.closeFd(fd);
         allocator.free(self.fds);
         allocator.destroy(self);
     }
@@ -1000,10 +438,10 @@ pub const ExpertStore = struct {
         const fds = try self.allocator.alloc(fd_t, paths.len);
         errdefer self.allocator.free(fds);
         var n_open: usize = 0;
-        errdefer for (fds[0..n_open]) |fd| closeFd(fd);
+        errdefer for (fds[0..n_open]) |fd| io.closeFd(fd);
         for (paths) |path| {
-            fds[n_open] = try openReadOnly(self.allocator, path);
-            if (self.options.uncached) setUncached(fds[n_open]);
+            fds[n_open] = try io.openReadOnly(self.allocator, path);
+            if (self.options.uncached) io.setUncached(fds[n_open]);
             n_open += 1;
         }
         const grown = try self.allocator.alloc(MirrorSet, self.mirrors.len + 1);
@@ -1023,7 +461,7 @@ pub const ExpertStore = struct {
         var projs: [3]ProjGeometry = undefined;
         for (specs, 0..) |spec, p| {
             if (spec.part >= self.fds.len) return Error.InvalidExpertGeometry;
-            projs[p] = try ProjGeometry.init(spec, n_expert);
+            projs[p] = try geometry.ProjGeometry.init(spec, n_expert);
         }
         const layout = LayerState.expertSlabOffsets(projs);
 
@@ -1106,15 +544,15 @@ pub const ExpertStore = struct {
             for (self.copy_bytes) |*b| b.* = .init(0);
         }
 
-        const history_pairs = self.loadUsage();
+        const history_pairs = persist.loadUsage(self);
 
         var budget: usize = self.options.cache_bytes orelse blk: {
-            const avail = memAvailableBytes() orelse (8 << 30);
+            const avail = policy.memAvailableBytes() orelse (8 << 30);
             break :blk @max(avail / 2, 512 << 20);
         };
         if (self.options.auto_pin and history_pairs >= self.options.auto_pin_min_history) {
             const pin_budget = self.options.pin_bytes orelse budget / 2;
-            const spent = try self.selectAndLoadPins(@min(pin_budget, budget));
+            const spent = try tiers.selectAndLoadPins(self, @min(pin_budget, budget));
             budget -= @min(spent, budget);
         }
 
@@ -1122,8 +560,8 @@ pub const ExpertStore = struct {
         // the pin selection on purpose — pinned experts never miss, so the
         // builder spends the tier's bytes on the band below the pins.
         if (self.options.l2_path) |l2_base| {
-            if (self.options.l2_build_bytes) |l2_budget| try self.l2Build(l2_base, l2_budget);
-            try self.l2Open(l2_base);
+            if (self.options.l2_build_bytes) |l2_budget| try tiers.l2Build(self, l2_base, l2_budget);
+            try tiers.l2Open(self, l2_base);
         }
 
         var cap: usize = undefined;
@@ -1150,94 +588,6 @@ pub const ExpertStore = struct {
         self.read_slots = try self.allocator.alloc(*Slot, max_expert);
         self.read_failed = try self.allocator.alloc(bool, max_expert);
         self.finalized = true;
-    }
-
-    /// Greedy hottest-first pin selection over every registered layer's
-    /// usage histogram, then one sequential read pass to load the picks.
-    /// Returns the bytes spent. Experts with zero recorded usage are never
-    /// pinned.
-    fn selectAndLoadPins(self: *ExpertStore, pin_budget: usize) Error!usize {
-        const Cand = struct { count: u64, layer: u32, eid: u32 };
-        var cands: std.ArrayList(Cand) = .empty;
-        defer cands.deinit(self.allocator);
-        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
-            if (!reg) continue;
-            for (ls.usage, 0..) |count, e| {
-                if (count == 0) continue;
-                try cands.append(self.allocator, .{ .count = count, .layer = @intCast(layer_i), .eid = @intCast(e) });
-            }
-        }
-        std.mem.sort(Cand, cands.items, {}, struct {
-            fn hotter(_: void, a: Cand, b: Cand) bool {
-                if (a.count != b.count) return a.count > b.count;
-                if (a.layer != b.layer) return a.layer < b.layer;
-                return a.eid < b.eid;
-            }
-        }.hotter);
-
-        // Pass 1: greedy pick under the budget.
-        const pick_counts = try self.allocator.alloc(usize, self.layers.len);
-        defer self.allocator.free(pick_counts);
-        @memset(pick_counts, 0);
-        var picks: std.ArrayList(Cand) = .empty;
-        defer picks.deinit(self.allocator);
-        var spent: usize = 0;
-        for (cands.items) |cand| {
-            const ls = &self.layers[cand.layer];
-            if (spent + ls.slab_bytes > pin_budget) continue;
-            spent += ls.slab_bytes;
-            pick_counts[cand.layer] += 1;
-            try picks.append(self.allocator, cand);
-        }
-        if (picks.items.len == 0) return 0;
-
-        // Flatness guard (see Options.auto_pin_min_advantage): compare the
-        // traffic share the greedy picks would retain against what the same
-        // slot count retains under a flat histogram. Skipped when every
-        // used expert fits — a fully-pinned working set wins at any skew.
-        if (picks.items.len < cands.items.len) {
-            var picked_traffic: u64 = 0;
-            for (picks.items) |cand| picked_traffic += cand.count;
-            var total_traffic: u64 = 0;
-            for (cands.items) |cand| total_traffic += cand.count;
-            const coverage = @as(f64, @floatFromInt(picked_traffic)) / @as(f64, @floatFromInt(total_traffic));
-            const flat = @as(f64, @floatFromInt(picks.items.len)) / @as(f64, @floatFromInt(cands.items.len));
-            if (coverage < flat * self.options.auto_pin_min_advantage) {
-                self.pins_declined_flat = true;
-                return 0;
-            }
-        }
-
-        // Pass 2: allocate the pinned tiers, hint the whole pick set, then
-        // read it sequentially (the hints let the kernel batch the reads).
-        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
-            if (!reg or pick_counts[layer_i] == 0) continue;
-            ls.pinned = try self.allocator.alloc(Slot, pick_counts[layer_i]);
-            @memset(ls.pinned, .{});
-        }
-        if (self.options.readahead) {
-            for (picks.items) |cand| {
-                const ls = &self.layers[cand.layer];
-                const copy = self.routeCopy(cand.layer, cand.eid);
-                for (&ls.projs) |*g| {
-                    for (0..g.plane_count) |plane| hintWillNeed(self.copyFd(copy, g.part), g.planeFileOffset(cand.eid, plane), g.plane_bytes);
-                }
-            }
-        }
-        const fill = try self.allocator.alloc(usize, self.layers.len);
-        defer self.allocator.free(fill);
-        @memset(fill, 0);
-        for (picks.items) |cand| {
-            const ls = &self.layers[cand.layer];
-            const slot = &ls.pinned[fill[cand.layer]];
-            fill[cand.layer] += 1;
-            try slot.ensureCapacity(self.allocator, ls.slab_bytes);
-            try self.readExpert(ls, cand.layer, cand.eid, slot);
-            slot.eid = cand.eid;
-        }
-        self.pinned_experts = picks.items.len;
-        self.pinned_bytes = spent;
-        return spent;
     }
 
     /// Total bytes one layer's LRU tier may hold; times registered layers =
@@ -1273,105 +623,43 @@ pub const ExpertStore = struct {
         };
     }
 
+    pub const max_route_window = policy.max_route_window;
+    pub const trace_magic = persist.trace_magic;
+
+    /// Cache-aware top-k expert selection (max-rank; `policy.cacheRouteTopK`
+    /// holds the body and its WORKER-THREAD-ONLY contract).
+    pub fn cacheRouteTopK(self: *ExpertStore, layer_i: usize, choice: []const f32, sel: []usize) bool {
+        return policy.cacheRouteTopK(self, layer_i, choice, sel);
+    }
+
+    /// One pinned-tier adaptation pass (`policy.repinPass`). Call at safe
+    /// boundaries, never inside an acquire.
+    pub fn repinPass(self: *ExpertStore, max_swaps_per_layer: usize) usize {
+        return policy.repinPass(self, max_swaps_per_layer);
+    }
+
+    /// Write the routing trace (`persist.saveTrace`; FUCTRCE1).
+    pub fn saveTrace(self: *ExpertStore) Error!void {
+        return persist.saveTrace(self);
+    }
+
+    /// Persist the usage histogram sidecar (`persist.saveUsage`; FUCEXPT1).
+    pub fn saveUsage(self: *ExpertStore) Error!void {
+        return persist.saveUsage(self);
+    }
+
+    /// Copy index (0 = primary) serving an expert's bytes
+    /// (`policy.routeCopy`). Module-internal seam (`tiers` routes pin and
+    /// stage reads through it); not part of the consumer contract.
+    pub fn routeCopy(self: *const ExpertStore, layer_i: usize, eid: u32) usize {
+        return policy.routeCopy(self, layer_i, eid);
+    }
+
     /// Resolve every expert in `selected` (dupes fine — it is the raw routed
     /// pair list) for one layer op: pinned/cached experts resolve to their
     /// slabs; misses are read from disk into working-set slots, readahead
     /// hints for the whole miss set going out before the first synchronous
     /// read. Locks the store until `release`.
-    /// Largest max-rank window `cacheRouteTopK` supports (stack scratch).
-    pub const max_route_window = 64;
-
-    /// Cache-aware top-k expert selection (max-rank, arXiv:2412.00099 —
-    /// colibri's CACHE_ROUTE), active only when `Options.cache_route` was
-    /// set: rank the bias-augmented `choice` scores, always take the true
-    /// top-`sacred` ranks, fill the remaining `sel` slots preferring
-    /// experts whose blocks already sit in RAM (pinned, LRU, or staged)
-    /// among the top-`window` ranks, and complete in true rank order. Ties
-    /// resolve to the lowest expert id, like the plain top-k it replaces.
-    /// Returns false when cache routing is off or the shape doesn't apply
-    /// — the caller keeps its plain selection. WORKER THREAD ONLY (shares
-    /// the acquire scratch).
-    pub fn cacheRouteTopK(self: *ExpertStore, layer_i: usize, choice: []const f32, sel: []usize) bool {
-        const cr = self.options.cache_route orelse return false;
-        if (!self.finalized or layer_i >= self.layers.len or !self.registered[layer_i]) return false;
-        const ls = &self.layers[layer_i];
-        const k = sel.len;
-        if (k == 0 or k > max_route_window or choice.len != ls.n_expert or k > ls.n_expert) return false;
-
-        var rank_buf: [max_route_window]u32 = undefined;
-        const window: usize = @min(@max(cr.window, k), @min(ls.n_expert, max_route_window));
-        const sacred: usize = @min(cr.sacred, k);
-
-        // Rank the top-`window` scores (strict > keeps ties on the lowest
-        // id, the plain top-k's order).
-        const taken = self.seen[0..ls.n_expert];
-        @memset(taken, false);
-        for (rank_buf[0..window]) |*slot| {
-            var best: usize = 0;
-            var best_c = -std.math.inf(f32);
-            for (choice, 0..) |c, e| {
-                if (!taken[e] and c > best_c) {
-                    best_c = c;
-                    best = e;
-                }
-            }
-            taken[best] = true;
-            slot.* = @intCast(best);
-        }
-
-        var chosen: usize = 0;
-        for (rank_buf[0..sacred]) |e| {
-            sel[chosen] = e;
-            chosen += 1;
-        }
-        if (chosen < k) {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            for (rank_buf[sacred..window]) |e| {
-                if (chosen == k) break;
-                if (self.residentLocked(ls, layer_i, e)) {
-                    sel[chosen] = e;
-                    chosen += 1;
-                }
-            }
-        }
-        // Remainder in true rank order, skipping what's already chosen.
-        outer: for (rank_buf[0..window]) |e| {
-            if (chosen == k) break;
-            for (sel[0..chosen]) |s| {
-                if (s == e) continue :outer;
-            }
-            sel[chosen] = e;
-            chosen += 1;
-        }
-
-        // Swap accounting vs the true top-k (rank_buf[0..k]).
-        self.stats.route_slots += @intCast(k);
-        outer2: for (sel[0..k]) |s| {
-            for (rank_buf[0..k]) |t| {
-                if (t == s) continue :outer2;
-            }
-            self.stats.route_swaps += 1;
-        }
-        return true;
-    }
-
-    /// Residency probe for cache-aware routing: any tier whose blocks are
-    /// already in RAM. Caller holds `mutex`; the staging peek takes
-    /// `stage_mutex` in the same order the worker's `stageConsume` does.
-    fn residentLocked(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32) bool {
-        if (findPinned(ls, eid) != null) return true;
-        if (self.findCached(ls, eid) != null) return true;
-        if (self.stage_meta.len > 0) {
-            self.stage_mutex.lock();
-            defer self.stage_mutex.unlock();
-            for (self.stage_meta) |*m| {
-                if (m.state == .ready and m.layer_i == @as(u32, @intCast(layer_i)) and m.eid == eid) return true;
-            }
-        }
-        return false;
-    }
-
     pub fn acquire(self: *ExpertStore, layer_i: usize, selected: []const usize) Error!void {
         self.mutex.lock();
         errdefer self.mutex.unlock();
@@ -1380,13 +668,13 @@ pub const ExpertStore = struct {
         const ls = &self.layers[layer_i];
         const n_read = rs.n_read;
         try self.readMissSet(ls, layer_i, n_read);
-        self.stats.bytes_read += @as(u64, n_read) * expertBytes(ls);
+        self.stats.bytes_read += @as(u64, n_read) * tiers.expertBytes(ls);
         for (self.read_eids[0..n_read], self.read_slots[0..n_read]) |eid, slot| {
             slot.eid = eid;
             self.resolveSlot(ls, eid, slot);
         }
         if (rs.read_start) |t0| {
-            if (monotonicNanos()) |t1| self.stats.read_ns += t1 -| t0;
+            if (io.monotonicNanos()) |t1| self.stats.read_ns += t1 -| t0;
         }
 
         self.stats.acquires += 1;
@@ -1450,7 +738,7 @@ pub const ExpertStore = struct {
         // may transiently also sit in the LRU after a repin); misses collect.
         self.n_miss = 0;
         for (self.active[0..self.n_active]) |eid| {
-            if (findPinned(ls, eid)) |slot| {
+            if (tiers.findPinned(ls, eid)) |slot| {
                 self.resolveSlot(ls, eid, slot);
                 self.stats.hits += 1;
                 self.stats.pin_hits += 1;
@@ -1473,22 +761,22 @@ pub const ExpertStore = struct {
         // L2 fd is uncached (advise is a no-op there).
         if (self.options.readahead and self.n_miss > 1) {
             for (self.miss_eids[0..self.n_miss]) |eid| {
-                if (self.l2Offset(layer_i, eid) != null) continue;
+                if (tiers.l2Offset(self, layer_i, eid) != null) continue;
                 const copy = self.routeCopy(layer_i, eid);
                 for (&ls.projs) |*g| {
-                    for (0..g.plane_count) |plane| hintWillNeed(self.copyFd(copy, g.part), g.planeFileOffset(eid, plane), g.plane_bytes);
+                    for (0..g.plane_count) |plane| io.hintWillNeed(self.copyFd(copy, g.part), g.planeFileOffset(eid, plane), g.plane_bytes);
                 }
             }
         }
 
-        const read_start = if (self.n_miss > 0) monotonicNanos() else null;
+        const read_start = if (self.n_miss > 0) io.monotonicNanos() else null;
         // A staged load resolves its miss by slab swap; everything else
         // becomes the read set, capacity ensured here (one thread, so the
         // allocator is uncontended and an OOM surfaces before any I/O).
         var n_read: usize = 0;
         for (self.miss_eids[0..self.n_miss], 0..) |eid, w| {
             const slot = &self.work[w];
-            if (self.stageConsume(layer_i, eid, slot)) {
+            if (tiers.stageConsume(self, layer_i, eid, slot)) {
                 slot.eid = eid;
                 self.resolveSlot(ls, eid, slot);
                 continue;
@@ -1523,7 +811,7 @@ pub const ExpertStore = struct {
         const rs = try self.acquireResolve(layer_i, selected);
         const ls = &self.layers[layer_i];
         const n_read = rs.n_read;
-        self.stats.bytes_read += @as(u64, n_read) * expertBytes(ls);
+        self.stats.bytes_read += @as(u64, n_read) * tiers.expertBytes(ls);
 
         launch: {
             if (n_read == 0) break :launch;
@@ -1543,7 +831,7 @@ pub const ExpertStore = struct {
                     self.resolveSlot(ls, eid, slot);
                 }
                 if (rs.read_start) |t0| {
-                    if (monotonicNanos()) |t1| self.stats.read_ns += t1 -| t0;
+                    if (io.monotonicNanos()) |t1| self.stats.read_ns += t1 -| t0;
                 }
                 break :launch;
             }
@@ -1577,7 +865,7 @@ pub const ExpertStore = struct {
         if (!self.miss_inflight) return;
         const ls = &self.layers[layer_i];
         const count = self.miss_batch.count;
-        const t0 = monotonicNanos();
+        const t0 = io.monotonicNanos();
         self.miss_batch.drain();
         for (self.io_pool[0..self.miss_started]) |*w| w.wait();
         self.miss_inflight = false;
@@ -1591,7 +879,7 @@ pub const ExpertStore = struct {
             self.resolveSlot(ls, eid, slot);
         }
         if (t0) |a| {
-            if (monotonicNanos()) |b| self.stats.read_ns += b -| a;
+            if (io.monotonicNanos()) |b| self.stats.read_ns += b -| a;
         }
     }
 
@@ -1617,11 +905,17 @@ pub const ExpertStore = struct {
         for (0..promo) |a| {
             const w = self.n_miss - 1 - a;
             const src = &self.work[w];
+            // Abandoned wave-split acquire: this miss's read never landed
+            // (`acquireFinish` did not run), so the slot still carries
+            // `invalid_eid` and holds no expert. Promoting it would evict a
+            // real cached expert for garbage — and the next release's heat
+            // victim scan would index `heat[invalid_eid]` out of bounds.
+            if (src.eid == invalid_eid) continue;
             var dst: *Slot = undefined;
             if (ls.n_slots < cap) {
                 dst = &ls.slots[ls.n_slots];
                 ls.n_slots += 1;
-            } else if (self.options.heat_eviction and envPlainLru() == false) {
+            } else if (self.options.heat_eviction and policy.envPlainLru() == false) {
                 // Victim = coldest by decayed routed-pair count, recency
                 // breaking ties — over slots NOT touched by this acquire
                 // (see acquire_clock0). When the acquire fills the whole
@@ -1666,16 +960,11 @@ pub const ExpertStore = struct {
         self.mutex.unlock();
     }
 
-    fn findCached(self: *ExpertStore, ls: *LayerState, eid: u32) ?*Slot {
+    /// Module-internal seam: the sibling concern files (`policy`) probe
+    /// the LRU through the store. Not part of the consumer contract.
+    pub fn findCached(self: *ExpertStore, ls: *LayerState, eid: u32) ?*Slot {
         _ = self;
         for (ls.slots[0..ls.n_slots]) |*slot| {
-            if (slot.eid == eid) return slot;
-        }
-        return null;
-    }
-
-    fn findPinned(ls: *LayerState, eid: u32) ?*Slot {
-        for (ls.pinned) |*slot| {
             if (slot.eid == eid) return slot;
         }
         return null;
@@ -1684,265 +973,6 @@ pub const ExpertStore = struct {
     fn resolveSlot(self: *ExpertStore, ls: *LayerState, eid: u32, slot: *Slot) void {
         _ = self;
         for (0..3) |p| ls.resolved[eid][p] = @ptrCast(slot.slab.ptr + ls.proj_off[p]);
-    }
-
-    const l2_absent: u64 = std.math.maxInt(u64);
-
-    /// Striped-tier prefix fraction: the bandwidth-balance point between
-    /// the fast tier drive and the slower primary. Reading prefix and
-    /// suffix concurrently makes every covered miss cost
-    /// max(P/fast, (S-P)/slow) — minimized when the split matches the
-    /// drives' bandwidth ratio, and always cheaper than the whole slab on
-    /// either device alone. Capacity then decides COVERAGE (how many
-    /// experts stripe), not depth.
-    const l2_stripe_num: u64 = 11;
-    const l2_stripe_den: u64 = 16;
-
-    /// Build/refresh the striped L2 tier: rank every registered
-    /// non-pinned expert by loaded usage (no-history falls back to natural
-    /// order) and, until `budget_bytes`, write each covered expert's slab
-    /// PREFIX (the bandwidth-balance fraction, 16 KiB-rounded) to the tier
-    /// file; the suffix stays on the primary and the two halves are read
-    /// concurrently per miss. Uniform miss cost for every covered expert,
-    /// both devices busy by construction, and coverage (not selection
-    /// quality) is the only histogram-sensitive part. Folded layers are
-    /// not striped (their slab bytes are not primary file bytes). The
-    /// tier file is TRUNCATED first: a build is a fresh snapshot.
-    fn l2Build(self: *ExpertStore, base: []const u8, budget_bytes: u64) Error!void {
-        const allocator = self.allocator;
-        const Entry = struct { layer: u32, eid: u32, usage: u64 };
-        var list: std.ArrayList(Entry) = .empty;
-        defer list.deinit(allocator);
-        var max_slab: usize = 0;
-        for (self.layers, self.registered, 0..) |*ls, reg, li| {
-            if (!reg) continue;
-            var folded = false;
-            for (&ls.projs) |*g| folded = folded or g.fold;
-            if (folded or l2PrefixBytes(ls.slab_bytes) == 0) continue;
-            max_slab = @max(max_slab, ls.slab_bytes);
-            for (0..ls.n_expert) |e| {
-                const eid: u32 = @intCast(e);
-                if (findPinned(ls, eid) != null) continue;
-                list.append(allocator, .{ .layer = @intCast(li), .eid = eid, .usage = ls.usage[e] }) catch return Error.UsageFileWriteFailed;
-            }
-        }
-        // Refuse before truncating: a build over a store whose every layer
-        // is fold-served (an all-tied-K2 PTQTP model without
-        // FUCINA_PTQTP_FOLD=0) would wipe the existing tier and record
-        // zero coverage — an easy-to-miss silent perf cliff.
-        if (max_slab == 0) return Error.L2NoStripeableLayers;
-
-        const S = struct {
-            fn hotter(_: void, a: Entry, b: Entry) bool {
-                if (a.usage != b.usage) return a.usage > b.usage;
-                if (a.layer != b.layer) return a.layer < b.layer;
-                return a.eid < b.eid;
-            }
-        };
-        std.sort.pdq(Entry, list.items, {}, S.hotter);
-
-        const fd = try openWriteTrunc(allocator, base);
-        defer closeFd(fd);
-
-        const offsets = try allocator.alloc([]u64, self.layers.len);
-        var built_layers: usize = 0;
-        defer {
-            for (offsets[0..built_layers]) |p| if (p.len > 0) allocator.free(p);
-            allocator.free(offsets);
-        }
-        for (self.layers, self.registered) |*ls, reg| {
-            offsets[built_layers] = if (reg) blk: {
-                const p = try allocator.alloc(u64, ls.n_expert);
-                @memset(p, l2_absent);
-                break :blk p;
-            } else &.{};
-            built_layers += 1;
-        }
-
-        var slab = Slot{};
-        defer slab.deinit(allocator);
-        try slab.ensureCapacity(allocator, max_slab);
-        var write_off: u64 = 0;
-        for (list.items) |e| {
-            const ls = &self.layers[e.layer];
-            const prefix = l2PrefixBytes(ls.slab_bytes);
-            if (write_off + prefix > budget_bytes) break;
-            try self.readExpert(ls, e.layer, e.eid, &slab);
-            try pwriteFullFd(fd, slab.slab[0..@intCast(prefix)], write_off);
-            offsets[e.layer][e.eid] = write_off;
-            write_off += prefix;
-        }
-
-        // Offset index: magic, version, layer count, then per registered
-        // layer its expert count, one u64 slab offset per expert, and (v4)
-        // the slab_bytes + content fingerprint the open-side must match.
-        const idx_path = std.fmt.allocPrint(allocator, "{s}.idx", .{base}) catch return Error.UsageFileWriteFailed;
-        defer allocator.free(idx_path);
-        const idx_fd = try openWriteTrunc(allocator, idx_path);
-        defer closeFd(idx_fd);
-        var off: u64 = 0;
-        var head: [12]u8 = undefined;
-        std.mem.writeInt(u32, head[0..4], 0x4632_4C43, .little); // "CL2F"
-        std.mem.writeInt(u32, head[4..8], 4, .little);
-        std.mem.writeInt(u32, head[8..12], @intCast(self.layers.len), .little);
-        try pwriteFullFd(idx_fd, &head, off);
-        off += head.len;
-        for (self.layers, offsets) |*ls, p| {
-            var n: [4]u8 = undefined;
-            std.mem.writeInt(u32, &n, @intCast(p.len), .little);
-            try pwriteFullFd(idx_fd, &n, off);
-            off += n.len;
-            var pb: [8]u8 = undefined;
-            std.mem.writeInt(u64, &pb, if (p.len > 0) l2PrefixBytes(ls.slab_bytes) else 0, .little);
-            try pwriteFullFd(idx_fd, &pb, off);
-            off += pb.len;
-            if (p.len > 0) {
-                try pwriteFullFd(idx_fd, std.mem.sliceAsBytes(p), off);
-                off += p.len * 8;
-            }
-            var ident: [16]u8 = undefined;
-            std.mem.writeInt(u64, ident[0..8], if (p.len > 0) ls.slab_bytes else 0, .little);
-            std.mem.writeInt(u64, ident[8..16], if (p.len > 0) try self.l2LayerFingerprint(ls) else 0, .little);
-            try pwriteFullFd(idx_fd, &ident, off);
-            off += ident.len;
-        }
-    }
-
-    /// Content fingerprint for a registered layer: Wyhash of the first
-    /// min(4 KiB, one plane) of the primary-file expert bytes this layer's
-    /// tier slabs mirror. Ties a tier to the EXPERT BYTES it holds — model
-    /// files that share expert stacks (trunk-only variants) keep matching,
-    /// while a file with different expert content is refused at open
-    /// instead of silently served another model's weights.
-    fn l2LayerFingerprint(self: *ExpertStore, ls: *const LayerState) Error!u64 {
-        var buf: [4096]u8 = undefined;
-        const g = &ls.projs[0];
-        var part: usize = g.part;
-        var offset: u64 = g.plane_offsets[0];
-        if (ls.slab_file_offset) |so| {
-            part = ls.slab_part;
-            offset = so;
-        }
-        const len = @min(buf.len, g.plane_bytes);
-        try preadFullFd(self.fds[part], buf[0..len], offset);
-        return std.hash.Wyhash.hash(0x4632_4c46, buf[0..len]);
-    }
-
-    /// Striped prefix length for a slab: the bandwidth-balance fraction,
-    /// 16 KiB-rounded (uncached fast-drive reads want page-aligned
-    /// lengths). 0 = slab too small to stripe usefully.
-    fn l2PrefixBytes(slab_bytes: usize) u64 {
-        const raw = @as(u64, slab_bytes) * l2_stripe_num / l2_stripe_den;
-        const rounded = (raw / 16384) * 16384;
-        if (rounded == 0 or rounded >= slab_bytes) return 0;
-        return rounded;
-    }
-
-    /// Open the L2 tier for serving: load + validate the offset index
-    /// against the registered geometry, open the tier file read-only.
-    /// The tier fd is uncached by default, like the primary (see the
-    /// F_NOCACHE note at the open below; `FUCINA_MOE_L2_CACHED=1` keeps
-    /// it page-cached instead).
-    fn l2Open(self: *ExpertStore, base: []const u8) Error!void {
-        const allocator = self.allocator;
-        const idx_path = std.fmt.allocPrint(allocator, "{s}.idx", .{base}) catch return Error.ExpertFileReadFailed;
-        defer allocator.free(idx_path);
-        const idx_fd = try openReadOnly(allocator, idx_path);
-        defer closeFd(idx_fd);
-        var head: [12]u8 = undefined;
-        if ((try preadOnce(idx_fd, &head, 0)) != head.len) return Error.InvalidExpertGeometry;
-        if (std.mem.readInt(u32, head[0..4], .little) != 0x4632_4C43) return Error.InvalidExpertGeometry;
-        // v3 tiers (no fingerprint) stay openable and are trusted as-is;
-        // rebuilding upgrades them to v4.
-        const idx_version = std.mem.readInt(u32, head[4..8], .little);
-        if (idx_version != 3 and idx_version != 4) return Error.InvalidExpertGeometry;
-        if (std.mem.readInt(u32, head[8..12], .little) != self.layers.len) return Error.InvalidExpertGeometry;
-
-        const offsets = try allocator.alloc([]u64, self.layers.len);
-        var built: usize = 0;
-        errdefer {
-            for (offsets[0..built]) |p| if (p.len > 0) allocator.free(p);
-            allocator.free(offsets);
-        }
-        const prefixes = try allocator.alloc(u64, self.layers.len);
-        errdefer allocator.free(prefixes);
-        var off: u64 = head.len;
-        for (self.layers, self.registered) |*ls, reg| {
-            var nb: [4]u8 = undefined;
-            if ((try preadOnce(idx_fd, &nb, off)) != nb.len) return Error.InvalidExpertGeometry;
-            off += nb.len;
-            const n = std.mem.readInt(u32, &nb, .little);
-            const want: u32 = if (reg) @intCast(ls.n_expert) else 0;
-            if (n != want) return Error.InvalidExpertGeometry;
-            var pb: [8]u8 = undefined;
-            if ((try preadOnce(idx_fd, &pb, off)) != pb.len) return Error.InvalidExpertGeometry;
-            off += pb.len;
-            const prefix = std.mem.readInt(u64, &pb, .little);
-            if (prefix % 16384 != 0) return Error.InvalidExpertGeometry;
-            if (reg and prefix >= ls.slab_bytes) return Error.InvalidExpertGeometry;
-            prefixes[built] = prefix;
-            offsets[built] = if (n > 0) blk: {
-                const p = try allocator.alloc(u64, n);
-                const bytes = std.mem.sliceAsBytes(p);
-                if ((try preadOnce(idx_fd, bytes, off)) != bytes.len) return Error.InvalidExpertGeometry;
-                off += bytes.len;
-                break :blk p;
-            } else &.{};
-            // Tier offsets locate slab PREFIXES of primary-file bytes. A
-            // layer served folded rebuilds its slab section at fill time
-            // (the 4-bit pack is not primary bytes), so coverage recorded
-            // for it — a tier built under FUCINA_PTQTP_FOLD=0, opened
-            // without it — must never be served: `readExpertPrefix` would
-            // overwrite the pack's head with unfolded plane bytes. Drop
-            // that layer's coverage instead (the tier adds speed, never
-            // correctness; the drop is visible as zero l2 reads in the
-            // exit stats).
-            // Count the layer as built NOW: the fingerprint checks below
-            // can error, and the errdefer frees offsets[0..built] only.
-            const cur = built;
-            built += 1;
-            if (reg and offsets[cur].len > 0) {
-                var folded = false;
-                for (&ls.projs) |*g| folded = folded or g.fold;
-                if (folded) @memset(offsets[cur], l2_absent);
-            }
-            if (idx_version >= 4) {
-                var ident: [16]u8 = undefined;
-                if ((try preadOnce(idx_fd, &ident, off)) != ident.len) return Error.InvalidExpertGeometry;
-                off += ident.len;
-                if (n > 0) {
-                    // The tier's slabs are primary-file bytes of the model
-                    // it was built from: refuse any file whose expert
-                    // content differs (same-trunk-different-experts served
-                    // silently wrong is exactly the failure this catches).
-                    if (std.mem.readInt(u64, ident[0..8], .little) != ls.slab_bytes) return Error.InvalidExpertGeometry;
-                    if (std.mem.readInt(u64, ident[8..16], .little) != try self.l2LayerFingerprint(ls)) return Error.InvalidExpertGeometry;
-                }
-            }
-        }
-
-        const fds = try allocator.alloc(fd_t, 1);
-        errdefer allocator.free(fds);
-        fds[0] = try openReadOnly(allocator, base);
-        // Uncached by default, like the primary: with page-aligned slabs
-        // AND page-cache headroom (a RAM budget well under free memory)
-        // uncached slab preads run at the fast drive's full speed, but
-        // F_NOCACHE throughput collapses under memory pressure — so the
-        // budget knob governs tier speed, not just capacity.
-        // FUCINA_MOE_L2_CACHED=1 keeps the tier page-cached instead (the
-        // FUCINA_MOE_LRU-style A/B on one binary).
-        if (!tuning.get().moe_l2_cached) setUncached(fds[0]);
-        self.l2_fds = fds;
-        self.l2_present = offsets;
-        self.l2_prefix = prefixes;
-    }
-
-    /// Slab-prefix offset of an expert in the L2 tier, null when absent.
-    fn l2Offset(self: *const ExpertStore, layer_i: usize, eid: u32) ?u64 {
-        if (self.l2_present.len == 0) return null;
-        const p = self.l2_present[layer_i];
-        if (eid >= p.len or p[eid] == l2_absent) return null;
-        return p[eid];
     }
 
     /// One expert's gate+up+down blocks into `slot.slab` — one `pread` per
@@ -1960,7 +990,10 @@ pub const ExpertStore = struct {
     /// single-threaded fallbacks): primary side then tier prefix. The
     /// batched miss path runs the two phases as SEPARATE work items so
     /// the slow and fast drives serve one expert concurrently.
-    fn readExpert(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
+    /// Module-internal seam: the pin loader, L2 builder, repin pass, and
+    /// staging worker (`tiers`/`policy`) read experts through the store.
+    /// Not part of the consumer contract.
+    pub fn readExpert(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
         try self.readExpertMain(ls, layer_i, eid, slot);
         try self.readExpertPrefix(ls, layer_i, eid, slot);
     }
@@ -1971,7 +1004,7 @@ pub const ExpertStore = struct {
     /// so slab bytes ARE primary file bytes).
     fn readExpertMain(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
         const copy = self.routeCopy(layer_i, eid);
-        const prefix: usize = if (self.l2Offset(layer_i, eid) != null) @intCast(self.l2_prefix[layer_i]) else 0;
+        const prefix: usize = if (tiers.l2Offset(self, layer_i, eid) != null) @intCast(self.l2_prefix[layer_i]) else 0;
         // Slab-native record: the on-disk bytes ARE the slab — one
         // contiguous pread of [prefix..slab_bytes) (the tier phase serves
         // the prefix) instead of three per-projection reads.
@@ -2002,14 +1035,14 @@ pub const ExpertStore = struct {
     /// reading the prefix range from the primary (the tier adds speed,
     /// never correctness).
     fn readExpertPrefix(self: *ExpertStore, ls: *LayerState, layer_i: usize, eid: u32, slot: *Slot) Error!void {
-        const l2_off = self.l2Offset(layer_i, eid) orelse return;
+        const l2_off = tiers.l2Offset(self, layer_i, eid) orelse return;
         const prefix: usize = @intCast(self.l2_prefix[layer_i]);
         if (prefix == 0) return;
-        const t0 = monotonicNanos();
-        if (preadFullFd(self.l2_fds[0], slot.slab[0..prefix], l2_off)) {
+        const t0 = io.monotonicNanos();
+        if (io.preadFullFd(self.l2_fds[0], slot.slab[0..prefix], l2_off)) {
             _ = self.l2_expert_hits.fetchAdd(1, .monotonic);
             _ = self.l2_bytes.fetchAdd(prefix, .monotonic);
-            if (t0) |t| if (monotonicNanos()) |t1| {
+            if (t0) |t| if (io.monotonicNanos()) |t1| {
                 _ = self.l2_read_ns.fetchAdd(t1 -| t, .monotonic);
             };
             return;
@@ -2066,31 +1099,9 @@ pub const ExpertStore = struct {
         qm.ternary.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
     }
 
-    fn expertBytes(ls: *const LayerState) u64 {
-        var total: u64 = 0;
-        for (&ls.projs) |*g| total += g.expert_bytes;
-        return total;
-    }
-
-    /// Copy index (0 = primary) serving an expert's bytes: a splitmix64
-    /// finalizer over (layer, expert) cut against the cumulative weight
-    /// table. No mirrors = primary, always.
-    fn routeCopy(self: *const ExpertStore, layer_i: usize, eid: u32) usize {
-        if (self.route_cum.len == 0) return 0;
-        var h = (@as(u64, @intCast(layer_i)) << 32) | eid;
-        h ^= h >> 30;
-        h *%= 0xbf58476d1ce4e5b9;
-        h ^= h >> 27;
-        h *%= 0x94d049bb133111eb;
-        h ^= h >> 31;
-        const cut: u32 = @intCast(h & 0xFFFF);
-        for (self.route_cum, 0..) |threshold, i| {
-            if (cut < threshold) return i;
-        }
-        return 0;
-    }
-
-    fn copyFd(self: *const ExpertStore, copy: usize, part: u16) fd_t {
+    /// Module-internal seam (`tiers` hints and reads through the routed
+    /// copy's fd); not part of the consumer contract.
+    pub fn copyFd(self: *const ExpertStore, copy: usize, part: u16) fd_t {
         return if (copy == 0) self.fds[part] else self.mirrors[copy - 1].fds[part];
     }
 
@@ -2099,24 +1110,15 @@ pub const ExpertStore = struct {
     /// must never kill decode while the primary holds the same bytes.
     fn preadFull(self: *ExpertStore, part: u16, copy: usize, buf: []u8, offset: u64) Error!void {
         if (copy != 0) {
-            if (preadFullFd(self.copyFd(copy, part), buf, offset)) {
+            if (io.preadFullFd(self.copyFd(copy, part), buf, offset)) {
                 _ = self.copy_bytes[copy].fetchAdd(buf.len, .monotonic);
                 return;
             } else |_| {
                 _ = self.mirror_fallbacks.fetchAdd(1, .monotonic);
             }
         }
-        try preadFullFd(self.fds[part], buf, offset);
+        try io.preadFullFd(self.fds[part], buf, offset);
         if (self.copy_bytes.len > 0) _ = self.copy_bytes[0].fetchAdd(buf.len, .monotonic);
-    }
-
-    fn preadFullFd(fd: fd_t, buf: []u8, offset: u64) Error!void {
-        var done: usize = 0;
-        while (done < buf.len) {
-            const n = try preadOnce(fd, buf[done..], offset + done);
-            if (n == 0) return Error.UnexpectedEndOfFile;
-            done += n;
-        }
     }
 
     // ---- demand-miss I/O pool ------------------------------------------
@@ -2158,27 +1160,8 @@ pub const ExpertStore = struct {
         }
     };
 
-    /// Demote the calling thread below the compute team (macOS QoS
-    /// UTILITY): the store's threads live blocked in pread, and when they
-    /// wake they must not preempt the worker team's fork-joins on the
-    /// P-cores — miss activity scheduled onto the compute cores inflates
-    /// every phase that shares them. Self-set once per thread (QoS classes
-    /// cannot be assigned externally); no-op off macOS. The FORWARD thread
-    /// also drains batches — it never routes through here, so its QoS is
-    /// untouched.
-    threadlocal var io_qos_set: bool = false;
-    fn setIoThreadQos() void {
-        if (builtin.os.tag != .macos) return;
-        if (io_qos_set) return;
-        io_qos_set = true;
-        const c = struct {
-            extern "c" fn pthread_set_qos_class_self_np(qos_class: c_uint, relative_priority: c_int) c_int;
-        };
-        _ = c.pthread_set_qos_class_self_np(0x11, 0); // QOS_CLASS_UTILITY
-    }
-
     fn ioDrainJob(arg: *anyopaque) void {
-        setIoThreadQos();
+        io.setIoThreadQos();
         const batch: *IoBatch = @ptrCast(@alignCast(arg));
         batch.drain();
     }
@@ -2210,7 +1193,7 @@ pub const ExpertStore = struct {
         }
         var striped: usize = 0;
         for (self.read_eids[0..count]) |eid| {
-            if (self.l2Offset(layer_i, eid) != null) striped += 1;
+            if (tiers.l2Offset(self, layer_i, eid) != null) striped += 1;
         }
         return striped;
     }
@@ -2277,7 +1260,7 @@ pub const ExpertStore = struct {
         if (!self.finalized or layer_i >= self.layers.len or !self.registered[layer_i]) return;
         const ls = &self.layers[layer_i];
 
-        if (self.pilot_thread == null) self.pilotStart() catch return;
+        if (self.pilot_thread == null) tiers.pilotStart(self) catch return;
 
         ls.pred_epoch +%= 1;
         if (ls.pred_epoch == ls.pred_scored) ls.pred_epoch +%= 1; // skip the ambiguous wrap value
@@ -2285,9 +1268,9 @@ pub const ExpertStore = struct {
             if (e >= ls.n_expert) continue;
             ls.pred_marks[e] = ls.pred_epoch;
             const eid: u32 = @intCast(e);
-            if (findPinned(ls, eid) != null) continue;
+            if (tiers.findPinned(ls, eid) != null) continue;
             if (self.findCached(ls, eid) != null) continue;
-            self.pilotEnqueue(.{ .layer_i = @intCast(layer_i), .eid = eid });
+            tiers.pilotEnqueue(self, .{ .layer_i = @intCast(layer_i), .eid = eid });
         }
     }
 
@@ -2302,261 +1285,7 @@ pub const ExpertStore = struct {
         const ls = &self.layers[layer_i];
         if (eid >= ls.n_expert) return false;
         const e: u32 = @intCast(eid);
-        return findPinned(ls, e) != null or self.findCached(ls, e) != null;
-    }
-
-    fn pilotStart(self: *ExpertStore) !void {
-        if (self.pilot_ring.len == 0) {
-            self.pilot_ring = try self.allocator.alloc(PilotReq, pilot_ring_cap);
-        }
-        if (self.stage_meta.len == 0 and self.options.prefetch_stage_slots > 0) {
-            self.stage_slots = try self.allocator.alloc(Slot, self.options.prefetch_stage_slots);
-            for (self.stage_slots) |*s| s.* = .{};
-            self.stage_meta = try self.allocator.alloc(StageMeta, self.options.prefetch_stage_slots);
-            for (self.stage_meta) |*m| m.* = .{};
-        }
-        self.pilot_thread = try std.Thread.spawn(.{}, pilotWorker, .{self});
-    }
-
-    fn pilotEnqueue(self: *ExpertStore, range: PilotReq) void {
-        const w = self.pilot_w.load(.monotonic);
-        const r = self.pilot_r.load(.acquire);
-        if (w -% r >= pilot_ring_cap) return; // full: drop the hint
-        self.pilot_ring[w % pilot_ring_cap] = range;
-        self.pilot_w.store(w +% 1, .release);
-        self.stats.pilot_ranges += 1;
-    }
-
-    fn pilotWorker(self: *ExpertStore) void {
-        setIoThreadQos();
-        while (!self.pilot_stop.load(.acquire)) {
-            const r = self.pilot_r.load(.monotonic);
-            const w = self.pilot_w.load(.acquire);
-            if (r == w) {
-                sleepMicros(200);
-                continue;
-            }
-            const req = self.pilot_ring[r % pilot_ring_cap];
-            self.pilot_r.store(r +% 1, .release);
-            self.stageLoad(req);
-        }
-    }
-
-    /// Load one predicted expert into a staging slot: claim under
-    /// `stage_mutex`, pread outside the lock, publish ready. Duplicates,
-    /// full tiers, and read failures degrade to no-ops — staging is advice.
-    fn stageLoad(self: *ExpertStore, req: PilotReq) void {
-        const ls = &self.layers[req.layer_i];
-        var slot_i: usize = 0;
-        {
-            self.stage_mutex.lock();
-            defer self.stage_mutex.unlock();
-            for (self.stage_meta) |*m| {
-                if (m.state != .empty and m.layer_i == req.layer_i and m.eid == req.eid) return;
-            }
-            var oldest: ?usize = null;
-            var found = false;
-            for (self.stage_meta, 0..) |*m, i| {
-                if (m.state == .empty) {
-                    slot_i = i;
-                    found = true;
-                    break;
-                }
-                if (m.state == .ready and (oldest == null or m.stamp < self.stage_meta[oldest.?].stamp)) oldest = i;
-            }
-            if (!found) {
-                slot_i = oldest orelse return; // every slot mid-load: drop
-                self.stats.staged_wasted += 1;
-            }
-            self.stage_stamp += 1;
-            self.stage_meta[slot_i] = .{ .layer_i = req.layer_i, .eid = req.eid, .state = .loading, .stamp = self.stage_stamp };
-        }
-        const slot = &self.stage_slots[slot_i];
-        var ok = true;
-        slot.ensureCapacity(self.allocator, ls.slab_bytes) catch {
-            ok = false;
-        };
-        if (ok) self.readExpert(ls, req.layer_i, req.eid, slot) catch {
-            ok = false;
-        };
-        self.stage_mutex.lock();
-        defer self.stage_mutex.unlock();
-        if (!ok) {
-            self.stage_meta[slot_i].state = .empty;
-            return;
-        }
-        self.stage_meta[slot_i].state = .ready;
-        self.stats.staged_loads += 1;
-        self.stats.staged_bytes += expertBytes(ls);
-    }
-
-    /// Consume a ready staged expert into `dst` by slab swap (zero copy).
-    /// False = not staged; the caller does its synchronous read as always.
-    fn stageConsume(self: *ExpertStore, layer_i: usize, eid: u32, dst: *Slot) bool {
-        if (self.stage_meta.len == 0) return false;
-        self.stage_mutex.lock();
-        defer self.stage_mutex.unlock();
-        for (self.stage_meta, 0..) |*m, i| {
-            if (m.state == .ready and m.layer_i == @as(u32, @intCast(layer_i)) and m.eid == eid) {
-                const tmp = dst.slab;
-                dst.slab = self.stage_slots[i].slab;
-                self.stage_slots[i].slab = tmp;
-                m.* = .{};
-                self.stats.staged_consumed += 1;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // ---- the learning cache: persistent usage histogram --------------------
-
-    const usage_magic = "FUCEXPT1";
-    pub const trace_magic = "FUCTRCE1";
-
-    /// Write the routing trace (`Options.trace_path`): magic, layer count,
-    /// then little-endian u32 (layer, eid) pairs in request order. The
-    /// input format of `tools/replay_experts.zig`. Called from `destroy`;
-    /// also callable early to snapshot mid-session.
-    pub fn saveTrace(self: *ExpertStore) Error!void {
-        const path = self.options.trace_path orelse return;
-        var bytes: std.ArrayList(u8) = .empty;
-        defer bytes.deinit(self.allocator);
-        try bytes.appendSlice(self.allocator, trace_magic);
-        try appendInt(u32, self.allocator, &bytes, @intCast(self.layers.len));
-        try appendInt(u64, self.allocator, &bytes, @intCast(self.trace.items.len / 2));
-        for (self.trace.items) |v| try appendInt(u32, self.allocator, &bytes, v);
-
-        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{path});
-        defer self.allocator.free(tmp_path);
-        {
-            const fd = try openWriteTrunc(self.allocator, tmp_path);
-            defer closeFd(fd);
-            try writeFull(fd, bytes.items);
-        }
-        try renamePath(self.allocator, tmp_path, path);
-    }
-
-    /// Persist the usage histogram to the sidecar (`<gguf>.experts`),
-    /// atomically (tmp + rename): counts accumulate across sessions, and at
-    /// the next startup auto-pin turns them into a pinned hot tier. Call at
-    /// end of generation / turn boundaries; a failure loses only learning.
-    pub fn saveUsage(self: *ExpertStore) Error!void {
-        var bytes: std.ArrayList(u8) = .empty;
-        defer bytes.deinit(self.allocator);
-        try bytes.appendSlice(self.allocator, usage_magic);
-        try appendInt(u32, self.allocator, &bytes, @intCast(self.layers.len));
-        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
-            if (!reg) continue;
-            try appendInt(u32, self.allocator, &bytes, @intCast(layer_i));
-            try appendInt(u32, self.allocator, &bytes, @intCast(ls.n_expert));
-            for (ls.usage) |count| try appendInt(u64, self.allocator, &bytes, count);
-        }
-
-        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{self.usage_path});
-        defer self.allocator.free(tmp_path);
-        {
-            const fd = try openWriteTrunc(self.allocator, tmp_path);
-            defer closeFd(fd);
-            try writeFull(fd, bytes.items);
-        }
-        try renamePath(self.allocator, tmp_path, self.usage_path);
-    }
-
-    /// Merge the sidecar histogram into the in-memory counts (add, so a
-    /// session's own routing keeps accumulating on top). Any mismatch —
-    /// missing file, other model's geometry, torn write — ignores the file
-    /// wholesale. Returns the total merged pair count.
-    fn loadUsage(self: *ExpertStore) u64 {
-        const bytes = readWholeFile(self.allocator, self.usage_path) orelse return 0;
-        defer self.allocator.free(bytes);
-        var r = UsageReader{ .bytes = bytes };
-        if (!std.mem.eql(u8, r.take(usage_magic.len) orelse return 0, usage_magic)) return 0;
-        const n_layers = r.int(u32) orelse return 0;
-        if (n_layers != self.layers.len) return 0;
-
-        // Validate the whole record set against the registered geometry
-        // before merging anything: an invalid tail must not half-apply.
-        var check = r;
-        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
-            if (!reg) continue;
-            if ((check.int(u32) orelse return 0) != layer_i) return 0;
-            if ((check.int(u32) orelse return 0) != ls.n_expert) return 0;
-            if (check.take(ls.n_expert * @sizeOf(u64)) == null) return 0;
-        }
-        if (check.bytes.len != check.at) return 0;
-
-        var total: u64 = 0;
-        for (self.layers, self.registered) |*ls, reg| {
-            if (!reg) continue;
-            _ = r.int(u32);
-            _ = r.int(u32);
-            for (ls.usage) |*count| {
-                const stored = r.int(u64) orelse unreachable;
-                count.* +|= stored;
-                total +|= stored;
-            }
-        }
-        return total;
-    }
-
-    const UsageReader = struct {
-        bytes: []const u8,
-        at: usize = 0,
-
-        fn take(self: *UsageReader, n: usize) ?[]const u8 {
-            if (self.at + n > self.bytes.len) return null;
-            defer self.at += n;
-            return self.bytes[self.at..][0..n];
-        }
-
-        fn int(self: *UsageReader, comptime T: type) ?T {
-            const raw = self.take(@sizeOf(T)) orelse return null;
-            return std.mem.readInt(T, raw[0..@sizeOf(T)], .little);
-        }
-    };
-
-    fn appendInt(comptime T: type, allocator: Allocator, bytes: *std.ArrayList(u8), value: T) Error!void {
-        var raw: [@sizeOf(T)]u8 = undefined;
-        std.mem.writeInt(T, &raw, value, .little);
-        try bytes.appendSlice(allocator, &raw);
-    }
-
-    // ---- live tier adaptation ----------------------------------------------
-
-    /// One adaptation pass over the pinned tier: per layer, replace up to
-    /// `max_swaps_per_layer` of the coldest pinned experts with hotter
-    /// streamed ones (25% + fixed hysteresis — see `tierPickSwap`), reading
-    /// the replacement into the existing pinned slab; then halve the heat so
-    /// the signal follows the current workload. Call at safe boundaries
-    /// (between generations / chat turns), never inside an acquire. Returns
-    /// the number of swaps performed.
-    pub fn repinPass(self: *ExpertStore, max_swaps_per_layer: usize) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        std.debug.assert(self.acquired_layer == null);
-        if (!self.finalized) return 0;
-
-        var swaps: usize = 0;
-        for (self.layers, self.registered, 0..) |*ls, reg, layer_i| {
-            if (!reg) continue;
-            if (ls.pinned.len > 0) {
-                var done: usize = 0;
-                while (done < max_swaps_per_layer) : (done += 1) {
-                    const pick = tierPickSwap(ls) orelse break;
-                    const slot = &ls.pinned[pick.slot];
-                    // Invalidate first: a failed read leaves the slot skipped
-                    // by lookups instead of resolving to stale bytes.
-                    slot.eid = invalid_eid;
-                    slot.ensureCapacity(self.allocator, ls.slab_bytes) catch break;
-                    self.readExpert(ls, layer_i, pick.eid, slot) catch break;
-                    slot.eid = pick.eid;
-                    swaps += 1;
-                }
-            }
-            for (ls.heat) |*h| h.* >>= 1;
-        }
-        return swaps;
+        return tiers.findPinned(ls, e) != null or self.findCached(ls, e) != null;
     }
 };
 

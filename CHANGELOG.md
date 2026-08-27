@@ -244,6 +244,17 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `store/expert_store.zig` is now the facade over five concern files —
+  `store/io.zig` (platform I/O shims + the store error set),
+  `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout
+  math), `store/tiers.zig` (slot/LRU+heat state, the pinned tier, the
+  pilot staging ring, the striped L2 tier and its CL2F index),
+  `store/policy.zig` (mirror routing, cache-aware selection, repin,
+  `memAvailableBytes`), `store/persist.zig` (the FUCEXPT1/FUCTRCE1
+  formats). `fucina.ExpertStore` and every `fucina.expert_store` re-export
+  keep their names; `readExpert`/`findCached`/`routeCopy`/`copyFd` became
+  `pub` module-internal seams (documented as not part of the consumer
+  contract).
 - `weights.LinearWeight` is a five-container union — `dense` (f32/f16/bf16),
   `quant` (every other GGUF block format, dtype-erased behind a vtable
   built at load), `packed_quant` (q4_k/q5_k/q6_k/q8_0 with their packed
@@ -918,6 +929,11 @@ monomorphization is preserved everywhere. Rewrite table, grouped by rule:
 
 ### Fixed
 
+- `ExpertStore.release` after an abandoned wave-split acquire (an error
+  between `acquireStart` and `acquireFinish`) no longer promotes the
+  unread working slots into the LRU: a promoted `invalid_eid` slot both
+  evicted a real cached expert for garbage and made the next release's
+  heat victim scan index `heat[invalid_eid]` out of bounds.
 - qwen35: a layer leak on the load error path (a failing
   `ExpertStore.finalize` after the layers had loaded freed the layer
   slice but not the layers).

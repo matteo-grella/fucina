@@ -43,7 +43,7 @@ Top-down; a band may depend only on bands at or below it:
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/es/**`, `src/ptqtp.zig`, `src/gguf.zig`, `src/gguf/**`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
-| store | `src/store/**` (disk-streamed block stores: `expert_store.zig`, the out-of-core MoE expert tier) |
+| store | `src/store/**` (disk-streamed block stores: the out-of-core MoE expert tier — `expert_store.zig` the facade over the `io`/`geometry`/`tiers`/`policy`/`persist` concern files) |
 | backend | `src/backend.zig`, `src/backend/**` (build-selected numeric kernels behind the `backend/interface.zig` kernel set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |

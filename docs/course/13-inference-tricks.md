@@ -578,7 +578,7 @@ The **disk tier** (`--kv-cache-dir D`, `--kv-disk-slots`) reuses the exact same 
 
 > **ML note** — this is virtual memory rediscovered at the granularity the router actually uses. A top-k router gives each token a *working set* of experts per layer, and empirically that working set has temporal locality (the measured hit rates below are 52–59% against a cache a fraction of the model's size) and a heavy-tailed popularity distribution (a modest hot set absorbs a disproportionate share of routings — the measured run below pins 944 experts, 10.7 GB of a 142 GB model). Caching theory then does the rest: pin the head of the distribution, LRU the middle, stream the tail. The reason generic OS paging can't do this for you is the eviction policy — the OS sees pages, not experts, and cannot know that "this expert was just routed" is the recency signal that matters.
 
-**Where it lives.** `src/exec/expert_store.zig` — a file whose comments are a course in themselves. The resolution loop in `acquire` (expert_store.zig:926-944) is a cache in its purest form:
+**Where it lives.** `src/store/expert_store.zig` — a file whose comments are a course in themselves. The resolution loop in `acquire` (`acquireResolve` in expert_store.zig) is a cache in its purest form:
 
 ```zig
 // Pinned and LRU hits resolve in place (pin first — a pinned expert
