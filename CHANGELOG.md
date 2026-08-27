@@ -23,6 +23,8 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-27
+
 ### Added
 
 - `fucina.Error` and `fucina.TensorError`: the public error vocabulary at
