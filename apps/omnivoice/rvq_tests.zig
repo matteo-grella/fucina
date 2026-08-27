@@ -69,13 +69,13 @@ fn buildSynthetic(ctx: *fucina.ExecContext, allocator: std.mem.Allocator) !Synth
         out.dec.quantizers[k] = .{
             .embed = embed,
             .embed_sq = embed_sq,
-            .project_out = .{ .f32 = weight },
+            .project_out = .{ .dense = .{ .f32 = weight } },
             .project_out_bias = bias,
         };
     }
     var fc2_w = try fucina.weights.WeightF32.fromSlice(ctx, .{ fc_dim, h_dim }, &out.fc2_w);
     errdefer fc2_w.deinit();
-    out.dec.fc2 = .{ .f32 = fc2_w };
+    out.dec.fc2 = .{ .dense = .{ .f32 = fc2_w } };
     out.dec.fc2_bias = try allocator.dupe(f32, &out.fc2_b);
     return out;
 }
