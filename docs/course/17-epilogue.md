@@ -27,8 +27,8 @@ The same arc, as a review index:
 | I — Foundations | [0](00-introduction.md)–[2](02-just-enough-ml.md) | the premise, the language, the math | README.md; `AGENTS.md` |
 | II — The tensor core | [3](03-tensors-from-scratch.md)–[6](06-going-fast-on-cpus.md) | dtypes, storage, tensors, tags, ops, SIMD | `src/dtype.zig`, `src/storage.zig`, `src/tensor.zig`, `src/tags.zig`, `src/exec.zig`, `src/backend/` |
 | III — Learning | [7](07-autograd.md)–[9](09-training-without-gradients.md) | autograd, optimizers, evolution strategies | `src/ag/`, `src/optim.zig`, `src/es.zig` |
-| IV — Sound | [10](10-the-guitar-amp.md) | a real-time neural guitar amp | `examples/nam/` |
-| V — Language models | [11](11-model-files-and-quantization.md)–[15](15-training-llms-on-cpu.md) | GGUF, quantization, a transformer, inference tricks, low-bit, CPU training | `src/gguf.zig`, `src/backend/quant/`, `src/llm/`, `examples/` |
+| IV — Sound | [10](10-the-guitar-amp.md) | a real-time neural guitar amp | `apps/nam/` |
+| V — Language models | [11](11-model-files-and-quantization.md)–[15](15-training-llms-on-cpu.md) | GGUF, quantization, a transformer, inference tricks, low-bit, CPU training | `src/gguf.zig`, `src/backend/quant/`, `src/models/`, `apps/` |
 | VI — The craft | [16](16-the-craft.md) | the discipline that holds it together | `docs/`, `tools/`, the CI matrix |
 
 From a dtype enum to a live guitar amp and chatting language models. One language. One machine. Nothing you cannot read.
@@ -48,7 +48,7 @@ The only way to keep any of this is to build with it. Six projects, graded. Each
 
 Notice the pattern in the milestone column: in every project the first thing you build is the thing that can tell you you are wrong. That is the course's method applied to your own work — the oracle comes first.
 
-**1. Run every example.** Begin where the course began — `zig build spirals` needs no downloads at all — then work through the model zoo: `docs/RUNNING-MODELS.md` has copy-paste commands and verified download links — chat with Qwen3, transcribe with Parakeet, clone a voice with OmniVoice, locate objects from a text prompt, play through an amp profile — and the face-detection walkthrough lives with its example, in `examples/facedetect/README.md`. (Weights are not included in the repo and each family carries its own license; the doc notes the terms next to each download.) Build everything with `-Doptimize=ReleaseFast` — Debug is 10–50× slower (README.md). An afternoon spent here turns fourteen table rows in the README into things you have actually touched.
+**1. Run every example.** Begin where the course began — `zig build spirals` needs no downloads at all — then work through the model zoo: `docs/RUNNING-MODELS.md` has copy-paste commands and verified download links — chat with Qwen3, transcribe with Parakeet, clone a voice with OmniVoice, locate objects from a text prompt, play through an amp profile — and the face-detection walkthrough lives with its example, in `apps/facedetect/README.md`. (Weights are not included in the repo and each family carries its own license; the doc notes the terms next to each download.) Build everything with `-Doptimize=ReleaseFast` — Debug is 10–50× slower (README.md). An afternoon spent here turns fourteen table rows in the README into things you have actually touched.
 
 **2. Add a pointwise op, end to end.** The classic first contribution, and every station of it now has a name you know. Two routes:
 
@@ -70,7 +70,7 @@ Notice the pattern in the milestone column: in every project the first thing you
 
 **4. Port a small model.** This is the project that teaches the most, because it forces every layer of the stack through your hands at once. Do not improvise the method — `docs/PORTING.md` *is* the method, written for the next port, and its one-line version is the whole discipline: you don't optimize what you can't verify, so the oracle is built first, parity closes stage by stage behind mechanical gates, and only then does performance work begin. Pin the reference at an exact commit; choose the smallest variant that exercises every code path you must port (PORTING.md's own example: "the Parakeet port anchored on a 110M hybrid precisely because it has *both* decode heads"); climb the parity ladder (tokenizer token-ID-exact → logits from raw ids → generation); and respect the tolerance tiers — discrete outputs gate on exact equality, and the tolerance is never loosened to make a gate pass.
 
-**5. Train a NAM profile of your own amp.** [Chapter 10](10-the-guitar-amp.md) ran other people's profiles; now capture your own rig. `examples/nam/README.md` walks the whole path — reamp-box wiring, the standardized capture signal, level discipline (the trainer refuses clipped input), then `profile` for one-step capture + train + export, or `train --input in.wav --output reamp.wav --out m.nam` from an existing pair. Profiles are exchanged "with the original NAM tooling in both directions" (examples/nam/README.md). There is something clarifying about a project whose loss you can *hear*.
+**5. Train a NAM profile of your own amp.** [Chapter 10](10-the-guitar-amp.md) ran other people's profiles; now capture your own rig. `apps/nam/README.md` walks the whole path — reamp-box wiring, the standardized capture signal, level discipline (the trainer refuses clipped input), then `profile` for one-step capture + train + export, or `train --input in.wav --output reamp.wav --out m.nam` from an existing pair. Profiles are exchanged "with the original NAM tooling in both directions" (apps/nam/README.md). There is something clarifying about a project whose loss you can *hear*.
 
 **6. Contribute upstream.** `CONTRIBUTING.md` is short because the bar is simple, and after this course you can meet it. Two rules matter most.
 
@@ -89,7 +89,7 @@ The repo documents itself; the README's Documentation table is the index. In cou
 | Read | Because |
 | --- | --- |
 | `docs/ARCHITECTURE.md` | the actual source layout, layer by layer — the map this course walked |
-| `docs/REFERENCE.md` | the full public surface with machine-verified snippets — the contract |
+| `docs/reference/` | the full public surface with machine-verified snippets, one chapter per file — the contract |
 | `docs/RUNNING-MODELS.md` | project 1, ready to paste |
 | `docs/MEMORY-MODEL.md` | ownership rules and the buffer-pool-not-arena adjudication — a masterclass in documenting a rejected alternative |
 | `docs/TRAINING.md` | autograd to checkpoints, including how the gradients were verified |
@@ -107,7 +107,7 @@ And read the shoulders this project stands on, as its README credits them — "F
 - **spaGO** — the Go library where the graph-implicit-in-the-values idea was first explored; Fucina's direct ancestor (README.md, Origins).
 - **ZML** — the inspiration for the tagged-tensor approach: axis tags carried in the type, operands aligned by name.
 - **NeuralAmpModelerCore / neural-amp-modeler** — Steven Atkinson; the reference for the entire NAM example.
-- **nanochat** — karpathy's from-scratch GPT pipeline, ported whole in `examples/nanochat/main.zig` and the existence proof that the public facade can train a language model end to end (README.md, What runs today).
+- **nanochat** — karpathy's from-scratch GPT pipeline, ported whole in `apps/nanochat/main.zig` and the existence proof that the public facade can train a language model end to end (README.md, What runs today).
 
 They are not the whole list — the README also credits the ports from mudler's face-detect.cpp/parakeet.cpp/locate-anything.cpp, antirez's ds4, ServeurpersoCom's omnivoice.cpp, the vendored MLX Metal kernel and llguidance engine, and more. The complete inventory — what is vendored, what is ported, what is only a parity reference, and under which license — is `docs/THIRD-PARTY-NOTICES.md`. The repo treats uncredited ports as bugs (CONTRIBUTING.md), and so should you.
 
@@ -135,7 +135,7 @@ The fire is lit. Forge something.
 - `src/backend/ops.zig` — the semantic spec of the pointwise library; the cleanest place to begin project 2.
 - `src/backend/quant/cold_tests.zig` — what "bit-exact against embedded goldens" looks like; the bar for project 3.
 - `docs/PORTING.md` — the method, before you port anything.
-- `examples/nam/README.md` — the capture-to-profile walkthrough for project 5.
+- `apps/nam/README.md` — the capture-to-profile walkthrough for project 5.
 - `CONTRIBUTING.md` — two pages; read them before your first PR, not after.
 - `docs/THIRD-PARTY-NOTICES.md` — the full provenance inventory; the model for crediting whatever you build on.
 
