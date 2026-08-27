@@ -637,7 +637,7 @@ comptime data, and the docs state the consequence plainly:
 
 > The tag algebra is comptime-only data — it compiles down to stride
 > manipulation on the raw tensor with zero runtime tagging cost.
-> — `docs/REFERENCE.md` §1.2
+> — `docs/reference/01-introduction-and-mental-model.md` §1.2
 
 Zero cost is meant literally: at runtime there are no tag objects, no name
 lookups — nothing. The names exist only in the compiler, where they steer
@@ -759,7 +759,7 @@ dtype policy. An `.f32` spec gets the differentiable tensor family;
 block-quantized dtypes get a constant inference family; everything else, a
 typed-constant family. What each dtype *can do* is decided by which struct
 type you receive — "enforced by the type system, not runtime checks"
-(`docs/REFERENCE.md` §1.2).
+(`docs/reference/01-introduction-and-mental-model.md` §1.2).
 
 Two honest caveats, so the magic stays measured. First, only tag-*level*
 errors are compile-time (wrong axis name, duplicate tags, rank overflow);
