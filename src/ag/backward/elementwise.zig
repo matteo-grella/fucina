@@ -42,10 +42,13 @@ pub fn PointwiseBackward(
 
         const Side = enum { left, right };
 
-        /// max/min gradient at the broadcast result shape: gy weighted by
-        /// 1 where `favored` wins, 0.5 on exact ties (torch's subgradient,
-        /// ±inf ties included), 0 where it loses — NaN positions weigh 0
-        /// on both sides (IEEE compares are false; the torch formula).
+        /// max/min gradient at the broadcast result shape: gy where
+        /// `favored` wins, 0.5·gy on exact ties (torch's subgradient, ±inf
+        /// ties included), 0 where it loses — NaN positions get 0 on both
+        /// sides (IEEE: the win compare is false and `ne` is true, so the
+        /// tie fill zeroes them; the torch formula). Compare-mask + select
+        /// compose: two masks, one scale, one fill, one where — no cast /
+        /// weight-tensor intermediates.
         fn winnerWeightGrad(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, comptime favored: Side) !RawTensor {
             const result_shape = taggedShapeArray(result_tags, rawShapeArray(result_tags, gy));
             var left_view = try tag_ops.broadcastTensorTo(.f32, left_tags, &self.left_value.?, result_tags, result_shape);
@@ -53,19 +56,15 @@ pub fn PointwiseBackward(
             var right_view = try tag_ops.broadcastTensorTo(.f32, right_tags, &self.right_value.?, result_tags, result_shape);
             defer right_view.deinit();
             const win_op: exec_mod.CompareOp = comptime if ((op == .max) == (favored == .left)) .gt else .lt;
-            var wins_mask = try ctx.compare(.f32, win_op, &left_view, &right_view);
-            defer wins_mask.deinit();
-            var wins = try ctx.cast(.bool, .f32, &wins_mask);
+            var wins = try ctx.compare(.f32, win_op, &left_view, &right_view);
             defer wins.deinit();
-            var ties_mask = try ctx.compare(.f32, .eq, &left_view, &right_view);
-            defer ties_mask.deinit();
-            var ties = try ctx.cast(.bool, .f32, &ties_mask);
-            defer ties.deinit();
-            var half_ties = try ctx.scale(.f32, &ties, 0.5);
-            defer half_ties.deinit();
-            var weight = try ctx.elementwise(.f32, .add, &wins, &half_ties);
-            defer weight.deinit();
-            return tag_ops.pointwise(.f32, .mul, result_tags, gy, ctx, result_tags, &weight);
+            var not_ties = try ctx.compare(.f32, .ne, &left_view, &right_view);
+            defer not_ties.deinit();
+            var half = try ctx.scale(.f32, gy, 0.5);
+            defer half.deinit();
+            var tie_grad = try ctx.maskedFill(.f32, .bool, &half, &not_ties, 0);
+            defer tie_grad.deinit();
+            return ctx.where(.f32, .bool, gy, &wins, &tie_grad);
         }
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
@@ -131,6 +130,44 @@ pub fn IdentityBackward(comptime tags: anytype) type {
     };
 }
 
+/// Shared pool-split for the elementwise VJP map loops: `dst[i] =
+/// env.apply(a[i], gy[i])` per chunk (or a whole-slice `env.runSlice` when
+/// the env provides one, e.g. a SIMD derivative body). Each output element
+/// depends only on its own inputs, so chunking is partition-invariant —
+/// bitwise-equal to the serial loop — and the select/derivative VJPs over
+/// vocab-sized gradients stop serializing the backward pass.
+fn vjpMapChunked(comptime Env: type, ctx: *ExecContext, env: Env, as: []const Env.Elem, gys: []const f32, dsts: []f32) void {
+    const Task = struct {
+        env: Env,
+        as: []const Env.Elem,
+        gys: []const f32,
+        dsts: []f32,
+
+        fn run(task: *const @This()) void {
+            if (comptime @hasDecl(Env, "runSlice")) {
+                task.env.runSlice(task.dsts, task.as, task.gys);
+            } else {
+                for (task.as, task.gys, task.dsts) |a, grad, *dst| dst.* = task.env.apply(a, grad);
+            }
+        }
+    };
+    const total = dsts.len;
+    if (total >= parallel.vector_elementwise_len_threshold) {
+        if (ctx.workPool()) |pool| {
+            const task_count = parallel.cpuThreadCount(parallel.vector_max_threads);
+            var tasks: [parallel.vector_max_threads]Task = undefined;
+            for (0..task_count) |i| {
+                const s = i * total / task_count;
+                const e = (i + 1) * total / task_count;
+                tasks[i] = .{ .env = env, .as = as[s..e], .gys = gys[s..e], .dsts = dsts[s..e] };
+            }
+            pool.parallelChunks(Task, tasks[0..task_count], Task.run);
+            return;
+        }
+    }
+    Task.run(&.{ .env = env, .as = as, .gys = gys, .dsts = dsts });
+}
+
 pub const ReluBackward = struct {
     const Self = @This();
 
@@ -147,9 +184,13 @@ pub const ReluBackward = struct {
 
         var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
-        for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
-            dst.* = if (value > 0) grad else 0;
-        }
+        const Env = struct {
+            const Elem = f32;
+            fn apply(_: @This(), value: f32, grad: f32) f32 {
+                return if (value > 0) grad else 0;
+            }
+        };
+        vjpMapChunked(Env, ctx, .{}, x.dataConst(), gy_ready.dataConst(), gx.data());
         out[0] = gx;
     }
 
@@ -179,13 +220,17 @@ pub const SoftcapBackward = struct {
         var gy_ready = try contiguousForRead(ctx, gy);
         defer gy_ready.deinit();
 
-        const inv = 1.0 / self.cap;
         var gx = try ctx.empty(.f32, y.shape.slice());
         errdefer gx.deinit();
-        for (y.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
-            const u = value * inv;
-            dst.* = grad * (1 - u * u);
-        }
+        const Env = struct {
+            const Elem = f32;
+            inv: f32,
+            fn apply(env: @This(), value: f32, grad: f32) f32 {
+                const u = value * env.inv;
+                return grad * (1 - u * u);
+            }
+        };
+        vjpMapChunked(Env, ctx, .{ .inv = 1.0 / self.cap }, y.dataConst(), gy_ready.dataConst(), gx.data());
         out[0] = gx;
     }
 
@@ -214,9 +259,14 @@ pub const LeakyReluBackward = struct {
 
         var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
-        for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
-            dst.* = if (value > 0) grad else grad * self.negative_slope;
-        }
+        const Env = struct {
+            const Elem = f32;
+            negative_slope: f32,
+            fn apply(env: @This(), value: f32, grad: f32) f32 {
+                return if (value > 0) grad else grad * env.negative_slope;
+            }
+        };
+        vjpMapChunked(Env, ctx, .{ .negative_slope = self.negative_slope }, x.dataConst(), gy_ready.dataConst(), gx.data());
         out[0] = gx;
     }
 
@@ -286,53 +336,30 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
 
             var gx = try ctx.empty(.f32, x.shape.slice());
             errdefer gx.deinit();
-            const xs = x.dataConst();
-            const gys = gy_ready.dataConst();
-            const dsts = gx.data();
-            // Elementwise map: chunking is partition-invariant (bitwise-equal
-            // to the serial loop), so parallelize like the forward kernels —
-            // transcendental derivatives (tanh/gelu/…) over vocab-sized
-            // gradients otherwise serialize the whole backward pass.
-            const total = dsts.len;
-            if (total >= parallel.vector_elementwise_len_threshold) {
-                if (ctx.workPool()) |pool| {
-                    const task_count = parallel.cpuThreadCount(parallel.vector_max_threads);
-                    var tasks: [parallel.vector_max_threads]ChunkTask = undefined;
-                    for (0..task_count) |i| {
-                        const s = i * total / task_count;
-                        const e = (i + 1) * total / task_count;
-                        tasks[i] = .{ .xs = xs[s..e], .gys = gys[s..e], .dsts = dsts[s..e] };
+            // Chunked like every elementwise VJP map — transcendental
+            // derivatives (tanh/gelu/…) over vocab-sized gradients would
+            // otherwise serialize the whole backward pass.
+            const Env = struct {
+                const Elem = f32;
+                fn runSlice(_: @This(), dsts: []f32, xs: []const f32, gys: []const f32) void {
+                    if (comptime vector_primitives.unaryVjpVectorizes(op)) {
+                        // SIMD derivative body — the scalar loop pays one
+                        // libm expf per element for the exp-family ops.
+                        vector_primitives.vecUnaryVjp(op, dsts, xs, gys);
+                    } else if (comptime unaryUsesOutput(op)) {
+                        for (xs, gys, dsts) |value, grad, *dst| {
+                            dst.* = grad * unaryDerivativeFromOutput(op, value);
+                        }
+                    } else {
+                        for (xs, gys, dsts) |value, grad, *dst| {
+                            dst.* = grad * unaryDerivative(op, value);
+                        }
                     }
-                    pool.parallelChunks(ChunkTask, tasks[0..task_count], ChunkTask.run);
-                    out[0] = gx;
-                    return;
                 }
-            }
-            ChunkTask.run(&.{ .xs = xs, .gys = gys, .dsts = dsts });
+            };
+            vjpMapChunked(Env, ctx, .{}, x.dataConst(), gy_ready.dataConst(), gx.data());
             out[0] = gx;
         }
-
-        const ChunkTask = struct {
-            xs: []const f32,
-            gys: []const f32,
-            dsts: []f32,
-
-            fn run(t: *const ChunkTask) void {
-                if (comptime vector_primitives.unaryVjpVectorizes(op)) {
-                    // SIMD derivative body — the scalar loop pays one libm
-                    // expf per element for the exp-family ops.
-                    vector_primitives.vecUnaryVjp(op, t.dsts, t.xs, t.gys);
-                } else if (comptime unaryUsesOutput(op)) {
-                    for (t.xs, t.gys, t.dsts) |value, grad, *dst| {
-                        dst.* = grad * unaryDerivativeFromOutput(op, value);
-                    }
-                } else {
-                    for (t.xs, t.gys, t.dsts) |value, grad, *dst| {
-                        dst.* = grad * unaryDerivative(op, value);
-                    }
-                }
-            }
-        };
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
@@ -400,9 +427,15 @@ pub const ClampBackward = struct {
 
         var gx = try ctx.empty(.f32, x.shape.slice());
         errdefer gx.deinit();
-        for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
-            dst.* = if (value >= self.min_value and value <= self.max_value) grad else 0;
-        }
+        const Env = struct {
+            const Elem = f32;
+            min_value: f32,
+            max_value: f32,
+            fn apply(env: @This(), value: f32, grad: f32) f32 {
+                return if (value >= env.min_value and value <= env.max_value) grad else 0;
+            }
+        };
+        vjpMapChunked(Env, ctx, .{ .min_value = self.min_value, .max_value = self.max_value }, x.dataConst(), gy_ready.dataConst(), gx.data());
         out[0] = gx;
     }
 
@@ -536,8 +569,11 @@ pub fn AddScalarBackward(comptime tags: anytype) type {
         const Self = @This();
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            _ = ctx;
             if (!core.needs(self, 0)) return;
-            out[0] = try ctx.scale(.f32, gy, 1); // identity passthrough as a fresh owned tensor
+            // Identity passthrough: an owned view of gy (refcounted, no
+            // copy) — the same spelling PointwiseBackward uses for add.
+            out[0] = try gy.cloneView();
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -596,9 +632,13 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
             defer gy_ready.deinit();
             var gx = try ctx.empty(.f32, m.shape.slice());
             errdefer gx.deinit();
-            for (m.dataConst(), gy_ready.dataConst(), gx.data()) |mv, grad, *dst| {
-                dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) 0 else grad;
-            }
+            const Env = struct {
+                const Elem = dtype_mod.Scalar(mask_dtype);
+                fn apply(_: @This(), mv: Elem, grad: f32) f32 {
+                    return if (dtype_mod.isTruthy(mask_dtype, mv)) 0 else grad;
+                }
+            };
+            vjpMapChunked(Env, ctx, .{}, m.dataConst(), gy_ready.dataConst(), gx.data());
             out[0] = gx;
         }
 
@@ -629,17 +669,25 @@ pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DTy
             if (core.needs(self, 0)) {
                 var gx = try ctx.empty(.f32, c.shape.slice());
                 errdefer gx.deinit();
-                for (c.dataConst(), gy_ready.dataConst(), gx.data()) |cv, grad, *dst| {
-                    dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) grad else 0;
-                }
+                const Env = struct {
+                    const Elem = dtype_mod.Scalar(cond_dtype);
+                    fn apply(_: @This(), cv: Elem, grad: f32) f32 {
+                        return if (dtype_mod.isTruthy(cond_dtype, cv)) grad else 0;
+                    }
+                };
+                vjpMapChunked(Env, ctx, .{}, c.dataConst(), gy_ready.dataConst(), gx.data());
                 out[0] = gx;
             }
             if (core.needs(self, 1)) {
                 var gyy = try ctx.empty(.f32, c.shape.slice());
                 errdefer gyy.deinit();
-                for (c.dataConst(), gy_ready.dataConst(), gyy.data()) |cv, grad, *dst| {
-                    dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) 0 else grad;
-                }
+                const Env = struct {
+                    const Elem = dtype_mod.Scalar(cond_dtype);
+                    fn apply(_: @This(), cv: Elem, grad: f32) f32 {
+                        return if (dtype_mod.isTruthy(cond_dtype, cv)) 0 else grad;
+                    }
+                };
+                vjpMapChunked(Env, ctx, .{}, c.dataConst(), gy_ready.dataConst(), gyy.data());
                 out[1] = gyy;
             }
         }

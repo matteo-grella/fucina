@@ -20,7 +20,6 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
     return struct {
         parents: [1]?*GradState,
         input: RawTensor,
-        output: RawTensor,
 
         const Self = @This();
         const rank = rawRank(source_tags.len);
@@ -28,34 +27,36 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var x_ready = try contiguousForRead(ctx, &self.input);
-            defer x_ready.deinit();
-            const x = x_ready.dataConst();
-            var lse_ready = try contiguousForRead(ctx, &self.output);
-            defer lse_ready.deinit();
-            const lse = lse_ready.dataConst();
             var gy_ready = try contiguousForRead(ctx, gy);
             defer gy_ready.deinit();
             const g = gy_ready.dataConst();
 
-            const source_shape = rawShapeArray(source_tags, &self.input);
-            var gx = try ctx.empty(.f32, source_shape);
+            // d(logsumexp)/dx = exp(x − lse) IS the softmax of x along
+            // `axis`, scaled by the reduced-shape upstream gradient. The
+            // softmax row kernels (vexpf lanes, task-parallel over rows)
+            // replace the per-element libm @exp loop; the normalizer is
+            // recomputed from x instead of read back from the saved lse,
+            // so gradients agree in ulps rather than bitwise — the FD
+            // suite is the contract.
+            var gx = try ctx.softmax(.f32, rank, &self.input, axis);
             errdefer gx.deinit();
             const gxd = gx.data();
 
-            // d(logsumexp)/dx = exp(x - lse), scaled by the reduced-shape
-            // upstream gradient (the softmax of the row).
+            const source_shape = rawShapeArray(source_tags, &self.input);
             const axis_dim = source_shape[axis];
             const geo = axisGeometry(rank, source_shape, axis);
-            for (0..geo.outer) |outer_i| {
-                const base = outer_i * axis_dim * geo.inner;
-                for (0..geo.inner) |inner_i| {
-                    const reduced = outer_i * geo.inner + inner_i;
-                    const shift = lse[reduced];
-                    const upstream = g[reduced];
+            if (geo.inner == 1) {
+                for (0..geo.outer) |outer_i| {
+                    const upstream = g[outer_i];
+                    for (gxd[outer_i * axis_dim ..][0..axis_dim]) |*value| value.* *= upstream;
+                }
+            } else {
+                for (0..geo.outer) |outer_i| {
+                    const g_row = g[outer_i * geo.inner ..][0..geo.inner];
+                    const base = outer_i * axis_dim * geo.inner;
                     for (0..axis_dim) |i| {
-                        const offset = base + i * geo.inner + inner_i;
-                        gxd[offset] = @exp(x[offset] - shift) * upstream;
+                        const dst = gxd[base + i * geo.inner ..][0..geo.inner];
+                        for (dst, g_row) |*value, upstream| value.* *= upstream;
                     }
                 }
             }
@@ -65,7 +66,6 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
             self.input.deinit();
-            self.output.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);

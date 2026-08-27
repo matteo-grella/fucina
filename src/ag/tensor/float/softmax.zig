@@ -59,7 +59,8 @@ pub fn Ops(comptime Self: type) type {
         /// whose max is ±inf are shifted by 0 instead, so an all(-inf) row
         /// yields -inf and a row containing +inf yields +inf (the torch
         /// convention) rather than NaN. Differentiable: the backward is
-        /// the saved-output identity `exp(x − lse)·g` (the row softmax).
+        /// the row softmax of the saved INPUT times the upstream gradient
+        /// (`exp(x − lse)·g`; only the input is retained).
         pub fn logsumexp(self: *const Self, ctx: *ExecContext, comptime tag: Tag) !Tensor(.{ .dtype = reduced_dtype, .tags = removeTag(tags, tag) }) {
             const result_tags = removeTag(tags, tag);
             const reduce_axis = comptime axis(tag);
@@ -70,12 +71,9 @@ pub fn Ops(comptime Self: type) type {
             const Record = LogsumexpBackward(tags, reduce_axis);
             var saved_input = try (&self.value).cloneView();
             errdefer saved_input.deinit();
-            var saved_output = try (&value).cloneView();
-            errdefer saved_output.deinit();
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{self.grad_state},
                 .input = saved_input,
-                .output = saved_output,
             });
         }
 
