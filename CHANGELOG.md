@@ -304,6 +304,16 @@ this point; earlier history is `git log`.
   `backend.ParallelConfig`, `quantized_matmul.blockCountForDType` (the
   `q8k.qkBlockCount`/`q8_0BlockCount` spellings), or the curated
   `backend.simd` seam (`dotF32F16` added for the SubQ research kernels).
+- `backend/vector/tile.zig` is the one range splitter behind the vector
+  kernels' parallel dispatch (`forRange` for disjoint-write splits,
+  `reduceRange` for partial folds): the 39 hand-rolled per-kernel Task
+  structs and their `runParallel*`/`run*Task` splitters in
+  `vector/elementwise.zig`, `vector/gemm.zig` and `vector/conv.zig` are
+  gone (Task-struct decls 19/10/10 to 0/0/0). Split points
+  (`i * total / thread_count`), per-chunk iteration order and every
+  measured thread-count gate are unchanged, so results are bit-identical;
+  `matmul_quant.zig`'s `QuantizedRhsParallel` keeps its grouped/gated
+  policy as the richer sibling.
 - `store/expert_store.zig` is now the facade over five concern files —
   `store/io.zig` (platform I/O shims + the store error set),
   `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout

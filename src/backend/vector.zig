@@ -11,6 +11,8 @@
 //! Child modules, each addressed as `vector.<child>.<fn>`:
 //!   common       - ParallelConfig, the V* vector-width aliases, the
 //!                  thread-count gates and the contiguous-data accessors.
+//!   tile         - the payload-generic range splitter (forRange /
+//!                  reduceRange) behind the kernels' parallel dispatch.
 //!   primitives   - the @Vector cores: dot/add/mul, transcendental bodies,
 //!                  the typed f64/f16/bf16 tails, the f16 row-block attention
 //!                  inner loops.
@@ -33,6 +35,7 @@
 //!                  BLAS strips, multi-stream decode) with their Task
 //!                  payloads and run adapters.
 pub const common = @import("vector/common.zig");
+pub const tile = @import("vector/tile.zig");
 
 pub const primitives = @import("vector/primitives.zig");
 pub const elementwise = @import("vector/elementwise.zig");

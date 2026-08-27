@@ -5,6 +5,8 @@
 const std = @import("std");
 const elementwise = @import("elementwise.zig");
 const tensor = @import("../../tensor.zig");
+const thread = @import("../../thread.zig");
+const common = @import("common.zig");
 
 const Tensor = tensor.Tensor;
 
@@ -372,4 +374,64 @@ test "groupNorm backward vector kernel matches naive f64 two-pass reference" {
             try std.testing.expectEqualSlices(f32, gx.dataConst(), gx_only.dataConst());
         }
     }
+}
+
+test "elementwise map kernels: pooled split is bit-identical to serial" {
+    // The tile.forRange conversion contract: same proportional split points,
+    // same per-chunk iteration order — for the disjoint-write map families
+    // the pooled result is the serial result's bytes. (The sum/prod/dot
+    // reductions deliberately stay outside this pin: their pooled form
+    // combines per-task partials, a different documented reduction tree.)
+    const allocator = std.testing.allocator;
+    const parallel = @import("../../parallel.zig");
+
+    var pool: thread.Pool = undefined;
+    try pool.init(.{ .allocator = allocator, .max_workers = 3 });
+    defer pool.deinit();
+    const pooled: common.ParallelConfig = .{ .pool = &pool };
+
+    const len: usize = parallel.vector_elementwise_len_threshold * 2 + 7;
+    var a = try Tensor.zeros(allocator, &.{len});
+    defer a.deinit();
+    fillPseudoRandom(a.data(), 71);
+    var b = try Tensor.zeros(allocator, &.{len});
+    defer b.deinit();
+    fillPseudoRandom(b.data(), 72);
+    var out_serial = try Tensor.zeros(allocator, &.{len});
+    defer out_serial.deinit();
+    var out_pooled = try Tensor.zeros(allocator, &.{len});
+    defer out_pooled.deinit();
+
+    elementwise.addContiguousIntoUnchecked(.{}, &out_serial, &a, &b, len);
+    elementwise.addContiguousIntoUnchecked(pooled, &out_pooled, &a, &b, len);
+    try std.testing.expectEqualSlices(f32, out_serial.dataConst(), out_pooled.dataConst());
+
+    elementwise.mulContiguousIntoUnchecked(.{}, &out_serial, &a, &b, len);
+    elementwise.mulContiguousIntoUnchecked(pooled, &out_pooled, &a, &b, len);
+    try std.testing.expectEqualSlices(f32, out_serial.dataConst(), out_pooled.dataConst());
+
+    try elementwise.scaleInto(.{}, &out_serial, &a, 1.5);
+    try elementwise.scaleInto(pooled, &out_pooled, &a, 1.5);
+    try std.testing.expectEqualSlices(f32, out_serial.dataConst(), out_pooled.dataConst());
+
+    // The transcendental families (unary exp/gelu, gated, snake) are NOT
+    // pinned here: their vector bodies and scalar tails compute different
+    // expressions (vexpf/@sin lanes vs libm scalars), so a chunk boundary
+    // moves which elements take the tail form — the historic split
+    // behavior, held to references by tolerance tests instead.
+
+    // Row/channel and group splits (groupNorm's apply phase is exact ops).
+    const rows: usize = 96;
+    const cols: usize = 640;
+    var x2 = try Tensor.zeros(allocator, &.{ rows, cols });
+    defer x2.deinit();
+    fillPseudoRandom(x2.data(), 73);
+    var y_serial = try Tensor.zeros(allocator, &.{ rows, cols });
+    defer y_serial.deinit();
+    var y_pooled = try Tensor.zeros(allocator, &.{ rows, cols });
+    defer y_pooled.deinit();
+
+    elementwise.groupNormInto(.{}, &y_serial, &x2, null, null, rows, cols, 8, 1e-5);
+    elementwise.groupNormInto(pooled, &y_pooled, &x2, null, null, rows, cols, 8, 1e-5);
+    try std.testing.expectEqualSlices(f32, y_serial.dataConst(), y_pooled.dataConst());
 }

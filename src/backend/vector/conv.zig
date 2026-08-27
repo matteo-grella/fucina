@@ -19,6 +19,7 @@ const parallel = @import("../../parallel.zig");
 const std = @import("std");
 const tensor = @import("../../tensor.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 
 const Tensor = tensor.Tensor;
 const ParallelConfig = common.ParallelConfig;
@@ -40,7 +41,7 @@ pub fn causalDepthwiseConv1dInto(
     const output = common.contiguousData(out, seq * channels);
     const input_data = common.contiguousDataConst(input, seq * channels);
     const kernel_data = common.contiguousDataConst(kernel, channels * taps);
-    if (maybeParallelConv(pc, runForwardTask, output, input_data, kernel_data, null, state, seq, channels, taps, dilation)) return;
+    if (maybeParallelConv(pc, runForwardChannels, output, input_data, kernel_data, null, state, seq, channels, taps, dilation)) return;
     forwardRange(output, input_data, kernel_data, state, seq, channels, taps, dilation, 0, channels);
 }
 
@@ -58,7 +59,7 @@ pub fn causalDepthwiseConv1dBackwardInputInto(
     const output = common.contiguousData(out, seq * channels);
     const gy_data = common.contiguousDataConst(gy, seq * channels);
     const kernel_data = common.contiguousDataConst(kernel, channels * taps);
-    if (maybeParallelConv(pc, runBackwardInputTask, output, gy_data, kernel_data, null, null, seq, channels, taps, dilation)) return;
+    if (maybeParallelConv(pc, runBackwardInputChannels, output, gy_data, kernel_data, null, null, seq, channels, taps, dilation)) return;
     backwardInputRange(output, gy_data, kernel_data, seq, channels, taps, dilation, 0, channels);
 }
 
@@ -77,11 +78,11 @@ pub fn causalDepthwiseConv1dBackwardKernelInto(
     const output = common.contiguousData(out, channels * taps);
     const input_data = common.contiguousDataConst(input, seq * channels);
     const gy_data = common.contiguousDataConst(gy, seq * channels);
-    if (maybeParallelConv(pc, runBackwardKernelTask, output, input_data, undefined, gy_data, state, seq, channels, taps, dilation)) return;
+    if (maybeParallelConv(pc, runBackwardKernelChannels, output, input_data, undefined, gy_data, state, seq, channels, taps, dilation)) return;
     backwardKernelRange(output, input_data, gy_data, state, seq, channels, taps, dilation, 0, channels);
 }
 
-const ConvTask = struct {
+const ConvCtx = struct {
     out: []f32,
     input: []const f32,
     kernel: []const f32,
@@ -91,13 +92,11 @@ const ConvTask = struct {
     channels: usize,
     taps: usize,
     dilation: usize,
-    channel_start: usize,
-    channel_end: usize,
 };
 
 fn maybeParallelConv(
     pc: ParallelConfig,
-    comptime runTask: fn (*const ConvTask) void,
+    comptime runFn: fn (ConvCtx, usize, usize) void,
     out: []f32,
     input: []const f32,
     kernel: []const f32,
@@ -111,37 +110,30 @@ fn maybeParallelConv(
     const pool = pc.pool orelse return false;
     const thread_count = common.depthwiseConvThreadCount(seq, channels, taps);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]ConvTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .input = input,
-            .kernel = kernel,
-            .gy = gy orelse &.{},
-            .state = state,
-            .seq = seq,
-            .channels = channels,
-            .taps = taps,
-            .dilation = dilation,
-            .channel_start = task_i * channels / thread_count,
-            .channel_end = (task_i + 1) * channels / thread_count,
-        };
-    }
-    pool.parallelChunks(ConvTask, tasks[0..thread_count], runTask);
+    tile.forRange(pool, ConvCtx, .{
+        .out = out,
+        .input = input,
+        .kernel = kernel,
+        .gy = gy orelse &.{},
+        .state = state,
+        .seq = seq,
+        .channels = channels,
+        .taps = taps,
+        .dilation = dilation,
+    }, channels, thread_count, runFn);
     return true;
 }
 
-fn runForwardTask(task: *const ConvTask) void {
-    forwardRange(task.out, task.input, task.kernel, task.state, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
+fn runForwardChannels(c: ConvCtx, channel_start: usize, channel_end: usize) void {
+    forwardRange(c.out, c.input, c.kernel, c.state, c.seq, c.channels, c.taps, c.dilation, channel_start, channel_end);
 }
 
-fn runBackwardInputTask(task: *const ConvTask) void {
-    backwardInputRange(task.out, task.input, task.kernel, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
+fn runBackwardInputChannels(c: ConvCtx, channel_start: usize, channel_end: usize) void {
+    backwardInputRange(c.out, c.input, c.kernel, c.seq, c.channels, c.taps, c.dilation, channel_start, channel_end);
 }
 
-fn runBackwardKernelTask(task: *const ConvTask) void {
-    backwardKernelRange(task.out, task.input, task.gy, task.state, task.seq, task.channels, task.taps, task.dilation, task.channel_start, task.channel_end);
+fn runBackwardKernelChannels(c: ConvCtx, channel_start: usize, channel_end: usize) void {
+    backwardKernelRange(c.out, c.input, c.gy, c.state, c.seq, c.channels, c.taps, c.dilation, channel_start, channel_end);
 }
 
 fn forwardRange(
@@ -263,7 +255,7 @@ pub fn causalConv1dInto(
     const output = common.contiguousData(out, seq * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralForwardTask, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
     generalForwardRange(output, input_data, weight_data, state, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
@@ -282,7 +274,7 @@ pub fn causalConv1dBackwardInputInto(
     const output = common.contiguousData(out, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputTask, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, 1)) return;
     generalBackwardInputRange(output, gy_data, weight_data, seq, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
@@ -303,7 +295,7 @@ pub fn causalConv1dBackwardWeightInto(
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const rows = taps * in_channels;
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightTask, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
     generalBackwardWeightRange(output, input_data, gy_data, state, seq, in_channels, out_channels, taps, dilation, 1, 0, rows);
 }
 
@@ -325,7 +317,7 @@ pub fn groupedCausalConv1dInto(
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const in_per_group = in_channels / groups;
     const weight_data = common.contiguousDataConst(weight, taps * in_per_group * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralForwardTask, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
     generalForwardRange(output, input_data, weight_data, state, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
@@ -346,7 +338,7 @@ pub fn groupedCausalConv1dBackwardInputInto(
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const in_per_group = in_channels / groups;
     const weight_data = common.contiguousDataConst(weight, taps * in_per_group * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputTask, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, groups)) return;
     generalBackwardInputRange(output, gy_data, weight_data, seq, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
@@ -369,11 +361,11 @@ pub fn groupedCausalConv1dBackwardWeightInto(
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const rows = taps * in_per_group;
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightTask, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
     generalBackwardWeightRange(output, input_data, gy_data, state, seq, in_channels, out_channels, taps, dilation, groups, 0, rows);
 }
 
-const GeneralConvTask = struct {
+const GeneralConvCtx = struct {
     out: []f32,
     input: []const f32,
     weight: []const f32,
@@ -385,13 +377,11 @@ const GeneralConvTask = struct {
     taps: usize,
     dilation: usize,
     groups: usize,
-    start: usize,
-    end: usize,
 };
 
 fn maybeParallelGeneralConv(
     pc: ParallelConfig,
-    comptime runTask: fn (*const GeneralConvTask) void,
+    comptime runFn: fn (GeneralConvCtx, usize, usize) void,
     split: usize,
     out: []f32,
     input: []const f32,
@@ -409,39 +399,32 @@ fn maybeParallelGeneralConv(
     const work = std.math.mul(usize, parallel.saturatedMul3(seq, in_channels, out_channels), taps) catch std.math.maxInt(usize);
     const thread_count = common.generalConvThreadCount(split, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]GeneralConvTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .input = input,
-            .weight = weight,
-            .gy = gy orelse &.{},
-            .state = state,
-            .seq = seq,
-            .in_channels = in_channels,
-            .out_channels = out_channels,
-            .taps = taps,
-            .dilation = dilation,
-            .groups = groups,
-            .start = task_i * split / thread_count,
-            .end = (task_i + 1) * split / thread_count,
-        };
-    }
-    pool.parallelChunks(GeneralConvTask, tasks[0..thread_count], runTask);
+    tile.forRange(pool, GeneralConvCtx, .{
+        .out = out,
+        .input = input,
+        .weight = weight,
+        .gy = gy orelse &.{},
+        .state = state,
+        .seq = seq,
+        .in_channels = in_channels,
+        .out_channels = out_channels,
+        .taps = taps,
+        .dilation = dilation,
+        .groups = groups,
+    }, split, thread_count, runFn);
     return true;
 }
 
-fn runGeneralForwardTask(task: *const GeneralConvTask) void {
-    generalForwardRange(task.out, task.input, task.weight, task.state, task.in_channels, task.out_channels, task.taps, task.dilation, task.groups, task.start, task.end);
+fn runGeneralForwardRows(c: GeneralConvCtx, start: usize, end: usize) void {
+    generalForwardRange(c.out, c.input, c.weight, c.state, c.in_channels, c.out_channels, c.taps, c.dilation, c.groups, start, end);
 }
 
-fn runGeneralBackwardInputTask(task: *const GeneralConvTask) void {
-    generalBackwardInputRange(task.out, task.gy, task.weight, task.seq, task.in_channels, task.out_channels, task.taps, task.dilation, task.groups, task.start, task.end);
+fn runGeneralBackwardInputRows(c: GeneralConvCtx, start: usize, end: usize) void {
+    generalBackwardInputRange(c.out, c.gy, c.weight, c.seq, c.in_channels, c.out_channels, c.taps, c.dilation, c.groups, start, end);
 }
 
-fn runGeneralBackwardWeightTask(task: *const GeneralConvTask) void {
-    generalBackwardWeightRange(task.out, task.input, task.gy, task.state, task.seq, task.in_channels, task.out_channels, task.taps, task.dilation, task.groups, task.start, task.end);
+fn runGeneralBackwardWeightRows(c: GeneralConvCtx, start: usize, end: usize) void {
+    generalBackwardWeightRange(c.out, c.input, c.gy, c.state, c.seq, c.in_channels, c.out_channels, c.taps, c.dilation, c.groups, start, end);
 }
 
 /// Resolves the input row feeding tap `k` at output time `t`: the chunk's own
@@ -1055,18 +1038,16 @@ pub const Conv2dDims = struct {
     groups: usize,
 };
 
-const Conv2dTask = struct {
+const Conv2dCtx = struct {
     out: []f32,
     in: []const f32,
     w: []const f32,
     bias: ?[]const f32,
     d: Conv2dDims,
-    oh_start: usize,
-    oh_end: usize,
 };
 
-fn runConv2dTask(task: *const Conv2dTask) void {
-    conv2dRangeRows(task.out, task.in, task.w, task.bias, task.d, task.oh_start, task.oh_end);
+fn runConv2dRows(c: Conv2dCtx, oh_start: usize, oh_end: usize) void {
+    conv2dRangeRows(c.out, c.in, c.w, c.bias, c.d, oh_start, oh_end);
 }
 
 pub fn conv2dInto(
@@ -1090,35 +1071,21 @@ pub fn conv2dInto(
         const work = d.oh * d.ow * d.cout * d.kh * d.kw * cin_pg;
         const tc = common.generalConvThreadCount(d.oh, work);
         if (tc > 1) {
-            var tasks: [parallel.vector_max_threads]Conv2dTask = undefined;
-            for (0..tc) |ti| {
-                tasks[ti] = .{
-                    .out = o,
-                    .in = in,
-                    .w = wt,
-                    .bias = bias,
-                    .d = d,
-                    .oh_start = ti * d.oh / tc,
-                    .oh_end = (ti + 1) * d.oh / tc,
-                };
-            }
-            pool.parallelChunks(Conv2dTask, tasks[0..tc], runConv2dTask);
+            tile.forRange(pool, Conv2dCtx, .{ .out = o, .in = in, .w = wt, .bias = bias, .d = d }, d.oh, tc, runConv2dRows);
             return;
         }
     }
     conv2dRangeRows(o, in, wt, bias, d, 0, d.oh);
 }
 
-const Im2colTask = struct {
+const Im2colCtx = struct {
     col: []f32,
     in: []const f32,
     d: Conv2dDims,
-    oh_start: usize,
-    oh_end: usize,
 };
 
-fn runIm2colTask(task: *const Im2colTask) void {
-    im2colRangeRows(task.col, task.in, task.d, task.oh_start, task.oh_end);
+fn runIm2colRows(c: Im2colCtx, oh_start: usize, oh_end: usize) void {
+    im2colRangeRows(c.col, c.in, c.d, oh_start, oh_end);
 }
 
 /// im2col gather for the groups==1 conv2d GEMM route:
@@ -1133,17 +1100,7 @@ pub fn im2colInto(pc: ParallelConfig, col: *Tensor, input: *const Tensor, d: Con
         const work = d.oh * d.ow * d.kh * d.kw * d.cin;
         const tc = common.generalConvThreadCount(d.oh, work);
         if (tc > 1) {
-            var tasks: [parallel.vector_max_threads]Im2colTask = undefined;
-            for (0..tc) |ti| {
-                tasks[ti] = .{
-                    .col = cd,
-                    .in = in,
-                    .d = d,
-                    .oh_start = ti * d.oh / tc,
-                    .oh_end = (ti + 1) * d.oh / tc,
-                };
-            }
-            pool.parallelChunks(Im2colTask, tasks[0..tc], runIm2colTask);
+            tile.forRange(pool, Im2colCtx, .{ .col = cd, .in = in, .d = d }, d.oh, tc, runIm2colRows);
             return;
         }
     }
@@ -1243,26 +1200,24 @@ fn conv2dRangeRows(out: []f32, in: []const f32, w: []const f32, bias: ?[]const f
 // to match the forward.
 // ===========================================================================
 
-const Conv2dGradTask = struct {
+const Conv2dGradCtx = struct {
     out: []f32,
     a: []const f32, // gy (backward-input) / input (backward-weight)
     b: []const f32, // weight (backward-input) / gy (backward-weight)
     d: Conv2dDims,
-    start: usize,
-    end: usize,
 };
 
-fn runConv2dBackwardInputTask(task: *const Conv2dGradTask) void {
-    conv2dBackwardInputRangeRows(task.out, task.a, task.b, task.d, task.start, task.end);
+fn runConv2dBackwardInputRows(c: Conv2dGradCtx, start: usize, end: usize) void {
+    conv2dBackwardInputRangeRows(c.out, c.a, c.b, c.d, start, end);
 }
 
-fn runConv2dBackwardWeightTask(task: *const Conv2dGradTask) void {
-    conv2dBackwardWeightRangeCout(task.out, task.a, task.b, task.d, task.start, task.end);
+fn runConv2dBackwardWeightCout(c: Conv2dGradCtx, start: usize, end: usize) void {
+    conv2dBackwardWeightRangeCout(c.out, c.a, c.b, c.d, start, end);
 }
 
 fn maybeParallelConv2dGrad(
     pc: ParallelConfig,
-    comptime runTask: fn (*const Conv2dGradTask) void,
+    comptime runFn: fn (Conv2dGradCtx, usize, usize) void,
     split: usize,
     out: []f32,
     a: []const f32,
@@ -1274,19 +1229,7 @@ fn maybeParallelConv2dGrad(
     const work = std.math.mul(usize, parallel.saturatedMul3(d.oh * d.ow, d.cout, cin_pg), d.kh * d.kw) catch std.math.maxInt(usize);
     const thread_count = common.generalConvThreadCount(split, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]Conv2dGradTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .a = a,
-            .b = b,
-            .d = d,
-            .start = task_i * split / thread_count,
-            .end = (task_i + 1) * split / thread_count,
-        };
-    }
-    pool.parallelChunks(Conv2dGradTask, tasks[0..thread_count], runTask);
+    tile.forRange(pool, Conv2dGradCtx, .{ .out = out, .a = a, .b = b, .d = d }, split, thread_count, runFn);
     return true;
 }
 
@@ -1297,7 +1240,7 @@ pub fn conv2dBackwardInputInto(pc: ParallelConfig, out: *Tensor, gy: *const Tens
     const gx = out.data();
     const gyd = gy.dataConst();
     const wt = weight.dataConst();
-    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardInputTask, d.h, gx, gyd, wt, d)) return;
+    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardInputRows, d.h, gx, gyd, wt, d)) return;
     conv2dBackwardInputRangeRows(gx, gyd, wt, d, 0, d.h);
 }
 
@@ -1353,7 +1296,7 @@ pub fn conv2dBackwardWeightInto(pc: ParallelConfig, out: *Tensor, input: *const 
     const gw = out.data();
     const ind = input.dataConst();
     const gyd = gy.dataConst();
-    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardWeightTask, d.cout, gw, ind, gyd, d)) return;
+    if (maybeParallelConv2dGrad(common.refSerial(pc), runConv2dBackwardWeightCout, d.cout, gw, ind, gyd, d)) return;
     conv2dBackwardWeightRangeCout(gw, ind, gyd, d, 0, d.cout);
 }
 
@@ -1407,16 +1350,14 @@ fn conv2dBackwardWeightRangeCout(gw: []f32, ind: []const f32, gyd: []const f32, 
 // is bit-identical to serial.
 // ===========================================================================
 
-const Col2imTask = struct {
+const Col2imCtx = struct {
     out: []f32,
     col: []const f32,
     d: Conv2dDims,
-    h_start: usize,
-    h_end: usize,
 };
 
-fn runCol2imTask(task: *const Col2imTask) void {
-    col2imRangeRows(task.out, task.col, task.d, task.h_start, task.h_end);
+fn runCol2imRows(c: Col2imCtx, h_start: usize, h_end: usize) void {
+    col2imRangeRows(c.out, c.col, c.d, h_start, h_end);
 }
 
 /// `out` is [H,W,Cin]; `col` is the im2col layout
@@ -1431,17 +1372,7 @@ pub fn col2imInto(pc: ParallelConfig, out: *Tensor, col: *const Tensor, d: Conv2
         const work = parallel.saturatedMul3(d.h * d.w, d.cin, (d.kh / d.stride_h + 1) * (d.kw / d.stride_w + 1));
         const tc = common.generalConvThreadCount(d.h, work);
         if (tc > 1) {
-            var tasks: [parallel.vector_max_threads]Col2imTask = undefined;
-            for (0..tc) |ti| {
-                tasks[ti] = .{
-                    .out = o,
-                    .col = cd,
-                    .d = d,
-                    .h_start = ti * d.h / tc,
-                    .h_end = (ti + 1) * d.h / tc,
-                };
-            }
-            pool.parallelChunks(Col2imTask, tasks[0..tc], runCol2imTask);
+            tile.forRange(pool, Col2imCtx, .{ .out = o, .col = cd, .d = d }, d.h, tc, runCol2imRows);
             return;
         }
     }
@@ -1505,17 +1436,15 @@ pub fn conv1dInto(
     conv1dForwardRange(output, input_data, weight_data, d, 0, d.out_len);
 }
 
-const Conv1dTask = struct {
+const Conv1dCtx = struct {
     out: []f32,
     input: []const f32,
     weight: []const f32,
     d: Conv1dDims,
-    start: usize,
-    end: usize,
 };
 
-fn runConv1dTask(task: *const Conv1dTask) void {
-    conv1dForwardRange(task.out, task.input, task.weight, task.d, task.start, task.end);
+fn runConv1dRows(c: Conv1dCtx, start: usize, end: usize) void {
+    conv1dForwardRange(c.out, c.input, c.weight, c.d, start, end);
 }
 
 fn maybeParallelConv1d(
@@ -1530,19 +1459,7 @@ fn maybeParallelConv1d(
     const work = std.math.mul(usize, parallel.saturatedMul3(d.out_len, in_per_group, d.out_channels), d.taps) catch std.math.maxInt(usize);
     const thread_count = common.generalConvThreadCount(d.out_len, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]Conv1dTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .input = input,
-            .weight = weight,
-            .d = d,
-            .start = task_i * d.out_len / thread_count,
-            .end = (task_i + 1) * d.out_len / thread_count,
-        };
-    }
-    pool.parallelChunks(Conv1dTask, tasks[0..thread_count], runConv1dTask);
+    tile.forRange(pool, Conv1dCtx, .{ .out = out, .input = input, .weight = weight, .d = d }, d.out_len, thread_count, runConv1dRows);
     return true;
 }
 
@@ -1621,7 +1538,7 @@ pub fn col2im1dInto(
     col2im1dRange(output, col_data, t_in, out_channels, taps, stride, pad, 0, out_len);
 }
 
-const Col2im1dTask = struct {
+const Col2im1dCtx = struct {
     out: []f32,
     col: []const f32,
     t_in: usize,
@@ -1629,12 +1546,10 @@ const Col2im1dTask = struct {
     taps: usize,
     stride: usize,
     pad: usize,
-    start: usize,
-    end: usize,
 };
 
-fn runCol2im1dTask(task: *const Col2im1dTask) void {
-    col2im1dRange(task.out, task.col, task.t_in, task.out_channels, task.taps, task.stride, task.pad, task.start, task.end);
+fn runCol2im1dRows(c: Col2im1dCtx, start: usize, end: usize) void {
+    col2im1dRange(c.out, c.col, c.t_in, c.out_channels, c.taps, c.stride, c.pad, start, end);
 }
 
 fn maybeParallelCol2im1d(
@@ -1653,22 +1568,7 @@ fn maybeParallelCol2im1d(
     const work = parallel.saturatedMul3(out_len, out_channels, taps / stride + 1);
     const thread_count = common.generalConvThreadCount(out_len, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]Col2im1dTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .col = col,
-            .t_in = t_in,
-            .out_channels = out_channels,
-            .taps = taps,
-            .stride = stride,
-            .pad = pad,
-            .start = task_i * out_len / thread_count,
-            .end = (task_i + 1) * out_len / thread_count,
-        };
-    }
-    pool.parallelChunks(Col2im1dTask, tasks[0..thread_count], runCol2im1dTask);
+    tile.forRange(pool, Col2im1dCtx, .{ .out = out, .col = col, .t_in = t_in, .out_channels = out_channels, .taps = taps, .stride = stride, .pad = pad }, out_len, thread_count, runCol2im1dRows);
     return true;
 }
 
@@ -1736,7 +1636,7 @@ pub fn conv1dBackwardInputInto(
     const gy_data = common.contiguousDataConst(gy, d.out_len * d.out_channels);
     const in_per_group = d.in_channels / d.groups;
     const weight_data = common.contiguousDataConst(weight, d.taps * in_per_group * d.out_channels);
-    if (maybeParallelConv1dGrad(pc, runConv1dBackwardInputTask, d.seq, output, gy_data, weight_data, d)) return;
+    if (maybeParallelConv1dGrad(pc, runConv1dBackwardInputRows, d.seq, output, gy_data, weight_data, d)) return;
     conv1dBackwardInputRange(output, gy_data, weight_data, d, 0, d.seq);
 }
 
@@ -1758,30 +1658,28 @@ pub fn conv1dBackwardWeightInto(
     const input_data = common.contiguousDataConst(input, d.seq * d.in_channels);
     const gy_data = common.contiguousDataConst(gy, d.out_len * d.out_channels);
     const rows = d.taps * in_per_group;
-    if (maybeParallelConv1dGrad(pc, runConv1dBackwardWeightTask, rows, output, input_data, gy_data, d)) return;
+    if (maybeParallelConv1dGrad(pc, runConv1dBackwardWeightRows, rows, output, input_data, gy_data, d)) return;
     conv1dBackwardWeightRange(output, input_data, gy_data, d, 0, rows);
 }
 
-const Conv1dGradTask = struct {
+const Conv1dGradCtx = struct {
     out: []f32,
     a: []const f32, // gy (backward-input) / input (backward-weight)
     b: []const f32, // weight (backward-input) / gy (backward-weight)
     d: Conv1dDims,
-    start: usize,
-    end: usize,
 };
 
-fn runConv1dBackwardInputTask(task: *const Conv1dGradTask) void {
-    conv1dBackwardInputRange(task.out, task.a, task.b, task.d, task.start, task.end);
+fn runConv1dBackwardInputRows(c: Conv1dGradCtx, start: usize, end: usize) void {
+    conv1dBackwardInputRange(c.out, c.a, c.b, c.d, start, end);
 }
 
-fn runConv1dBackwardWeightTask(task: *const Conv1dGradTask) void {
-    conv1dBackwardWeightRange(task.out, task.a, task.b, task.d, task.start, task.end);
+fn runConv1dBackwardWeightRows(c: Conv1dGradCtx, start: usize, end: usize) void {
+    conv1dBackwardWeightRange(c.out, c.a, c.b, c.d, start, end);
 }
 
 fn maybeParallelConv1dGrad(
     pc: ParallelConfig,
-    comptime runTask: fn (*const Conv1dGradTask) void,
+    comptime runFn: fn (Conv1dGradCtx, usize, usize) void,
     split: usize,
     out: []f32,
     a: []const f32,
@@ -1793,19 +1691,7 @@ fn maybeParallelConv1dGrad(
     const work = std.math.mul(usize, parallel.saturatedMul3(d.out_len, in_per_group, d.out_channels), d.taps) catch std.math.maxInt(usize);
     const thread_count = common.generalConvThreadCount(split, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]Conv1dGradTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .a = a,
-            .b = b,
-            .d = d,
-            .start = task_i * split / thread_count,
-            .end = (task_i + 1) * split / thread_count,
-        };
-    }
-    pool.parallelChunks(Conv1dGradTask, tasks[0..thread_count], runTask);
+    tile.forRange(pool, Conv1dGradCtx, .{ .out = out, .a = a, .b = b, .d = d }, split, thread_count, runFn);
     return true;
 }
 
@@ -1914,7 +1800,7 @@ pub fn col2im1dBackwardInto(
     col2im1dBackwardRange(output, gy_data, t_conv, out_channels, taps, stride, pad, 0, t_in);
 }
 
-const Col2im1dBackwardTask = struct {
+const Col2im1dBackwardCtx = struct {
     out: []f32,
     gy: []const f32,
     t_conv: usize,
@@ -1922,12 +1808,10 @@ const Col2im1dBackwardTask = struct {
     taps: usize,
     stride: usize,
     pad: usize,
-    start: usize,
-    end: usize,
 };
 
-fn runCol2im1dBackwardTask(task: *const Col2im1dBackwardTask) void {
-    col2im1dBackwardRange(task.out, task.gy, task.t_conv, task.out_channels, task.taps, task.stride, task.pad, task.start, task.end);
+fn runCol2im1dBackwardRows(c: Col2im1dBackwardCtx, start: usize, end: usize) void {
+    col2im1dBackwardRange(c.out, c.gy, c.t_conv, c.out_channels, c.taps, c.stride, c.pad, start, end);
 }
 
 fn maybeParallelCol2im1dBackward(
@@ -1945,22 +1829,7 @@ fn maybeParallelCol2im1dBackward(
     const work = parallel.saturatedMul3(t_in, out_channels, taps);
     const thread_count = common.generalConvThreadCount(t_in, work);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]Col2im1dBackwardTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .gy = gy,
-            .t_conv = t_conv,
-            .out_channels = out_channels,
-            .taps = taps,
-            .stride = stride,
-            .pad = pad,
-            .start = task_i * t_in / thread_count,
-            .end = (task_i + 1) * t_in / thread_count,
-        };
-    }
-    pool.parallelChunks(Col2im1dBackwardTask, tasks[0..thread_count], runCol2im1dBackwardTask);
+    tile.forRange(pool, Col2im1dBackwardCtx, .{ .out = out, .gy = gy, .t_conv = t_conv, .out_channels = out_channels, .taps = taps, .stride = stride, .pad = pad }, t_in, thread_count, runCol2im1dBackwardRows);
     return true;
 }
 

@@ -209,7 +209,9 @@ Backends:
   query-tiled online-softmax prefill, tiled backward + BLAS strips,
   multi-stream decode) with their Task payloads and adapters,
   `batched.zig`; `common.zig` holds `ParallelConfig`, the vector-width aliases
-  and the thread-count gates. Every pool-taking kernel takes `pc` first.
+  and the thread-count gates; `tile.zig` is the payload-generic range
+  splitter (`forRange`/`reduceRange`) behind the kernels' parallel
+  dispatch. Every pool-taking kernel takes `pc` first.
 - `src/backend/quant.zig` + `src/backend/quant/`: GGML-compatible block
   helpers, dequantization, quantized-RHS containers and dot kernels, addressed
   by child module (`quant.q4_k.matmulQ4_Kx8RhsTile`): `q4_k.zig`, `q5_k.zig`,

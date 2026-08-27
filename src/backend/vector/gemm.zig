@@ -1,6 +1,6 @@
 //! Dense f32/f16/f64/bf16 GEMM: the one `gemm` entry over `ops.Gemm`
-//! (orientation, operand dtypes, store/accumulate), its Task structs and
-//! parallel dispatch, and the inner range/cols/row kernels.
+//! (orientation, operand dtypes, store/accumulate), its rows/cols parallel
+//! dispatch over `tile.forRange`, and the inner range/cols/row kernels.
 //! Shared-core symbols (ParallelConfig, contiguous-data helpers, thread-count
 //! gates, the V* width aliases) come from `common.zig`; the @Vector
 //! primitives from `primitives.zig`; blocked-tile cores from
@@ -15,6 +15,7 @@ const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 const ops = @import("../ops.zig");
 const primitives = @import("primitives.zig");
 
@@ -162,559 +163,105 @@ pub fn gemmNTRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const
 
 // ---------------- Inner kernels ----------------
 
-const GemmTask = struct {
-    cd: []f32,
-    ad: []const f32,
-    bd: []const f32,
+// One payload shape per element-type family; the splits and spawns are
+// `tile.forRange` (same proportional boundaries as the retired per-family
+// splitters, bitwise-neutral).
+fn GemmCtx(comptime Cd: type, comptime Ad: type, comptime Bd: type) type {
+    return struct {
+        cd: []Cd,
+        ad: []const Ad,
+        bd: []const Bd,
+        m: usize,
+        n: usize,
+        k: usize,
+    };
+}
+
+const Ctx32 = GemmCtx(f32, f32, f32);
+
+/// Adapt a `(cd, ad, bd, m, n, k, start, end)` range kernel onto the tile
+/// payload.
+fn rangeRunner(comptime Ctx: type, comptime rangeFn: anytype) fn (Ctx, usize, usize) void {
+    return struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            rangeFn(c.cd, c.ad, c.bd, c.m, c.n, c.k, start, end);
+        }
+    }.go;
+}
+
+/// The dense families' one rows/cols split: the column arm (when present)
+/// fires below the decode-m gate through `columnThreadCount`, else the row
+/// arm through `matmulThreadCount` — the historical gates, thresholds and
+/// split points unchanged.
+fn maybeRowsCols(
+    pc: ParallelConfig,
+    comptime Ctx: type,
+    ctx: Ctx,
     m: usize,
     n: usize,
     k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const GemmTaskF64 = struct {
-    cd: []f64,
-    ad: []const f64,
-    bd: []const f64,
-    m: usize,
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const GemmTaskF16 = struct {
-    cd: []f16,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const GemmTaskF16Rhs = struct {
-    cd: []f32,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const GemmTaskBf16 = struct {
-    cd: []u16,
-    ad: []const u16,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const ColTask = struct {
-    cd: []f32,
-    ad: []const f32,
-    bd: []const f32,
-    m: usize,
-    n: usize,
-    k: usize,
-    col_start: usize,
-    col_end: usize,
-};
-
-const ColTaskF16Rhs = struct {
-    cd: []f32,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    col_start: usize,
-    col_end: usize,
-};
-
-const GemmTaskBf16Rhs = struct {
-    cd: []f32,
-    ad: []const f32,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-const ColTaskBf16Rhs = struct {
-    cd: []f32,
-    ad: []const f32,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    col_start: usize,
-    col_end: usize,
-};
-
-const ColTaskF16 = struct {
-    cd: []f16,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    col_start: usize,
-    col_end: usize,
-};
-
-fn maybeParallelNN(pc: ParallelConfig, comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+    comptime rowsFn: fn (Ctx, usize, usize) void,
+    comptime colsFn: ?fn (Ctx, usize, usize) void,
+) bool {
     const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelCols(pool, runGemmNNColTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
-            return true;
+    if (comptime colsFn != null) {
+        if (m < parallel.vector_column_min_m) {
+            const thread_count = common.columnThreadCount(m, n, k);
+            if (thread_count != 1) {
+                tile.forRange(pool, Ctx, ctx, n, thread_count, colsFn.?);
+                return true;
+            }
         }
     }
     const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
     if (thread_count == 1) return false;
-    runParallelRows(pool, runGemmNNTaskMode(mode), cd, ad, bd, m, n, k, thread_count);
+    tile.forRange(pool, Ctx, ctx, m, thread_count, rowsFn);
     return true;
+}
+
+fn maybeParallelNN(pc: ParallelConfig, comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
+    const runners = struct {
+        fn rows(c: Ctx32, start: usize, end: usize) void {
+            gemmNNRangeMode(mode, c.cd, c.ad, c.bd, c.m, c.n, c.k, start, end);
+        }
+        fn cols(c: Ctx32, start: usize, end: usize) void {
+            gemmNNColsMode(mode, c.cd, c.ad, c.bd, c.m, c.n, c.k, start, end);
+        }
+    };
+    return maybeRowsCols(pc, Ctx32, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, runners.rows, runners.cols);
 }
 
 fn maybeParallelNNF64(pc: ParallelConfig, cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRowsF64(pool, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    const Ctx = GemmCtx(f64, f64, f64);
+    return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNNRangeF64), null);
 }
 
 fn maybeParallelNNF16(pc: ParallelConfig, cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelColsF16(pool, cd, ad, bd, m, n, k, thread_count);
-            return true;
-        }
-    }
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRowsF16(pool, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    const Ctx = GemmCtx(f16, f16, f16);
+    return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNNRangeF16), rangeRunner(Ctx, gemmNNColsF16));
 }
 
 fn maybeParallelNNBf16(pc: ParallelConfig, cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRowsBf16(pool, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    const Ctx = GemmCtx(u16, u16, u16);
+    return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNNRangeBf16), null);
 }
 
 fn maybeParallelTN(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelCols(pool, runGemmTNColTask, cd, ad, bd, m, n, k, thread_count);
-            return true;
-        }
-    }
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRows(pool, runGemmTNTask, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    return maybeRowsCols(pc, Ctx32, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx32, gemmTNRange), rangeRunner(Ctx32, gemmTNCols));
 }
 
 fn maybeParallelNT(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelCols(pool, runGemmNTColTask, cd, ad, bd, m, n, k, thread_count);
-            return true;
-        }
-    }
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRows(pool, runGemmNTTask, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    return maybeRowsCols(pc, Ctx32, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx32, gemmNTRange), rangeRunner(Ctx32, gemmNTCols));
 }
 
 fn maybeParallelNTF16Rhs(pc: ParallelConfig, cd: []f32, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelColsF16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
-            return true;
-        }
-    }
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRowsF16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
-    return true;
+    const Ctx = GemmCtx(f32, f16, f16);
+    return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNTF16RhsRange), rangeRunner(Ctx, gemmNTF16RhsCols));
 }
 
 fn maybeParallelNTBf16Rhs(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize) bool {
-    const pool = pc.pool orelse return false;
-    if (m < parallel.vector_column_min_m) {
-        const thread_count = common.columnThreadCount(m, n, k);
-        if (thread_count != 1) {
-            runParallelColsBf16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
-            return true;
-        }
-    }
-    const thread_count = common.matmulThreadCount(m, n, k, parallel.vector_matmul_work_threshold);
-    if (thread_count == 1) return false;
-    runParallelRowsBf16Rhs(pool, cd, ad, bd, m, n, k, thread_count);
-    return true;
-}
-
-fn runParallelRows(
-    pool: *thread.Pool,
-    comptime func: fn (*const GemmTask) void,
-    cd: []f32,
-    ad: []const f32,
-    bd: []const f32,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTask = undefined;
-
-    for (0..thread_count) |ti| {
-        const start = ti * m / thread_count;
-        const end = (ti + 1) * m / thread_count;
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = start,
-            .row_end = end,
-        };
-    }
-
-    pool.parallelChunks(GemmTask, tasks[0..thread_count], func);
-}
-
-fn runParallelRowsF64(
-    pool: *thread.Pool,
-    cd: []f64,
-    ad: []const f64,
-    bd: []const f64,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTaskF64 = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = ti * m / thread_count,
-            .row_end = (ti + 1) * m / thread_count,
-        };
-    }
-
-    pool.parallelChunks(GemmTaskF64, tasks[0..thread_count], runGemmNNF64Task);
-}
-
-fn runParallelRowsF16(
-    pool: *thread.Pool,
-    cd: []f16,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTaskF16 = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = ti * m / thread_count,
-            .row_end = (ti + 1) * m / thread_count,
-        };
-    }
-
-    pool.parallelChunks(GemmTaskF16, tasks[0..thread_count], runGemmNNF16Task);
-}
-
-fn runParallelRowsF16Rhs(
-    pool: *thread.Pool,
-    cd: []f32,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTaskF16Rhs = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = ti * m / thread_count,
-            .row_end = (ti + 1) * m / thread_count,
-        };
-    }
-
-    pool.parallelChunks(GemmTaskF16Rhs, tasks[0..thread_count], runGemmNTF16RhsTask);
-}
-
-fn runParallelRowsBf16Rhs(
-    pool: *thread.Pool,
-    cd: []f32,
-    ad: []const f32,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTaskBf16Rhs = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = ti * m / thread_count,
-            .row_end = (ti + 1) * m / thread_count,
-        };
-    }
-
-    pool.parallelChunks(GemmTaskBf16Rhs, tasks[0..thread_count], runGemmNTBf16RhsTask);
-}
-
-fn runParallelRowsBf16(
-    pool: *thread.Pool,
-    cd: []u16,
-    ad: []const u16,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]GemmTaskBf16 = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .row_start = ti * m / thread_count,
-            .row_end = (ti + 1) * m / thread_count,
-        };
-    }
-
-    pool.parallelChunks(GemmTaskBf16, tasks[0..thread_count], runGemmNNBf16Task);
-}
-
-fn runParallelCols(
-    pool: *thread.Pool,
-    comptime func: fn (*const ColTask) void,
-    cd: []f32,
-    ad: []const f32,
-    bd: []const f32,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]ColTask = undefined;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .col_start = ti * n / thread_count,
-            .col_end = (ti + 1) * n / thread_count,
-        };
-    }
-    pool.parallelChunks(ColTask, tasks[0..thread_count], func);
-}
-
-fn runParallelColsF16Rhs(
-    pool: *thread.Pool,
-    cd: []f32,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]ColTaskF16Rhs = undefined;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .col_start = ti * n / thread_count,
-            .col_end = (ti + 1) * n / thread_count,
-        };
-    }
-    pool.parallelChunks(ColTaskF16Rhs, tasks[0..thread_count], runGemmNTF16RhsColTask);
-}
-
-fn runParallelColsBf16Rhs(
-    pool: *thread.Pool,
-    cd: []f32,
-    ad: []const f32,
-    bd: []const u16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]ColTaskBf16Rhs = undefined;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .col_start = ti * n / thread_count,
-            .col_end = (ti + 1) * n / thread_count,
-        };
-    }
-    pool.parallelChunks(ColTaskBf16Rhs, tasks[0..thread_count], runGemmNTBf16RhsColTask);
-}
-
-fn runParallelColsF16(
-    pool: *thread.Pool,
-    cd: []f16,
-    ad: []const f16,
-    bd: []const f16,
-    m: usize,
-    n: usize,
-    k: usize,
-    thread_count: usize,
-) void {
-    var tasks: [parallel.vector_max_threads]ColTaskF16 = undefined;
-
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .cd = cd,
-            .ad = ad,
-            .bd = bd,
-            .m = m,
-            .n = n,
-            .k = k,
-            .col_start = ti * n / thread_count,
-            .col_end = (ti + 1) * n / thread_count,
-        };
-    }
-    pool.parallelChunks(ColTaskF16, tasks[0..thread_count], runGemmNNColTaskF16);
-}
-
-fn runGemmNNTaskMode(comptime mode: StoreMode) fn (*const GemmTask) void {
-    return struct {
-        fn run(task: *const GemmTask) void {
-            gemmNNRangeMode(mode, task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-        }
-    }.run;
-}
-
-fn runGemmNNColTaskMode(comptime mode: StoreMode) fn (*const ColTask) void {
-    return struct {
-        fn run(task: *const ColTask) void {
-            gemmNNColsMode(mode, task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-        }
-    }.run;
-}
-
-fn runGemmNNF64Task(task: *const GemmTaskF64) void {
-    gemmNNRangeF64(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmNNF16Task(task: *const GemmTaskF16) void {
-    gemmNNRangeF16(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmNNBf16Task(task: *const GemmTaskBf16) void {
-    gemmNNRangeBf16(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmTNTask(task: *const GemmTask) void {
-    gemmTNRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmNTTask(task: *const GemmTask) void {
-    gemmNTRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmNTF16RhsTask(task: *const GemmTaskF16Rhs) void {
-    gemmNTF16RhsRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmNTBf16RhsTask(task: *const GemmTaskBf16Rhs) void {
-    gemmNTBf16RhsRange(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.row_start, task.row_end);
-}
-
-fn runGemmTNColTask(task: *const ColTask) void {
-    gemmTNCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-}
-
-fn runGemmNTColTask(task: *const ColTask) void {
-    gemmNTCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-}
-
-fn runGemmNTF16RhsColTask(task: *const ColTaskF16Rhs) void {
-    gemmNTF16RhsCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-}
-
-fn runGemmNTBf16RhsColTask(task: *const ColTaskBf16Rhs) void {
-    gemmNTBf16RhsCols(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
-}
-
-fn runGemmNNColTaskF16(task: *const ColTaskF16) void {
-    gemmNNColsF16(task.cd, task.ad, task.bd, task.m, task.n, task.k, task.col_start, task.col_end);
+    const Ctx = GemmCtx(f32, f32, u16);
+    return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNTBf16RhsRange), rangeRunner(Ctx, gemmNTBf16RhsCols));
 }
 
 pub fn gemmNNRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {

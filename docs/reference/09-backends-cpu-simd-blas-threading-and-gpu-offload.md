@@ -331,6 +331,7 @@ first. Module map:
 | Module | Contents |
 |---|---|
 | `vector/common.zig` | shared leaf: `ParallelConfig`, `V*` width aliases, thread-count gates, contiguous-data accessors |
+| `vector/tile.zig` | the payload-generic range splitter (`forRange`/`reduceRange`) behind the kernels' parallel dispatch: proportional boundaries `i * total / thread_count`, serial task-order partial folds |
 | `vector/primitives.zig` | `@Vector` leaves: `vecAdd/Sub/Mul/Scale/AddScaled`, `vecUnary/AddUnary/LeakyRelu/Clamp/Gated`, `vecUnaryVjp` (unary-VJP derivative bodies; `unaryVjpVectorizes` gates which ops route here — the exp-family backward loops), `vecSum/Dot`, f16/bf16/f64 typed twins, `vexpf`, bf16 bit converters |
 | `vector/elementwise.zig` | elementwise/reduction entry points, parallel dispatch, snake/groupNorm/prelu/channelAffine kernels |
 | `vector/gemm.zig` | dense f32/f16/f64/bf16 GEMM (NN/TN/NT), register-tiled row kernels, `gemmNNRange/gemmTNRange/gemmNTRange` |

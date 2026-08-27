@@ -1,6 +1,6 @@
-//! Elementwise vector kernels: the contiguous entry points, the
-//! elementwise/reduction Task structs and their parallel dispatch, and the
-//! typed scalar inner kernels. Shared-core symbols (ParallelConfig,
+//! Elementwise vector kernels: the contiguous entry points, their parallel
+//! dispatch over `tile.forRange`/`reduceRange`, and the typed scalar inner
+//! kernels. Shared-core symbols (ParallelConfig,
 //! contiguous-data helpers, elementwiseThreadCount) come from `common.zig`;
 //! the @Vector primitives from `primitives.zig`; op definitions from
 //! `../ops.zig`.
@@ -12,6 +12,7 @@ const dtype_mod = @import("../../dtype.zig");
 const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 const primitives = @import("primitives.zig");
 
 const DType = dtype_mod.DType;
@@ -121,7 +122,7 @@ pub fn addContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runAddTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecAdd, z, x, y)) return;
     primitives.vecAdd(z, x, y);
 }
 
@@ -142,7 +143,7 @@ pub fn subContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runSubTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecSub, z, x, y)) return;
     primitives.vecSub(z, x, y);
 }
 
@@ -163,7 +164,7 @@ pub fn mulContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runMulTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecMul, z, x, y)) return;
     primitives.vecMul(z, x, y);
 }
 
@@ -178,7 +179,7 @@ pub fn divContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runDivTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecDiv, z, x, y)) return;
     primitives.vecDiv(z, x, y);
 }
 
@@ -193,7 +194,7 @@ pub fn maximumContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runMaximumTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecMaximum, z, x, y)) return;
     primitives.vecMaximum(z, x, y);
 }
 
@@ -208,7 +209,7 @@ pub fn minimumContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, runMinimumTask, z, x, y)) return;
+    if (maybeParallelBinary(pc, primitives.vecMinimum, z, x, y)) return;
     primitives.vecMinimum(z, x, y);
 }
 
@@ -276,19 +277,19 @@ pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []cons
 // reproduces the composed ops' values exactly). Parallel over row ranges (each
 // row is disjoint; bit-identical to serial).
 
-const RowChanTask = struct {
+/// Per-channel row-kernel payload (PReLU, channelAffine): `a` is the
+/// per-channel vector, `b` the optional second one.
+const RowChanCtx = struct {
     z: []f32,
     x: []const f32,
     a: []const f32,
     b: ?[]const f32,
     cols: usize,
-    row_start: usize,
-    row_end: usize,
 };
 
 fn maybeParallelRowChan(
     pc: ParallelConfig,
-    comptime func: fn (*const RowChanTask) void,
+    comptime runFn: fn (RowChanCtx, usize, usize) void,
     z: []f32,
     x: []const f32,
     a: []const f32,
@@ -299,25 +300,12 @@ fn maybeParallelRowChan(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(rows * cols), rows);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]RowChanTask = undefined;
-    for (0..thread_count) |ti| {
-        tasks[ti] = .{
-            .z = z,
-            .x = x,
-            .a = a,
-            .b = b,
-            .cols = cols,
-            .row_start = ti * rows / thread_count,
-            .row_end = (ti + 1) * rows / thread_count,
-        };
-    }
-    pool.parallelChunks(RowChanTask, tasks[0..thread_count], func);
+    tile.forRange(pool, RowChanCtx, .{ .z = z, .x = x, .a = a, .b = b, .cols = cols }, rows, thread_count, runFn);
     return true;
 }
 
-fn runPreluChannelsTask(task: *const RowChanTask) void {
-    preluChannelsRows(task.z, task.x, task.a, task.cols, task.row_start, task.row_end);
+fn runPreluChannelsRows(c: RowChanCtx, row_start: usize, row_end: usize) void {
+    preluChannelsRows(c.z, c.x, c.a, c.cols, row_start, row_end);
 }
 
 /// PReLU with a per-channel slope: `z[r,c] = x > 0 ? x : α[c]·x`.
@@ -325,7 +313,7 @@ pub fn preluChannelsInto(pc: ParallelConfig, z: []f32, x: []const f32, alpha: []
     if (comptime isa.reference) return scalar.preluChannelsInto(z, x, alpha, rows, cols);
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
-    if (maybeParallelRowChan(pc, runPreluChannelsTask, z, x, alpha, null, rows, cols)) return;
+    if (maybeParallelRowChan(pc, runPreluChannelsRows, z, x, alpha, null, rows, cols)) return;
     preluChannelsRows(z, x, alpha, cols, 0, rows);
 }
 
@@ -348,8 +336,8 @@ fn preluChannelsRows(z: []f32, x: []const f32, alpha: []const f32, cols: usize, 
     }
 }
 
-fn runChannelAffineTask(task: *const RowChanTask) void {
-    channelAffineRows(task.z, task.x, task.a, task.b, task.cols, task.row_start, task.row_end);
+fn runChannelAffineRows(c: RowChanCtx, row_start: usize, row_end: usize) void {
+    channelAffineRows(c.z, c.x, c.a, c.b, c.cols, row_start, row_end);
 }
 
 /// Per-channel affine (frozen-stats BatchNorm): `z[r,c] = x·scale[c] + shift[c]`;
@@ -359,7 +347,7 @@ pub fn channelAffineInto(pc: ParallelConfig, z: []f32, x: []const f32, scale: []
     if (comptime isa.reference) return scalar.channelAffineInto(z, x, scale, shift, rows, cols);
     std.debug.assert(z.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(scale.len == cols and (shift == null or shift.?.len == cols));
-    if (maybeParallelRowChan(pc, runChannelAffineTask, z, x, scale, shift, rows, cols)) return;
+    if (maybeParallelRowChan(pc, runChannelAffineRows, z, x, scale, shift, rows, cols)) return;
     channelAffineRows(z, x, scale, shift, cols, 0, rows);
 }
 
@@ -574,113 +562,10 @@ pub fn dotIntoTyped(
 
 // ---------------- Inner kernels ----------------
 
-const BinaryTask = struct {
-    z: []f32,
-    x: []const f32,
-    y: []const f32,
-    start: usize,
-    end: usize,
-};
-
-const ScaleTask = struct {
-    z: []f32,
-    x: []const f32,
-    scalar: f32,
-    start: usize,
-    end: usize,
-};
-
-const UnaryTask = struct {
-    op: ops.UnaryOp,
-    z: []f32,
-    x: []const f32,
-    start: usize,
-    end: usize,
-};
-
-const LeakyReluTask = struct {
-    z: []f32,
-    x: []const f32,
-    negative_slope: f32,
-    start: usize,
-    end: usize,
-};
-
-const SoftcapTask = struct {
-    z: []f32,
-    x: []const f32,
-    cap: f32,
-    start: usize,
-    end: usize,
-};
-
-const ClampTask = struct {
-    z: []f32,
-    x: []const f32,
-    min_value: f32,
-    max_value: f32,
-    start: usize,
-    end: usize,
-};
-
-const GatedTask = struct {
-    op: ops.GatedOp,
-    z: []f32,
-    x: []const f32,
-    y: []const f32,
-    start: usize,
-    end: usize,
-};
-
-const SumTask = struct {
-    x: []const f32,
-    partial: *f32,
-    start: usize,
-    end: usize,
-};
-
-const ProdTask = struct {
-    x: []const f32,
-    partial: *f32,
-    start: usize,
-    end: usize,
-};
-
-const DotTask = struct {
-    x: []const f32,
-    y: []const f32,
-    partial: *f32,
-    start: usize,
-    end: usize,
-};
-
-const DotTaskF64 = struct {
-    x: []const f64,
-    y: []const f64,
-    partial: *f64,
-    start: usize,
-    end: usize,
-};
-
-const DotTaskF16 = struct {
-    x: []const f16,
-    y: []const f16,
-    partial: *f32,
-    start: usize,
-    end: usize,
-};
-
-const DotTaskBf16 = struct {
-    x: []const u16,
-    y: []const u16,
-    partial: *f32,
-    start: usize,
-    end: usize,
-};
-
 fn maybeParallelBinary(
     pc: ParallelConfig,
-    comptime func: fn (*const BinaryTask) void,
+    // `anytype`: the binary primitives are `inline fn`s.
+    comptime vecFn: anytype,
     z: []f32,
     x: []const f32,
     y: []const f32,
@@ -688,14 +573,12 @@ fn maybeParallelBinary(
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]BinaryTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .y = y, .start = start, .end = end };
-    }
-    pool.parallelChunks(BinaryTask, tasks[0..thread_count], func);
+    const Ctx = struct { z: []f32, x: []const f32, y: []const f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .y = y }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            vecFn(c.z[start..end], c.x[start..end], c.y[start..end]);
+        }
+    }.go);
     return true;
 }
 
@@ -703,14 +586,12 @@ fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar_value
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]ScaleTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .scalar = scalar_value, .start = start, .end = end };
-    }
-    pool.parallelChunks(ScaleTask, tasks[0..thread_count], runScaleTask);
+    const Ctx = struct { z: []f32, x: []const f32, scalar: f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .scalar = scalar_value }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecScale(c.z[start..end], c.x[start..end], c.scalar);
+        }
+    }.go);
     return true;
 }
 
@@ -718,14 +599,12 @@ fn maybeParallelUnary(pc: ParallelConfig, comptime op: ops.UnaryOp, z: []f32, x:
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]UnaryTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .op = op, .z = z, .x = x, .start = start, .end = end };
-    }
-    pool.parallelChunks(UnaryTask, tasks[0..thread_count], runUnaryTask);
+    const Ctx = struct { z: []f32, x: []const f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecUnary(op, c.z[start..end], c.x[start..end]);
+        }
+    }.go);
     return true;
 }
 
@@ -733,14 +612,12 @@ fn maybeParallelLeakyRelu(pc: ParallelConfig, z: []f32, x: []const f32, negative
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]LeakyReluTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .negative_slope = negative_slope, .start = start, .end = end };
-    }
-    pool.parallelChunks(LeakyReluTask, tasks[0..thread_count], runLeakyReluTask);
+    const Ctx = struct { z: []f32, x: []const f32, negative_slope: f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .negative_slope = negative_slope }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecLeakyRelu(c.z[start..end], c.x[start..end], c.negative_slope);
+        }
+    }.go);
     return true;
 }
 
@@ -748,14 +625,12 @@ fn maybeParallelSoftcap(pc: ParallelConfig, z: []f32, x: []const f32, cap: f32) 
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]SoftcapTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .cap = cap, .start = start, .end = end };
-    }
-    pool.parallelChunks(SoftcapTask, tasks[0..thread_count], runSoftcapTask);
+    const Ctx = struct { z: []f32, x: []const f32, cap: f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .cap = cap }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecSoftcap(c.z[start..end], c.x[start..end], c.cap);
+        }
+    }.go);
     return true;
 }
 
@@ -763,14 +638,12 @@ fn maybeParallelClamp(pc: ParallelConfig, z: []f32, x: []const f32, min_value: f
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]ClampTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .z = z, .x = x, .min_value = min_value, .max_value = max_value, .start = start, .end = end };
-    }
-    pool.parallelChunks(ClampTask, tasks[0..thread_count], runClampTask);
+    const Ctx = struct { z: []f32, x: []const f32, min_value: f32, max_value: f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .min_value = min_value, .max_value = max_value }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecClamp(c.z[start..end], c.x[start..end], c.min_value, c.max_value);
+        }
+    }.go);
     return true;
 }
 
@@ -778,205 +651,97 @@ fn maybeParallelGated(pc: ParallelConfig, comptime op: ops.GatedOp, z: []f32, x:
     const pool = pc.pool orelse return false;
     const thread_count = elementwiseThreadCount(z.len);
     if (thread_count == 1) return false;
-
-    var tasks: [parallel.vector_max_threads]GatedTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * z.len / thread_count;
-        const end = (ti + 1) * z.len / thread_count;
-        tasks[ti] = .{ .op = op, .z = z, .x = x, .y = y, .start = start, .end = end };
-    }
-    pool.parallelChunks(GatedTask, tasks[0..thread_count], runGatedTask);
+    const Ctx = struct { z: []f32, x: []const f32, y: []const f32 };
+    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .y = y }, z.len, thread_count, struct {
+        fn go(c: Ctx, start: usize, end: usize) void {
+            primitives.vecGated(op, c.z[start..end], c.x[start..end], c.y[start..end]);
+        }
+    }.go);
     return true;
+}
+
+const SliceCtx = struct { x: []const f32 };
+
+fn addF32(a: f32, b: f32) f32 {
+    return a + b;
+}
+
+fn mulF32(a: f32, b: f32) f32 {
+    return a * b;
+}
+
+fn addF64(a: f64, b: f64) f64 {
+    return a + b;
 }
 
 fn parallelVecSum(pc: ParallelConfig, x: []const f32) ?f32 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f32 = [_]f32{0} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]SumTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(SumTask, tasks[0..thread_count], runSumTask);
-
-    var total: f32 = 0;
-    for (partials[0..thread_count]) |value| total += value;
-    return total;
+    return tile.reduceRange(pool, f32, SliceCtx, .{ .x = x }, x.len, thread_count, 0, struct {
+        fn go(c: SliceCtx, start: usize, end: usize) f32 {
+            return primitives.vecSum(c.x[start..end]);
+        }
+    }.go, addF32);
 }
 
 fn parallelVecProd(pc: ParallelConfig, x: []const f32) ?f32 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f32 = [_]f32{1} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]ProdTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(ProdTask, tasks[0..thread_count], runProdTask);
-
-    var total: f32 = 1;
-    for (partials[0..thread_count]) |value| total *= value;
-    return total;
+    return tile.reduceRange(pool, f32, SliceCtx, .{ .x = x }, x.len, thread_count, 1, struct {
+        fn go(c: SliceCtx, start: usize, end: usize) f32 {
+            return primitives.vecProd(c.x[start..end]);
+        }
+    }.go, mulF32);
 }
 
 fn parallelVecDot(pc: ParallelConfig, x: []const f32, y: []const f32) ?f32 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f32 = [_]f32{0} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]DotTask = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .y = y, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(DotTask, tasks[0..thread_count], runDotTask);
-
-    var total: f32 = 0;
-    for (partials[0..thread_count]) |value| total += value;
-    return total;
+    const Ctx = struct { x: []const f32, y: []const f32 };
+    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
+        fn go(c: Ctx, start: usize, end: usize) f32 {
+            return primitives.vecDot(c.x[start..end], c.y[start..end]);
+        }
+    }.go, addF32);
 }
 
 fn parallelVecDotF64(pc: ParallelConfig, x: []const f64, y: []const f64) ?f64 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f64 = [_]f64{0} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]DotTaskF64 = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .y = y, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(DotTaskF64, tasks[0..thread_count], runDotF64Task);
-
-    var total: f64 = 0;
-    for (partials[0..thread_count]) |value| total += value;
-    return total;
+    const Ctx = struct { x: []const f64, y: []const f64 };
+    return tile.reduceRange(pool, f64, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
+        fn go(c: Ctx, start: usize, end: usize) f64 {
+            return primitives.vecDotF64(c.x[start..end], c.y[start..end]);
+        }
+    }.go, addF64);
 }
 
 fn parallelVecDotF16ToF32(pc: ParallelConfig, x: []const f16, y: []const f16) ?f32 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f32 = [_]f32{0} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]DotTaskF16 = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .y = y, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(DotTaskF16, tasks[0..thread_count], runDotF16Task);
-
-    var total: f32 = 0;
-    for (partials[0..thread_count]) |value| total += value;
-    return total;
+    const Ctx = struct { x: []const f16, y: []const f16 };
+    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
+        fn go(c: Ctx, start: usize, end: usize) f32 {
+            return primitives.vecDotF16ToF32(c.x[start..end], c.y[start..end]);
+        }
+    }.go, addF32);
 }
 
 fn parallelVecDotBf16ToF32(pc: ParallelConfig, x: []const u16, y: []const u16) ?f32 {
     const pool = pc.pool orelse return null;
     const thread_count = elementwiseThreadCount(x.len);
     if (thread_count == 1) return null;
-
-    var partials: [parallel.vector_max_threads]f32 = [_]f32{0} ** parallel.vector_max_threads;
-    var tasks: [parallel.vector_max_threads]DotTaskBf16 = undefined;
-    for (0..thread_count) |ti| {
-        const start = ti * x.len / thread_count;
-        const end = (ti + 1) * x.len / thread_count;
-        tasks[ti] = .{ .x = x, .y = y, .partial = &partials[ti], .start = start, .end = end };
-    }
-    pool.parallelChunks(DotTaskBf16, tasks[0..thread_count], runDotBf16Task);
-
-    var total: f32 = 0;
-    for (partials[0..thread_count]) |value| total += value;
-    return total;
-}
-
-fn runAddTask(task: *const BinaryTask) void {
-    primitives.vecAdd(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runSubTask(task: *const BinaryTask) void {
-    primitives.vecSub(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runMulTask(task: *const BinaryTask) void {
-    primitives.vecMul(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runDivTask(task: *const BinaryTask) void {
-    primitives.vecDiv(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runMaximumTask(task: *const BinaryTask) void {
-    primitives.vecMaximum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runMinimumTask(task: *const BinaryTask) void {
-    primitives.vecMinimum(task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runScaleTask(task: *const ScaleTask) void {
-    primitives.vecScale(task.z[task.start..task.end], task.x[task.start..task.end], task.scalar);
-}
-
-fn runUnaryTask(task: *const UnaryTask) void {
-    switch (task.op) {
-        inline else => |op| primitives.vecUnary(op, task.z[task.start..task.end], task.x[task.start..task.end]),
-    }
-}
-
-fn runLeakyReluTask(task: *const LeakyReluTask) void {
-    primitives.vecLeakyRelu(task.z[task.start..task.end], task.x[task.start..task.end], task.negative_slope);
-}
-
-fn runSoftcapTask(task: *const SoftcapTask) void {
-    primitives.vecSoftcap(task.z[task.start..task.end], task.x[task.start..task.end], task.cap);
-}
-
-fn runClampTask(task: *const ClampTask) void {
-    primitives.vecClamp(task.z[task.start..task.end], task.x[task.start..task.end], task.min_value, task.max_value);
-}
-
-fn runGatedTask(task: *const GatedTask) void {
-    switch (task.op) {
-        inline else => |op| primitives.vecGated(op, task.z[task.start..task.end], task.x[task.start..task.end], task.y[task.start..task.end]),
-    }
-}
-
-fn runSumTask(task: *const SumTask) void {
-    task.partial.* = primitives.vecSum(task.x[task.start..task.end]);
-}
-
-fn runProdTask(task: *const ProdTask) void {
-    task.partial.* = primitives.vecProd(task.x[task.start..task.end]);
-}
-
-fn runDotTask(task: *const DotTask) void {
-    task.partial.* = primitives.vecDot(task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runDotF64Task(task: *const DotTaskF64) void {
-    task.partial.* = primitives.vecDotF64(task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runDotF16Task(task: *const DotTaskF16) void {
-    task.partial.* = primitives.vecDotF16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
-}
-
-fn runDotBf16Task(task: *const DotTaskBf16) void {
-    task.partial.* = primitives.vecDotBf16ToF32(task.x[task.start..task.end], task.y[task.start..task.end]);
+    const Ctx = struct { x: []const u16, y: []const u16 };
+    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
+        fn go(c: Ctx, start: usize, end: usize) f32 {
+            return primitives.vecDotBf16ToF32(c.x[start..end], c.y[start..end]);
+        }
+    }.go, addF32);
 }
 
 fn elementwiseSlicesTyped(
@@ -1054,20 +819,6 @@ pub fn snakeInto(
     snakeRowsRange(output, input, alpha, inv_b, cols, 0, rows);
 }
 
-const SnakeTask = struct {
-    out: []f32,
-    x: []const f32,
-    alpha: []const f32,
-    inv_b: []const f32,
-    cols: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-fn runSnakeTask(task: *const SnakeTask) void {
-    snakeRowsRange(task.out, task.x, task.alpha, task.inv_b, task.cols, task.row_start, task.row_end);
-}
-
 fn maybeParallelSnake(
     pc: ParallelConfig,
     out: []f32,
@@ -1080,20 +831,12 @@ fn maybeParallelSnake(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), rows);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]SnakeTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .x = x,
-            .alpha = alpha,
-            .inv_b = inv_b,
-            .cols = cols,
-            .row_start = task_i * rows / thread_count,
-            .row_end = (task_i + 1) * rows / thread_count,
-        };
-    }
-    pool.parallelChunks(SnakeTask, tasks[0..thread_count], runSnakeTask);
+    const Ctx = struct { out: []f32, x: []const f32, alpha: []const f32, inv_b: []const f32, cols: usize };
+    tile.forRange(pool, Ctx, .{ .out = out, .x = x, .alpha = alpha, .inv_b = inv_b, .cols = cols }, rows, thread_count, struct {
+        fn go(c: Ctx, row_start: usize, row_end: usize) void {
+            snakeRowsRange(c.out, c.x, c.alpha, c.inv_b, c.cols, row_start, row_end);
+        }
+    }.go);
     return true;
 }
 
@@ -1152,23 +895,6 @@ pub fn groupNormInto(
     groupNormGroupRange(output, input, weight, bias, rows, cols, groups, eps, 0, groups);
 }
 
-const GroupNormTask = struct {
-    out: []f32,
-    x: []const f32,
-    weight: ?[]const f32,
-    bias: ?[]const f32,
-    rows: usize,
-    cols: usize,
-    groups: usize,
-    eps: f32,
-    group_start: usize,
-    group_end: usize,
-};
-
-fn runGroupNormTask(task: *const GroupNormTask) void {
-    groupNormGroupRange(task.out, task.x, task.weight, task.bias, task.rows, task.cols, task.groups, task.eps, task.group_start, task.group_end);
-}
-
 fn maybeParallelGroupNorm(
     pc: ParallelConfig,
     out: []f32,
@@ -1183,23 +909,12 @@ fn maybeParallelGroupNorm(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), groups);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]GroupNormTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .x = x,
-            .weight = weight,
-            .bias = bias,
-            .rows = rows,
-            .cols = cols,
-            .groups = groups,
-            .eps = eps,
-            .group_start = task_i * groups / thread_count,
-            .group_end = (task_i + 1) * groups / thread_count,
-        };
-    }
-    pool.parallelChunks(GroupNormTask, tasks[0..thread_count], runGroupNormTask);
+    const Ctx = struct { out: []f32, x: []const f32, weight: ?[]const f32, bias: ?[]const f32, rows: usize, cols: usize, groups: usize, eps: f32 };
+    tile.forRange(pool, Ctx, .{ .out = out, .x = x, .weight = weight, .bias = bias, .rows = rows, .cols = cols, .groups = groups, .eps = eps }, groups, thread_count, struct {
+        fn go(c: Ctx, group_start: usize, group_end: usize) void {
+            groupNormGroupRange(c.out, c.x, c.weight, c.bias, c.rows, c.cols, c.groups, c.eps, group_start, group_end);
+        }
+    }.go);
     return true;
 }
 
@@ -1286,21 +1001,6 @@ pub fn snakeBackwardInputInto(
     snakeBackwardInputRowsRange(output, input, grad, alpha, inv_b, cols, 0, rows);
 }
 
-const SnakeBackwardInputTask = struct {
-    out: []f32,
-    x: []const f32,
-    gy: []const f32,
-    alpha: []const f32,
-    inv_b: []const f32,
-    cols: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-fn runSnakeBackwardInputTask(task: *const SnakeBackwardInputTask) void {
-    snakeBackwardInputRowsRange(task.out, task.x, task.gy, task.alpha, task.inv_b, task.cols, task.row_start, task.row_end);
-}
-
 fn maybeParallelSnakeBackwardInput(
     pc: ParallelConfig,
     out: []f32,
@@ -1314,21 +1014,12 @@ fn maybeParallelSnakeBackwardInput(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(out.len), rows);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]SnakeBackwardInputTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .out = out,
-            .x = x,
-            .gy = gy,
-            .alpha = alpha,
-            .inv_b = inv_b,
-            .cols = cols,
-            .row_start = task_i * rows / thread_count,
-            .row_end = (task_i + 1) * rows / thread_count,
-        };
-    }
-    pool.parallelChunks(SnakeBackwardInputTask, tasks[0..thread_count], runSnakeBackwardInputTask);
+    const Ctx = struct { out: []f32, x: []const f32, gy: []const f32, alpha: []const f32, inv_b: []const f32, cols: usize };
+    tile.forRange(pool, Ctx, .{ .out = out, .x = x, .gy = gy, .alpha = alpha, .inv_b = inv_b, .cols = cols }, rows, thread_count, struct {
+        fn go(c: Ctx, row_start: usize, row_end: usize) void {
+            snakeBackwardInputRowsRange(c.out, c.x, c.gy, c.alpha, c.inv_b, c.cols, row_start, row_end);
+        }
+    }.go);
     return true;
 }
 
@@ -1390,23 +1081,6 @@ pub fn snakeBackwardParamsInto(
     snakeBackwardParamsColumnRange(ga, gib, input, grad, alpha, inv_b, rows, cols, 0, cols);
 }
 
-const SnakeBackwardParamsTask = struct {
-    ga: []f32,
-    gib: []f32,
-    x: []const f32,
-    gy: []const f32,
-    alpha: []const f32,
-    inv_b: []const f32,
-    rows: usize,
-    cols: usize,
-    col_start: usize,
-    col_end: usize,
-};
-
-fn runSnakeBackwardParamsTask(task: *const SnakeBackwardParamsTask) void {
-    snakeBackwardParamsColumnRange(task.ga, task.gib, task.x, task.gy, task.alpha, task.inv_b, task.rows, task.cols, task.col_start, task.col_end);
-}
-
 fn maybeParallelSnakeBackwardParams(
     pc: ParallelConfig,
     ga: []f32,
@@ -1421,23 +1095,12 @@ fn maybeParallelSnakeBackwardParams(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(x.len), cols);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]SnakeBackwardParamsTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .ga = ga,
-            .gib = gib,
-            .x = x,
-            .gy = gy,
-            .alpha = alpha,
-            .inv_b = inv_b,
-            .rows = rows,
-            .cols = cols,
-            .col_start = task_i * cols / thread_count,
-            .col_end = (task_i + 1) * cols / thread_count,
-        };
-    }
-    pool.parallelChunks(SnakeBackwardParamsTask, tasks[0..thread_count], runSnakeBackwardParamsTask);
+    const Ctx = struct { ga: []f32, gib: []f32, x: []const f32, gy: []const f32, alpha: []const f32, inv_b: []const f32, rows: usize, cols: usize };
+    tile.forRange(pool, Ctx, .{ .ga = ga, .gib = gib, .x = x, .gy = gy, .alpha = alpha, .inv_b = inv_b, .rows = rows, .cols = cols }, cols, thread_count, struct {
+        fn go(c: Ctx, col_start: usize, col_end: usize) void {
+            snakeBackwardParamsColumnRange(c.ga, c.gib, c.x, c.gy, c.alpha, c.inv_b, c.rows, c.cols, col_start, col_end);
+        }
+    }.go);
     return true;
 }
 
@@ -1526,25 +1189,6 @@ pub fn groupNormBackwardInto(
     groupNormBackwardGroupRange(gx_data, gw_data, gb_data, input, grad, weight, rows, cols, groups, eps, 0, groups);
 }
 
-const GroupNormBackwardTask = struct {
-    gx: ?[]f32,
-    gw: ?[]f32,
-    gb: ?[]f32,
-    x: []const f32,
-    gy: []const f32,
-    weight: ?[]const f32,
-    rows: usize,
-    cols: usize,
-    groups: usize,
-    eps: f32,
-    group_start: usize,
-    group_end: usize,
-};
-
-fn runGroupNormBackwardTask(task: *const GroupNormBackwardTask) void {
-    groupNormBackwardGroupRange(task.gx, task.gw, task.gb, task.x, task.gy, task.weight, task.rows, task.cols, task.groups, task.eps, task.group_start, task.group_end);
-}
-
 fn maybeParallelGroupNormBackward(
     pc: ParallelConfig,
     gx: ?[]f32,
@@ -1561,25 +1205,12 @@ fn maybeParallelGroupNormBackward(
     const pool = pc.pool orelse return false;
     const thread_count = @min(elementwiseThreadCount(x.len), groups);
     if (thread_count <= 1) return false;
-
-    var tasks: [parallel.vector_max_threads]GroupNormBackwardTask = undefined;
-    for (0..thread_count) |task_i| {
-        tasks[task_i] = .{
-            .gx = gx,
-            .gw = gw,
-            .gb = gb,
-            .x = x,
-            .gy = gy,
-            .weight = weight,
-            .rows = rows,
-            .cols = cols,
-            .groups = groups,
-            .eps = eps,
-            .group_start = task_i * groups / thread_count,
-            .group_end = (task_i + 1) * groups / thread_count,
-        };
-    }
-    pool.parallelChunks(GroupNormBackwardTask, tasks[0..thread_count], runGroupNormBackwardTask);
+    const Ctx = struct { gx: ?[]f32, gw: ?[]f32, gb: ?[]f32, x: []const f32, gy: []const f32, weight: ?[]const f32, rows: usize, cols: usize, groups: usize, eps: f32 };
+    tile.forRange(pool, Ctx, .{ .gx = gx, .gw = gw, .gb = gb, .x = x, .gy = gy, .weight = weight, .rows = rows, .cols = cols, .groups = groups, .eps = eps }, groups, thread_count, struct {
+        fn go(c: Ctx, group_start: usize, group_end: usize) void {
+            groupNormBackwardGroupRange(c.gx, c.gw, c.gb, c.x, c.gy, c.weight, c.rows, c.cols, c.groups, c.eps, group_start, group_end);
+        }
+    }.go);
     return true;
 }
 
