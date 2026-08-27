@@ -317,6 +317,29 @@ pub const kernels = struct {
     pub const pool_free_groupedCausalAttentionBackwardBlasTiles = true;
     pub const attentionBackwardReduceRows = vector.attention.attentionBackwardReduceRows;
     pub const pool_free_attentionBackwardReduceRows = true;
+    // Dtype cast rows (vector/elementwise.zig) and the straggler row
+    // kernels (vector/rows.zig): extremum/variance rows, the fused-rope
+    // pair strip, the gated vector scans, the masked-reduce select row.
+    pub const castF32ToF16 = vector.elementwise.castF32ToF16;
+    pub const pool_free_castF32ToF16 = true;
+    pub const castF16ToF32 = vector.elementwise.castF16ToF32;
+    pub const pool_free_castF16ToF32 = true;
+    pub const castF32ToBf16 = vector.elementwise.castF32ToBf16;
+    pub const pool_free_castF32ToBf16 = true;
+    pub const castBf16ToF32 = vector.elementwise.castBf16ToF32;
+    pub const pool_free_castBf16ToF32 = true;
+    pub const extremumRowValue = vector.rows.extremumRowValue;
+    pub const pool_free_extremumRowValue = true;
+    pub const varianceRowsInto = vector.rows.varianceRowsInto;
+    pub const pool_free_varianceRowsInto = true;
+    pub const ropeHalfPairsInto = vector.rows.ropeHalfPairsInto;
+    pub const pool_free_ropeHalfPairsInto = true;
+    pub const scanRows = vector.rows.scanRows;
+    pub const pool_free_scanRows = true;
+    pub const scanColumns = vector.rows.scanColumns;
+    pub const pool_free_scanColumns = true;
+    pub const selectRow = vector.rows.selectRow;
+    pub const pool_free_selectRow = true;
 };
 
 /// Full dot product into the scalar `out`: f32 takes the dedicated f32

@@ -781,36 +781,18 @@ pub fn rmsNormMulRopeWithTable(
         const rms_scale = 1 / @sqrt(sumsq * inv_feature_dim + eps);
 
         if (input_feature_stride == 1 and output_feature_stride == 1 and mode == .half) {
-            const Vec = @Vector(4, f32);
-            const vector_width = 4;
-            const scale_vec: Vec = @splat(rms_scale);
-            var pair_i: usize = 0;
-            while (pair_i + vector_width <= pair_count) : (pair_i += vector_width) {
-                const angle_i = position_coord * pair_count + pair_i;
-                const sin_vec: Vec = sin_values[angle_i..][0..vector_width].*;
-                const cos_vec: Vec = cos_values[angle_i..][0..vector_width].*;
-                const input_first_offset = input_base + pair_i;
-                const input_second_offset = input_base + pair_i + pair_count;
-                const output_first_offset = output_base + pair_i;
-                const output_second_offset = output_base + pair_i + pair_count;
-                const first = @as(Vec, input[input_first_offset..][0..vector_width].*) * scale_vec * @as(Vec, weights[pair_i..][0..vector_width].*);
-                const second = @as(Vec, input[input_second_offset..][0..vector_width].*) * scale_vec * @as(Vec, weights[pair_i + pair_count ..][0..vector_width].*);
-                output[output_first_offset..][0..vector_width].* = first * cos_vec - second * sin_vec;
-                output[output_second_offset..][0..vector_width].* = first * sin_vec + second * cos_vec;
-            }
-            while (pair_i < pair_count) : (pair_i += 1) {
-                const angle_i = position_coord * pair_count + pair_i;
-                const sin_value = sin_values[angle_i];
-                const cos_value = cos_values[angle_i];
-                const input_first_offset = input_base + pair_i;
-                const input_second_offset = input_base + pair_i + pair_count;
-                const output_first_offset = output_base + pair_i;
-                const output_second_offset = output_base + pair_i + pair_count;
-                const first = input[input_first_offset] * rms_scale * weights[pair_i];
-                const second = input[input_second_offset] * rms_scale * weights[pair_i + pair_count];
-                output[output_first_offset] = first * cos_value - second * sin_value;
-                output[output_second_offset] = first * sin_value + second * cos_value;
-            }
+            const angle_base = position_coord * pair_count;
+            kernels.ropeHalfPairsInto(
+                output[output_base..][0..pair_count],
+                output[output_base + pair_count ..][0..pair_count],
+                input[input_base..][0..pair_count],
+                input[input_base + pair_count ..][0..pair_count],
+                weights[0..pair_count],
+                weights[pair_count..][0..pair_count],
+                sin_values[angle_base..][0..pair_count],
+                cos_values[angle_base..][0..pair_count],
+                rms_scale,
+            );
             continue;
         }
 

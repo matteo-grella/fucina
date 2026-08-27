@@ -26,6 +26,84 @@ const vector_len = common.vector_len;
 
 // ---------------- Elementwise ----------------
 
+// ---------------- Dtype cast rows ----------------
+
+/// Vector twin of `dtype.f32ToBf16` — bit-identical lanes: round-to-nearest-
+/// even via the (bits + 0x7fff + lsb) trick, NaN quieted with bit 6 set.
+pub fn castF32ToBf16(output: []u16, input: []const f32) void {
+    if (comptime isa.reference) return scalar.castF32ToBf16(output, input);
+    const width = std.simd.suggestVectorLength(f32) orelse 8;
+    var i: usize = 0;
+    while (i + width <= input.len) : (i += width) {
+        output[i..][0..width].* = f32ToBf16Lanes(width, input[i..][0..width].*);
+    }
+    while (i < input.len) : (i += 1) output[i] = dtype_mod.f32ToBf16(input[i]);
+}
+
+fn f32ToBf16Lanes(comptime width: usize, values: @Vector(width, f32)) @Vector(width, u16) {
+    const U32 = @Vector(width, u32);
+    const bits: U32 = @bitCast(values);
+    const abs = bits & @as(U32, @splat(0x7fff_ffff));
+    const is_nan = abs > @as(U32, @splat(0x7f80_0000));
+    const high = bits >> @as(@Vector(width, u5), @splat(16));
+    const lsb = high & @as(U32, @splat(1));
+    // Never overflows for non-NaN inputs (max non-NaN is ±inf, 0xff80_0000);
+    // NaN lanes take the quieting arm via @select.
+    const rounded = (bits +% @as(U32, @splat(0x7fff)) +% lsb) >> @as(@Vector(width, u5), @splat(16));
+    const quieted = high | @as(U32, @splat(64));
+    return @truncate(@select(u32, is_nan, quieted, rounded));
+}
+
+/// Vector twin of `dtype.bf16ToF32` — exact (bits << 16).
+pub fn castBf16ToF32(output: []f32, input: []const u16) void {
+    if (comptime isa.reference) return scalar.castBf16ToF32(output, input);
+    const width = std.simd.suggestVectorLength(f32) orelse 8;
+    const U32 = @Vector(width, u32);
+    var i: usize = 0;
+    while (i + width <= input.len) : (i += width) {
+        const bits: @Vector(width, u16) = input[i..][0..width].*;
+        const widened = @as(U32, bits) << @as(@Vector(width, u5), @splat(16));
+        output[i..][0..width].* = @bitCast(widened);
+    }
+    while (i < input.len) : (i += 1) output[i] = dtype_mod.bf16ToF32(input[i]);
+}
+
+pub fn castF32ToF16(output: []f16, input: []const f32) void {
+    if (comptime isa.reference) return scalar.castF32ToF16(output, input);
+    const width = std.simd.suggestVectorLength(f16) orelse 8;
+    const F32 = @Vector(width, f32);
+    const F16 = @Vector(width, f16);
+    var i: usize = 0;
+    while (i + 4 * width <= input.len) : (i += 4 * width) {
+        output[i..][0..width].* = @as(F16, @floatCast(@as(F32, input[i..][0..width].*)));
+        output[i + width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + width ..][0..width].*)));
+        output[i + 2 * width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + 2 * width ..][0..width].*)));
+        output[i + 3 * width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + 3 * width ..][0..width].*)));
+    }
+    while (i + width <= input.len) : (i += width) {
+        output[i..][0..width].* = @as(F16, @floatCast(@as(F32, input[i..][0..width].*)));
+    }
+    while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
+}
+
+pub fn castF16ToF32(output: []f32, input: []const f16) void {
+    if (comptime isa.reference) return scalar.castF16ToF32(output, input);
+    const width = std.simd.suggestVectorLength(f16) orelse 8;
+    const F16 = @Vector(width, f16);
+    const F32 = @Vector(width, f32);
+    var i: usize = 0;
+    while (i + 4 * width <= input.len) : (i += 4 * width) {
+        output[i..][0..width].* = @as(F32, @floatCast(@as(F16, input[i..][0..width].*)));
+        output[i + width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + width ..][0..width].*)));
+        output[i + 2 * width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + 2 * width ..][0..width].*)));
+        output[i + 3 * width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + 3 * width ..][0..width].*)));
+    }
+    while (i + width <= input.len) : (i += width) {
+        output[i..][0..width].* = @as(F32, @floatCast(@as(F16, input[i..][0..width].*)));
+    }
+    while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
+}
+
 pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
     try tensor.requireSameShape(a, b);
     try tensor.requireSameShape(out, a);
@@ -1645,6 +1723,21 @@ test {
 /// `backend/parity_test.zig` and `bench/backend.zig`, which hold entry and
 /// twin to the same answer.
 pub const scalar = struct {
+    pub fn castF32ToBf16(output: []u16, input: []const f32) void {
+        for (output, input) |*dst, value| dst.* = dtype_mod.f32ToBf16(value);
+    }
+
+    pub fn castBf16ToF32(output: []f32, input: []const u16) void {
+        for (output, input) |*dst, value| dst.* = dtype_mod.bf16ToF32(value);
+    }
+
+    pub fn castF32ToF16(output: []f16, input: []const f32) void {
+        for (output, input) |*dst, value| dst.* = @floatCast(value);
+    }
+
+    pub fn castF16ToF32(output: []f32, input: []const f16) void {
+        for (output, input) |*dst, value| dst.* = @floatCast(value);
+    }
     pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
         const x = contiguousDataConst(a, len);
         const y = contiguousDataConst(b, len);

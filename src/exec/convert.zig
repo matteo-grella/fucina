@@ -1,8 +1,9 @@
 //! Dtype conversion ops for the eager runtime.
 //!
-//! `cast` is the general float-to-float cast; the two vectorized cast
-//! kernels it uses (`castF32ToF16`/`castF16ToF32`) are also the primitives the
-//! KV-cache-append helpers in `exec.zig` reuse, so they live here as `pub`.
+//! `cast` is the general float-to-float cast; its vectorized cast kernels
+//! are backend kernels (`backend.kernels.castF32ToF16`, ...), shared with
+//! the KV-cache-append helpers in `exec.zig` and the optimizer's 16-bit
+//! master-weight mirrors.
 //!
 //! Domain module: receives an explicit `*ExecContext` (never `self: anytype`);
 //! `prepareContiguous` is the substrate primitive it draws on.
@@ -15,6 +16,15 @@ const exec_shape = @import("shape.zig");
 const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
 
 const ExecContext = @import("../exec.zig").ExecContext;
+
+// The vectorized cast kernels live in the backend (`vector/elementwise.zig`),
+// registered in the conformed kernels table; this module keeps the cast
+// op's validation/layout tier and the KV-cache-append view walkers.
+const kernels = backend_mod.kernels;
+const castF32ToF16 = kernels.castF32ToF16;
+const castF16ToF32 = kernels.castF16ToF32;
+const castF32ToBf16 = kernels.castF32ToBf16;
+const castBf16ToF32 = kernels.castBf16ToF32;
 
 const DType = tensor.DType;
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
@@ -58,78 +68,6 @@ pub fn cast(
         dst.* = dtype_mod.castScalar(source_dtype, target_dtype, value);
     }
     return out;
-}
-
-/// Vector twin of `dtype.f32ToBf16` — bit-identical lanes: round-to-nearest-
-/// even via the (bits + 0x7fff + lsb) trick, NaN quieted with bit 6 set.
-pub fn castF32ToBf16(output: []u16, input: []const f32) void {
-    const width = std.simd.suggestVectorLength(f32) orelse 8;
-    var i: usize = 0;
-    while (i + width <= input.len) : (i += width) {
-        output[i..][0..width].* = f32ToBf16Lanes(width, input[i..][0..width].*);
-    }
-    while (i < input.len) : (i += 1) output[i] = dtype_mod.f32ToBf16(input[i]);
-}
-
-fn f32ToBf16Lanes(comptime width: usize, values: @Vector(width, f32)) @Vector(width, u16) {
-    const U32 = @Vector(width, u32);
-    const bits: U32 = @bitCast(values);
-    const abs = bits & @as(U32, @splat(0x7fff_ffff));
-    const is_nan = abs > @as(U32, @splat(0x7f80_0000));
-    const high = bits >> @as(@Vector(width, u5), @splat(16));
-    const lsb = high & @as(U32, @splat(1));
-    // Never overflows for non-NaN inputs (max non-NaN is ±inf, 0xff80_0000);
-    // NaN lanes take the quieting arm via @select.
-    const rounded = (bits +% @as(U32, @splat(0x7fff)) +% lsb) >> @as(@Vector(width, u5), @splat(16));
-    const quieted = high | @as(U32, @splat(64));
-    return @truncate(@select(u32, is_nan, quieted, rounded));
-}
-
-/// Vector twin of `dtype.bf16ToF32` — exact (bits << 16).
-pub fn castBf16ToF32(output: []f32, input: []const u16) void {
-    const width = std.simd.suggestVectorLength(f32) orelse 8;
-    const U32 = @Vector(width, u32);
-    var i: usize = 0;
-    while (i + width <= input.len) : (i += width) {
-        const bits: @Vector(width, u16) = input[i..][0..width].*;
-        const widened = @as(U32, bits) << @as(@Vector(width, u5), @splat(16));
-        output[i..][0..width].* = @bitCast(widened);
-    }
-    while (i < input.len) : (i += 1) output[i] = dtype_mod.bf16ToF32(input[i]);
-}
-
-pub fn castF32ToF16(output: []f16, input: []const f32) void {
-    const width = std.simd.suggestVectorLength(f16) orelse 8;
-    const F32 = @Vector(width, f32);
-    const F16 = @Vector(width, f16);
-    var i: usize = 0;
-    while (i + 4 * width <= input.len) : (i += 4 * width) {
-        output[i..][0..width].* = @as(F16, @floatCast(@as(F32, input[i..][0..width].*)));
-        output[i + width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + width ..][0..width].*)));
-        output[i + 2 * width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + 2 * width ..][0..width].*)));
-        output[i + 3 * width ..][0..width].* = @as(F16, @floatCast(@as(F32, input[i + 3 * width ..][0..width].*)));
-    }
-    while (i + width <= input.len) : (i += width) {
-        output[i..][0..width].* = @as(F16, @floatCast(@as(F32, input[i..][0..width].*)));
-    }
-    while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
-}
-
-pub fn castF16ToF32(output: []f32, input: []const f16) void {
-    const width = std.simd.suggestVectorLength(f16) orelse 8;
-    const F16 = @Vector(width, f16);
-    const F32 = @Vector(width, f32);
-    var i: usize = 0;
-    while (i + 4 * width <= input.len) : (i += 4 * width) {
-        output[i..][0..width].* = @as(F32, @floatCast(@as(F16, input[i..][0..width].*)));
-        output[i + width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + width ..][0..width].*)));
-        output[i + 2 * width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + 2 * width ..][0..width].*)));
-        output[i + 3 * width ..][0..width].* = @as(F32, @floatCast(@as(F16, input[i + 3 * width ..][0..width].*)));
-    }
-    while (i + width <= input.len) : (i += width) {
-        output[i..][0..width].* = @as(F32, @floatCast(@as(F16, input[i..][0..width].*)));
-    }
-    while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
 }
 
 /// Cast an f32 tensor into a caller-owned f16 slice in logical row-major

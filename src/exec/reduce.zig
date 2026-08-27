@@ -322,7 +322,7 @@ pub fn cumprod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
     return scanWidened(ctx, dtype, rank, x, axis, .prod, false, "cumprod");
 }
 
-const ScanOp = enum { sum, prod };
+const ScanOp = backend_mod.ops.ScanOp;
 
 /// The scans share one f32 kernel; 16-bit inputs follow the `.widened`
 /// policy.
@@ -335,42 +335,11 @@ fn scanWidened(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
     return ctx.storeAs(compute, dtype, out);
 }
 
-inline fn scanIdentity(comptime op: ScanOp) f32 {
-    return if (op == .sum) 0 else 1;
-}
-
-inline fn scanCombine(comptime op: ScanOp, a: f32, b: f32) f32 {
-    return if (comptime op == .sum) a + b else a * b;
-}
-
+// `scan_vector_width`/`ScanVec` for the linearRecurrence lane strips; the
+// cumsum/cumprod scan kernels live in the backend (`kernels.scanRows`/
+// `scanColumns`).
 const scan_vector_width = 8;
 const ScanVec = @Vector(scan_vector_width, f32);
-
-inline fn scanCombineVec(comptime op: ScanOp, a: ScanVec, b: ScanVec) ScanVec {
-    return if (comptime op == .sum) a + b else a * b;
-}
-
-/// Shift lanes toward the high end by `k`, filling vacated low lanes with
-/// the scan identity (forward Hillis–Steele step).
-inline fn scanShiftUp(comptime op: ScanOp, comptime k: usize, v: ScanVec) ScanVec {
-    const identity: ScanVec = @splat(scanIdentity(op));
-    comptime var mask: [scan_vector_width]i32 = undefined;
-    comptime for (0..scan_vector_width) |j| {
-        mask[j] = if (j >= k) @intCast(j - k) else ~@as(i32, 0);
-    };
-    return @shuffle(f32, v, identity, @as(@Vector(scan_vector_width, i32), mask));
-}
-
-/// Shift lanes toward the low end by `k`, filling vacated high lanes with
-/// the scan identity (reverse/suffix Hillis–Steele step).
-inline fn scanShiftDown(comptime op: ScanOp, comptime k: usize, v: ScanVec) ScanVec {
-    const identity: ScanVec = @splat(scanIdentity(op));
-    comptime var mask: [scan_vector_width]i32 = undefined;
-    comptime for (0..scan_vector_width) |j| {
-        mask[j] = if (j + k < scan_vector_width) @intCast(j + k) else ~@as(i32, 0);
-    };
-    return @shuffle(f32, v, identity, @as(@Vector(scan_vector_width, i32), mask));
-}
 
 /// Directed inclusive scan (sum or prod, forward or reverse) along `axis`.
 ///
@@ -403,92 +372,17 @@ fn scanAxisRankDirected(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
 
-    if (comptime build_options.vector_scan) {
-        if (inner == 1) {
-            for (0..outer) |row_i| {
-                const base = row_i * axis_dim;
-                scanRowVec(op, reverse, input[base..][0..axis_dim], output[base..][0..axis_dim]);
-            }
-        } else {
-            for (0..outer) |outer_i| {
-                const base = outer_i * axis_dim * inner;
-                var j: usize = 0;
-                while (j + scan_vector_width <= inner) : (j += scan_vector_width) {
-                    var acc: ScanVec = @splat(scanIdentity(op));
-                    for (0..axis_dim) |step| {
-                        const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
-                        const offset = base + axis_i * inner + j;
-                        acc = scanCombineVec(op, acc, input[offset..][0..scan_vector_width].*);
-                        output[offset..][0..scan_vector_width].* = acc;
-                    }
-                }
-                while (j < inner) : (j += 1) {
-                    var acc: f32 = scanIdentity(op);
-                    for (0..axis_dim) |step| {
-                        const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
-                        const offset = base + axis_i * inner + j;
-                        acc = scanCombine(op, acc, input[offset]);
-                        output[offset] = acc;
-                    }
-                }
-            }
-        }
-        return out;
-    }
-
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var acc: f32 = scanIdentity(op);
-            for (0..axis_dim) |step| {
-                const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
-                const offset = base + axis_i * inner + inner_i;
-                acc = scanCombine(op, acc, input[offset]);
-                output[offset] = acc;
-            }
+    // The `-Dvector-scan` gate lives inside the kernels: default builds run
+    // their serial sequence-exact arms.
+    if (inner == 1) {
+        kernels.scanRows(op, reverse, input, output, outer, axis_dim);
+    } else {
+        for (0..outer) |outer_i| {
+            const base = outer_i * axis_dim * inner;
+            kernels.scanColumns(op, reverse, input[base..][0 .. axis_dim * inner], output[base..][0 .. axis_dim * inner], axis_dim, inner);
         }
     }
     return out;
-}
-
-/// In-register Hillis–Steele inclusive scan of one contiguous row.
-fn scanRowVec(comptime op: ScanOp, comptime reverse: bool, row_in: []const f32, row_out: []f32) void {
-    const n = row_in.len;
-    var carry: f32 = scanIdentity(op);
-
-    if (comptime !reverse) {
-        var i: usize = 0;
-        while (i + scan_vector_width <= n) : (i += scan_vector_width) {
-            var v: ScanVec = row_in[i..][0..scan_vector_width].*;
-            v = scanCombineVec(op, v, scanShiftUp(op, 1, v));
-            v = scanCombineVec(op, v, scanShiftUp(op, 2, v));
-            v = scanCombineVec(op, v, scanShiftUp(op, 4, v));
-            v = scanCombineVec(op, v, @splat(carry));
-            row_out[i..][0..scan_vector_width].* = v;
-            carry = v[scan_vector_width - 1];
-        }
-        while (i < n) : (i += 1) {
-            carry = scanCombine(op, carry, row_in[i]);
-            row_out[i] = carry;
-        }
-    } else {
-        var i: usize = n;
-        while (i >= scan_vector_width) {
-            i -= scan_vector_width;
-            var v: ScanVec = row_in[i..][0..scan_vector_width].*;
-            v = scanCombineVec(op, v, scanShiftDown(op, 1, v));
-            v = scanCombineVec(op, v, scanShiftDown(op, 2, v));
-            v = scanCombineVec(op, v, scanShiftDown(op, 4, v));
-            v = scanCombineVec(op, v, @splat(carry));
-            row_out[i..][0..scan_vector_width].* = v;
-            carry = v[0];
-        }
-        while (i > 0) {
-            i -= 1;
-            carry = scanCombine(op, carry, row_in[i]);
-            row_out[i] = carry;
-        }
-    }
 }
 
 /// First-order linear recurrence along `axis` (the associative-scan
@@ -900,54 +794,6 @@ pub fn meanMasked(
     return result;
 }
 
-/// Vector width for the masked select. Matches the f32 lane count the rest of
-/// the native kernels use.
-const masked_vec_len: usize = @import("std").simd.suggestVectorLength(f32) orelse 4;
-
-/// `dst[i] = mask[i] ? src[i] : 0`, explicitly vectorized.
-///
-/// LLVM does not reliably auto-vectorize this shape: the flags are a
-/// byte-per-element array while the data is f32, so the select needs a
-/// widening compare the scalar loop does not spell out. Writing the compare
-/// and `@select` by hand is what turns the last-axis masked reduction from
-/// compute-bound back into bandwidth-bound.
-fn selectRow(
-    comptime mask_dtype: DType,
-    src: []const f32,
-    flags: []const dtype_mod.Scalar(mask_dtype),
-    dst: []f32,
-) void {
-    const Lanes = @Vector(masked_vec_len, f32);
-    const zero: Lanes = @splat(0);
-    var i: usize = 0;
-
-    if (comptime mask_dtype == .bool) {
-        // `bool` storage is one byte per element; compare the bytes so the
-        // predicate arrives as a lane mask instead of a per-element branch.
-        const bytes: []const u8 = @ptrCast(flags);
-        const Bytes = @Vector(masked_vec_len, u8);
-        const byte_zero: Bytes = @splat(0);
-        while (i + masked_vec_len <= src.len) : (i += masked_vec_len) {
-            const values: Lanes = src[i..][0..masked_vec_len].*;
-            const keep: Bytes = bytes[i..][0..masked_vec_len].*;
-            dst[i..][0..masked_vec_len].* = @select(f32, keep != byte_zero, values, zero);
-        }
-    } else if (comptime mask_dtype == .f32) {
-        const gate_zero: Lanes = @splat(0);
-        while (i + masked_vec_len <= src.len) : (i += masked_vec_len) {
-            const values: Lanes = src[i..][0..masked_vec_len].*;
-            const gate: Lanes = flags[i..][0..masked_vec_len].*;
-            dst[i..][0..masked_vec_len].* = @select(f32, gate != gate_zero, values, zero);
-        }
-    }
-
-    // Tail, and the whole row for mask dtypes without a vector arm (f16/bf16/
-    // f64 masks are legal but rare; correctness first).
-    while (i < src.len) : (i += 1) {
-        dst[i] = if (dtype_mod.isTruthy(mask_dtype, flags[i])) src[i] else 0;
-    }
-}
-
 /// Number of selected elements in a flag row.
 fn countRow(comptime mask_dtype: DType, flags: []const dtype_mod.Scalar(mask_dtype)) usize {
     var selected: usize = 0;
@@ -1031,7 +877,7 @@ fn maskedReduce(
         for (0..outer) |outer_i| {
             const row = input[outer_i * axis_dim ..][0..axis_dim];
             const row_flags = flags[outer_i * axis_dim ..][0..axis_dim];
-            selectRow(mask_dtype, row, row_flags, row_scratch);
+            kernels.selectRow(mask_dtype, row, row_flags, row_scratch);
             output[outer_i] = kernels.sumSlice(row_scratch);
             if (need_counts) count_data[outer_i] = @floatFromInt(countRow(mask_dtype, row_flags));
         }

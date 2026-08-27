@@ -11,7 +11,8 @@ const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const tensor_mod = @import("../tensor.zig");
 const exec_mod = @import("../exec.zig");
-const exec_convert = @import("../exec/convert.zig");
+// The vectorized cast kernels are backend kernels (the conformed table).
+const backend_kernels = @import("../backend.zig").kernels;
 const ag_core = @import("../ag/core.zig");
 const parallel = @import("../parallel.zig");
 
@@ -390,8 +391,8 @@ pub const Param = struct {
     pub fn refreshMasterFromValue(self: *Param) void {
         switch (self.value) {
             .f32 => {},
-            .f16 => |*t| exec_convert.castF16ToF32(self.master, t.data()),
-            .bf16 => |*t| exec_convert.castBf16ToF32(self.master, t.data()),
+            .f16 => |*t| backend_kernels.castF16ToF32(self.master, t.data()),
+            .bf16 => |*t| backend_kernels.castBf16ToF32(self.master, t.data()),
         }
     }
 
@@ -400,8 +401,8 @@ pub const Param = struct {
     pub fn publish(self: *Param) void {
         switch (self.value) {
             .f32 => {},
-            .f16 => |*t| exec_convert.castF32ToF16(t.data(), self.master),
-            .bf16 => |*t| exec_convert.castF32ToBf16(t.data(), self.master),
+            .f16 => |*t| backend_kernels.castF32ToF16(t.data(), self.master),
+            .bf16 => |*t| backend_kernels.castF32ToBf16(t.data(), self.master),
         }
     }
 

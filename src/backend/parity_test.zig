@@ -1669,6 +1669,142 @@ const Impl = struct {
             try expectClose(dv_b, dv_a, tol);
         }
     }
+
+    test "parity: dtype cast rows vs scalar twins are bitwise" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0xca57);
+        const rng = prng.random();
+        for ([_]usize{ 1, 7, 64, 257 }) |n| {
+            const src_f32 = try allocator.alloc(f32, n);
+            defer allocator.free(src_f32);
+            fillRandom(rng, src_f32);
+            const f16_a = try allocator.alloc(f16, n);
+            defer allocator.free(f16_a);
+            const f16_b = try allocator.alloc(f16, n);
+            defer allocator.free(f16_b);
+            native.castF32ToF16(f16_a, src_f32);
+            elementwise.scalar.castF32ToF16(f16_b, src_f32);
+            try std.testing.expectEqualSlices(u16, @ptrCast(f16_b), @ptrCast(f16_a));
+
+            const back_a = try allocator.alloc(f32, n);
+            defer allocator.free(back_a);
+            const back_b = try allocator.alloc(f32, n);
+            defer allocator.free(back_b);
+            native.castF16ToF32(back_a, f16_a);
+            elementwise.scalar.castF16ToF32(back_b, f16_a);
+            try expectBitwise(back_b, back_a);
+
+            const bf16_a = try allocator.alloc(u16, n);
+            defer allocator.free(bf16_a);
+            const bf16_b = try allocator.alloc(u16, n);
+            defer allocator.free(bf16_b);
+            native.castF32ToBf16(bf16_a, src_f32);
+            elementwise.scalar.castF32ToBf16(bf16_b, src_f32);
+            try std.testing.expectEqualSlices(u16, bf16_b, bf16_a);
+
+            native.castBf16ToF32(back_a, bf16_a);
+            elementwise.scalar.castBf16ToF32(back_b, bf16_a);
+            try expectBitwise(back_b, back_a);
+        }
+    }
+
+    test "parity: straggler row kernels vs serial references" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x57a6);
+        const rng = prng.random();
+        const rows_n: usize = 4;
+        const cols: usize = 133;
+        const len = rows_n * cols;
+        const input = try allocator.alloc(f32, len);
+        defer allocator.free(input);
+        fillRandom(rng, input);
+
+        // Row extremum: @max/@min are exact selections, so the lane reduce
+        // agrees with the serial walk bitwise.
+        for (0..rows_n) |r| {
+            const row = input[r * cols ..][0..cols];
+            var smax = -std.math.inf(f32);
+            var smin = std.math.inf(f32);
+            for (row) |value| {
+                smax = @max(smax, value);
+                smin = @min(smin, value);
+            }
+            try std.testing.expectEqual(smax, native.extremumRowValue(true, row));
+            try std.testing.expectEqual(smin, native.extremumRowValue(false, row));
+        }
+
+        // Variance rows: lane-reduced sums vs the serial twin (tolerance).
+        {
+            const out_a = try allocator.alloc(f32, rows_n);
+            defer allocator.free(out_a);
+            const out_b = try allocator.alloc(f32, rows_n);
+            defer allocator.free(out_b);
+            const inv_cols = 1 / @as(f32, @floatFromInt(cols));
+            const inv_denom = 1 / @as(f32, @floatFromInt(cols - 1));
+            native.varianceRowsInto(out_a, input, rows_n, cols, inv_cols, inv_denom);
+            rows_impl.scalar.varianceRowsInto(out_b, input, rows_n, cols, inv_cols, inv_denom);
+            try expectClose(out_b, out_a, 1e-6 * @as(f32, @floatFromInt(cols)));
+        }
+
+        // Fused-rope pair strip: purely elementwise, bitwise.
+        {
+            const pairs: usize = 37;
+            const angles = try allocator.alloc(f32, 2 * pairs);
+            defer allocator.free(angles);
+            fillRandom(rng, angles);
+            const weights = try allocator.alloc(f32, 2 * pairs);
+            defer allocator.free(weights);
+            fillRandom(rng, weights);
+            const out_a = try allocator.alloc(f32, 2 * pairs);
+            defer allocator.free(out_a);
+            const out_b = try allocator.alloc(f32, 2 * pairs);
+            defer allocator.free(out_b);
+            const rms_scale: f32 = 0.75;
+            native.ropeHalfPairsInto(out_a[0..pairs], out_a[pairs..], input[0..pairs], input[pairs..][0..pairs], weights[0..pairs], weights[pairs..], angles[0..pairs], angles[pairs..], rms_scale);
+            for (0..pairs) |i| {
+                const first = input[i] * rms_scale * weights[i];
+                const second = input[pairs + i] * rms_scale * weights[pairs + i];
+                out_b[i] = first * angles[pairs + i] - second * angles[i];
+                out_b[pairs + i] = first * angles[i] + second * angles[pairs + i];
+            }
+            try expectBitwise(out_b, out_a);
+        }
+
+        // Scans: the strided-columns kernel is bitwise the serial twin on
+        // every build; the last-axis kernel is bitwise on default builds and
+        // the Hillis–Steele rounding class under -Dvector-scan.
+        {
+            const out_a = try allocator.alloc(f32, len);
+            defer allocator.free(out_a);
+            const out_b = try allocator.alloc(f32, len);
+            defer allocator.free(out_b);
+            inline for ([_]ops.ScanOp{ .sum, .prod }) |op| {
+                inline for ([_]bool{ false, true }) |reverse| {
+                    native.scanRows(op, reverse, input, out_a, rows_n, cols);
+                    rows_impl.scalar.scanRows(op, reverse, input, out_b, rows_n, cols);
+                    try expectClose(out_b, out_a, 1e-5 * @as(f32, @floatFromInt(cols)));
+                    native.scanColumns(op, reverse, input, out_a, rows_n, cols);
+                    rows_impl.scalar.scanColumns(op, reverse, input, out_b, rows_n, cols);
+                    try expectBitwise(out_b, out_a);
+                }
+            }
+        }
+
+        // Masked select row: purely elementwise, bitwise for bool and f32
+        // masks (the vectorized arms) on any build.
+        {
+            const flags = try allocator.alloc(bool, cols);
+            defer allocator.free(flags);
+            for (flags, 0..) |*flag, i| flag.* = (i % 3) != 0;
+            const dst_a = try allocator.alloc(f32, cols);
+            defer allocator.free(dst_a);
+            const dst_b = try allocator.alloc(f32, cols);
+            defer allocator.free(dst_b);
+            native.selectRow(.bool, input[0..cols], flags, dst_a);
+            for (dst_b, input[0..cols], flags) |*dst, value, keep| dst.* = if (keep) value else 0;
+            try expectBitwise(dst_b, dst_a);
+        }
+    }
 };
 
 test {

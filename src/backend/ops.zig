@@ -1,5 +1,9 @@
 const std = @import("std");
 
+/// Directed inclusive-scan combine of the cumulative kernels
+/// (`kernels.scanRows`/`scanColumns` and the exec `cumsum`/`cumprod` ops).
+pub const ScanOp = enum { sum, prod };
+
 pub const ElementwiseOp = enum {
     add,
     sub,

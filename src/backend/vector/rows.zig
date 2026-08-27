@@ -11,6 +11,7 @@
 //! builds (`isa.reference`) every SIMD entry selects its serial twin in
 //! the `scalar` namespace at the bottom of the file.
 const std = @import("std");
+const build_options = @import("build_options");
 const dtype_mod = @import("../../dtype.zig");
 const rng = @import("../../rng.zig");
 const tensor = @import("../../tensor.zig");
@@ -20,6 +21,8 @@ const quantized_matmul = @import("../quant.zig");
 const elementwise = @import("elementwise.zig");
 
 const vexpf = @import("primitives.zig").vexpf;
+
+const DType = dtype_mod.DType;
 
 /// Coordinate along `axis` of the contiguous linear index `linear` under
 /// `shape`/`strides` (row-major contiguous strides). Shared index math of
@@ -2878,6 +2881,296 @@ pub fn scatterAddRows(task: ScatterAddRowsTask) void {
     }
 }
 
+// ---- Straggler row kernels: the last-axis extremum/variance rows, the
+// fused rms-norm+rope contiguous pair strip, the gated vector scans, and
+// the masked-reduce select row (moved from their exec orchestration).
+
+/// Row extremum (`maximize` = max, else min) of one contiguous row: 8-lane
+/// running best + a horizontal reduce + the scalar tail. The ±inf identity
+/// seed and strict compares drop NaN exactly like the serial loop, and
+/// `@max`/`@min` return one of their inputs exactly, so the caller's
+/// first-index rescan stays valid.
+pub fn extremumRowValue(comptime maximize: bool, row: []const f32) f32 {
+    const identity: f32 = if (maximize) -std.math.inf(f32) else std.math.inf(f32);
+    if (comptime isa.reference) {
+        var best_value = identity;
+        for (row) |value| best_value = if (maximize) @max(best_value, value) else @min(best_value, value);
+        return best_value;
+    }
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    var axis_i: usize = 0;
+    var best_vec: Vec = @splat(identity);
+    while (axis_i + vector_width <= row.len) : (axis_i += vector_width) {
+        const chunk: Vec = row[axis_i..][0..vector_width].*;
+        best_vec = if (maximize) @max(best_vec, chunk) else @min(best_vec, chunk);
+    }
+    var best_value: f32 = if (maximize) @reduce(.Max, best_vec) else @reduce(.Min, best_vec);
+    while (axis_i < row.len) : (axis_i += 1) {
+        best_value = if (maximize) @max(best_value, row[axis_i]) else @min(best_value, row[axis_i]);
+    }
+    return best_value;
+}
+
+/// Per-row biased-two-pass variance over the last axis: `output[row] =
+/// Σ(x − mean)² · inv_denom` with `mean = Σx · inv_axis_dim` (the ddof
+/// fold lives in `inv_denom`). One output slot per row.
+pub fn varianceRowsInto(output: []f32, input: []const f32, rows: usize, axis_dim: usize, inv_axis_dim: f32, inv_denom: f32) void {
+    if (comptime isa.reference) return scalar.varianceRowsInto(output, input, rows, axis_dim, inv_axis_dim, inv_denom);
+    const Vec = @Vector(8, f32);
+    const vector_width = 8;
+    for (0..rows) |outer_i| {
+        const row = input[outer_i * axis_dim ..][0..axis_dim];
+        var axis_i: usize = 0;
+        var sum_vec: Vec = @splat(0);
+        while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
+            sum_vec += @as(Vec, row[axis_i..][0..vector_width].*);
+        }
+        var sum_acc = @reduce(.Add, sum_vec);
+        while (axis_i < axis_dim) : (axis_i += 1) {
+            sum_acc += row[axis_i];
+        }
+        const mean_value = sum_acc * inv_axis_dim;
+        const mean_vec: Vec = @splat(mean_value);
+
+        axis_i = 0;
+        var sumsq_vec: Vec = @splat(0);
+        while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
+            const centered = @as(Vec, row[axis_i..][0..vector_width].*) - mean_vec;
+            sumsq_vec += centered * centered;
+        }
+        var sumsq = @reduce(.Add, sumsq_vec);
+        while (axis_i < axis_dim) : (axis_i += 1) {
+            const centered = row[axis_i] - mean_value;
+            sumsq += centered * centered;
+        }
+        output[outer_i] = sumsq * inv_denom;
+    }
+}
+
+/// One contiguous half-layout rope pair row of the fused rms-norm+rope
+/// fallback: `first = in₁·s·w₁`, `second = in₂·s·w₂`, rotated by the
+/// (sin, cos) row. Every slice is `pair_count` long; `rms_scale` is the
+/// caller-computed row statistic. Purely elementwise, so the serial
+/// reference arm produces the vector arm's bytes.
+pub fn ropeHalfPairsInto(
+    out_first: []f32,
+    out_second: []f32,
+    in_first: []const f32,
+    in_second: []const f32,
+    weights_first: []const f32,
+    weights_second: []const f32,
+    sin_values: []const f32,
+    cos_values: []const f32,
+    rms_scale: f32,
+) void {
+    const pair_count = out_first.len;
+    if (comptime isa.reference) {
+        for (0..pair_count) |pair_i| {
+            const first = in_first[pair_i] * rms_scale * weights_first[pair_i];
+            const second = in_second[pair_i] * rms_scale * weights_second[pair_i];
+            out_first[pair_i] = first * cos_values[pair_i] - second * sin_values[pair_i];
+            out_second[pair_i] = first * sin_values[pair_i] + second * cos_values[pair_i];
+        }
+        return;
+    }
+    const Vec = @Vector(4, f32);
+    const vector_width = 4;
+    const scale_vec: Vec = @splat(rms_scale);
+    var pair_i: usize = 0;
+    while (pair_i + vector_width <= pair_count) : (pair_i += vector_width) {
+        const sin_vec: Vec = sin_values[pair_i..][0..vector_width].*;
+        const cos_vec: Vec = cos_values[pair_i..][0..vector_width].*;
+        const first = @as(Vec, in_first[pair_i..][0..vector_width].*) * scale_vec * @as(Vec, weights_first[pair_i..][0..vector_width].*);
+        const second = @as(Vec, in_second[pair_i..][0..vector_width].*) * scale_vec * @as(Vec, weights_second[pair_i..][0..vector_width].*);
+        out_first[pair_i..][0..vector_width].* = first * cos_vec - second * sin_vec;
+        out_second[pair_i..][0..vector_width].* = first * sin_vec + second * cos_vec;
+    }
+    while (pair_i < pair_count) : (pair_i += 1) {
+        const first = in_first[pair_i] * rms_scale * weights_first[pair_i];
+        const second = in_second[pair_i] * rms_scale * weights_second[pair_i];
+        out_first[pair_i] = first * cos_values[pair_i] - second * sin_values[pair_i];
+        out_second[pair_i] = first * sin_values[pair_i] + second * cos_values[pair_i];
+    }
+}
+
+// ---- Directed inclusive scans (the `-Dvector-scan` kernels). ----
+
+const scan_vector_width = 8;
+const ScanVec = @Vector(scan_vector_width, f32);
+
+inline fn scanIdentity(comptime op: backend_ops.ScanOp) f32 {
+    return if (op == .sum) 0 else 1;
+}
+
+inline fn scanCombine(comptime op: backend_ops.ScanOp, a: f32, b: f32) f32 {
+    return if (comptime op == .sum) a + b else a * b;
+}
+
+inline fn scanCombineVec(comptime op: backend_ops.ScanOp, a: ScanVec, b: ScanVec) ScanVec {
+    return if (comptime op == .sum) a + b else a * b;
+}
+
+/// Shift lanes toward the high end by `k`, filling vacated low lanes with
+/// the scan identity (forward Hillis–Steele step).
+inline fn scanShiftUp(comptime op: backend_ops.ScanOp, comptime k: usize, v: ScanVec) ScanVec {
+    const identity: ScanVec = @splat(scanIdentity(op));
+    comptime var mask: [scan_vector_width]i32 = undefined;
+    comptime for (0..scan_vector_width) |j| {
+        mask[j] = if (j >= k) @intCast(j - k) else ~@as(i32, 0);
+    };
+    return @shuffle(f32, v, identity, @as(@Vector(scan_vector_width, i32), mask));
+}
+
+/// Shift lanes toward the low end by `k`, filling vacated high lanes with
+/// the scan identity (reverse/suffix Hillis–Steele step).
+inline fn scanShiftDown(comptime op: backend_ops.ScanOp, comptime k: usize, v: ScanVec) ScanVec {
+    const identity: ScanVec = @splat(scanIdentity(op));
+    comptime var mask: [scan_vector_width]i32 = undefined;
+    comptime for (0..scan_vector_width) |j| {
+        mask[j] = if (j + k < scan_vector_width) @intCast(j + k) else ~@as(i32, 0);
+    };
+    return @shuffle(f32, v, identity, @as(@Vector(scan_vector_width, i32), mask));
+}
+
+/// In-register Hillis–Steele inclusive scan of one contiguous row.
+fn scanRowVec(comptime op: backend_ops.ScanOp, comptime reverse: bool, row_in: []const f32, row_out: []f32) void {
+    const n = row_in.len;
+    var carry: f32 = scanIdentity(op);
+
+    if (comptime !reverse) {
+        var i: usize = 0;
+        while (i + scan_vector_width <= n) : (i += scan_vector_width) {
+            var v: ScanVec = row_in[i..][0..scan_vector_width].*;
+            v = scanCombineVec(op, v, scanShiftUp(op, 1, v));
+            v = scanCombineVec(op, v, scanShiftUp(op, 2, v));
+            v = scanCombineVec(op, v, scanShiftUp(op, 4, v));
+            v = scanCombineVec(op, v, @splat(carry));
+            row_out[i..][0..scan_vector_width].* = v;
+            carry = v[scan_vector_width - 1];
+        }
+        while (i < n) : (i += 1) {
+            carry = scanCombine(op, carry, row_in[i]);
+            row_out[i] = carry;
+        }
+    } else {
+        var i: usize = n;
+        while (i >= scan_vector_width) {
+            i -= scan_vector_width;
+            var v: ScanVec = row_in[i..][0..scan_vector_width].*;
+            v = scanCombineVec(op, v, scanShiftDown(op, 1, v));
+            v = scanCombineVec(op, v, scanShiftDown(op, 2, v));
+            v = scanCombineVec(op, v, scanShiftDown(op, 4, v));
+            v = scanCombineVec(op, v, @splat(carry));
+            row_out[i..][0..scan_vector_width].* = v;
+            carry = v[0];
+        }
+        while (i > 0) {
+            i -= 1;
+            carry = scanCombine(op, carry, row_in[i]);
+            row_out[i] = carry;
+        }
+    }
+}
+
+/// Directed inclusive scan over contiguous last-axis rows. Default builds
+/// (`-Dvector-scan=false`) and the reference leg run the serial per-row
+/// scan, bitwise deterministic and sequence-exact; `-Dvector-scan=true`
+/// runs the in-register Hillis–Steele prefix scan per row (bitwise
+/// deterministic, but the accumulation order differs from the serial
+/// default — the sum-SIMD-lanes rounding class; exact for integer-valued
+/// data).
+pub fn scanRows(comptime op: backend_ops.ScanOp, comptime reverse: bool, input: []const f32, output: []f32, rows: usize, axis_dim: usize) void {
+    if (comptime isa.reference or !build_options.vector_scan) {
+        return scalar.scanRows(op, reverse, input, output, rows, axis_dim);
+    }
+    for (0..rows) |row_i| {
+        const base = row_i * axis_dim;
+        scanRowVec(op, reverse, input[base..][0..axis_dim], output[base..][0..axis_dim]);
+    }
+}
+
+/// Directed inclusive scan of one outer block over a strided (non-last)
+/// axis: `inner` independent columns, each a serial scan in axis order.
+/// `-Dvector-scan=true` vectorizes across `scan_vector_width` columns per
+/// strip — each lane is one column's serial scan, so the result is BITWISE
+/// IDENTICAL to the serial default (and to the reference leg).
+pub fn scanColumns(comptime op: backend_ops.ScanOp, comptime reverse: bool, input: []const f32, output: []f32, axis_dim: usize, inner: usize) void {
+    if (comptime isa.reference or !build_options.vector_scan) {
+        return scalar.scanColumns(op, reverse, input, output, axis_dim, inner);
+    }
+    var j: usize = 0;
+    while (j + scan_vector_width <= inner) : (j += scan_vector_width) {
+        var acc: ScanVec = @splat(scanIdentity(op));
+        for (0..axis_dim) |step| {
+            const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
+            const offset = axis_i * inner + j;
+            acc = scanCombineVec(op, acc, input[offset..][0..scan_vector_width].*);
+            output[offset..][0..scan_vector_width].* = acc;
+        }
+    }
+    while (j < inner) : (j += 1) {
+        var acc: f32 = scanIdentity(op);
+        for (0..axis_dim) |step| {
+            const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
+            const offset = axis_i * inner + j;
+            acc = scanCombine(op, acc, input[offset]);
+            output[offset] = acc;
+        }
+    }
+}
+
+/// Vector width for the masked select. Matches the f32 lane count the rest of
+/// the native kernels use.
+const masked_vec_len: usize = std.simd.suggestVectorLength(f32) orelse 4;
+
+/// `dst[i] = mask[i] ? src[i] : 0`, explicitly vectorized.
+///
+/// LLVM does not reliably auto-vectorize this shape: the flags are a
+/// byte-per-element array while the data is f32, so the select needs a
+/// widening compare the scalar loop does not spell out. Writing the compare
+/// and `@select` by hand is what turns the last-axis masked reduction from
+/// compute-bound back into bandwidth-bound. Purely elementwise: the serial
+/// reference arm produces the vector arm's bytes.
+pub fn selectRow(
+    comptime mask_dtype: DType,
+    src: []const f32,
+    flags: []const dtype_mod.Scalar(mask_dtype),
+    dst: []f32,
+) void {
+    const Lanes = @Vector(masked_vec_len, f32);
+    const zero: Lanes = @splat(0);
+    var i: usize = 0;
+
+    if (comptime isa.reference) {
+        // Serial arm below handles the whole row.
+    } else if (comptime mask_dtype == .bool) {
+        // `bool` storage is one byte per element; compare the bytes so the
+        // predicate arrives as a lane mask instead of a per-element branch.
+        const bytes: []const u8 = @ptrCast(flags);
+        const Bytes = @Vector(masked_vec_len, u8);
+        const byte_zero: Bytes = @splat(0);
+        while (i + masked_vec_len <= src.len) : (i += masked_vec_len) {
+            const values: Lanes = src[i..][0..masked_vec_len].*;
+            const keep: Bytes = bytes[i..][0..masked_vec_len].*;
+            dst[i..][0..masked_vec_len].* = @select(f32, keep != byte_zero, values, zero);
+        }
+    } else if (comptime mask_dtype == .f32) {
+        const gate_zero: Lanes = @splat(0);
+        while (i + masked_vec_len <= src.len) : (i += masked_vec_len) {
+            const values: Lanes = src[i..][0..masked_vec_len].*;
+            const gate: Lanes = flags[i..][0..masked_vec_len].*;
+            dst[i..][0..masked_vec_len].* = @select(f32, gate != gate_zero, values, zero);
+        }
+    }
+
+    // Tail, the reference leg, and the whole row for mask dtypes without a
+    // vector arm (f16/bf16/f64 masks are legal but rare; correctness first).
+    while (i < src.len) : (i += 1) {
+        dst[i] = if (dtype_mod.isTruthy(mask_dtype, flags[i])) src[i] else 0;
+    }
+}
+
 /// The scalar reference twins of this file's kernel entries: plain serial
 /// loops over the same Task payloads — no `@Vector`, no lane splits, one
 /// accumulator per output element in storage order. On `-Dbackend=scalar`
@@ -2890,6 +3183,49 @@ pub fn scatterAddRows(task: ScatterAddRowsTask) void {
 /// keep the per-output accumulation order exactly (the entries' documented
 /// contract), so they produce the entries' bytes.
 pub const scalar = struct {
+    pub fn varianceRowsInto(output: []f32, input: []const f32, rows: usize, axis_dim: usize, inv_axis_dim: f32, inv_denom: f32) void {
+        for (0..rows) |outer_i| {
+            const row = input[outer_i * axis_dim ..][0..axis_dim];
+            var sum_acc: f32 = 0;
+            for (row) |value| sum_acc += value;
+            const mean_value = sum_acc * inv_axis_dim;
+            var sumsq: f32 = 0;
+            for (row) |value| {
+                const centered = value - mean_value;
+                sumsq += centered * centered;
+            }
+            output[outer_i] = sumsq * inv_denom;
+        }
+    }
+
+    /// The sequence-exact serial scan: also the `-Dvector-scan=false`
+    /// default arm of the entry, so default builds and the reference leg
+    /// share these bytes.
+    pub fn scanRows(comptime op: backend_ops.ScanOp, comptime reverse: bool, input: []const f32, output: []f32, rows: usize, axis_dim: usize) void {
+        for (0..rows) |row_i| {
+            const base = row_i * axis_dim;
+            var acc: f32 = if (op == .sum) 0 else 1;
+            for (0..axis_dim) |step| {
+                const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
+                const offset = base + axis_i;
+                acc = if (comptime op == .sum) acc + input[offset] else acc * input[offset];
+                output[offset] = acc;
+            }
+        }
+    }
+
+    /// See `scanRows`: the serial strided-axis scan, one column at a time.
+    pub fn scanColumns(comptime op: backend_ops.ScanOp, comptime reverse: bool, input: []const f32, output: []f32, axis_dim: usize, inner: usize) void {
+        for (0..inner) |inner_i| {
+            var acc: f32 = if (op == .sum) 0 else 1;
+            for (0..axis_dim) |step| {
+                const axis_i = if (comptime reverse) axis_dim - 1 - step else step;
+                const offset = axis_i * inner + inner_i;
+                acc = if (comptime op == .sum) acc + input[offset] else acc * input[offset];
+                output[offset] = acc;
+            }
+        }
+    }
     fn rowMaxSerial(row_in: []const f32) f32 {
         var max_value = -std.math.inf(f32);
         for (row_in) |value| max_value = @max(max_value, value);

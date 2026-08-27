@@ -286,6 +286,16 @@ this point; earlier history is `git log`.
   `exec/attention.zig` keeps `groupedAttention`/`groupedAttentionBackward`
   and the dispatch/validation tier. Native builds are bitwise-unchanged
   (identical codegen histograms on the decode head kernel).
+- The remaining exec `@Vector` bodies are backend kernels too: the
+  vectorized dtype casts (`castF32ToF16`/`castF16ToF32`/`castF32ToBf16`/
+  `castBf16ToF32`, now `backend.kernels` entries — `optim`'s 16-bit
+  master-weight mirrors call them there, no longer through
+  `exec/convert.zig`), the last-axis extremum and variance row kernels,
+  the fused rms-norm+rope contiguous pair strip, the directed inclusive
+  scans (`kernels.scanRows`/`scanColumns`, with the `-Dvector-scan` gate
+  inside the kernel and `ops.ScanOp` as the shared vocabulary), and the
+  masked-reduce select row. Each carries its serial reference arm; the
+  elementwise ones are bit-exact against it by construction.
 - `store/expert_store.zig` is now the facade over five concern files —
   `store/io.zig` (platform I/O shims + the store error set),
   `store/geometry.zig` (`StreamedQuant`/`Proj`/`ProjSpec` and the layout

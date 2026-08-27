@@ -182,32 +182,9 @@ fn extremumAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     if (inner == 1) {
-        const Vec = @Vector(8, f32);
-        const vector_width = 8;
         for (0..outer) |outer_i| {
             const row = input[outer_i * axis_dim ..][0..axis_dim];
-            var axis_i: usize = 0;
-            var best_vec: Vec = @splat(switch (op) {
-                .max => -std.math.inf(f32),
-                .min => std.math.inf(f32),
-            });
-            while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
-                const chunk: Vec = row[axis_i..][0..vector_width].*;
-                best_vec = switch (op) {
-                    .max => @max(best_vec, chunk),
-                    .min => @min(best_vec, chunk),
-                };
-            }
-            var best_value = switch (op) {
-                .max => @reduce(.Max, best_vec),
-                .min => @reduce(.Min, best_vec),
-            };
-            while (axis_i < axis_dim) : (axis_i += 1) {
-                best_value = switch (op) {
-                    .max => @max(best_value, row[axis_i]),
-                    .min => @min(best_value, row[axis_i]),
-                };
-            }
+            const best_value = backend_mod.kernels.extremumRowValue(op == .max, row);
             // Second scan: the first index holding the extremum. Vector
             // @max/@min return one of their inputs exactly, so `==` is
             // safe; on an all-NaN row `==` never matches (the value is
@@ -430,35 +407,7 @@ fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
     const inv_denom = 1 / (@as(f32, @floatFromInt(axis_dim)) - @as(f32, @floatFromInt(ddof)));
     if (inner == 1) {
-        const Vec = @Vector(8, f32);
-        const vector_width = 8;
-        for (0..outer) |outer_i| {
-            const row = input[outer_i * axis_dim ..][0..axis_dim];
-            var axis_i: usize = 0;
-            var sum_vec: Vec = @splat(0);
-            while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
-                sum_vec += @as(Vec, row[axis_i..][0..vector_width].*);
-            }
-            var sum_acc = @reduce(.Add, sum_vec);
-            while (axis_i < axis_dim) : (axis_i += 1) {
-                sum_acc += row[axis_i];
-            }
-            const mean_value = sum_acc * inv_axis_dim;
-            const mean_vec: Vec = @splat(mean_value);
-
-            axis_i = 0;
-            var sumsq_vec: Vec = @splat(0);
-            while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
-                const centered = @as(Vec, row[axis_i..][0..vector_width].*) - mean_vec;
-                sumsq_vec += centered * centered;
-            }
-            var sumsq = @reduce(.Add, sumsq_vec);
-            while (axis_i < axis_dim) : (axis_i += 1) {
-                const centered = row[axis_i] - mean_value;
-                sumsq += centered * centered;
-            }
-            output[outer_i] = sumsq * inv_denom;
-        }
+        backend_mod.kernels.varianceRowsInto(output, input, outer, axis_dim, inv_axis_dim, inv_denom);
         return out;
     }
 
