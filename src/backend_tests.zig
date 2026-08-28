@@ -126,8 +126,11 @@ test "backend matmul" {
 //   - remainder rows match the kernel that owns them (row kernel for q8_0 and
 //     q5_k, padded x4 group for q4_k) run standalone on just those rows;
 //   - below-floor m matches the row-kernel reference on every row;
-//   - pooled dispatch matches unpooled bit-for-bit (row/column splits never
-//     change per-element math).
+//   - pooled dispatch matches unpooled bitwise-first with the tight
+//     per-element fallback of vector/matmul_quant_tests.zig: kernels may
+//     anchor their micro-tiling at the dispatch range origin (the aarch64
+//     q8_0 tile does), so a pooled range's rounding can drift in the last
+//     ulps against the serial full range.
 
 const split_test_n: usize = 32;
 const split_test_k: usize = 512;
@@ -141,6 +144,19 @@ fn expectBitEqualF32(expected: []const f32, actual: []const f32) !void {
             std.debug.print("bit mismatch at {d}: {x:0>8} vs {x:0>8}\n", .{ i, @as(u32, @bitCast(ref)), @as(u32, @bitCast(got)) });
             return error.TestExpectedEqual;
         }
+    }
+}
+
+// Pooled-vs-serial comparison: bitwise-first, then the per-element
+// fallback from vector/matmul_quant_tests.zig. A re-anchored micro-tile
+// drifts the final ulps; a mis-routed split is order-of-magnitude wrong,
+// which the fallback still rejects.
+fn expectPooledEqualsSerialF32(serial: []const f32, pooled: []const f32) !void {
+    try std.testing.expectEqual(serial.len, pooled.len);
+    if (std.mem.eql(u8, std.mem.sliceAsBytes(serial), std.mem.sliceAsBytes(pooled))) return;
+    for (serial, pooled) |ref, got| {
+        if (@abs(ref - got) <= 1e-4) continue;
+        try std.testing.expectApproxEqRel(ref, got, 2e-3);
     }
 }
 
@@ -305,10 +321,10 @@ fn expectPooledQuantizedRhsDispatchEqual(allocator: std.mem.Allocator, pool: *th
     defer pooled.deinit();
     try native.kernels.matmul2DQuantizedRhs(.{}, allocator, &serial, a, rhs, m, split_test_n, split_test_k);
     try native.kernels.matmul2DQuantizedRhs(.{ .pool = pool }, allocator, &pooled, a, rhs, m, split_test_n, split_test_k);
-    try expectBitEqualF32(serial.dataConst(), pooled.dataConst());
+    try expectPooledEqualsSerialF32(serial.dataConst(), pooled.dataConst());
 }
 
-test "native quantized-RHS dispatch quantizes the LHS over the pool bitwise identically" {
+test "native quantized-RHS dispatch quantizes the LHS over the pool split-invariantly" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x1a5d0ffbeef08001);
     const random = prng.random();
@@ -316,8 +332,10 @@ test "native quantized-RHS dispatch quantizes the LHS over the pool bitwise iden
     // 64 rows x 512 features is exactly the LHS-quantization pooling gate
     // (vector_elementwise_len_threshold / 8): the pooled call splits the
     // activation rows across tasks before the row-kernel GEMM, the serial
-    // call quantizes them on one thread; rows own disjoint blocks, so the
-    // products must agree byte for byte. Per-row Q8_0 (q8_0 rows) and
+    // call quantizes them on one thread. Rows own disjoint blocks, so the
+    // quantized activations are split-invariant; the pooled GEMM ranges may
+    // still re-anchor micro-tiling, so the products get the bitwise-first
+    // comparison with the tolerance fallback. Per-row Q8_0 (q8_0 rows) and
     // per-row Q8_K (plain q4_k rows) LHS formats.
     const m = 64;
     const lhs_values = try allocator.alloc(f32, m * split_test_k);
@@ -382,7 +400,7 @@ test "native q5_k x8 dispatch splits off-multiple m into x4 bulk plus row-kernel
     defer allocator.free(serial);
     const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
-    try expectBitEqualF32(serial, pooled);
+    try expectPooledEqualsSerialF32(serial, pooled);
 }
 
 test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 kernel" {
@@ -421,7 +439,7 @@ test "native q4_k x8 dispatch runs every off-multiple m through the padded x4 ke
     defer allocator.free(serial);
     const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
-    try expectBitEqualF32(serial, pooled);
+    try expectPooledEqualsSerialF32(serial, pooled);
 }
 
 test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus row-kernel tail" {
@@ -471,5 +489,5 @@ test "native q8_0 x4 dispatch splits off-multiple m >= 32 into packed bulk plus 
     defer allocator.free(serial);
     const pooled = try runSplitDispatch(native.kernels.matmulPacked, allocator, &rhs, lhs_values, 129, .{ .pool = &pool });
     defer allocator.free(pooled);
-    try expectBitEqualF32(serial, pooled);
+    try expectPooledEqualsSerialF32(serial, pooled);
 }

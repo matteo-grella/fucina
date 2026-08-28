@@ -241,10 +241,24 @@ test "public non-f32 float Tensor dot supports multi-free and batch tags" {
     }, batched_product.asRawTensor().dataConst());
 }
 
+/// Signed order of a 16-bit float's bit pattern (sign-magnitude to a
+/// monotone integer, +0 == -0), so adjacent representable values are one
+/// apart regardless of sign.
+fn halfUlpOrder(bits: u16) i32 {
+    const magnitude: i32 = bits & 0x7fff;
+    return if (bits & 0x8000 != 0) -magnitude else magnitude;
+}
+
 /// The batched typed dot (the `.typed` arm of `tag_ops.contract`, batch
 /// tags shared by both operands) against a per-batch loop of the 2-D
-/// typed GEMM (`ctx.matmul(dtype, .plain, ...)`), compared BITWISE: the
-/// batched arm must be a layout change, not a numerics change.
+/// typed GEMM (`ctx.matmul(dtype, .plain, ...)`), compared bitwise-first
+/// with a 1-ulp fallback. Both arms widen to the same f32 compute, but at
+/// blocked/BLAS-eligible sizes the batched dispatch (`kernels.gemmBatched`)
+/// and the 2-D dispatch may pick differently blocked kernel paths (the
+/// pool split and BLAS gates are machine-dependent), reassociating the f32
+/// accumulation; the stored 16-bit value then moves by at most its final
+/// ulp. A mis-wired batch offset is orders of magnitude off, which the
+/// fallback still rejects.
 fn expectTypedBatchedDotMatchesPerBatchGemm(
     comptime float_dtype: DType,
     ctx: *ExecContext,
@@ -286,10 +300,21 @@ fn expectTypedBatchedDotMatchesPerBatchGemm(
         defer per_batch.deinit();
         @memcpy(reference[bi * m * n ..][0 .. m * n], per_batch.dataConst());
     }
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(reference), std.mem.sliceAsBytes(product.asRawTensor().dataConst()));
+    const expected_bytes = std.mem.sliceAsBytes(reference);
+    const actual_bytes = std.mem.sliceAsBytes(product.asRawTensor().dataConst());
+    try std.testing.expectEqual(expected_bytes.len, actual_bytes.len);
+    if (std.mem.eql(u8, expected_bytes, actual_bytes)) return;
+    const expected_bits = std.mem.bytesAsSlice(u16, expected_bytes);
+    const actual_bits = std.mem.bytesAsSlice(u16, actual_bytes);
+    for (expected_bits, actual_bits, 0..) |ref, got, i| {
+        if (@abs(halfUlpOrder(ref) - halfUlpOrder(got)) > 1) {
+            std.debug.print("batched dot drift beyond 1 ulp at {d}: {x:0>4} vs {x:0>4}\n", .{ i, ref, got });
+            return error.TestExpectedEqual;
+        }
+    }
 }
 
-test "typed dot batched arm is bitwise the per-batch typed GEMM (f16, bf16)" {
+test "typed dot batched arm matches the per-batch typed GEMM (f16, bf16)" {
     inline for (.{ DType.f16, DType.bf16 }) |float_dtype| {
         var gpa = std.heap.DebugAllocator(.{}){};
         defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
