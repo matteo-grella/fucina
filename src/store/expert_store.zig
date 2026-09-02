@@ -1083,13 +1083,9 @@ pub const ExpertStore = struct {
         var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
         for (0..2) |plane| {
             views[plane] = .{
-                .rows = .{
-                    .allocator = null,
-                    .blocks = scratch[plane * plane_blocks ..][0..plane_blocks],
-                    .rows = g.out_dim,
-                    .cols = g.in_dim,
-                    .blocks_per_row = g.blocks_per_column,
-                },
+                .allocator = null,
+                .blocks = scratch[plane * plane_blocks ..][0..plane_blocks],
+                .blocks_per_column = g.blocks_per_column,
                 .k = g.in_dim,
                 .n = g.out_dim,
             };

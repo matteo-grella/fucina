@@ -801,7 +801,7 @@ const Impl = struct {
 
             const rhs_deq = try allocator.alloc(f32, n * k);
             defer allocator.free(rhs_deq);
-            for (0..n) |j| try qm.q8k.dequantizeRowQ8_0Into(rhs_deq[j * k ..][0..k], rhs.rows.rowBlocks(j));
+            for (0..n) |j| try qm.q8k.dequantizeRowQ8_0Into(rhs_deq[j * k ..][0..k], rhs.columnBlocks(j));
             const lhs_deq = try lhsDeqQ8_0(allocator, &a, m, k);
             defer allocator.free(lhs_deq);
             const ref = try quantRef(allocator, lhs_deq, rhs_deq, m, n, k);
@@ -809,7 +809,7 @@ const Impl = struct {
 
             try runBothQuant(allocator, &a, .{ .q8_0 = &rhs }, ref, m, n, k);
 
-            var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ8_0x4, allocator, rhs.rows.blocks, n, k, rhs.rows.blocks_per_row);
+            var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ8_0x4, allocator, rhs.blocks, n, k, rhs.blocks_per_column);
             defer x4.deinit();
             try runBothPacked(allocator, &a, &x4, ref, m, n, k);
         }
@@ -927,7 +927,7 @@ const Impl = struct {
 
             const rhs_deq = try allocator.alloc(f32, n * k);
             defer allocator.free(rhs_deq);
-            for (0..n) |j| try qm.cold.dequantizeRowTQ2_0Into(rhs_deq[j * k ..][0..k], rhs.rows.rowBlocks(j));
+            for (0..n) |j| try qm.cold.dequantizeRowTQ2_0Into(rhs_deq[j * k ..][0..k], rhs.columnBlocks(j));
             const lhs_deq = try lhsDeqQ8_K(allocator, &a, m, k);
             defer allocator.free(lhs_deq);
             const ref = try quantRef(allocator, lhs_deq, rhs_deq, m, n, k);

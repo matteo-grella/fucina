@@ -710,19 +710,18 @@ pub fn TileFn(comptime LhsBlock: type, comptime Rhs: type) type {
     return fn ([]f32, []const LhsBlock, *const Rhs, usize, usize, usize, usize, usize) void;
 }
 
-/// RHS containers spell their block table two ways: the K-quant compact
-/// views carry `blocks`/`blocks_per_column`, the rows views wrap a
-/// `QuantizedRows*` (`rows.blocks`/`rows.blocks_per_row`).
+/// Every `.rows` container is a `CompactRhs`: `blocks` and
+/// `blocks_per_column`.
 inline fn rhsBlocksPerColumn(rhs: anytype) usize {
-    return if (@hasField(@TypeOf(rhs.*), "blocks_per_column")) rhs.blocks_per_column else rhs.rows.blocks_per_row;
+    return rhs.blocks_per_column;
 }
 
 fn RhsBlocksSlice(comptime Rhs: type) type {
-    return if (@hasField(Rhs, "blocks_per_column")) @FieldType(Rhs, "blocks") else @FieldType(@FieldType(Rhs, "rows"), "blocks");
+    return @FieldType(Rhs, "blocks");
 }
 
 inline fn rhsBlocks(rhs: anytype) RhsBlocksSlice(@TypeOf(rhs.*)) {
-    return if (@hasField(@TypeOf(rhs.*), "blocks_per_column")) rhs.blocks else rhs.rows.blocks;
+    return rhs.blocks;
 }
 
 fn ReturnType(comptime f: anytype) type {

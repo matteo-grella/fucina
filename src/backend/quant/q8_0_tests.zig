@@ -517,13 +517,9 @@ test "ggml_q8_0 randomized blocks: row-outer matmul matches scalar reference" {
     for (rhs_blocks) |*blk| fillRandomBlockQ8_0(blk, random, true);
 
     var rhs = types.QuantizedMatmulRhsQ8_0{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = rhs_blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-        },
+        .allocator = allocator,
+        .blocks = rhs_blocks,
+        .blocks_per_column = blocks_per_row,
         .k = k,
         .n = n,
     };
@@ -573,13 +569,9 @@ test "ggml_q8_0 single-row chunked sdot path matches scalar reference" {
         for (rhs_blocks) |*blk| fillRandomBlockQ8_0(blk, random, true);
 
         var rhs = types.QuantizedMatmulRhsQ8_0{
-            .rows = .{
-                .allocator = allocator,
-                .blocks = rhs_blocks,
-                .rows = n,
-                .cols = k,
-                .blocks_per_row = blocks_per_row,
-            },
+            .allocator = allocator,
+            .blocks = rhs_blocks,
+            .blocks_per_column = blocks_per_row,
             .k = k,
             .n = n,
         };

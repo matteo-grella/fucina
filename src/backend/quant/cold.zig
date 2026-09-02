@@ -125,13 +125,9 @@ pub fn quantizeMatmulRhsQ4_0(allocator: Allocator, rhs: *const Tensor) !types.Qu
     }
 
     return .{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_column,
-        },
+        .allocator = allocator,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_column,
         .k = k,
         .n = n,
     };
@@ -1053,7 +1049,7 @@ fn matmulIQ4_XSTileDecoded(
     c0: usize,
     c1: usize,
 ) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     var rt = r0;
     while (rt < r1) : (rt += iq4_xs_row_tile) {
         const rt_end = @min(rt + iq4_xs_row_tile, r1);
@@ -1075,7 +1071,7 @@ fn matmulIQ4_XSTileDecoded(
                 var wb: [4]*const dtype_mod.BlockIQ4_XS = undefined;
                 var wd: [4]f32 = undefined;
                 inline for (0..4) |c| {
-                    wb[c] = &rhs.rows.blocks[(col + c) * blocks_per_row + block_index];
+                    wb[c] = &rhs.blocks[(col + c) * blocks_per_row + block_index];
                     wd[c] = f16BitsToF32(wb[c].d);
                 }
                 for (rt..rt_end) |row| {
@@ -1113,7 +1109,7 @@ fn matmulIQ4_XSTileDecoded(
             }
         }
         while (col < c1) : (col += 1) {
-            const col_blocks = rhs.rows.blocks[col * blocks_per_row ..][0..blocks_per_row];
+            const col_blocks = rhs.blocks[col * blocks_per_row ..][0..blocks_per_row];
             for (rt..rt_end) |row| out[row * n + col] = 0;
             var block_index: usize = 0;
             while (block_index < blocks_per_row) : (block_index += 1) {
@@ -1606,7 +1602,7 @@ fn matmulQ2_0RhsRefTile(
     c0: usize,
     c1: usize,
 ) void {
-    const sub_blocks_per_row = rhs.rows.blocks_per_row * (types.q2_0_block_size / types.q8_0_block_size);
+    const sub_blocks_per_row = rhs.blocks_per_column * (types.q2_0_block_size / types.q8_0_block_size);
     var r = r0;
     while (r < r1) : (r += 1) {
         const arow = lhs_blocks[r * sub_blocks_per_row ..][0..sub_blocks_per_row];
@@ -2148,7 +2144,9 @@ test "ggml_q1_0 dot and matmul consume loaded blocks" {
 
     var rhs_blocks = [_]dtype_mod.BlockQ1_0{ q1, q1 };
     var rhs = types.QuantizedMatmulRhsQ1_0{
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.q1_0_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.q1_0_block_size,
         .n = 2,
     };
@@ -2177,7 +2175,9 @@ test "ggml_q2_0 dot and matmul consume loaded blocks" {
 
     var rhs_blocks = [_]dtype_mod.BlockQ2_0{ q2, q2 };
     var rhs = types.QuantizedMatmulRhsQ2_0{
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.q2_0_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.q2_0_block_size,
         .n = 2,
     };
@@ -2202,7 +2202,9 @@ test "ggml_q4_1 dot and matmul consume loaded blocks" {
 
     var rhs_blocks = [_]dtype_mod.BlockQ4_1{ q4, q4 };
     var rhs = types.QuantizedMatmulRhsQ4_1{
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.q4_1_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.q4_1_block_size,
         .n = 2,
     };
@@ -2227,7 +2229,9 @@ test "ggml_q5_0 dot and matmul consume loaded blocks" {
 
     var rhs_blocks = [_]dtype_mod.BlockQ5_0{ q5, q5 };
     var rhs = types.QuantizedMatmulRhsQ5_0{
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.q5_0_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.q5_0_block_size,
         .n = 2,
     };
@@ -2252,7 +2256,9 @@ test "ggml_q5_1 dot and matmul consume loaded blocks" {
 
     var rhs_blocks = [_]dtype_mod.BlockQ5_1{ q5, q5 };
     var rhs = types.QuantizedMatmulRhsQ5_1{
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.q5_1_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.q5_1_block_size,
         .n = 2,
     };
@@ -2455,7 +2461,9 @@ test "iq4_xs decoded tile matmul matches the per-row generic path bitwise" {
     for (&ablocks) |*ab| ab.d = rnd.float(f32) * 2.0 - 1.0;
 
     const rhs = types.QuantizedMatmulRhsRowsFor(.iq4_xs){
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &wblocks, .rows = cols, .cols = bpr * qk_k_block_size, .blocks_per_row = bpr },
+        .allocator = std.testing.allocator,
+        .blocks = &wblocks,
+        .blocks_per_column = bpr,
         .k = bpr * qk_k_block_size,
         .n = cols,
     };

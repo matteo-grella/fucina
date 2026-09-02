@@ -1070,20 +1070,20 @@ fn benchQuantizedGGMLMatMulTimed(
     var qrhs = switch (tensor_dtype) {
         .q1_0 => blk: {
             const blocks = try makeQ1_0Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k), .k = k, .n = n };
         },
         .q4_0 => try native.kernels.quantizeMatmulRhsQ4_0(allocator, &b),
         .q4_1 => blk: {
             const blocks = try makeQ4_1Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k), .k = k, .n = n };
         },
         .q5_0 => blk: {
             const blocks = try makeQ5_0Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k), .k = k, .n = n };
         },
         .q5_1 => blk: {
             const blocks = try makeQ5_1Blocks(allocator, k, n);
-            break :blk QRhs{ .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k) }, .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k), .k = k, .n = n };
         },
         .q8_0 => try native.kernels.quantizeMatmulRhsQ8_0(allocator, &b),
         else => unreachable,
@@ -1219,7 +1219,9 @@ fn benchQuantizedLoadedMatMulTimed(
     for (blocks, 0..) |*block, i| fillLoadedQuantBlock(tensor_dtype, block, i);
 
     const qrhs = QRhs{
-        .rows = .{ .allocator = allocator, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = blocks_per_column },
+        .allocator = allocator,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_column,
         .k = k,
         .n = n,
     };

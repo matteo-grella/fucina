@@ -150,10 +150,10 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
 
     // Borrow the owning container's blocks: same storage, no dupe; deinit
     // frees nothing (allocator = null), so both containers may deinit.
-    var borrowed = try quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, owned.rows.blocks);
+    var borrowed = try quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, owned.blocks);
     defer borrowed.deinit();
-    try std.testing.expectEqual(owned.rows.blocks.ptr, borrowed.rows.blocks.ptr);
-    try std.testing.expectEqual(@as(usize, 1), borrowed.rows.blocks_per_row);
+    try std.testing.expectEqual(owned.blocks.ptr, borrowed.blocks.ptr);
+    try std.testing.expectEqual(@as(usize, 1), borrowed.blocks_per_column);
 
     // One matmul through each container agrees bitwise.
     var lhs: [2 * k]f32 = undefined;
@@ -167,6 +167,6 @@ test "tq2_0 borrowed-blocks RHS: no copy, matmul parity with the owning construc
     // Length validation still applies to borrowed views.
     try std.testing.expectError(
         quant.types.QuantizedFormatError.InvalidQuantizedLength,
-        quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.rows.blocks),
+        quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n + 1, owned.blocks),
     );
 }

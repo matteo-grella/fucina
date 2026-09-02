@@ -100,9 +100,11 @@ describes each block format programmatically (block struct, logical
 elements per block), read through `dtype.blockSize`, `dtype.blockByteSize`,
 `dtype.Storage`, `dtype.isBlockQuantized`, and
 `dtype.supportsQuantizedMatmulRhs` (false for `q8_1`/`q8_k`, the two block
-formats without an RHS kernel). Every RHS container (`QuantizedMatmulRhsQ4_K`,
-the packs, `QuantizedRowsFor(dt)`, ...) carries `pub const dtype: DType`, and
-`AnyQuantizedMatmulRhs` is tagged by `DType` names. Block-size constants
+formats without an RHS kernel). Every RHS container (`CompactRhs(dt)`,
+`LanePackedRhs(dt, pack)`, and the per-format names over them) carries
+`pub const dtype: DType` and `pub const pack: RhsPack`, and
+`AnyQuantizedMatmulRhs` is derived from the registry, tagged by `DType`
+names. Block-size constants
 (`q8_0_block_size` = 32, `qk_k_block_size` = 256, `k_scale_size` = 12,
 `iq4_nl_block_size`/`mxfp4_block_size` = 32, `nvfp4_block_size` = 64,
 `nvfp4_subblock_size` = 16, `q1_0_block_size`/`q2_0_block_size` = 128, `q4_0_block_size`,
@@ -292,27 +294,26 @@ test "f32 activations contract against a Q8_0 weight tensor" {
 Two families of weight-side containers exist below the tensor facade, both
 re-exported at the root:
 
-**Plain per-format containers** — `fucina.quant.QuantizedMatmulRhsQ2_K`,
-`fucina.quant.QuantizedMatmulRhsQ4_K`, `fucina.quant.QuantizedMatmulRhsQ5_K`,
-`fucina.quant.QuantizedMatmulRhsQ6_K` (root); the kernel tier additionally
-defines `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
-`QuantizedMatmulRhsQ3_K`, the
-`QuantizedMatmulRhsRowsFor(dtype)` generic (instantiated as
-`QuantizedMatmulRhs{Q1_0,Q2_0,Q4_1,Q5_0,Q5_1,IQ1_S,IQ1_M,IQ2_XXS,IQ2_XS,IQ2_S,
-IQ3_XXS,IQ3_S,IQ4_NL,IQ4_XS,TQ1_0,TQ2_0,MXFP4,NVFP4}`), the
-row wrappers (`QuantizedRowsQ8_1` instantiates the `QuantizedRowsFor(dtype)`
-generic; `QuantizedRowsQ8_0` and `QuantizedRowsQ4_0` are hand-written, and
-`QuantizedRowsQ4_0`'s allocator is non-optional — no borrow support), and
-the type-erased `AnyQuantizedMatmulRhs` union the backends dispatch on. A
-plain container is blocks + `k`/`n` dims; the hot-format containers (`Q8_0`,
-`Q4_K`, `Q5_K`, `Q6_K`), the `Q2_K`/`Q3_K` containers, and the
-`QuantizedRowsFor` generic carry an
-**optional allocator**:
-`allocator = null` means the blocks are *borrowed* (mmap'd GGUF, packed ES
-genomes) and `deinit` frees nothing. Ordinary users never build these —
-`ExecContext` wraps tensor blocks in stack-allocated borrow containers per
-dispatch, and the LLM MoE loader borrows expert blocks through
-`fucina.MoeRhs` ([§13](13-the-model-stack-fucina_models.md)).
+**Compact containers** — `CompactRhs(dtype)`
+(`src/backend/quant/types.zig`): the GGUF-native block-per-column layout of
+any format with an RHS kernel, `blocks` (a `[]const` slice: borrowed or
+owned) plus `k`/`n` and `blocks_per_column`, with an **optional
+allocator**: `allocator = null` means the blocks are *borrowed* (mmap'd
+GGUF, packed ES genomes, an expert stack) and `deinit` frees nothing. The
+per-format names are aliases of it: `fucina.quant.QuantizedMatmulRhsQ2_K`,
+`QuantizedMatmulRhsQ4_K`, `QuantizedMatmulRhsQ5_K`, `QuantizedMatmulRhsQ6_K`
+(root), and in the kernel tier `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
+`QuantizedMatmulRhsQ3_K` and `QuantizedMatmulRhs{Q1_0,Q2_0,Q4_1,Q5_0,Q5_1,IQ1_S,
+IQ1_M,IQ2_XXS,IQ2_XS,IQ2_S,IQ3_XXS,IQ3_S,IQ4_NL,IQ4_XS,TQ1_0,TQ2_0,MXFP4,NVFP4}`.
+The type-erased `AnyQuantizedMatmulRhs` union the backends dispatch on is
+derived from `dtype.block_formats` (one arm per row that claims
+`matmul_rhs`, holding `*const CompactRhs(dtype)` under the dtype's name,
+plus the W8A8 arm). The activation-side `QuantizedRowsFor(dtype)` row table
+(`QuantizedRowsQ8_1`) keeps the same optional-allocator convention. Ordinary
+users never build these — `ExecContext` wraps tensor blocks in
+stack-allocated borrow containers per dispatch, and the LLM MoE loader
+borrows expert blocks through `fucina.MoeRhs`
+([§13](13-the-model-stack-fucina_models.md)).
 
 **Packed containers** — independent load-time snapshots consumed by
 `dotPacked`. Dense packs are owned f32 output-row panels

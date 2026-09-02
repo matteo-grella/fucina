@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
 
         var rhs_row = try qm.quantizeMatmulRhsQ8_0(allocator, &rhs_dense);
         defer rhs_row.deinit();
-        var rhs_x4 = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, rhs_row.rows.blocks, n, k, bpr);
+        var rhs_x4 = try qm.q8_0.packMatmulRhsQ8_0x4(allocator, rhs_row.blocks, n, k, bpr);
         defer rhs_x4.deinit();
 
         for (ms) |m| {
@@ -155,12 +155,11 @@ pub fn main(init: std.process.Init) !void {
             const x4p_us = @as(f64, @floatFromInt(x4p_ns)) / fiters / 1000.0;
 
             try out.print("{s:<16} | {d:>2} | {d:>10.1} | {d:>10.1} | {d:>10.1} | {d:>8.1} | {d:>8.1} | {d:>8.1}{s}{s}\n", .{
-                shape.name,                          m,
-                row_us,                              x4_us,
-                x4p_us,                              weight_bytes / (row_us * 1000.0),
-                weight_bytes / (x4_us * 1000.0),     weight_bytes / (x4p_us * 1000.0),
-                if (rel_x4 > 1e-3) " X4-MISMATCH" else "",
-                if (rel_x4p > 1e-3) " X4P-MISMATCH" else "",
+                shape.name,                                m,
+                row_us,                                    x4_us,
+                x4p_us,                                    weight_bytes / (row_us * 1000.0),
+                weight_bytes / (x4_us * 1000.0),           weight_bytes / (x4p_us * 1000.0),
+                if (rel_x4 > 1e-3) " X4-MISMATCH" else "", if (rel_x4p > 1e-3) " X4P-MISMATCH" else "",
             });
         }
         try out.print("{s}\n", .{"-" ** 96});

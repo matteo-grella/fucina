@@ -135,7 +135,7 @@ fn runVariant(
             const kx4_gf = flops / (@as(f64, @floatFromInt(kx4_ns)) / @as(f64, @floatFromInt(iters)));
 
             try out.print("{s:<24} | {d:>3} | {d:>11.3} | {d:>11.3} | {d:>7.2}x | {d:>9.1} | {d:>9.1}{s}\n", .{
-                shape.name, m, row_us, kx4_us, row_us / kx4_us, row_gf, kx4_gf,
+                shape.name,                          m, row_us, kx4_us, row_us / kx4_us, row_gf, kx4_gf,
                 if (rel > 1e-3) " MISMATCH" else "",
             });
             std.mem.doNotOptimizeAway(sink);

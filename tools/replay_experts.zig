@@ -440,7 +440,7 @@ pub fn main(init: std.process.Init) !void {
         null;
 
     std.debug.print("trace: {d} requests, {d} layers, expert pool {d}, distinct (layer,expert) {d} ({d:.1}% of pool)\n", .{
-        trace.requests.len,                     trace.n_layers, trace.n_expert, distinct_total,
+        trace.requests.len,                                                                                                   trace.n_layers, trace.n_expert, distinct_total,
         100.0 * @as(f64, @floatFromInt(distinct_total)) / @as(f64, @floatFromInt(@as(u64, trace.n_layers) * trace.n_expert)),
     });
     if (pins_from) |p| std.debug.print("pin+lru pins from sidecar: {s} (cross-session knowledge, not the trace oracle)\n", .{p});

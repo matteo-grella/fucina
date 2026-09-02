@@ -69,13 +69,13 @@ pub fn loadMoeRhs(
             const bpc = src.len / rows;
             if (bpc * 32 != in_dim) return Error.InvalidWeightShape;
             if (borrow) {
-                break :blk .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = src, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+                break :blk .{ .q8_0 = .{ .allocator = null, .blocks = src, .blocks_per_column = bpc, .k = in_dim, .n = rows } };
             }
             gguf.prefetch(info.data);
             const owned = try ctx.allocator().alloc(dtype_mod.BlockQ8_0, src.len);
             errdefer ctx.allocator().free(owned);
             @memcpy(owned, src);
-            break :blk .{ .q8_0 = .{ .rows = .{ .allocator = ctx.allocator(), .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows } };
+            break :blk .{ .q8_0 = .{ .allocator = ctx.allocator(), .blocks = owned, .blocks_per_column = bpc, .k = in_dim, .n = rows } };
         },
         // IQ*/ternary experts: nested-rows containers, one shared
         // copy-or-borrow (copyOrBorrowMoeRhsRows).
@@ -478,11 +478,11 @@ fn copyOrBorrowMoeRhsRows(
     const bpc = src.len / rows;
     if (try backend_quant.blockCountForDType(.q8_k, in_dim) != bpc) return Error.InvalidWeightShape;
     if (borrow) {
-        return .{ .rows = .{ .allocator = null, .blocks = @constCast(src), .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
+        return .{ .allocator = null, .blocks = @constCast(src), .blocks_per_column = bpc, .k = in_dim, .n = rows };
     }
     gguf.prefetch(info.data);
     const owned = try ctx.allocator().alloc(Block, src.len);
     errdefer ctx.allocator().free(owned);
     @memcpy(owned, src);
-    return .{ .rows = .{ .allocator = ctx.allocator(), .blocks = owned, .rows = rows, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = rows };
+    return .{ .allocator = ctx.allocator(), .blocks = owned, .blocks_per_column = bpc, .k = in_dim, .n = rows };
 }

@@ -132,7 +132,7 @@ fn compactFromBlocks(comptime Rhs: type, allocator: std.mem.Allocator, blocks: a
 /// The raw block bytes behind a compact container (the GPU attempt's RHS).
 fn compactBlocksBytes(rhs: anytype) []const u8 {
     return if (comptime @hasField(@typeInfo(@TypeOf(rhs)).pointer.child, "rows"))
-        std.mem.sliceAsBytes(rhs.rows.blocks)
+        std.mem.sliceAsBytes(rhs.blocks)
     else
         std.mem.sliceAsBytes(rhs.blocks);
 }

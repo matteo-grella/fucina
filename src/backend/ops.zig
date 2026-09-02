@@ -495,12 +495,7 @@ pub fn LhsOf(comptime g: QuantGemm) type {
 /// `pack` matches `g.rhs` for `g.weight`.
 pub fn RhsOf(comptime g: QuantGemm) type {
     return switch (g.rhs) {
-        .rows => switch (g.weight) {
-            .q4_0 => *const quant_types.QuantizedMatmulRhsQ4_0,
-            .q8_0 => *const quant_types.QuantizedMatmulRhsQ8_0,
-            .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => *const quant_types.CompactRhs(g.weight),
-            else => *const quant_types.QuantizedMatmulRhsRowsFor(g.weight),
-        },
+        .rows => *const quant_types.CompactRhs(g.weight),
         // `PackedBlock` names the combinations that exist.
         .x4, .x8, .x2mmla => *const quant_types.LanePackedRhs(g.weight, g.rhs),
     };

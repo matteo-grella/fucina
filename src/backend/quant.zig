@@ -342,13 +342,9 @@ pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !Quantize
     }
 
     return .{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_column,
-        },
+        .allocator = allocator,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_column,
         .k = k,
         .n = n,
     };

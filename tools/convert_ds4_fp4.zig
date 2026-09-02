@@ -586,7 +586,7 @@ pub fn main(init: std.process.Init) !void {
     if (stack_count == 0) return error.NoExpertStacks;
 
     try stdout.print("plan: {d} expert stacks -> {d} plane tensors (K={d}{s}), {d} passthrough; bytes {d:.1} -> {d:.1} MiB\n", .{
-        stack_count,             stack_count * planes, planes, if (tie) " tied" else "", passthrough_count,
+        stack_count,          stack_count * planes, planes, if (tie) " tied" else "", passthrough_count,
         mib(total_src_bytes), mib(total_dst_bytes),
     });
     try stdout.flush();
@@ -634,9 +634,9 @@ pub fn main(init: std.process.Init) !void {
             const elapsed_s = @as(f64, @floatFromInt(nowNs(io) - total_start)) / 1e9;
             const eta_s = elapsed_s / @as(f64, @floatFromInt(solved_stacks)) * @as(f64, @floatFromInt(stack_count - solved_stacks));
             try stdout.print("[{d}/{d}] {s}: mean_rel {d:.4} max_rel {d:.4} unconverged {d}  {d:.1}s  elapsed {d:.1}m eta {d:.1}m\n", .{
-                solved_stacks,                            stack_count,      info.name,
-                stats.rel_sum / @as(f64, @floatFromInt(stats.experts)), stats.rel_max, stats.unconverged,
-                @as(f64, @floatFromInt(nowNs(io) - stack_start)) / 1e9,  elapsed_s / 60.0, eta_s / 60.0,
+                solved_stacks,                                          stack_count,      info.name,
+                stats.rel_sum / @as(f64, @floatFromInt(stats.experts)), stats.rel_max,    stats.unconverged,
+                @as(f64, @floatFromInt(nowNs(io) - stack_start)) / 1e9, elapsed_s / 60.0, eta_s / 60.0,
             });
             try stdout.flush();
         } else {
@@ -856,7 +856,7 @@ fn repackMxfp4(
             try streamer.writeTensorData(std.mem.sliceAsBytes(stack[0 .. n_expert * blocks_per_expert]));
             done += 1;
             try stdout.print("[{d}/{d}] {s} -> mxfp4 ({d:.1} MiB)  {d:.1}s\n", .{
-                done, stack_count, info.name, mib(n_expert * blocks_per_expert * @sizeOf(BlockMXFP4)),
+                done,                                                   stack_count, info.name, mib(n_expert * blocks_per_expert * @sizeOf(BlockMXFP4)),
                 @as(f64, @floatFromInt(nowNs(io) - total_start)) / 1e9,
             });
             try stdout.flush();
@@ -875,7 +875,7 @@ fn repackMxfp4(
         try streamer.writeTensorData(std.mem.sliceAsBytes(stack[0 .. d.n_expert * blocks_per_expert]));
         done += 1;
         try stdout.print("[{d}/{d}] blk.{d}.{s} -> mxfp4 ({d:.1} MiB)  {d:.1}s\n", .{
-            done, stack_count, d.layer, d.name_suffix, mib(d.n_expert * blocks_per_expert * @sizeOf(BlockMXFP4)),
+            done,                                                   stack_count, d.layer, d.name_suffix, mib(d.n_expert * blocks_per_expert * @sizeOf(BlockMXFP4)),
             @as(f64, @floatFromInt(nowNs(io) - total_start)) / 1e9,
         });
         try stdout.flush();
@@ -968,8 +968,8 @@ fn repackNative(
                 // The rows container carries mutable blocks; the pack never
                 // writes them, so the @constCast borrow of mmap bytes is
                 // sound (same note as exec/moe.zig tq2_0View).
-                var v0 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(p0_blocks[e * plane_blocks ..][0..plane_blocks]), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
-                var v1 = bq.QuantizedMatmulRhsTQ2_0{ .rows = .{ .allocator = null, .blocks = @constCast(p1_blocks[e * plane_blocks ..][0..plane_blocks]), .rows = out_dim, .cols = in_dim, .blocks_per_row = bpc }, .k = in_dim, .n = out_dim };
+                var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p0_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
+                var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p1_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
                 try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack_buf[e * fg ..][0..fg], &v0, &v1);
             }
             try streamer.writeTensorData(std.mem.sliceAsBytes(pack_buf[0 .. n_expert * fg]));
@@ -1245,9 +1245,9 @@ fn smoke(
         defer pair.deinit(ctx.allocator());
         const solve_ms = @as(f64, @floatFromInt(nowNs(io) - solve_start)) / 1e6;
         try stdout.print("smoke solve blk.{d}.{s} expert 0: K={d}{s} rel_err {d:.4} unconverged {d}/{d}  {d:.1} ms/expert -> est {d:.0} min for 129 stacks x 256 experts\n", .{
-            layer,                      p.gguf_name,               options.planes, if (options.tie_scales) " tied" else "",
-            pair.stats.rel_frob_err, pair.stats.unconverged_groups, pair.stats.group_count,
-            solve_ms,                   solve_ms * 129.0 * 256.0 / 60000.0,
+            layer,                              p.gguf_name,                   options.planes,         if (options.tie_scales) " tied" else "",
+            pair.stats.rel_frob_err,            pair.stats.unconverged_groups, pair.stats.group_count, solve_ms,
+            solve_ms * 129.0 * 256.0 / 60000.0,
         });
         try stdout.flush();
     }

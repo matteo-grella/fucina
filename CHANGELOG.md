@@ -60,6 +60,19 @@ this point; earlier history is `git log`.
   (`backend.quantized_matmul.types.RhsLifetime`; `exec.RhsLifetime` and
   `fucina.RhsLifetime` still name it); the packed weight's lifetime is
   read through `rhsLifetime()`/`setRhsLifetime()`.
+- The quantized RHS containers are two generics in
+  `src/backend/quant/types.zig`: `CompactRhs(dtype)` (every `.rows`
+  container: `allocator: ?Allocator`, `blocks: []const Storage(dtype)`,
+  `k`, `n`, `blocks_per_column`, `columnBlocks`) and `LanePackedRhs(dtype,
+  pack)` over `PackedBlock(dtype, pack)`. Every `fucina.quant.
+  QuantizedMatmulRhs*` name is an alias of one of them, so the rewrite is
+  field-level: `QuantizedMatmulRhsQ8_0`/`Q4_0` and the cold formats lose
+  their nested `rows` (`.rows.blocks` -> `.blocks`, `.rows.blocks_per_row`
+  -> `.blocks_per_column`, `.rows.rowBlocks(i)` -> `.columnBlocks(i)`;
+  `QuantizedMatmulRhsQ4_0.allocator` is optional now).
+  `AnyQuantizedMatmulRhs` is derived from `dtype.block_formats`; its
+  `innerDim`/`outputDim` methods (no callers) are gone. `ag.isPackedRhsType`
+  reads the container's `pack`.
 
 ## 0.4.0 - 2026-08-27
 

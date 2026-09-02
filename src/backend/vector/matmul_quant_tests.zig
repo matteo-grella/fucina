@@ -249,25 +249,14 @@ test "pooled dispatch matches serial: plain-block formats" {
             const rblocks = try allocator.alloc(dtype_mod.BlockQ8_0, n * (k / 32));
             defer allocator.free(rblocks);
             try qm.quantizeRowForDType(.q8_0, rblocks, w);
-            const rhs: qm.QuantizedMatmulRhsQ8_0 = .{ .rows = .{
-                .allocator = null,
-                .blocks = rblocks,
-                .rows = n,
-                .cols = k,
-                .blocks_per_row = k / 32,
-            }, .k = k, .n = n };
+            const rhs: qm.QuantizedMatmulRhsQ8_0 = .{ .allocator = null, .blocks = rblocks, .blocks_per_column = k / 32, .k = k, .n = n };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q8_0, .lhs = .q8_0 }), qm.q8_0.matmulQ8_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
         {
-            var rhs: qm.QuantizedMatmulRhsQ4_0 = .{ .rows = .{
-                .allocator = allocator,
-                .blocks = try allocator.alloc(dtype_mod.BlockQ4_0, n * (k / 32)),
-                .rows = n,
-                .cols = k,
-                .blocks_per_row = k / 32,
-            }, .k = k, .n = n };
-            defer rhs.deinit();
-            try qm.quantizeRowForDType(.q4_0, rhs.rows.blocks, w);
+            const q4_blocks = try allocator.alloc(dtype_mod.BlockQ4_0, n * (k / 32));
+            defer allocator.free(q4_blocks);
+            try qm.quantizeRowForDType(.q4_0, q4_blocks, w);
+            const rhs: qm.QuantizedMatmulRhsQ4_0 = .{ .allocator = null, .blocks = q4_blocks, .blocks_per_column = k / 32, .k = k, .n = n };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q4_0, .lhs = .q8_0 }), qm.cold.matmulQ4_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
     }

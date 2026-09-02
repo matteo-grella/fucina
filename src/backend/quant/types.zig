@@ -278,26 +278,9 @@ pub fn QuantizedRowsFor(comptime block_dtype: DType) type {
     };
 }
 
-pub fn QuantizedMatmulRhsRowsFor(comptime block_dtype: DType) type {
-    return struct {
-        rows: QuantizedRowsFor(block_dtype),
-        k: usize,
-        n: usize,
-
-        const Self = @This();
-        pub const dtype: DType = block_dtype;
-        pub const pack: RhsPack = .rows;
-
-        pub fn deinit(self: *Self) void {
-            self.rows.deinit();
-            self.* = undefined;
-        }
-
-        pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.Storage(block_dtype) {
-            return self.rows.rowBlocks(column);
-        }
-    };
-}
+/// Every `.rows` container is `CompactRhs`; the name stays for the readers
+/// that spell the format-keyed form.
+pub const QuantizedMatmulRhsRowsFor = CompactRhs;
 
 pub const QuantizedRowsQ8_1 = QuantizedRowsFor(.q8_1);
 
@@ -362,45 +345,11 @@ pub const QuantizedRowsQ4_0 = struct {
     }
 };
 
-pub const QuantizedMatmulRhsQ8_0 = struct {
-    rows: QuantizedRowsQ8_0,
-    k: usize,
-    n: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q8_0;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        self.rows.deinit();
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ8_0 {
-        return self.rows.rowBlocks(column);
-    }
-};
+pub const QuantizedMatmulRhsQ8_0 = CompactRhs(.q8_0);
 
 pub const QuantizedMatmulRhsQ8_0x4 = LanePackedRhs(.q8_0, .x4);
 
-pub const QuantizedMatmulRhsQ4_0 = struct {
-    rows: QuantizedRowsQ4_0,
-    k: usize,
-    n: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q4_0;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        self.rows.deinit();
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ4_0 {
-        return self.rows.rowBlocks(column);
-    }
-};
+pub const QuantizedMatmulRhsQ4_0 = CompactRhs(.q4_0);
 
 pub const QuantizedMatmulRhsQ2_K = CompactRhs(.q2_k);
 pub const QuantizedMatmulRhsQ3_K = CompactRhs(.q3_k);
@@ -413,45 +362,42 @@ pub const QuantizedMatmulRhsQ4_Kx2Mmla = LanePackedRhs(.q4_k, .x2mmla);
 pub const QuantizedMatmulRhsQ5_Kx8 = LanePackedRhs(.q5_k, .x8);
 pub const QuantizedMatmulRhsQ6_Kx4 = LanePackedRhs(.q6_k, .x4);
 
-pub const AnyQuantizedMatmulRhs = union(enum) {
-    fucina_w8a8_rhs: *const QuantizedMatmulRhsI8,
-    q1_0: *const QuantizedMatmulRhsQ1_0,
-    q2_0: *const QuantizedMatmulRhsQ2_0,
-    q4_0: *const QuantizedMatmulRhsQ4_0,
-    q4_1: *const QuantizedMatmulRhsQ4_1,
-    q5_0: *const QuantizedMatmulRhsQ5_0,
-    q5_1: *const QuantizedMatmulRhsQ5_1,
-    q8_0: *const QuantizedMatmulRhsQ8_0,
-    q2_k: *const QuantizedMatmulRhsQ2_K,
-    q3_k: *const QuantizedMatmulRhsQ3_K,
-    q4_k: *const QuantizedMatmulRhsQ4_K,
-    q5_k: *const QuantizedMatmulRhsQ5_K,
-    q6_k: *const QuantizedMatmulRhsQ6_K,
-    iq1_s: *const QuantizedMatmulRhsIQ1_S,
-    iq1_m: *const QuantizedMatmulRhsIQ1_M,
-    iq2_xxs: *const QuantizedMatmulRhsIQ2_XXS,
-    iq2_xs: *const QuantizedMatmulRhsIQ2_XS,
-    iq2_s: *const QuantizedMatmulRhsIQ2_S,
-    iq3_xxs: *const QuantizedMatmulRhsIQ3_XXS,
-    iq3_s: *const QuantizedMatmulRhsIQ3_S,
-    iq4_nl: *const QuantizedMatmulRhsIQ4_NL,
-    iq4_xs: *const QuantizedMatmulRhsIQ4_XS,
-    tq1_0: *const QuantizedMatmulRhsTQ1_0,
-    tq2_0: *const QuantizedMatmulRhsTQ2_0,
-    mxfp4: *const QuantizedMatmulRhsMXFP4,
-    nvfp4: *const QuantizedMatmulRhsNVFP4,
-
-    pub fn innerDim(self: AnyQuantizedMatmulRhs) usize {
-        return switch (self) {
-            inline else => |rhs| rhs.k,
-        };
+/// The block-quantized dtypes that can be a stored matmul RHS, in registry
+/// order (every `block_formats` row that claims `matmul_rhs`).
+pub const matmul_rhs_dtypes: []const DType = blk: {
+    var count: usize = 0;
+    for (dtype_mod.block_formats) |row| count += @intFromBool(row.matmul_rhs);
+    var out: [count]DType = undefined;
+    var i: usize = 0;
+    for (dtype_mod.block_formats) |row| {
+        if (row.matmul_rhs) {
+            out[i] = row.dtype;
+            i += 1;
+        }
     }
+    const final = out;
+    break :blk &final;
+};
 
-    pub fn outputDim(self: AnyQuantizedMatmulRhs) usize {
-        return switch (self) {
-            inline else => |rhs| rhs.n,
-        };
+/// Every stored-RHS format as one runtime-tagged operand of the block
+/// dispatch: one arm per matmul-capable registry row, holding
+/// `*const CompactRhs(dtype)` under the dtype's own name, plus the W8A8
+/// container. Derived from the registry, so a new format never lags here;
+/// `@unionInit(AnyQuantizedMatmulRhs, @tagName(dt), &rhs)` is the
+/// constructor.
+pub const AnyQuantizedMatmulRhs = blk: {
+    @setEvalBranchQuota(10_000);
+    const dts = matmul_rhs_dtypes;
+    var names: [dts.len + 1][:0]const u8 = undefined;
+    var field_types: [dts.len + 1]type = undefined;
+    for (dts, 0..) |dt, i| {
+        names[i] = @tagName(dt);
+        field_types[i] = *const CompactRhs(dt);
     }
+    names[dts.len] = "fucina_w8a8_rhs";
+    field_types[dts.len] = *const QuantizedMatmulRhsI8;
+    const Tag = @Enum(u8, .exhaustive, &names, &std.simd.iota(u8, names.len));
+    break :blk @Union(.auto, Tag, &names, &field_types, &@splat(.{}));
 };
 
 /// Symmetric int8 quantized weights, stored transposed as [n][k] with one

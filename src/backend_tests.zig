@@ -296,7 +296,7 @@ fn buildRowsRhsQ8_0(allocator: std.mem.Allocator, random: std.Random) !quant.Qua
     errdefer allocator.free(blocks);
     try quant.q8k.quantizeRowsQ8_0Into(blocks, &weights);
     return .{
-        .rows = .{ .allocator = allocator, .blocks = blocks, .rows = split_test_n, .cols = split_test_k, .blocks_per_row = blocks_per_row },
+        .allocator = allocator, .blocks = blocks, .blocks_per_column = blocks_per_row,
         .k = split_test_k,
         .n = split_test_n,
     };

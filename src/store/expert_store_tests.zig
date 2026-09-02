@@ -452,7 +452,9 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
     var resident_up: MoeRhs = .{ .q5_k = try qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, ds_hidden, gu_rows, up_blocks) };
     defer resident_up.deinit();
     var resident_down: MoeRhs = .{ .q8_0 = .{
-        .rows = .{ .allocator = null, .blocks = down_blocks, .rows = down_rows, .cols = ds_ffn, .blocks_per_row = down_bpc },
+        .allocator = null,
+        .blocks = down_blocks,
+        .blocks_per_column = down_bpc,
         .k = ds_ffn,
         .n = down_rows,
     } };
@@ -555,7 +557,9 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     const tq2View = struct {
         fn go(blocks: []dtype_mod.BlockTQ2_0, k: usize, rows: usize, bpc: usize) MoeRhs {
             return .{ .tq2_0 = .{
-                .rows = .{ .allocator = null, .blocks = blocks, .rows = rows, .cols = k, .blocks_per_row = bpc },
+                .allocator = null,
+                .blocks = blocks,
+                .blocks_per_column = bpc,
                 .k = k,
                 .n = rows,
             } };
@@ -638,7 +642,9 @@ fn ptqtpPlaneSumDot(
     for (planes, 0..) |plane, p| {
         const blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc];
         const view = backend_mod.QuantizedMatmulRhsTQ2_0{
-            .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+            .allocator = null,
+            .blocks = @constCast(blocks),
+            .blocks_per_column = bpc,
             .k = k,
             .n = out_dim,
         };
@@ -934,13 +940,9 @@ fn foldExpertStack(
         var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
         for ([2][]const dtype_mod.BlockTQ2_0{ plane1, plane2 }, 0..) |plane, p| {
             views[p] = .{
-                .rows = .{
-                    .allocator = null,
-                    .blocks = @constCast(plane[e * expert_blocks ..][0..expert_blocks]),
-                    .rows = out_dim,
-                    .cols = k,
-                    .blocks_per_row = bpc,
-                },
+                .allocator = null,
+                .blocks = @constCast(plane[e * expert_blocks ..][0..expert_blocks]),
+                .blocks_per_column = bpc,
                 .k = k,
                 .n = out_dim,
             };
@@ -1203,13 +1205,17 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     }
 
     var resident_gate: MoeRhs = .{ .iq2_xxs = .{
-        .rows = .{ .allocator = null, .blocks = gate_blocks, .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc },
+        .allocator = null,
+        .blocks = gate_blocks,
+        .blocks_per_column = gu_bpc,
         .k = t_hidden,
         .n = gu_rows,
     } };
     defer resident_gate.deinit();
     var resident_up: MoeRhs = .{ .iq3_xxs = .{
-        .rows = .{ .allocator = null, .blocks = up_blocks, .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc },
+        .allocator = null,
+        .blocks = up_blocks,
+        .blocks_per_column = gu_bpc,
         .k = t_hidden,
         .n = gu_rows,
     } };
@@ -2415,9 +2421,9 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
         allocator.free(mirrors[p]);
     };
 
-    var resident_gate: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[0], .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc }, .k = t_hidden, .n = gu_rows } };
-    var resident_up: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[1], .rows = gu_rows, .cols = t_hidden, .blocks_per_row = gu_bpc }, .k = t_hidden, .n = gu_rows } };
-    var resident_down: MoeRhs = .{ .q8_0 = .{ .rows = .{ .allocator = null, .blocks = mirrors[2], .rows = down_rows, .cols = t_ffn, .blocks_per_row = down_bpc }, .k = t_ffn, .n = down_rows } };
+    var resident_gate: MoeRhs = .{ .q8_0 = .{ .allocator = null, .blocks = mirrors[0], .blocks_per_column = gu_bpc, .k = t_hidden, .n = gu_rows } };
+    var resident_up: MoeRhs = .{ .q8_0 = .{ .allocator = null, .blocks = mirrors[1], .blocks_per_column = gu_bpc, .k = t_hidden, .n = gu_rows } };
+    var resident_down: MoeRhs = .{ .q8_0 = .{ .allocator = null, .blocks = mirrors[2], .blocks_per_column = down_bpc, .k = t_ffn, .n = down_rows } };
 
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "expert_store_mxfp4_{d}.bin", .{std.Io.Clock.real.now(std.testing.io).nanoseconds});

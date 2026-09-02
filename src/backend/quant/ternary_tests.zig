@@ -179,9 +179,9 @@ test "folded x4 tq2_0 matmul matches an order-matched scalar reference bitwise" 
 
     const got = try allocator.alloc(f32, m * n);
     defer allocator.free(got);
-    ternary.matmulTQ2_0FoldedX4RhsRange(got, qlhs, folded, rhs1.rows.blocks_per_row, n, 0, m);
+    ternary.matmulTQ2_0FoldedX4RhsRange(got, qlhs, folded, rhs1.blocks_per_column, n, 0, m);
 
-    const bpr = rhs1.rows.blocks_per_row;
+    const bpr = rhs1.blocks_per_column;
     for (0..m) |r| {
         for (0..n) |c| {
             var sum: f32 = 0;
@@ -239,7 +239,7 @@ test "x4 column-interleaved tq2_0 matmul matches the hot kernel bitwise" {
     const want = try allocator.alloc(f32, m * n);
     defer allocator.free(want);
 
-    ternary.matmulTQ2_0X4RhsRange(got, qlhs, packed_groups, rhs.rows.blocks_per_row, n, 0, m);
+    ternary.matmulTQ2_0X4RhsRange(got, qlhs, packed_groups, rhs.blocks_per_column, n, 0, m);
     ternary.matmulTQ2_0RhsRange(want, qlhs, &rhs, m, n, 0, m);
 
     try std.testing.expectEqualSlices(f32, want, got);
@@ -508,7 +508,9 @@ fn q2_0RhsFromF32(allocator: std.mem.Allocator, k: usize, n: usize, w: []const f
     return .{
         .blocks = blocks,
         .rhs = .{
-            .rows = .{ .allocator = null, .blocks = blocks, .rows = n, .cols = k, .blocks_per_row = blocks_per_row },
+            .allocator = null,
+            .blocks = blocks,
+            .blocks_per_column = blocks_per_row,
             .k = k,
             .n = n,
         },
@@ -601,7 +603,9 @@ test "q2_0 code 3 (+2d) agrees between hot and cold paths" {
         for (&b.qs, 0..) |*q, i| q.* = @truncate(i *% 57 +% row *% 31 +% 0b11_10_01_00);
     }
     var rhs = qm.QuantizedMatmulRhsQ2_0{
-        .rows = .{ .allocator = null, .blocks = &blocks, .rows = n, .cols = k, .blocks_per_row = 1 },
+        .allocator = null,
+        .blocks = &blocks,
+        .blocks_per_column = 1,
         .k = k,
         .n = n,
     };
@@ -679,7 +683,7 @@ test "folded x4 dequantize expands the pack by the fold's own decode law" {
     defer rhs2.deinit();
     const folded = try ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &rhs1, &rhs2);
     defer allocator.free(folded);
-    const bpr = rhs1.rows.blocks_per_row;
+    const bpr = rhs1.blocks_per_column;
 
     const got = try allocator.alloc(f32, qk_k_block_size);
     defer allocator.free(got);

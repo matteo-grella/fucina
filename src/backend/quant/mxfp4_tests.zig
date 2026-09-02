@@ -71,7 +71,9 @@ test "mxfp4 tile matches scalar lane re-derivation bitwise" {
         defer allocator.free(lhs_blocks);
 
         const rhs = types.QuantizedMatmulRhsMXFP4{
-            .rows = .{ .allocator = null, .blocks = rhs_blocks, .rows = n, .cols = k, .blocks_per_row = bpc },
+            .allocator = null,
+            .blocks = rhs_blocks,
+            .blocks_per_column = bpc,
             .k = k,
             .n = n,
         };
@@ -105,7 +107,9 @@ test "mxfp4 tile matches cold dequantizer through f64 dense reference" {
     defer allocator.free(lhs_blocks);
 
     const rhs = types.QuantizedMatmulRhsMXFP4{
-        .rows = .{ .allocator = null, .blocks = rhs_blocks, .rows = n, .cols = k, .blocks_per_row = bpc },
+        .allocator = null,
+        .blocks = rhs_blocks,
+        .blocks_per_column = bpc,
         .k = k,
         .n = n,
     };

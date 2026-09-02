@@ -125,18 +125,14 @@ fn encodeCrumbs(block: *BlockTQ2_0, x: *const [types.qk_k_block_size]f32, id: f3
 pub fn quantizedMatmulRhsTQ2_0FromBorrowedBlocks(
     k: usize,
     n: usize,
-    blocks: []BlockTQ2_0,
+    blocks: []const BlockTQ2_0,
 ) !types.QuantizedMatmulRhsTQ2_0 {
     const blocks_per_row = try tq2_0BlockCount(k);
     if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
     return .{
-        .rows = .{
-            .allocator = null,
-            .blocks = blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-        },
+        .allocator = null,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_row,
         .k = k,
         .n = n,
     };
@@ -179,13 +175,9 @@ fn rhsFromF32(allocator: Allocator, k: usize, n: usize, weights: []const f32, sc
         }
     }
     return .{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-        },
+        .allocator = allocator,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_row,
         .k = k,
         .n = n,
     };
@@ -320,7 +312,7 @@ pub fn matmulTQ2_0RhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     const cached = blocks_per_row <= bsum_cache_blocks;
     var bsum_cache: [bsum_cache_blocks]i32 = undefined;
     var r = r0;
@@ -374,7 +366,7 @@ pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const types.QuantizedMat
     const tensor = @import("../../tensor.zig");
     const n = rhs.n;
     if (n % 4 != 0) return tensor.TensorError.InvalidShape;
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     const out = try allocator.alloc(types.BlockTQ2_0x4, (n / 4) * blocks_per_row);
     errdefer allocator.free(out);
     for (0..n / 4) |g| {
@@ -562,7 +554,7 @@ pub fn packMatmulRhsTQ2_0Foldedx4(
     plane1: *const types.QuantizedMatmulRhsTQ2_0,
     plane2: *const types.QuantizedMatmulRhsTQ2_0,
 ) ![]types.BlockTQ2_0Foldedx4 {
-    const out = try allocator.alloc(types.BlockTQ2_0Foldedx4, (plane1.n / 4) * plane1.rows.blocks_per_row);
+    const out = try allocator.alloc(types.BlockTQ2_0Foldedx4, (plane1.n / 4) * plane1.blocks_per_column);
     errdefer allocator.free(out);
     try packMatmulRhsTQ2_0Foldedx4Into(out, plane1, plane2);
     return out;
@@ -578,9 +570,9 @@ pub fn packMatmulRhsTQ2_0Foldedx4Into(
 ) !void {
     const tensor = @import("../../tensor.zig");
     const n = plane1.n;
-    if (n % 4 != 0 or plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
+    if (n % 4 != 0 or plane2.n != n or plane2.blocks_per_column != plane1.blocks_per_column)
         return tensor.TensorError.InvalidShape;
-    const blocks_per_row = plane1.rows.blocks_per_row;
+    const blocks_per_row = plane1.blocks_per_column;
     if (out.len != (n / 4) * blocks_per_row) return tensor.TensorError.InvalidShape;
     for (0..n / 4) |g| {
         var cols1: [4][]const BlockTQ2_0 = undefined;
@@ -664,9 +656,9 @@ pub fn packMatmulRhsTQ2_0FoldedRows(
 ) ![]types.BlockTQ2_0Folded {
     const tensor = @import("../../tensor.zig");
     const n = plane1.n;
-    if (plane2.n != n or plane2.rows.blocks_per_row != plane1.rows.blocks_per_row)
+    if (plane2.n != n or plane2.blocks_per_column != plane1.blocks_per_column)
         return tensor.TensorError.InvalidShape;
-    const blocks_per_row = plane1.rows.blocks_per_row;
+    const blocks_per_row = plane1.blocks_per_column;
     const out = try allocator.alloc(types.BlockTQ2_0Folded, n * blocks_per_row);
     errdefer allocator.free(out);
     for (0..n) |row| {
@@ -1036,7 +1028,7 @@ inline fn q2_0MicroTile(
     cached: bool,
 ) void {
     const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
 
     var wcols: [cw][]const dtype_mod.BlockQ2_0 = undefined;
@@ -1106,7 +1098,7 @@ pub fn matmulQ2_0RhsTile(
     c1: usize,
 ) void {
     const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
     const cached = sub_blocks_per_row <= q2_0_bsum_cache_subs;
     var bsum_cache: [q2_0_row_block_max][q2_0_bsum_cache_subs]i32 = undefined;

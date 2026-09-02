@@ -625,13 +625,9 @@ fn checkQ8_0(allocator: std.mem.Allocator) !void {
     for (&rhs_blocks[0].qs) |*q| q.* = -128;
 
     var rhs = quant.QuantizedMatmulRhsQ8_0{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = rhs_blocks,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-        },
+        .allocator = allocator,
+        .blocks = rhs_blocks,
+        .blocks_per_column = blocks_per_row,
         .k = k,
         .n = n,
     };

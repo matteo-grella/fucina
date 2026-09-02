@@ -139,7 +139,9 @@ fn expectQ8_0TableMatmulMatchesDense(comptime rhs_dtype: DType, block: dtype_mod
 
     var rhs_blocks = [_]dtype_mod.Storage(rhs_dtype){ block, block };
     const rhs = types.QuantizedMatmulRhsRowsFor(rhs_dtype){
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = block_size,
         .n = 2,
     };
@@ -161,7 +163,9 @@ fn expectQ8_KTableMatmulMatchesDense(comptime rhs_dtype: DType, block: dtype_mod
 
     var rhs_blocks = [_]dtype_mod.Storage(rhs_dtype){ block, block };
     const rhs = types.QuantizedMatmulRhsRowsFor(rhs_dtype){
-        .rows = .{ .allocator = std.testing.allocator, .blocks = &rhs_blocks, .rows = 2, .cols = types.qk_k_block_size, .blocks_per_row = 1 },
+        .allocator = std.testing.allocator,
+        .blocks = &rhs_blocks,
+        .blocks_per_column = 1,
         .k = types.qk_k_block_size,
         .n = 2,
     };

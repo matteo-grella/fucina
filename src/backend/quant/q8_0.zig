@@ -255,7 +255,7 @@ fn matmulQ8_0RhsTileAarch64(
     c0: usize,
     c1: usize,
 ) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    const blocks_per_row = rhs.blocks_per_column;
     var i = r0;
 
     while (i + common.q8_0_row_block <= r1) : (i += common.q8_0_row_block) {
@@ -279,7 +279,7 @@ fn matmulQ8_0RhsTileAarch64(
                 }
 
                 inline for (0..q8_0_aarch64_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
+                    const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
                     const rhs_lo: QKV16i8 = @bitCast(rhs_block.qs[0..16].*);
                     const rhs_hi: QKV16i8 = @bitCast(rhs_block.qs[16..32].*);
                     inline for (0..common.q8_0_row_block) |r| {
@@ -346,7 +346,7 @@ fn matmulQ8_0RhsTileAarch64(
                         lhs_hi[b] = @bitCast(lhs_row[block_index + b].qs[16..32].*);
                     }
                     inline for (0..q8_0_aarch64_tail_col_block) |c| {
-                        const col_blocks = rhs.rows.blocks[(j + c) * blocks_per_row + block_index ..][0..4];
+                        const col_blocks = rhs.blocks[(j + c) * blocks_per_row + block_index ..][0..4];
                         const rd: [4]u16 = .{ col_blocks[0].d, col_blocks[1].d, col_blocks[2].d, col_blocks[3].d };
                         const scale4 = common.f16x4BitsToF32(rd) * ls;
                         inline for (0..4) |b| {
@@ -367,7 +367,7 @@ fn matmulQ8_0RhsTileAarch64(
                     const lhs_lo: QKV16i8 = @bitCast(lhs_block.qs[0..16].*);
                     const lhs_hi: QKV16i8 = @bitCast(lhs_block.qs[16..32].*);
                     inline for (0..q8_0_aarch64_tail_col_block) |c| {
-                        const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
+                        const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
                         acc0[c] = accumulateQ8_0Aarch64(
                             acc0[c],
                             lhs_block.d,
@@ -391,7 +391,7 @@ fn matmulQ8_0RhsTileAarch64(
                 const lhs_lo: QKV16i8 = @bitCast(lhs_block.qs[0..16].*);
                 const lhs_hi: QKV16i8 = @bitCast(lhs_block.qs[16..32].*);
                 inline for (0..q8_0_aarch64_tail_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
+                    const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
                     acc[c] = accumulateQ8_0Aarch64(
                         acc[c],
                         lhs_block.d,

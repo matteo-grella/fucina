@@ -992,13 +992,9 @@ fn guRawQ8View(
 ) backend_mod.QuantizedMatmulRhsQ8_0 {
     const bpr = out_pe / 32;
     return .{
-        .rows = .{
-            .allocator = null,
-            .blocks = gw.dn_blocks[expert * hidden * bpr ..][0 .. hidden * bpr],
-            .rows = hidden,
-            .cols = out_pe,
-            .blocks_per_row = bpr,
-        },
+        .allocator = null,
+        .blocks = gw.dn_blocks[expert * hidden * bpr ..][0 .. hidden * bpr],
+        .blocks_per_column = bpr,
         .k = out_pe,
         .n = hidden,
     };

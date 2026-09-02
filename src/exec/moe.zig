@@ -169,12 +169,12 @@ pub const MoeRhs = union(enum) {
     pub fn blocksPerColumn(self: *const MoeRhs) usize {
         return switch (self.*) {
             .streamed => |*value| value.blocks_per_column,
-            .q8_0 => |*value| value.rows.blocks_per_row,
-            .tq2_0 => |*value| value.rows.blocks_per_row,
-            .iq2_xxs => |*value| value.rows.blocks_per_row,
-            .iq3_xxs => |*value| value.rows.blocks_per_row,
-            .iq2_s => |*value| value.rows.blocks_per_row,
-            .iq4_xs => |*value| value.rows.blocks_per_row,
+            .q8_0 => |*value| value.blocks_per_column,
+            .tq2_0 => |*value| value.blocks_per_column,
+            .iq2_xxs => |*value| value.blocks_per_column,
+            .iq3_xxs => |*value| value.blocks_per_column,
+            .iq2_s => |*value| value.blocks_per_column,
+            .iq4_xs => |*value| value.blocks_per_column,
             inline else => |*value| value.blocks_per_column,
         };
     }
@@ -183,17 +183,17 @@ pub const MoeRhs = union(enum) {
         return switch (self.*) {
             // Virtual: the streamed stack never exists in memory at once.
             .streamed => |*value| value.rows() * value.blocks_per_column,
-            .q8_0 => |*value| value.rows.blocks.len,
-            .tq2_0 => |*value| value.rows.blocks.len,
+            .q8_0 => |*value| value.blocks.len,
+            .tq2_0 => |*value| value.blocks.len,
             // Per-plane geometry: every plane has the same block count. A
             // native-folded weight (tq2_0_fx4: plane_count 0, only the
             // pack) reports the equivalent per-plane count — each Foldedx4
             // block spans 4 columns' worth of plane blocks.
             .ptqtp => |*value| if (value.plane_count == 0) value.folded.len * 4 else value.planes[0].len,
-            .iq2_xxs => |*value| value.rows.blocks.len,
-            .iq3_xxs => |*value| value.rows.blocks.len,
-            .iq2_s => |*value| value.rows.blocks.len,
-            .iq4_xs => |*value| value.rows.blocks.len,
+            .iq2_xxs => |*value| value.blocks.len,
+            .iq3_xxs => |*value| value.blocks.len,
+            .iq2_s => |*value| value.blocks.len,
+            .iq4_xs => |*value| value.blocks.len,
             inline else => |*value| value.blocks.len,
         };
     }
@@ -361,7 +361,7 @@ fn singlePlaneExpertBlocks(comptime quant: expert_store.StreamedQuant, blocks: a
 /// pinned the pointer); resident arms slice their stacked buffer.
 fn expertBlocks(rhs: *const MoeRhs, e: usize, out_dim: usize) ExpertBlocks {
     return switch (rhs.*) {
-        inline .q8_0, .tq2_0, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs => |*big, tag| singlePlaneExpertBlocks(@field(expert_store.StreamedQuant, @tagName(tag)), big.rows.blocks, e, out_dim, big.k, big.rows.blocks_per_row),
+        inline .q8_0, .tq2_0, .iq2_xxs, .iq3_xxs, .iq2_s, .iq4_xs => |*big, tag| singlePlaneExpertBlocks(@field(expert_store.StreamedQuant, @tagName(tag)), big.blocks, e, out_dim, big.k, big.blocks_per_column),
         inline .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => |*big, tag| singlePlaneExpertBlocks(@field(expert_store.StreamedQuant, @tagName(tag)), big.blocks, e, out_dim, big.k, big.blocks_per_column),
         .ptqtp => |*big| blk: {
             const bpc = big.blocks_per_column;
@@ -412,7 +412,9 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
             // null, so the view never mutates or frees the storage.
             const blocks = @as([*]const dtype_mod.BlockMXFP4, @ptrCast(@alignCast(w.planes[0])))[0 .. out_dim * bpc];
             const view = backend_mod.QuantizedMatmulRhsMXFP4{
-                .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = w.k, .blocks_per_row = bpc },
+                .allocator = null,
+                .blocks = @constCast(blocks),
+                .blocks_per_column = bpc,
                 .k = w.k,
                 .n = out_dim,
             };
@@ -472,7 +474,9 @@ fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.BlockQ
 
 fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
     return .{
-        .rows = .{ .allocator = null, .blocks = blocks, .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+        .allocator = null,
+        .blocks = blocks,
+        .blocks_per_column = bpc,
         .k = k,
         .n = out_dim,
     };
@@ -483,7 +487,9 @@ fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: 
 /// writes them, so the @constCast is sound — see tq2_0View).
 fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim: usize, bpc: usize) backend_mod.quantized_matmul.QuantizedMatmulRhsRowsFor(dt) {
     return .{
-        .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+        .allocator = null,
+        .blocks = @constCast(blocks),
+        .blocks_per_column = bpc,
         .k = k,
         .n = out_dim,
     };
@@ -494,7 +500,9 @@ fn tq2_0View(blocks: []const dtype_mod.BlockTQ2_0, k: usize, out_dim: usize, bpc
     // never writes them, so the @constCast borrow is sound (see the
     // borrow note on exec/quant_matmul.zig's compactFromBlocks).
     return .{
-        .rows = .{ .allocator = null, .blocks = @constCast(blocks), .rows = out_dim, .cols = k, .blocks_per_row = bpc },
+        .allocator = null,
+        .blocks = @constCast(blocks),
+        .blocks_per_column = bpc,
         .k = k,
         .n = out_dim,
     };
@@ -531,7 +539,7 @@ fn moePtqtpTileDotRange(
 ) void {
     backend_mod.kernels.matmulTQ2_0RhsTile(out, qlhs, &planes[0], out_dim, 0, m, c0, c1);
     if (planes.len == 1) return;
-    const bpc = planes[0].rows.blocks_per_row;
+    const bpc = planes[0].blocks_per_column;
     var tmp: [ptqtp_acc_rows * ptqtp_acc_cols]f32 = undefined;
     for (planes[1..]) |*plane| {
         var r0: usize = 0;
@@ -546,7 +554,7 @@ fn moePtqtpTileDotRange(
             var cc = c0;
             while (cc < c1) : (cc += ptqtp_acc_cols) {
                 const cols_now = @min(cc + ptqtp_acc_cols, c1) - cc;
-                const sub = tq2_0View(plane.rows.blocks[cc * bpc ..][0 .. cols_now * bpc], plane.k, cols_now, bpc);
+                const sub = tq2_0View(plane.blocks[cc * bpc ..][0 .. cols_now * bpc], plane.k, cols_now, bpc);
                 backend_mod.kernels.matmulTQ2_0RhsTile(tmp[0 .. rows_now * cols_now], lhs, &sub, cols_now, 0, rows_now, 0, cols_now);
                 for (0..rows_now) |r| {
                     const orow = out[(r0 + r) * out_dim + cc ..][0..cols_now];

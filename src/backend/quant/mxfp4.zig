@@ -118,7 +118,7 @@ pub fn matmulMXFP4RhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    const bpc = rhs.rows.blocks_per_row;
+    const bpc = rhs.blocks_per_column;
     var i = r0;
     while (i < r1) : (i += 1) {
         const lhs_row = lhs_blocks[i * bpc ..][0..bpc];
@@ -128,7 +128,7 @@ pub fn matmulMXFP4RhsTile(
             var acc: [col_block]common.QKV4f32 = undefined;
             inline for (0..col_block) |c| acc[c] = @splat(0);
             var cols: [col_block][]const dtype_mod.BlockMXFP4 = undefined;
-            inline for (0..col_block) |c| cols[c] = rhs.rows.blocks[(j + c) * bpc ..][0..bpc];
+            inline for (0..col_block) |c| cols[c] = rhs.blocks[(j + c) * bpc ..][0..bpc];
 
             // Block pairs per column: independent contributions pipeline the
             // integer dots; the per-column float adds stay in serial order,
