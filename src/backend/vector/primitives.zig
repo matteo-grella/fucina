@@ -52,76 +52,106 @@ pub fn applyElementwiseTyped(
 
 // ---------------- Vector primitives ----------------
 
-pub inline fn vecAdd(z: []f32, x: []const f32, y: []const f32) void {
+/// Lane vector of the typed binary loop: f32/f64/f16 at their own widths
+/// (f16 lanes compute in f16, the dtype's pointwise compute dtype), bf16
+/// bits at the f32 width (widened to f32 lanes and rounded back).
+fn BinaryLanes(comptime dtype: DType) type {
+    return switch (dtype) {
+        .f32 => Vf32,
+        .f64 => Vf64,
+        .f16 => common.Vf16,
+        .bf16 => common.Vu16ForF32,
+        else => @compileError("vecBinary: no vector lanes for " ++ @tagName(dtype)),
+    };
+}
+
+/// torch.maximum/minimum on a vector: NaN in either lane propagates NaN
+/// (bare @max/@min follow IEEE maxNum and would drop it).
+pub inline fn applyMaxMinVec(comptime V: type, comptime op: ops.ElementwiseOp, a: V, b: V) V {
+    const Elem = @typeInfo(V).vector.child;
+    const raw = if (comptime op == .max) @max(a, b) else @min(a, b);
+    const nan_v: V = @splat(std.math.nan(Elem));
+    return @select(Elem, a != a, nan_v, @select(Elem, b != b, nan_v, raw));
+}
+
+pub inline fn applyElementwiseVec(comptime V: type, comptime op: ops.ElementwiseOp, a: V, b: V) V {
+    return switch (op) {
+        .add => a + b,
+        .sub => a - b,
+        .mul => a * b,
+        .div => a / b,
+        .max, .min => applyMaxMinVec(V, op, a, b),
+    };
+}
+
+/// `op` on one lane vector of `dtype` storage.
+inline fn binaryLanes(comptime dtype: DType, comptime op: ops.ElementwiseOp, a: BinaryLanes(dtype), b: BinaryLanes(dtype)) BinaryLanes(dtype) {
+    if (comptime dtype == .bf16) return f32VecToBf16(applyElementwiseVec(Vf32, op, bf16VecToF32(a), bf16VecToF32(b)));
+    return applyElementwiseVec(BinaryLanes(dtype), op, a, b);
+}
+
+/// The one typed binary elementwise loop: four lane vectors per iteration,
+/// then single vectors, then the scalar tail through
+/// `applyElementwiseTyped`.
+pub inline fn vecBinary(
+    comptime dtype: DType,
+    comptime op: ops.ElementwiseOp,
+    z: []dtype_mod.Scalar(dtype),
+    x: []const dtype_mod.Scalar(dtype),
+    y: []const dtype_mod.Scalar(dtype),
+) void {
+    const Lanes = BinaryLanes(dtype);
+    const L = @typeInfo(Lanes).vector.len;
     var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = x[i..][0..vector_len].*;
-        const y0: Vf32 = y[i..][0..vector_len].*;
-        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
-        const y1: Vf32 = y[i + vector_len ..][0..vector_len].*;
-        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
-        const y2: Vf32 = y[i + 2 * vector_len ..][0..vector_len].*;
-        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
-        const y3: Vf32 = y[i + 3 * vector_len ..][0..vector_len].*;
-        z[i..][0..vector_len].* = x0 + y0;
-        z[i + vector_len ..][0..vector_len].* = x1 + y1;
-        z[i + 2 * vector_len ..][0..vector_len].* = x2 + y2;
-        z[i + 3 * vector_len ..][0..vector_len].* = x3 + y3;
+    while (i + 4 * L <= z.len) : (i += 4 * L) {
+        var xs: [4]Lanes = undefined;
+        var ys: [4]Lanes = undefined;
+        inline for (0..4) |u| {
+            xs[u] = x[i + u * L ..][0..L].*;
+            ys[u] = y[i + u * L ..][0..L].*;
+        }
+        inline for (0..4) |u| z[i + u * L ..][0..L].* = binaryLanes(dtype, op, xs[u], ys[u]);
     }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv: Vf32 = y[i..][0..vector_len].*;
-        z[i..][0..vector_len].* = xv + yv;
+    while (i + L <= z.len) : (i += L) {
+        z[i..][0..L].* = binaryLanes(dtype, op, x[i..][0..L].*, y[i..][0..L].*);
     }
-    while (i < z.len) : (i += 1) z[i] = x[i] + y[i];
+    while (i < z.len) : (i += 1) z[i] = applyElementwiseTyped(dtype, op, x[i], y[i]);
+}
+
+pub inline fn vecAdd(z: []f32, x: []const f32, y: []const f32) void {
+    vecBinary(.f32, .add, z, x, y);
 }
 
 pub inline fn vecSub(z: []f32, x: []const f32, y: []const f32) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = x[i..][0..vector_len].*;
-        const y0: Vf32 = y[i..][0..vector_len].*;
-        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
-        const y1: Vf32 = y[i + vector_len ..][0..vector_len].*;
-        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
-        const y2: Vf32 = y[i + 2 * vector_len ..][0..vector_len].*;
-        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
-        const y3: Vf32 = y[i + 3 * vector_len ..][0..vector_len].*;
-        z[i..][0..vector_len].* = x0 - y0;
-        z[i + vector_len ..][0..vector_len].* = x1 - y1;
-        z[i + 2 * vector_len ..][0..vector_len].* = x2 - y2;
-        z[i + 3 * vector_len ..][0..vector_len].* = x3 - y3;
-    }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv: Vf32 = y[i..][0..vector_len].*;
-        z[i..][0..vector_len].* = xv - yv;
-    }
-    while (i < z.len) : (i += 1) z[i] = x[i] - y[i];
+    vecBinary(.f32, .sub, z, x, y);
 }
 
 pub inline fn vecMul(z: []f32, x: []const f32, y: []const f32) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = x[i..][0..vector_len].*;
-        const y0: Vf32 = y[i..][0..vector_len].*;
-        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
-        const y1: Vf32 = y[i + vector_len ..][0..vector_len].*;
-        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
-        const y2: Vf32 = y[i + 2 * vector_len ..][0..vector_len].*;
-        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
-        const y3: Vf32 = y[i + 3 * vector_len ..][0..vector_len].*;
-        z[i..][0..vector_len].* = x0 * y0;
-        z[i + vector_len ..][0..vector_len].* = x1 * y1;
-        z[i + 2 * vector_len ..][0..vector_len].* = x2 * y2;
-        z[i + 3 * vector_len ..][0..vector_len].* = x3 * y3;
-    }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv: Vf32 = y[i..][0..vector_len].*;
-        z[i..][0..vector_len].* = xv * yv;
-    }
-    while (i < z.len) : (i += 1) z[i] = x[i] * y[i];
+    vecBinary(.f32, .mul, z, x, y);
+}
+
+pub inline fn vecDiv(z: []f32, x: []const f32, y: []const f32) void {
+    vecBinary(.f32, .div, z, x, y);
+}
+
+pub inline fn vecMaximum(z: []f32, x: []const f32, y: []const f32) void {
+    vecBinary(.f32, .max, z, x, y);
+}
+
+pub inline fn vecMinimum(z: []f32, x: []const f32, y: []const f32) void {
+    vecBinary(.f32, .min, z, x, y);
+}
+
+pub inline fn vecElementwiseF64(comptime op: ops.ElementwiseOp, z: []f64, x: []const f64, y: []const f64) void {
+    vecBinary(.f64, op, z, x, y);
+}
+
+pub inline fn vecElementwiseF16(comptime op: ops.ElementwiseOp, z: []f16, x: []const f16, y: []const f16) void {
+    vecBinary(.f16, op, z, x, y);
+}
+
+pub inline fn vecElementwiseBf16(comptime op: ops.ElementwiseOp, z: []u16, x: []const u16, y: []const u16) void {
+    vecBinary(.bf16, op, z, x, y);
 }
 
 pub inline fn vecScale(z: []f32, x: []const f32, s: f32) void {
@@ -433,18 +463,6 @@ pub inline fn geluQuantVec(value: Vf32) Vf32 {
 // `primitives_tests.zig` sweeps both against the scalar forms bit-for-bit.
 // ---------------------------------------------------------------------------
 
-inline fn maskAnd(comptime W: usize, a: @Vector(W, bool), b: @Vector(W, bool)) @Vector(W, bool) {
-    return @select(bool, a, b, @as(@Vector(W, bool), @splat(false)));
-}
-
-inline fn maskOr(comptime W: usize, a: @Vector(W, bool), b: @Vector(W, bool)) @Vector(W, bool) {
-    return @select(bool, a, @as(@Vector(W, bool), @splat(true)), b);
-}
-
-inline fn maskNot(comptime W: usize, a: @Vector(W, bool)) @Vector(W, bool) {
-    return @select(bool, a, @as(@Vector(W, bool), @splat(false)), @as(@Vector(W, bool), @splat(true)));
-}
-
 /// musl expm1f on lanes, byte-identical to `std.math.expm1(f32)` per lane.
 pub inline fn vexpm1f(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
     const Vec = @Vector(W, f32);
@@ -463,9 +481,9 @@ pub inline fn vexpm1f(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
     // above the overflow threshold go to +inf; in-range large lanes fall
     // through to the general path exactly as in the scalar.
     const big = hx >= @as(VecU, @splat(0x4195B844));
-    const ret_neg1 = maskAnd(W, big, sign);
-    const ret_inf = maskAnd(W, maskAnd(W, big, maskNot(W, sign)), x > @as(Vec, @splat(o_threshold)));
-    const early = maskOr(W, maskOr(W, is_nan, ret_neg1), ret_inf);
+    const ret_neg1 = big & sign;
+    const ret_inf = big & ~sign & (x > @as(Vec, @splat(o_threshold)));
+    const early = is_nan | ret_neg1 | ret_inf;
     // Early-return lanes run the shared pipeline on 0 (k = 0, polynomial at
     // 0) so nothing below traps or overflows; their results are replaced at
     // the end. This also bounds |kf| in the body, keeping @intFromFloat in
@@ -561,7 +579,7 @@ inline fn vexpm1fBody(comptime W: usize, comptime bounded: bool, xs: @Vector(W, 
             y0 * twopk,
         );
         const res_wide = y1 - one;
-        const wide = maskOr(W, k < @as(VecI, @splat(0)), k > @as(VecI, @splat(56)));
+        const wide = (k < @as(VecI, @splat(0))) | (k > @as(VecI, @splat(56)));
         break :res_scaled @select(f32, wide, res_wide, //
             @select(f32, k < @as(VecI, @splat(23)), res_low, res_high));
     };
@@ -590,9 +608,9 @@ pub inline fn vtanhf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
 
     // expm1(2|x|) feeds the cross-but-not-huge and mid arms, expm1(-2|x|)
     // the small normal arm; every other lane is fed 0 and overridden.
-    const saturating = maskAnd(W, cross, maskNot(W, huge));
-    const pos_arm = maskOr(W, saturating, maskAnd(W, maskNot(W, cross), mid));
-    const neg_arm = maskAnd(W, maskNot(W, cross), maskAnd(W, maskNot(W, mid), norm));
+    const saturating = cross & ~huge;
+    const pos_arm = saturating | (~cross & mid);
+    const neg_arm = ~cross & ~mid & norm;
     const two_ax = @as(Vec, @splat(2)) * ax;
     const arg = @select(f32, pos_arm, two_ax, @select(f32, neg_arm, -two_ax, @as(Vec, @splat(0))));
     // The constructed argument is finite in [-log(5/3), 20] by the masks
@@ -604,7 +622,7 @@ pub inline fn vtanhf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
     // |x| > 10: t = 1 + 0/x (1 on finite lanes, NaN propagation on NaN);
     // this fdiv is independent of the expm1 chain, so it overlaps it.
     const t_huge = @as(Vec, @splat(1)) + @as(Vec, @splat(0)) / x;
-    const t1 = @select(f32, maskOr(W, pos_arm, neg_arm), t_expm1, ax); // else arm: subnormal t = |x|
+    const t1 = @select(f32, pos_arm | neg_arm, t_expm1, ax); // else arm: subnormal t = |x|
     const t2 = @select(f32, huge, t_huge, t1);
     return @select(f32, sign, -t2, t2);
 }
@@ -701,132 +719,6 @@ pub inline fn vexpf(comptime W: usize, x: @Vector(W, f32)) @Vector(W, f32) {
     return @select(f32, x != x, x, result);
 }
 
-/// Number of independent accumulator chains in `vecSum` / `vecDot`: the
-/// loops are add-latency bound, and eight chains keep the FMA/FADD
-/// pipelines full where four left them half idle (measured, see the
-/// commit that widened them). The chain count is part of the summation
-/// order and therefore of the result bits.
-pub const reduce_chains = 8;
-
-pub inline fn vecSum(x: []const f32) f32 {
-    if (x.len == 0) return 0;
-    var acc: [reduce_chains]Vf32 = undefined;
-    inline for (0..reduce_chains) |c| acc[c] = @splat(0);
-    var i: usize = 0;
-    while (i + reduce_chains * vector_len <= x.len) : (i += reduce_chains * vector_len) {
-        inline for (0..reduce_chains) |c| acc[c] += @as(Vf32, x[i + c * vector_len ..][0..vector_len].*);
-    }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        acc[0] += xv;
-    }
-    var total = acc[0];
-    inline for (1..reduce_chains) |c| total += acc[c];
-    var s = @reduce(.Add, total);
-    while (i < x.len) : (i += 1) s += x[i];
-    return s;
-}
-
-pub inline fn vecDiv(z: []f32, x: []const f32, y: []const f32) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = x[i..][0..vector_len].*;
-        const y0: Vf32 = y[i..][0..vector_len].*;
-        const x1: Vf32 = x[i + vector_len ..][0..vector_len].*;
-        const y1: Vf32 = y[i + vector_len ..][0..vector_len].*;
-        const x2: Vf32 = x[i + 2 * vector_len ..][0..vector_len].*;
-        const y2: Vf32 = y[i + 2 * vector_len ..][0..vector_len].*;
-        const x3: Vf32 = x[i + 3 * vector_len ..][0..vector_len].*;
-        const y3: Vf32 = y[i + 3 * vector_len ..][0..vector_len].*;
-        z[i..][0..vector_len].* = x0 / y0;
-        z[i + vector_len ..][0..vector_len].* = x1 / y1;
-        z[i + 2 * vector_len ..][0..vector_len].* = x2 / y2;
-        z[i + 3 * vector_len ..][0..vector_len].* = x3 / y3;
-    }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv: Vf32 = y[i..][0..vector_len].*;
-        z[i..][0..vector_len].* = xv / yv;
-    }
-    while (i < z.len) : (i += 1) z[i] = x[i] / y[i];
-}
-
-pub inline fn vecMaximum(z: []f32, x: []const f32, y: []const f32) void {
-    vecMaxMinBinary(.max, z, x, y);
-}
-
-pub inline fn vecMinimum(z: []f32, x: []const f32, y: []const f32) void {
-    vecMaxMinBinary(.min, z, x, y);
-}
-
-inline fn vecMaxMinBinary(comptime op: ops.ElementwiseOp, z: []f32, x: []const f32, y: []const f32) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        z[i..][0..vector_len].* = applyMaxMinVec(Vf32, op, x[i..][0..vector_len].*, y[i..][0..vector_len].*);
-        z[i + vector_len ..][0..vector_len].* = applyMaxMinVec(Vf32, op, x[i + vector_len ..][0..vector_len].*, y[i + vector_len ..][0..vector_len].*);
-        z[i + 2 * vector_len ..][0..vector_len].* = applyMaxMinVec(Vf32, op, x[i + 2 * vector_len ..][0..vector_len].*, y[i + 2 * vector_len ..][0..vector_len].*);
-        z[i + 3 * vector_len ..][0..vector_len].* = applyMaxMinVec(Vf32, op, x[i + 3 * vector_len ..][0..vector_len].*, y[i + 3 * vector_len ..][0..vector_len].*);
-    }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        z[i..][0..vector_len].* = applyMaxMinVec(Vf32, op, x[i..][0..vector_len].*, y[i..][0..vector_len].*);
-    }
-    while (i < z.len) : (i += 1) {
-        const a = x[i];
-        const b = y[i];
-        z[i] = if (a != a or b != b) std.math.nan(f32) else if (comptime op == .max) @max(a, b) else @min(a, b);
-    }
-}
-
-pub inline fn vecProd(x: []const f32) f32 {
-    if (x.len == 0) return 1;
-    var acc0: Vf32 = @splat(1);
-    var acc1: Vf32 = @splat(1);
-    var acc2: Vf32 = @splat(1);
-    var acc3: Vf32 = @splat(1);
-    var i: usize = 0;
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        acc0 *= @as(Vf32, x[i..][0..vector_len].*);
-        acc1 *= @as(Vf32, x[i + vector_len ..][0..vector_len].*);
-        acc2 *= @as(Vf32, x[i + 2 * vector_len ..][0..vector_len].*);
-        acc3 *= @as(Vf32, x[i + 3 * vector_len ..][0..vector_len].*);
-    }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        acc0 *= xv;
-    }
-    var p = @reduce(.Mul, acc0 * acc1 * acc2 * acc3);
-    while (i < x.len) : (i += 1) p *= x[i];
-    return p;
-}
-
-/// Fused dot product over `reduce_chains` independent chains: every
-/// product is folded into its chain with one `@mulAdd` (a single rounding
-/// per term, the scalar tail included), the chains are summed in index
-/// order and the lanes reduced last.
-pub inline fn vecDot(x: []const f32, y: []const f32) f32 {
-    if (x.len == 0) return 0;
-    var acc: [reduce_chains]Vf32 = undefined;
-    inline for (0..reduce_chains) |c| acc[c] = @splat(0);
-    var i: usize = 0;
-    while (i + reduce_chains * vector_len <= x.len) : (i += reduce_chains * vector_len) {
-        inline for (0..reduce_chains) |c| {
-            const xv: Vf32 = x[i + c * vector_len ..][0..vector_len].*;
-            const yv: Vf32 = y[i + c * vector_len ..][0..vector_len].*;
-            acc[c] = @mulAdd(Vf32, xv, yv, acc[c]);
-        }
-    }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        const xv: Vf32 = x[i..][0..vector_len].*;
-        const yv: Vf32 = y[i..][0..vector_len].*;
-        acc[0] = @mulAdd(Vf32, xv, yv, acc[0]);
-    }
-    var total = acc[0];
-    inline for (1..reduce_chains) |c| total += acc[c];
-    var s = @reduce(.Add, total);
-    while (i < x.len) : (i += 1) s = @mulAdd(f32, x[i], y[i], s);
-    return s;
-}
-
 // Fused multiply-add of a contiguous slice with a broadcast scalar:
 // out += in * s, one `@mulAdd` per lane (fmla on AArch64, vfmadd on
 // x86_64 with FMA), the scalar tail fused the same way.
@@ -841,273 +733,178 @@ pub inline fn vecFmaScalar(out: []f32, in: []const f32, s: f32) void {
     while (i < out.len) : (i += 1) out[i] = @mulAdd(f32, in[i], s, out[i]);
 }
 
-pub inline fn vecElementwiseF64(comptime op: ops.ElementwiseOp, z: []f64, x: []const f64, y: []const f64) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len_f64 <= z.len) : (i += 4 * vector_len_f64) {
-        z[i..][0..vector_len_f64].* = applyElementwiseVecF64(op, x[i..][0..vector_len_f64].*, y[i..][0..vector_len_f64].*);
-        z[i + vector_len_f64 ..][0..vector_len_f64].* = applyElementwiseVecF64(op, x[i + vector_len_f64 ..][0..vector_len_f64].*, y[i + vector_len_f64 ..][0..vector_len_f64].*);
-        z[i + 2 * vector_len_f64 ..][0..vector_len_f64].* = applyElementwiseVecF64(op, x[i + 2 * vector_len_f64 ..][0..vector_len_f64].*, y[i + 2 * vector_len_f64 ..][0..vector_len_f64].*);
-        z[i + 3 * vector_len_f64 ..][0..vector_len_f64].* = applyElementwiseVecF64(op, x[i + 3 * vector_len_f64 ..][0..vector_len_f64].*, y[i + 3 * vector_len_f64 ..][0..vector_len_f64].*);
-    }
-    while (i + vector_len_f64 <= z.len) : (i += vector_len_f64) {
-        z[i..][0..vector_len_f64].* = applyElementwiseVecF64(op, x[i..][0..vector_len_f64].*, y[i..][0..vector_len_f64].*);
-    }
-    while (i < z.len) : (i += 1) {
-        z[i] = applyElementwiseTyped(.f64, op, x[i], y[i]);
-    }
+// ---------------- Reductions ----------------
+
+/// Number of independent accumulator chains in the f32 `vecSum` /
+/// `vecDot`: the loops are add-latency bound, and eight chains keep the
+/// FMA/FADD pipelines full where four left them half idle (measured, see
+/// the commit that widened them). The chain count is part of the
+/// summation order and therefore of the result bits.
+pub const reduce_chains = 8;
+
+pub const ReduceTerm = enum { sum, prod, dot };
+
+/// Accumulator (and result) of the typed reductions: f32 for f16/bf16/f32,
+/// f64 for f64.
+pub fn ReduceAcc(comptime dtype: DType) type {
+    return dtype_mod.Accumulator(dtype);
 }
 
-pub inline fn vecElementwiseF16(comptime op: ops.ElementwiseOp, z: []f16, x: []const f16, y: []const f16) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len_f16 <= z.len) : (i += 4 * vector_len_f16) {
-        z[i..][0..vector_len_f16].* = applyElementwiseVecF16(op, x[i..][0..vector_len_f16].*, y[i..][0..vector_len_f16].*);
-        z[i + vector_len_f16 ..][0..vector_len_f16].* = applyElementwiseVecF16(op, x[i + vector_len_f16 ..][0..vector_len_f16].*, y[i + vector_len_f16 ..][0..vector_len_f16].*);
-        z[i + 2 * vector_len_f16 ..][0..vector_len_f16].* = applyElementwiseVecF16(op, x[i + 2 * vector_len_f16 ..][0..vector_len_f16].*, y[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
-        z[i + 3 * vector_len_f16 ..][0..vector_len_f16].* = applyElementwiseVecF16(op, x[i + 3 * vector_len_f16 ..][0..vector_len_f16].*, y[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
-    }
-    while (i + vector_len_f16 <= z.len) : (i += vector_len_f16) {
-        z[i..][0..vector_len_f16].* = applyElementwiseVecF16(op, x[i..][0..vector_len_f16].*, y[i..][0..vector_len_f16].*);
-    }
-    while (i < z.len) : (i += 1) {
-        z[i] = applyElementwiseTyped(.f16, op, x[i], y[i]);
-    }
-}
-
-pub inline fn vecElementwiseBf16(comptime op: ops.ElementwiseOp, z: []u16, x: []const u16, y: []const u16) void {
-    var i: usize = 0;
-    while (i + 4 * vector_len <= z.len) : (i += 4 * vector_len) {
-        z[i..][0..vector_len].* = f32VecToBf16(applyElementwiseVecF32(op, bf16VecToF32(x[i..][0..vector_len].*), bf16VecToF32(y[i..][0..vector_len].*)));
-        z[i + vector_len ..][0..vector_len].* = f32VecToBf16(applyElementwiseVecF32(op, bf16VecToF32(x[i + vector_len ..][0..vector_len].*), bf16VecToF32(y[i + vector_len ..][0..vector_len].*)));
-        z[i + 2 * vector_len ..][0..vector_len].* = f32VecToBf16(applyElementwiseVecF32(op, bf16VecToF32(x[i + 2 * vector_len ..][0..vector_len].*), bf16VecToF32(y[i + 2 * vector_len ..][0..vector_len].*)));
-        z[i + 3 * vector_len ..][0..vector_len].* = f32VecToBf16(applyElementwiseVecF32(op, bf16VecToF32(x[i + 3 * vector_len ..][0..vector_len].*), bf16VecToF32(y[i + 3 * vector_len ..][0..vector_len].*)));
-    }
-    while (i + vector_len <= z.len) : (i += vector_len) {
-        z[i..][0..vector_len].* = f32VecToBf16(applyElementwiseVecF32(op, bf16VecToF32(x[i..][0..vector_len].*), bf16VecToF32(y[i..][0..vector_len].*)));
-    }
-    while (i < z.len) : (i += 1) {
-        z[i] = applyElementwiseTyped(.bf16, op, x[i], y[i]);
-    }
-}
-
-/// torch.maximum/minimum on a vector: NaN in either lane propagates NaN
-/// (bare @max/@min follow IEEE maxNum and would drop it).
-pub inline fn applyMaxMinVec(comptime V: type, comptime op: ops.ElementwiseOp, a: V, b: V) V {
-    const Elem = @typeInfo(V).vector.child;
-    const raw = if (comptime op == .max) @max(a, b) else @min(a, b);
-    const nan_v: V = @splat(std.math.nan(Elem));
-    return @select(Elem, a != a, nan_v, @select(Elem, b != b, nan_v, raw));
-}
-
-pub inline fn applyElementwiseVecF32(comptime op: ops.ElementwiseOp, a: Vf32, b: Vf32) Vf32 {
-    return switch (op) {
-        .add => a + b,
-        .sub => a - b,
-        .mul => a * b,
-        .div => a / b,
-        .max, .min => applyMaxMinVec(Vf32, op, a, b),
+/// Lane vector of the typed reductions, in the accumulator type: f32 and
+/// f64 at their own widths, f16 widened at the f32 width, bf16 widened at
+/// the f16 width.
+fn ReduceLanes(comptime dtype: DType) type {
+    return switch (dtype) {
+        .f32, .f16 => Vf32,
+        .f64 => Vf64,
+        .bf16 => common.Vf32ForF16,
+        else => @compileError("vecReduce: no vector lanes for " ++ @tagName(dtype)),
     };
 }
 
-pub inline fn applyElementwiseVecF64(comptime op: ops.ElementwiseOp, a: Vf64, b: Vf64) Vf64 {
-    return switch (op) {
-        .add => a + b,
-        .sub => a - b,
-        .mul => a * b,
-        .div => a / b,
-        .max, .min => applyMaxMinVec(Vf64, op, a, b),
+const ReduceSpec = struct { ladder: []const usize, fused: bool };
+
+/// Chain ladder and FMA policy per (dtype, term): `ladder` lists the chain
+/// counts in order (each level's loop runs while that many lane vectors
+/// remain; the widest sets the accumulator count), `fused` folds each
+/// product with one `@mulAdd`, tail included. Both are part of the
+/// summation order and therefore of the result bits.
+fn reduceSpec(comptime dtype: DType, comptime term: ReduceTerm) ReduceSpec {
+    return switch (dtype) {
+        .f32 => .{ .ladder = if (term == .prod) &.{4} else &.{reduce_chains}, .fused = term == .dot },
+        .f16 => .{ .ladder = if (term == .dot) &.{ 8, 4 } else &.{4}, .fused = false },
+        .f64, .bf16 => .{ .ladder = &.{4}, .fused = false },
+        else => @compileError("vecReduce: unsupported dtype " ++ @tagName(dtype)),
     };
 }
 
-pub inline fn applyElementwiseVecF16(comptime op: ops.ElementwiseOp, a: common.Vf16, b: common.Vf16) common.Vf16 {
-    return switch (op) {
-        .add => a + b,
-        .sub => a - b,
-        .mul => a * b,
-        .div => a / b,
-        .max, .min => applyMaxMinVec(common.Vf16, op, a, b),
+/// One lane vector of `dtype` storage, widened to the accumulator lanes.
+inline fn widenLanes(comptime dtype: DType, bits: @Vector(@typeInfo(ReduceLanes(dtype)).vector.len, dtype_mod.Scalar(dtype))) ReduceLanes(dtype) {
+    return switch (dtype) {
+        .f32, .f64 => bits,
+        .f16 => @floatCast(bits),
+        .bf16 => bf16VecToF32Wide(bits),
+        else => unreachable,
     };
+}
+
+/// One reduction step on lanes or on the scalar tail (`V` is the lane
+/// vector or the accumulator scalar).
+inline fn reduceStep(comptime term: ReduceTerm, comptime fused: bool, comptime V: type, acc: V, a: V, b: V) V {
+    return switch (term) {
+        .sum => acc + a,
+        .prod => acc * a,
+        .dot => if (fused) @mulAdd(V, a, b, acc) else acc + a * b,
+    };
+}
+
+inline fn reduceLanes(
+    comptime dtype: DType,
+    comptime term: ReduceTerm,
+    comptime fused: bool,
+    acc: ReduceLanes(dtype),
+    x: []const dtype_mod.Scalar(dtype),
+    y: []const dtype_mod.Scalar(dtype),
+    i: usize,
+) ReduceLanes(dtype) {
+    const L = @typeInfo(ReduceLanes(dtype)).vector.len;
+    const a = widenLanes(dtype, x[i..][0..L].*);
+    const b = if (comptime term == .dot) widenLanes(dtype, y[i..][0..L].*) else a;
+    return reduceStep(term, fused, ReduceLanes(dtype), acc, a, b);
+}
+
+inline fn foldPartial(comptime term: ReduceTerm, comptime V: type, acc: V, part: V) V {
+    return if (term == .prod) acc * part else acc + part;
+}
+
+/// The chained reduction behind every sum/prod/dot primitive: the
+/// `reduceSpec` ladder over lane accumulators, one single-chain vector
+/// loop, the chains folded in index order, the lanes reduced, then the
+/// scalar tail. `y` is read by `.dot` only (pass `x` otherwise).
+pub inline fn vecReduce(
+    comptime dtype: DType,
+    comptime term: ReduceTerm,
+    x: []const dtype_mod.Scalar(dtype),
+    y: []const dtype_mod.Scalar(dtype),
+) ReduceAcc(dtype) {
+    const spec = comptime reduceSpec(dtype, term);
+    const Acc = ReduceAcc(dtype);
+    const V = ReduceLanes(dtype);
+    const L = @typeInfo(V).vector.len;
+    const chains = spec.ladder[0];
+    const identity: Acc = if (term == .prod) 1 else 0;
+    var acc: [chains]V = undefined;
+    inline for (0..chains) |c| acc[c] = @splat(identity);
+    var i: usize = 0;
+    inline for (spec.ladder) |level| {
+        while (i + level * L <= x.len) : (i += level * L) {
+            inline for (0..level) |c| acc[c] = reduceLanes(dtype, term, spec.fused, acc[c], x, y, i + c * L);
+        }
+    }
+    while (i + L <= x.len) : (i += L) acc[0] = reduceLanes(dtype, term, spec.fused, acc[0], x, y, i);
+    var total = acc[0];
+    inline for (1..chains) |c| total = foldPartial(term, V, total, acc[c]);
+    var s: Acc = @reduce(if (term == .prod) .Mul else .Add, total);
+    while (i < x.len) : (i += 1) {
+        const a = dtype_mod.toAccumulator(dtype, x[i]);
+        const b = if (comptime term == .dot) dtype_mod.toAccumulator(dtype, y[i]) else a;
+        s = reduceStep(term, spec.fused, Acc, s, a, b);
+    }
+    return s;
+}
+
+pub inline fn vecSum(x: []const f32) f32 {
+    return vecReduce(.f32, .sum, x, x);
+}
+
+pub inline fn vecProd(x: []const f32) f32 {
+    return vecReduce(.f32, .prod, x, x);
+}
+
+/// Fused dot product over `reduce_chains` independent chains: every
+/// product is folded into its chain with one `@mulAdd` (a single rounding
+/// per term, the scalar tail included).
+pub inline fn vecDot(x: []const f32, y: []const f32) f32 {
+    return vecReduce(.f32, .dot, x, y);
 }
 
 pub inline fn vecSumF64(x: []const f64) f64 {
-    var i: usize = 0;
-    var acc0: Vf64 = @splat(0);
-    var acc1: Vf64 = @splat(0);
-    var acc2: Vf64 = @splat(0);
-    var acc3: Vf64 = @splat(0);
-
-    while (i + 4 * vector_len_f64 <= x.len) : (i += 4 * vector_len_f64) {
-        acc0 += x[i..][0..vector_len_f64].*;
-        acc1 += x[i + vector_len_f64 ..][0..vector_len_f64].*;
-        acc2 += x[i + 2 * vector_len_f64 ..][0..vector_len_f64].*;
-        acc3 += x[i + 3 * vector_len_f64 ..][0..vector_len_f64].*;
-    }
-    while (i + vector_len_f64 <= x.len) : (i += vector_len_f64) {
-        acc0 += x[i..][0..vector_len_f64].*;
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += x[i];
-    return s;
+    return vecReduce(.f64, .sum, x, x);
 }
 
 pub inline fn vecDotF64(x: []const f64, y: []const f64) f64 {
-    var i: usize = 0;
-    var acc0: Vf64 = @splat(0);
-    var acc1: Vf64 = @splat(0);
-    var acc2: Vf64 = @splat(0);
-    var acc3: Vf64 = @splat(0);
-
-    while (i + 4 * vector_len_f64 <= x.len) : (i += 4 * vector_len_f64) {
-        acc0 += @as(Vf64, x[i..][0..vector_len_f64].*) * @as(Vf64, y[i..][0..vector_len_f64].*);
-        acc1 += @as(Vf64, x[i + vector_len_f64 ..][0..vector_len_f64].*) * @as(Vf64, y[i + vector_len_f64 ..][0..vector_len_f64].*);
-        acc2 += @as(Vf64, x[i + 2 * vector_len_f64 ..][0..vector_len_f64].*) * @as(Vf64, y[i + 2 * vector_len_f64 ..][0..vector_len_f64].*);
-        acc3 += @as(Vf64, x[i + 3 * vector_len_f64 ..][0..vector_len_f64].*) * @as(Vf64, y[i + 3 * vector_len_f64 ..][0..vector_len_f64].*);
-    }
-    while (i + vector_len_f64 <= x.len) : (i += vector_len_f64) {
-        acc0 += @as(Vf64, x[i..][0..vector_len_f64].*) * @as(Vf64, y[i..][0..vector_len_f64].*);
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += x[i] * y[i];
-    return s;
+    return vecReduce(.f64, .dot, x, y);
 }
 
 pub inline fn vecSumF16ToF32(x: []const f16) f32 {
-    var i: usize = 0;
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
-
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        acc0 += @as(Vf32, @floatCast(@as(Vf16ForF32, x[i..][0..vector_len].*)));
-        acc1 += @as(Vf32, @floatCast(@as(Vf16ForF32, x[i + vector_len ..][0..vector_len].*)));
-        acc2 += @as(Vf32, @floatCast(@as(Vf16ForF32, x[i + 2 * vector_len ..][0..vector_len].*)));
-        acc3 += @as(Vf32, @floatCast(@as(Vf16ForF32, x[i + 3 * vector_len ..][0..vector_len].*)));
-    }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        acc0 += @as(Vf32, @floatCast(@as(Vf16ForF32, x[i..][0..vector_len].*)));
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += @floatCast(x[i]);
-    return s;
+    return vecReduce(.f16, .sum, x, x);
 }
 
 pub inline fn vecDotF16ToF32(x: []const f16, y: []const f16) f32 {
-    var i: usize = 0;
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
-    var acc4: Vf32 = @splat(0);
-    var acc5: Vf32 = @splat(0);
-    var acc6: Vf32 = @splat(0);
-    var acc7: Vf32 = @splat(0);
-
-    while (i + 8 * vector_len <= x.len) : (i += 8 * vector_len) {
-        const x0: Vf32 = @floatCast(@as(Vf16ForF32, x[i..][0..vector_len].*));
-        const y0: Vf32 = @floatCast(@as(Vf16ForF32, y[i..][0..vector_len].*));
-        const x1: Vf32 = @floatCast(@as(Vf16ForF32, x[i + vector_len ..][0..vector_len].*));
-        const y1: Vf32 = @floatCast(@as(Vf16ForF32, y[i + vector_len ..][0..vector_len].*));
-        const x2: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 2 * vector_len ..][0..vector_len].*));
-        const y2: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 2 * vector_len ..][0..vector_len].*));
-        const x3: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 3 * vector_len ..][0..vector_len].*));
-        const y3: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 3 * vector_len ..][0..vector_len].*));
-        const x4: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 4 * vector_len ..][0..vector_len].*));
-        const y4: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 4 * vector_len ..][0..vector_len].*));
-        const x5: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 5 * vector_len ..][0..vector_len].*));
-        const y5: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 5 * vector_len ..][0..vector_len].*));
-        const x6: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 6 * vector_len ..][0..vector_len].*));
-        const y6: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 6 * vector_len ..][0..vector_len].*));
-        const x7: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 7 * vector_len ..][0..vector_len].*));
-        const y7: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 7 * vector_len ..][0..vector_len].*));
-        acc0 += x0 * y0;
-        acc1 += x1 * y1;
-        acc2 += x2 * y2;
-        acc3 += x3 * y3;
-        acc4 += x4 * y4;
-        acc5 += x5 * y5;
-        acc6 += x6 * y6;
-        acc7 += x7 * y7;
-    }
-    while (i + 4 * vector_len <= x.len) : (i += 4 * vector_len) {
-        const x0: Vf32 = @floatCast(@as(Vf16ForF32, x[i..][0..vector_len].*));
-        const y0: Vf32 = @floatCast(@as(Vf16ForF32, y[i..][0..vector_len].*));
-        const x1: Vf32 = @floatCast(@as(Vf16ForF32, x[i + vector_len ..][0..vector_len].*));
-        const y1: Vf32 = @floatCast(@as(Vf16ForF32, y[i + vector_len ..][0..vector_len].*));
-        const x2: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 2 * vector_len ..][0..vector_len].*));
-        const y2: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 2 * vector_len ..][0..vector_len].*));
-        const x3: Vf32 = @floatCast(@as(Vf16ForF32, x[i + 3 * vector_len ..][0..vector_len].*));
-        const y3: Vf32 = @floatCast(@as(Vf16ForF32, y[i + 3 * vector_len ..][0..vector_len].*));
-        acc0 += x0 * y0;
-        acc1 += x1 * y1;
-        acc2 += x2 * y2;
-        acc3 += x3 * y3;
-    }
-    while (i + vector_len <= x.len) : (i += vector_len) {
-        const xv: Vf32 = @floatCast(@as(Vf16ForF32, x[i..][0..vector_len].*));
-        const yv: Vf32 = @floatCast(@as(Vf16ForF32, y[i..][0..vector_len].*));
-        acc0 += xv * yv;
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3 + acc4 + acc5 + acc6 + acc7);
-    while (i < x.len) : (i += 1) s += @as(f32, @floatCast(x[i])) * @as(f32, @floatCast(y[i]));
-    return s;
+    return vecReduce(.f16, .dot, x, y);
 }
 
 pub inline fn vecSumBf16ToF32(x: []const u16) f32 {
-    var i: usize = 0;
-    var acc0: common.Vf32ForF16 = @splat(0);
-    var acc1: common.Vf32ForF16 = @splat(0);
-    var acc2: common.Vf32ForF16 = @splat(0);
-    var acc3: common.Vf32ForF16 = @splat(0);
-
-    while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
-        acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*);
-        acc1 += bf16VecToF32Wide(x[i + vector_len_f16 ..][0..vector_len_f16].*);
-        acc2 += bf16VecToF32Wide(x[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
-        acc3 += bf16VecToF32Wide(x[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
-    }
-    while (i + vector_len_f16 <= x.len) : (i += vector_len_f16) {
-        acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*);
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += dtype_mod.bf16ToF32(x[i]);
-    return s;
+    return vecReduce(.bf16, .sum, x, x);
 }
 
 pub inline fn vecDotBf16ToF32(x: []const u16, y: []const u16) f32 {
-    var i: usize = 0;
-    var acc0: common.Vf32ForF16 = @splat(0);
-    var acc1: common.Vf32ForF16 = @splat(0);
-    var acc2: common.Vf32ForF16 = @splat(0);
-    var acc3: common.Vf32ForF16 = @splat(0);
+    return vecReduce(.bf16, .dot, x, y);
+}
 
-    while (i + 4 * vector_len_f16 <= x.len) : (i += 4 * vector_len_f16) {
-        acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
-        acc1 += bf16VecToF32Wide(x[i + vector_len_f16 ..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i + vector_len_f16 ..][0..vector_len_f16].*);
-        acc2 += bf16VecToF32Wide(x[i + 2 * vector_len_f16 ..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i + 2 * vector_len_f16 ..][0..vector_len_f16].*);
-        acc3 += bf16VecToF32Wide(x[i + 3 * vector_len_f16 ..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i + 3 * vector_len_f16 ..][0..vector_len_f16].*);
-    }
-    while (i + vector_len_f16 <= x.len) : (i += vector_len_f16) {
-        acc0 += bf16VecToF32Wide(x[i..][0..vector_len_f16].*) * bf16VecToF32Wide(y[i..][0..vector_len_f16].*);
-    }
-
-    var s = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
-    while (i < x.len) : (i += 1) s += dtype_mod.bf16ToF32(x[i]) * dtype_mod.bf16ToF32(y[i]);
-    return s;
+/// bf16 bits to f32 lanes, exact (bits << 16).
+pub inline fn bf16ToF32Lanes(comptime W: usize, bits: @Vector(W, u16)) @Vector(W, f32) {
+    const U = @Vector(W, u32);
+    const widened: U = @as(U, @intCast(bits)) << @as(U, @splat(16));
+    return @bitCast(widened);
 }
 
 pub inline fn bf16VecToF32(bits: common.Vu16ForF32) Vf32 {
-    const widened: common.Vu32ForF32 = @as(common.Vu32ForF32, @intCast(bits)) << @as(common.Vu32ForF32, @splat(16));
-    return @bitCast(widened);
+    return bf16ToF32Lanes(vector_len, bits);
 }
 
 pub inline fn bf16VecToF32Wide(bits: common.Vu16ForF16) common.Vf32ForF16 {
-    const widened: common.Vu32ForF16 = @as(common.Vu32ForF16, @intCast(bits)) << @as(common.Vu32ForF16, @splat(16));
-    return @bitCast(widened);
+    return bf16ToF32Lanes(vector_len_f16, bits);
 }
 
 pub inline fn f32VecToBf16(values: Vf32) common.Vu16ForF32 {
