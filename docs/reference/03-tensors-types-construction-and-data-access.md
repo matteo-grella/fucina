@@ -1099,7 +1099,7 @@ methods are documented above; [§4](04-tensor-operations.md) covers every math/N
 `logsumexp`, `logSoftmax`, `argmax`, `multinomial`,
 `max`, `min`, `topK`, `sort`, `argsort`, `routerTopK`, `softmax`, `rmsNorm`,
 `rmsNormMul`, `rmsNormMulAdd`, `rmsNormMulRopeHalfPrepared`, `layerNorm`,
-`groupNorm`, `crossEntropy`, `crossEntropy`, `linearCrossEntropy`, `linearDistill`,
+`groupNorm`, `crossEntropy`, `crossEntropy`, `linearCrossEntropy`,
 `mseLoss`, `huberLoss`,
 `bceLoss`, `klDivLoss`, `nllLoss`, `l2Normalize`, `cosineSimilarity`,
 `rope`, `matmul`, `dot`, `addDot`, `einsum`, `dotTernarySte`, `packRhs`, `dotPacked`,

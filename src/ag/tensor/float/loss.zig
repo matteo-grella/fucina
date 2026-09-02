@@ -12,7 +12,6 @@ const Tag = tags_mod.Tag;
 const removeTag = tags_mod.removeTag;
 const CrossEntropyExtBackward = backward_loss.CrossEntropyExtBackward;
 const LinearCrossEntropyBackward = backward_loss.LinearCrossEntropyBackward;
-const LinearDistillBackward = backward_loss.LinearDistillBackward;
 const MseLossBackward = backward_loss.MseLossBackward;
 const HuberLossBackward = backward_loss.HuberLossBackward;
 const BceLossBackward = backward_loss.BceLossBackward;
@@ -131,86 +130,6 @@ pub fn Ops(comptime Self: type) type {
                 .labels = owned_labels,
                 .row_stats = owned_row_stats,
                 .estimated_work = Record.workEstimate(self.grad_state, weight_ptr.grad_state, self.asRawTensor(), weight_ptr.asRawTensor()),
-            });
-        }
-
-        /// Fused linear + sparse-soft-target distillation loss:
-        /// cross-entropy of `self·weightᵀ` against per-entry
-        /// (row, class, prob) soft targets, as ONE differentiable op —
-        /// `loss = reduce_i probs[i]·(LSE(logits[rows[i]]) −
-        /// logits[rows[i], classes[i]])`. Only the UNIQUE rows named by
-        /// `rows` are projected (rows without entries never produce
-        /// logits), the selected-row logits live solely on the backward
-        /// record with the forward's per-row softmax statistics, and the
-        /// VJP consumes them in place — the full [row, class] block never
-        /// enters the graph and its gradient never costs a second buffer.
-        /// `self` is [row, shared] and `weight` [class, shared] (both
-        /// rank-2, shared tag last, f32). `probs[i]` weights entry i (a
-        /// teacher probability in the distillation use; truncated tail
-        /// mass deliberately NOT renormalized). `options.reduction`
-        /// reduces over ENTRIES and `options.loss_scale` multiplies the
-        /// scalar result (the gradient-accumulation knob). Differentiable
-        /// in BOTH operands; the record is single-use like
-        /// `linearCrossEntropy`.
-        pub fn linearDistill(
-            self: *const Self,
-            ctx: *ExecContext,
-            weight: anytype,
-            rows: []const usize,
-            classes: []const usize,
-            probs: []const f32,
-            options: exec_mod.LinearDistillOptions,
-        ) !Tensor(.{}) {
-            const Other = TensorObject(@TypeOf(weight));
-            comptime {
-                if (tag_rank != 2 or Other.axis_tags.len != 2) @compileError("linearDistill requires rank-2 [row, shared] x and [class, shared] weight");
-                if (Other.dtype != .f32) @compileError("linearDistill requires an f32 weight (quantized/f16 arms are not routed)");
-                if (tags[1] != Other.axis_tags[1]) @compileError("linearDistill requires the shared tag LAST on both operands");
-                if (Other.axis_tags[0] == tags[0] or Other.axis_tags[0] == tags[1]) @compileError("linearDistill weight class tag must not appear on x");
-            }
-            const weight_ptr = tensorObjectPtrFrom(@TypeOf(weight), &weight);
-            const wants_grad = self.requiresGrad() or weight_ptr.requiresGrad();
-            var fwd = try ctx.linearDistillLossStats(self.asRawTensor(), weight_ptr.asRawTensor(), rows, classes, probs, options);
-            // finishOp takes ownership of the scalar; everything else is
-            // cloned/duped onto the record and released here.
-            defer {
-                fwd.logits.deinit();
-                fwd.x_sel.deinit();
-                ctx.allocator().free(fwd.sel_rows);
-                ctx.allocator().free(fwd.local_rows);
-                ctx.allocator().free(fwd.row_stats);
-            }
-            errdefer fwd.value.deinit();
-            if (!recordsGrad(wants_grad)) return finishNoGrad(.{}, ctx, fwd.value);
-            var saved_x_sel = try (&fwd.x_sel).cloneView();
-            errdefer saved_x_sel.deinit();
-            var saved_weight = try weight_ptr.asRawTensor().cloneView();
-            errdefer saved_weight.deinit();
-            var saved_logits = try (&fwd.logits).cloneView();
-            errdefer saved_logits.deinit();
-            const owned_sel_rows = try ctx.allocator().dupe(usize, fwd.sel_rows);
-            errdefer ctx.allocator().free(owned_sel_rows);
-            const owned_local_rows = try ctx.allocator().dupe(usize, fwd.local_rows);
-            errdefer ctx.allocator().free(owned_local_rows);
-            const owned_classes = try ctx.allocator().dupe(usize, classes);
-            errdefer ctx.allocator().free(owned_classes);
-            const owned_probs = try ctx.allocator().dupe(f32, probs);
-            errdefer ctx.allocator().free(owned_probs);
-            const owned_row_stats = try ctx.allocator().dupe(f32, fwd.row_stats);
-            errdefer ctx.allocator().free(owned_row_stats);
-            return finishOp(.{}, ctx, fwd.value, LinearDistillBackward{
-                .parents = .{ self.grad_state, weight_ptr.grad_state },
-                .x_sel = saved_x_sel,
-                .weight = saved_weight,
-                .logits = saved_logits,
-                .sel_rows = owned_sel_rows,
-                .local_rows = owned_local_rows,
-                .classes = owned_classes,
-                .probs = owned_probs,
-                .row_stats = owned_row_stats,
-                .row_count = self.asRawTensor().shape.at(0),
-                .options = options,
-                .estimated_work = LinearDistillBackward.workEstimate(self.grad_state, weight_ptr.grad_state, (&fwd.x_sel), weight_ptr.asRawTensor()),
             });
         }
 

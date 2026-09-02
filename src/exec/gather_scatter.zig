@@ -27,10 +27,7 @@ const coordinateForLinear = backend_mod.rows.coordinateForLinear;
 
 const ScatterAddRowsTask = exec_row_ops.ScatterAddRowsTask;
 
-// --- model-serving: relposShift (parakeet) ----------------------------------
-// Single consumer family: the parakeet FastConformer encoder and its
-// streaming variant, through the `Tensor.relposShift` facade (see the
-// model-serving group in exec.zig).
+// --- relposShift: the relative-position skew (Transformer-XL family) ------
 
 /// Transformer-XL relative-shift ("skew"): a rank-3
 /// relative-score tensor `bd[H,Tq,P]` → `out[H,Tq,Tk]` with

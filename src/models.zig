@@ -144,6 +144,9 @@ pub const text = struct {
     pub const kv_persist = @import("models/text/kv_persist.zig");
     pub const data = @import("models/text/data.zig");
     pub const cartridge = @import("models/text/cartridge.zig");
+    /// The cartridge trainer's fused linear + sparse-soft-target
+    /// distillation loss (a custom VJP).
+    pub const linear_distill = @import("models/text/linear_distill.zig");
     pub const cartridge_fleet = @import("models/text/cartridge_fleet.zig");
     /// Lossless draft-model-free speculative decoding. Files in
     /// `models/text/speculative/`.
@@ -264,6 +267,7 @@ test {
     _ = inkling.mmproj;
     _ = inkling.chat;
     _ = text.cartridge;
+    _ = text.linear_distill;
     _ = text.cartridge_fleet;
     _ = research.engram;
     _ = train.lora_trainer;

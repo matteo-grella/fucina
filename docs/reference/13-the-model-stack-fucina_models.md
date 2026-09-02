@@ -2016,7 +2016,11 @@ Construction and lifecycle (create OUTSIDE any exec scope, like LoRA A/B):
   `forwardStep` decode continues at position p, the training-time layout.
 
 `distillLoss(ctx, logits, targets, options)` is the reference training
-objective: the teacher top-k cross-entropy
+objective (the composed route; the trainer's default is the fused custom
+VJP `models.text.linear_distill.linearDistill(ctx, x, weight, rows,
+classes, probs, options)`, which projects only the unique supervised rows
+and consumes its saved logits in the backward — same objective, f32
+roundoff apart): the teacher top-k cross-entropy
 `mean(-exp(logprob_i) · log_softmax(logits)[positions_i − 1, tokens_i])` over
 sparse `(position, token, logprob)` entries — gradient-identical to forward
 KL(teacher ‖ student) since the teacher entropy is constant. `positions[i]`

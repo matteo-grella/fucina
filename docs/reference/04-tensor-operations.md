@@ -66,7 +66,7 @@ Every operation below shares one contract, implemented by the shared tails
   `RopeMode`, `RopeTable`, `RopeTheta`, `MoeRhs`, `MoeBatchProfile`,
   `PackedRhs`, `GatedOp`, `VarianceOptions`. The remaining option types
   named in this section (`CompareOp`, `MatmulKind`, `MseOptions`,
-  `HuberOptions`, `BceOptions`, `KlDivOptions`, `LinearDistillOptions`,
+  `HuberOptions`, `BceOptions`, `KlDivOptions`,
   `SoftmaxExtOptions`, `NormOrder`) live in
   `src/exec.zig` and are reached through enum/struct literals at call sites
   (`.swiglu`, `.lt`, `.trans_b`, `.{ .reduction = .none }`).
@@ -1666,30 +1666,9 @@ is never materialized. Differentiable in **both** operands; same
 options/reduction contract as `crossEntropy` (`.none` returns per-row
 losses tagged by the row tag).
 
-**Fused linear + sparse-soft-target distillation** — cross-entropy of
-`self·weightᵀ` against per-entry `(row, class, prob)` soft targets as ONE
-differentiable op (a teacher's top-k in the distillation use, [§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig)):
-
-```zig
-pub fn linearDistill(self, ctx, weight: anytype, rows: []const usize,
-                        classes: []const usize, probs: []const f32,
-                        options: exec.LinearDistillOptions) !Tensor(.{})
-```
-
-`loss = reduce_i probs[i]·(LSE(logits[rows[i]]) − logits[rows[i], classes[i]])`
-with the same operand contract as `linearCrossEntropy` (rank-2 f32,
-shared tag last, comptime-checked). Two structural properties on top of
-the fused CE: only the UNIQUE rows named by `rows` are ever projected
-(rows without entries produce no logits at all), and the backward consumes
-the saved selected-row logits in place, so neither the `[row, class]`
-block nor its gradient ever exists outside the record.
-`exec.LinearDistillOptions{ .reduction = .mean|.sum, .loss_scale }`
-reduces over ENTRIES (`.mean` divides by the entry count; probs are used
-as given — a truncated teacher tail is deliberately NOT renormalized) and
-`loss_scale` multiplies the scalar result (the gradient-accumulation
-knob). Differentiable in **both** operands; the record is single-use like
-`linearCrossEntropy` (a repeat backward errors with
-`LinearDistillBackwardConsumed`).
+The cartridge trainer's fused linear + sparse-soft-target distillation
+loss is not a core op: it is a custom VJP beside its consumer,
+`models.text.linear_distill` ([§13.10](13-the-model-stack-fucina_models.md#1310-cartridges-srcmodelstextcartridgezig)).
 
 **Elementwise losses** vs a same-tagged `target`, all differentiable in
 **both** operands, all sharing the reduction/result-type contract above

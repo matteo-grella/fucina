@@ -68,8 +68,6 @@ pub const Reduction = exec_loss.Reduction;
 pub const CrossEntropyOptions = exec_loss.CrossEntropyOptions;
 pub const CrossEntropyUpstream = exec_loss.CrossEntropyUpstream;
 pub const LinearCrossEntropyGrads = exec_loss.LinearCrossEntropyGrads;
-pub const LinearDistillOptions = exec_loss.LinearDistillOptions;
-pub const LinearDistillForward = exec_loss.LinearDistillForward;
 pub const MseOptions = exec_loss.MseOptions;
 pub const HuberOptions = exec_loss.HuberOptions;
 pub const BceOptions = exec_loss.BceOptions;
@@ -294,6 +292,10 @@ pub const ExecContext = struct {
     pub const softcap = exec_elementwise.softcap;
     pub const clamp = exec_elementwise.clamp;
     pub const reduceBroadcast = exec_elementwise.reduceBroadcast;
+    /// Per-channel Snake activation rows (audio codec decoders).
+    pub const snakeRows = exec_elementwise.snakeRows;
+    pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
+    pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
 
     // ----------------------------------------------------------------------
     // convert: dtype conversion and quantize/dequantize round trips (exec/convert.zig)
@@ -378,6 +380,8 @@ pub const ExecContext = struct {
     pub const takeAlong = exec_gather_scatter.takeAlong;
     pub const scatterAddAlong = exec_gather_scatter.scatterAddAlong;
     pub const scatterAlong = exec_gather_scatter.scatterAlong;
+    /// Transformer-XL relative-shift skew (relative-position attention).
+    pub const relposShift = exec_gather_scatter.relposShift;
 
     // ----------------------------------------------------------------------
     // stats: extrema, moments, standardize, top-k, sort (exec/stats.zig)
@@ -406,6 +410,8 @@ pub const ExecContext = struct {
     pub const logSoftmax = exec_softmax.logSoftmax;
     pub const softmaxExt = exec_softmax.softmaxExt;
     pub const softmaxBackward = exec_softmax.softmaxBackward;
+    /// Standardize over a valid prefix (`standardizeAxis` `.valid_len`).
+    pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
 
     // ----------------------------------------------------------------------
     // norm: RMS/layer/group normalization and their fused arms (exec/norm.zig)
@@ -494,31 +500,6 @@ pub const ExecContext = struct {
     pub const carveMoeDecodeChainScratch = exec_moe.carveMoeDecodeChainScratch;
     pub const moeExpertFfn = exec_moe.moeExpertFfn;
     pub const moeExpertFfnBatch = exec_moe.moeExpertFfnBatch;
-
-    // ----------------------------------------------------------------------
-    // model-serving ops: general in shape, present for named model families.
-    // Each is reached through a public `Tensor` facade method, and the ag
-    // mixins hosting those facades cannot import the models band (that
-    // import would invert the layer stack), so the bodies live in exec/
-    // beside the generic machinery they share (`standardizeImpl`, the
-    // linear-loss row tasks, the elementwise kernel seam). This group is
-    // the inventory; the body sites carry the same mark.
-    // ----------------------------------------------------------------------
-    /// Snake activation rows (audio codec decoders: qwen3tts codec,
-    /// omnivoice DAC, via `Tensor.snake`).
-    pub const snakeRows = exec_elementwise.snakeRows;
-    pub const snakeRowsBackwardInput = exec_elementwise.snakeRowsBackwardInput;
-    pub const snakeRowsBackwardParams = exec_elementwise.snakeRowsBackwardParams;
-    /// Transformer-XL relative-shift skew (parakeet encoder + streaming,
-    /// via `Tensor.relposShift`).
-    pub const relposShift = exec_gather_scatter.relposShift;
-    /// Standardize over a valid prefix (parakeet NeMo frontend, via
-    /// `Tensor.standardizeAxis` `.valid_len`).
-    pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
-    /// Fused linear + sparse-soft-target distillation (qwen3 cartridge
-    /// distillation, via `Tensor.linearDistill`).
-    pub const linearDistillLossStats = exec_loss.linearDistillLossStats;
-    pub const linearDistillBackwardUpstream = exec_loss.linearDistillBackwardUpstream;
 };
 
 test {

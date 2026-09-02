@@ -44,12 +44,13 @@ services.
   assistant tokens are supervised, read from logits row `position − 1`;
   top-20 entries truncated at 0.99 cumulative mass, tail dropped, NOT
   renormalized. Optimizer: Adam, lr 2e-2, no weight decay, no schedule.
-  The trainer computes this through the fused `linearDistill` core op:
-  the output projection and the sparse targets run as ONE node, only the
-  supervised rows are ever projected, and the `[seq, vocab]` logits never
-  enter the autograd graph (the composed `cartridge.distillLoss` tail
-  remains available — `FUCINA_FUSED_DISTILL=0` — and the two agree to
-  f32 roundoff, pinned by a trainer test).
+  The trainer computes this through `models.text.linear_distill`, a
+  fused custom VJP beside it: the output projection and the sparse
+  targets run as ONE node, only the supervised rows are ever projected,
+  and the `[seq, vocab]` logits never enter the autograd graph (the
+  composed `cartridge.distillLoss` tail remains available —
+  `FUCINA_FUSED_DISTILL=0` — and the two agree to f32 roundoff, pinned by
+  a trainer test).
 - **Self-study** (paper Sec 4, Algorithm 1 with k = 1;
   `apps/cartridge/main.zig`): sample a uniform random corpus token span and
   one of seven seed-prompt types: the reference five (structuring /

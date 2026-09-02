@@ -26,6 +26,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const qwen3 = @import("model.zig");
 const cartridge_mod = @import("../text/cartridge.zig");
+const linear_distill = @import("../text/linear_distill.zig");
 const lora_trainer = @import("../train/lora_trainer.zig");
 const weights = @import("fucina").weights;
 
@@ -874,12 +875,12 @@ pub fn Trainer(comptime targets: Targets) type {
         }
 
         /// The fused tail of `distillLoss`: final norm, then
-        /// `linearDistillExt` — the output projection and the sparse
-        /// teacher targets as ONE op, so the [seq, vocab] logits (and
-        /// their log-softmax) never enter the graph and only the
-        /// supervised rows are ever projected. Same objective as the
-        /// composed tail (`cartridge.distillLoss` documents it); the two
-        /// routes agree to f32 roundoff, pinned by a trainer test.
+        /// `linear_distill.linearDistill` — the output projection and the
+        /// sparse teacher targets as ONE custom-VJP node, so the [seq,
+        /// vocab] logits (and their log-softmax) never enter the graph and
+        /// only the supervised rows are ever projected. Same objective as
+        /// the composed tail (`cartridge.distillLoss` documents it); the
+        /// two routes agree to f32 roundoff, pinned by a trainer test.
         fn distillLossFusedTail(
             self: *Self,
             ctx: *ExecContext,
@@ -904,7 +905,7 @@ pub fn Trainer(comptime targets: Targets) type {
                 row.* = pos - 1;
                 prob.* = @exp(logprob);
             }
-            return normed.linearDistill(ctx, head, rows, distill_targets.tokens, probs, .{
+            return linear_distill.linearDistill(ctx, &normed, head, rows, distill_targets.tokens, probs, .{
                 .reduction = switch (options.reduction) {
                     .mean => .mean,
                     .sum => .sum,

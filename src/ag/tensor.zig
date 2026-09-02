@@ -877,7 +877,6 @@ fn FloatTensor(comptime tags: anytype) type {
         }
         pub const crossEntropy = loss_ops.crossEntropy;
         pub const linearCrossEntropy = loss_ops.linearCrossEntropy;
-        pub const linearDistill = loss_ops.linearDistill;
         pub const mseLoss = loss_ops.mseLoss;
         pub const huberLoss = loss_ops.huberLoss;
         pub const bceLoss = loss_ops.bceLoss;

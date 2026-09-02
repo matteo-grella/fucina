@@ -402,10 +402,7 @@ pub fn standardize(
     return standardizeImpl(ctx, rank, x, axis, null, options);
 }
 
-// --- model-serving: standardizeValidPrefix (parakeet frontend) --------------
-// Single consumer: the parakeet NeMo frontend, through `standardizeAxis`'s
-// `.valid_len` option. A thin arm of `standardizeImpl` shared with the plain
-// `standardize` (see the model-serving group in exec.zig).
+// --- standardizeValidPrefix: a thin arm of `standardizeImpl` ---------------
 
 /// Standardize over the first `valid_len` elements of `axis`; positions
 /// after that prefix are masked out, written as zero, and ignored by the

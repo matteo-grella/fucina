@@ -22,6 +22,12 @@
 //!
 //! `backward` must write owned raw tensors into `out[i]` for every true
 //! `needs_grad[i]`; the autograd engine consumes and deinits those tensors.
+//!
+//! `extra` is stored by value on the backward record. An `extra` type that
+//! owns state (a pointer to a forward-computed cache the backward reads)
+//! declares `pub fn deinit(self: *Extra, allocator)`: `customVjp` calls it
+//! once the record is released, or right after a forward that records no
+//! gradient. On an error out of `customVjp` the caller still owns `extra`.
 const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
@@ -61,7 +67,10 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
     errdefer value.deinit();
 
     if (!any_grad or !control.isGradEnabled()) {
-        return finishNoGrad(Spec.Output, ctx, value);
+        const out = try finishNoGrad(Spec.Output, ctx, value);
+        var owned_extra = extra;
+        releaseExtra(&owned_extra, ctx.allocator());
+        return out;
     }
 
     var views: [n]RawTensor = undefined;
@@ -130,13 +139,19 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
         }
 
         pub fn deinitFields(self: *Self, allocator: Allocator) void {
-            _ = allocator;
             for (&self.views) |*view| view.deinit();
             self.output.deinit();
+            releaseExtra(&self.extra, allocator);
         }
 
         pub const vtable = core.recordVTable(Self);
     };
+}
+
+/// Runs `Extra.deinit` when the extra type declares one (owned state).
+fn releaseExtra(extra: anytype, allocator: Allocator) void {
+    const Extra = @TypeOf(extra.*);
+    if (comptime @typeInfo(Extra) == .@"struct" and @hasDecl(Extra, "deinit")) extra.deinit(allocator);
 }
 
 fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Output {

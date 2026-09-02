@@ -25,6 +25,19 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `Tensor.linearDistill` is gone from the core: the fused linear +
+  sparse-soft-target distillation loss is `models.text.linear_distill.
+  linearDistill(ctx, x, weight, rows, classes, probs, options)`, a custom
+  VJP beside the cartridge trainer (its only consumer). With it go
+  `exec.LinearDistillOptions`/`LinearDistillForward`, the exec
+  `linearDistillLossStats`/`linearDistillBackwardUpstream` entries, the
+  `distillStatsRows`/`distillBackwardRows` kernels and the
+  `LinearDistillBackward` record. `customVjp` now releases an `extra`
+  that declares `deinit(allocator)` when the record is dropped (or after a
+  forward that records no gradient).
+- The exec registry's "model-serving" exception group is gone: `snakeRows`,
+  `relposShift` and `standardizeValidPrefix` are listed with their
+  families (elementwise, gather/scatter, stats).
 - The subquadratic evaluator's f16 row-block attention kernels
   (`scoreRows4F16`, `weightedAccumRows4F16`, `vecExpAffineSumInPlace`,
   `vecMaxReduce`) live beside their one consumer as

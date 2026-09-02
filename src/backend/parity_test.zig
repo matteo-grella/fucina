@@ -1015,21 +1015,6 @@ const Impl = struct {
             rows_impl.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_a, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
             rows_impl.scalar.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_b, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
             try expectClose(gx_b, gx_a, tol);
-
-            // Distill statistics + backward share the CE stats layout.
-            const stats_a = try allocator.alloc(f32, 2 * n_rows);
-            defer allocator.free(stats_a);
-            const stats_b = try allocator.alloc(f32, 2 * n_rows);
-            defer allocator.free(stats_b);
-            rows_impl.distillStatsRows(.{ .input = input, .row_stats = stats_a, .class_count = cols, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.distillStatsRows(.{ .input = input, .row_stats = stats_b, .class_count = cols, .row_start = 0, .row_end = n_rows });
-            try expectClose(stats_b, stats_a, tol);
-            const mass = try allocator.alloc(f32, n_rows);
-            defer allocator.free(mass);
-            fillRandom(rng, mass);
-            rows_impl.distillBackwardRows(.{ .input = input, .output = gx_a, .row_stats = stats_a, .row_mass = mass, .class_count = cols, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.distillBackwardRows(.{ .input = input, .output = gx_b, .row_stats = stats_a, .row_mass = mass, .class_count = cols, .row_start = 0, .row_end = n_rows });
-            try expectClose(gx_b, gx_a, tol);
         }
     }
 
