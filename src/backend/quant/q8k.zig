@@ -61,6 +61,39 @@ pub fn packLaneGroups(
     };
 }
 
+/// The shared x8 lane-pack body of `packGroupQ4_Kx8` / `packGroupQ5_Kx8`:
+/// the eight columns' d/dmin and per-sub-block (scale, min), then `groups`
+/// 256-byte qs groups (8 feature groups x 8 columns x 4 lanes) filled from
+/// `value(block, group, feature_offset)`. Q4_K keeps its nibble pairs
+/// packed (4 groups of two sub-blocks each); Q5_K stores the unpacked
+/// 5-bit values (8 groups).
+pub fn packGroupKx8(dst: anytype, cols: anytype, comptime groups: usize, comptime value: anytype) void {
+    inline for (0..8) |col| {
+        dst.d[col] = cols[col].dm[0];
+        dst.dmin[col] = cols[col].dm[1];
+    }
+
+    for (0..8) |subblock| {
+        inline for (0..8) |col| {
+            const scale_min = getScaleMinK4(&cols[col].scales, subblock);
+            dst.scales[subblock * 8 + col] = scale_min.scale;
+            dst.mins[subblock * 8 + col] = scale_min.min;
+        }
+    }
+
+    for (0..groups) |group| {
+        for (0..8) |feature_group| {
+            inline for (0..8) |col| {
+                const block = cols[col];
+                inline for (0..4) |lane| {
+                    const feature_offset = feature_group * 4 + lane;
+                    dst.qs[group * 256 + feature_group * 32 + col * 4 + lane] = @intCast(value(block, group, feature_offset));
+                }
+            }
+        }
+    }
+}
+
 pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
     const block_count = try q8_0BlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
@@ -209,91 +242,33 @@ pub fn qkBlockCount(len: usize) !usize {
     return types.blockCountExact(qk_k_block_size, len);
 }
 pub const blockCountExact = types.blockCountExact;
-pub fn quantizedMatmulRhsQ2_KFromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const dtype_mod.BlockQ2_K,
-) !types.QuantizedMatmulRhsQ2_K {
-    const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(dtype_mod.BlockQ2_K, blocks);
-    return .{
-        .allocator = allocator,
-        .blocks = owned,
-        .k = k,
-        .n = n,
-        .blocks_per_column = blocks_per_column,
+
+/// The owning compact-RHS constructor of a K-quant format: `n` columns of
+/// `k/256` blocks each, copied into the container.
+fn KQuantRhsFromBlocks(comptime Rhs: type) type {
+    const Block = @typeInfo(@FieldType(Rhs, "blocks")).pointer.child;
+    return struct {
+        fn fromBlocks(allocator: Allocator, k: usize, n: usize, blocks: []const Block) !Rhs {
+            const blocks_per_column = try qkBlockCount(k);
+            if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
+            const owned = try allocator.dupe(Block, blocks);
+            return .{
+                .allocator = allocator,
+                .blocks = owned,
+                .k = k,
+                .n = n,
+                .blocks_per_column = blocks_per_column,
+            };
+        }
     };
 }
-pub fn quantizedMatmulRhsQ3_KFromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const dtype_mod.BlockQ3_K,
-) !types.QuantizedMatmulRhsQ3_K {
-    const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(dtype_mod.BlockQ3_K, blocks);
-    return .{
-        .allocator = allocator,
-        .blocks = owned,
-        .k = k,
-        .n = n,
-        .blocks_per_column = blocks_per_column,
-    };
-}
-pub fn quantizedMatmulRhsQ4_KFromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const dtype_mod.BlockQ4_K,
-) !types.QuantizedMatmulRhsQ4_K {
-    const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(dtype_mod.BlockQ4_K, blocks);
-    return .{
-        .allocator = allocator,
-        .blocks = owned,
-        .k = k,
-        .n = n,
-        .blocks_per_column = blocks_per_column,
-    };
-}
-pub fn quantizedMatmulRhsQ5_KFromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const dtype_mod.BlockQ5_K,
-) !types.QuantizedMatmulRhsQ5_K {
-    const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(dtype_mod.BlockQ5_K, blocks);
-    return .{
-        .allocator = allocator,
-        .blocks = owned,
-        .k = k,
-        .n = n,
-        .blocks_per_column = blocks_per_column,
-    };
-}
-pub fn quantizedMatmulRhsQ6_KFromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const dtype_mod.BlockQ6_K,
-) !types.QuantizedMatmulRhsQ6_K {
-    const blocks_per_column = try qkBlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_column)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(dtype_mod.BlockQ6_K, blocks);
-    return .{
-        .allocator = allocator,
-        .blocks = owned,
-        .k = k,
-        .n = n,
-        .blocks_per_column = blocks_per_column,
-    };
-}
+
+pub const quantizedMatmulRhsQ2_KFromBlocks = KQuantRhsFromBlocks(types.QuantizedMatmulRhsQ2_K).fromBlocks;
+pub const quantizedMatmulRhsQ3_KFromBlocks = KQuantRhsFromBlocks(types.QuantizedMatmulRhsQ3_K).fromBlocks;
+pub const quantizedMatmulRhsQ4_KFromBlocks = KQuantRhsFromBlocks(types.QuantizedMatmulRhsQ4_K).fromBlocks;
+pub const quantizedMatmulRhsQ5_KFromBlocks = KQuantRhsFromBlocks(types.QuantizedMatmulRhsQ5_K).fromBlocks;
+pub const quantizedMatmulRhsQ6_KFromBlocks = KQuantRhsFromBlocks(types.QuantizedMatmulRhsQ6_K).fromBlocks;
+
 pub fn quantizeRowQ8_KInto(dst: []dtype_mod.BlockQ8_K, src: []const f32) !void {
     const block_count = try qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;

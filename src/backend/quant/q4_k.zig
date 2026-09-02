@@ -67,31 +67,13 @@ pub fn packMatmulRhsQ4_Kx8(allocator: Allocator, blocks: []const BlockQ4_K, n: u
 }
 
 fn packGroupQ4_Kx8(dst: *BlockQ4_Kx8, cols: [8]*const BlockQ4_K) void {
-    inline for (0..8) |col| {
-        dst.d[col] = cols[col].dm[0];
-        dst.dmin[col] = cols[col].dm[1];
-    }
+    q8k.packGroupKx8(dst, cols, 4, q4Kx8NibblePair);
+}
 
-    for (0..8) |subblock| {
-        inline for (0..8) |col| {
-            const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
-            dst.scales[subblock * 8 + col] = scale_min.scale;
-            dst.mins[subblock * 8 + col] = scale_min.min;
-        }
-    }
-
-    for (0..4) |subblock_pair| {
-        for (0..8) |feature_group| {
-            inline for (0..8) |col| {
-                const block = cols[col];
-                inline for (0..4) |lane| {
-                    const feature_offset = feature_group * 4 + lane;
-                    dst.qs[subblock_pair * 256 + feature_group * 32 + col * 4 + lane] =
-                        block.qs[subblock_pair * 32 + feature_offset];
-                }
-            }
-        }
-    }
+/// Q4_Kx8 keeps the nibble pairs packed: qs group `subblock_pair` holds
+/// the raw bytes of sub-blocks `2p` (low nibbles) and `2p+1` (high).
+fn q4Kx8NibblePair(block: *const BlockQ4_K, subblock_pair: usize, feature_offset: usize) u8 {
+    return block.qs[subblock_pair * 32 + feature_offset];
 }
 
 pub fn packMatmulRhsQ4_Kx2Mmla(allocator: Allocator, blocks: []const BlockQ4_K, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsQ4_Kx2Mmla {

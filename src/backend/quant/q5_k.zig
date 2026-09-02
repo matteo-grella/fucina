@@ -30,31 +30,7 @@ pub fn packMatmulRhsQ5_Kx8(allocator: Allocator, blocks: []const dtype_mod.Block
 }
 
 fn packGroupQ5_Kx8(dst: *BlockQ5_Kx8, cols: [8]*const dtype_mod.BlockQ5_K) void {
-    inline for (0..8) |col| {
-        dst.d[col] = cols[col].dm[0];
-        dst.dmin[col] = cols[col].dm[1];
-    }
-
-    for (0..8) |subblock| {
-        inline for (0..8) |col| {
-            const scale_min = q8k.getScaleMinK4(&cols[col].scales, subblock);
-            dst.scales[subblock * 8 + col] = scale_min.scale;
-            dst.mins[subblock * 8 + col] = scale_min.min;
-        }
-    }
-
-    for (0..8) |subblock| {
-        for (0..8) |feature_group| {
-            inline for (0..8) |col| {
-                const block = cols[col];
-                inline for (0..4) |lane| {
-                    const feature_offset = feature_group * 4 + lane;
-                    dst.qs[subblock * 256 + feature_group * 32 + col * 4 + lane] =
-                        @intCast(q5KValue(block, subblock, feature_offset));
-                }
-            }
-        }
-    }
+    q8k.packGroupKx8(dst, cols, 8, q5KValue);
 }
 
 const matmulQ5_Kx8RhsTile = common.LaneX8Tile(BlockQ8_K, types.QuantizedMatmulRhsQ5_Kx8, .{ .rows = accumulateQ5_Kx8Rows, .one = accumulateQ5_Kx8 });
