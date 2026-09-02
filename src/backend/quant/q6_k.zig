@@ -54,50 +54,11 @@ fn packGroupQ6_Kx4(dst: *BlockQ6_Kx4, cols: [4]*const BlockQ6_K) void {
     }
 }
 
-pub fn matmulQ6_KRhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const types.QuantizedMatmulRhsQ6_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.blocks_per_column;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-
-        while (j + common.qk_col_block <= c1) : (j += common.qk_col_block) {
-            var acc = [_]f32{0} ** common.qk_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_block = &lhs_row[block_index];
-                inline for (0..common.qk_col_block) |c| {
-                    const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
-                    acc[c] += dotQ6_KQ8_K(rhs_block, lhs_block);
-                }
-            }
-            inline for (0..common.qk_col_block) |c| out[i * n + j + c] = acc[c];
-        }
-
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ6_KQ8_K(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+pub const matmulQ6_KRhsTile = common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsQ6_K, common.qk_col_block, .{ .dot = dotQ6_KQ8_K });
 
 pub const matmulQ6_KRhsRange = common.RangeFromTile(matmulQ6_KRhsTile);
 
-const moe_row_tile = 4;
+const moe_row_tile = common.moe_row_tile;
 
 /// Unpack one Q6_K group (16 weights) to a centered i8 lane for sdot. Same
 /// extraction as `dotQ6_KGroupI32`, emitted once for reuse across a row batch.
@@ -324,60 +285,7 @@ pub fn matmulQ6_KCompactQ8_Kx4ColOuter(
     }
 }
 
-pub fn matmulQ6_Kx4RhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const types.QuantizedMatmulRhsQ6_Kx4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    std.debug.assert(c0 % 4 == 0);
-    std.debug.assert(c1 % 4 == 0);
-
-    const blocks_per_row = rhs.blocks_per_group;
-    var i = r0;
-    while (i + q8_0_row_block <= r1) : (i += q8_0_row_block) {
-        var j = c0;
-        while (j < c1) : (j += 4) {
-            const rhs_group = rhs.groupBlocks(j / 4);
-            var acc: [q8_0_row_block]QKV4f32 = undefined;
-            inline for (0..q8_0_row_block) |r| acc[r] = @splat(0);
-
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const rhs_block = &rhs_group[block_index];
-                accumulateQ6_Kx4Rows(lhs_blocks, i, blocks_per_row, block_index, rhs_block, &acc);
-            }
-
-            inline for (0..q8_0_row_block) |r| {
-                out[(i + r) * n + j + 0] = acc[r][0];
-                out[(i + r) * n + j + 1] = acc[r][1];
-                out[(i + r) * n + j + 2] = acc[r][2];
-                out[(i + r) * n + j + 3] = acc[r][3];
-            }
-        }
-    }
-
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 4) {
-            const rhs_group = rhs.groupBlocks(j / 4);
-            var acc: QKV4f32 = @splat(0);
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc = accumulateQ6_Kx4(&lhs_row[block_index], &rhs_group[block_index], acc);
-            }
-            out[i * n + j + 0] = acc[0];
-            out[i * n + j + 1] = acc[1];
-            out[i * n + j + 2] = acc[2];
-            out[i * n + j + 3] = acc[3];
-        }
-    }
-}
+pub const matmulQ6_Kx4RhsTile = common.LaneX4Tile(BlockQ8_K, types.QuantizedMatmulRhsQ6_Kx4, .{ .rows = accumulateQ6_Kx4Rows, .one = accumulateQ6_Kx4 });
 
 pub fn matmulQ6_Kx4RhsPairTile(
     gate_out: []f32,

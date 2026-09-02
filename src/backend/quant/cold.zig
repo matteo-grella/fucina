@@ -922,250 +922,34 @@ fn writeQh(qh: []u8, value: u32) void {
     qh[3] = @intCast((value >> 24) & 0xff);
 }
 
-fn matmulQ4_0RhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const types.QuantizedMatmulRhsQ4_0,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-
-        while (j + q4_0_col_block <= c1) : (j += q4_0_col_block) {
-            var acc = [_]f32{0} ** q4_0_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const a_block = prepareQ8_0Block(&lhs_row[block_index]);
-                inline for (0..q4_0_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
-                    acc[c] += dotQ4_0PreparedQ8_0(rhs_block, a_block);
-                }
-            }
-            inline for (0..q4_0_col_block) |c| out[i * n + j + c] = acc[c];
-        }
-
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ4_0Q8_0(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+/// The Q8_0 activation block is widened once per K step (`prepareQ8_0Block`)
+/// and shared across the column block.
+const matmulQ4_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ4_0, q4_0_col_block, .{ .prepare = prepareQ8_0Block, .dot = dotQ4_0PreparedQ8_0 });
 
 pub const matmulQ4_0RhsRange = common.RangeFromTile(matmulQ4_0RhsTile);
 
-fn matmulQ1_0RhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const types.QuantizedMatmulRhsQ1_0,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    const lhs_blocks_per_row = blocks_per_row * (types.q1_0_block_size / types.q8_0_block_size);
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * lhs_blocks_per_row ..][0..lhs_blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_base = block_index * (types.q1_0_block_size / types.q8_0_block_size);
-                acc += dotQ1_0Q8_0(&rhs_col[block_index], lhs_row[lhs_base..][0..4]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+/// One Q1_0 block (128 weights) spans four Q8_0 activation blocks.
+const matmulQ1_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ1_0, 1, .{ .lhs_per_rhs = types.q1_0_block_size / types.q8_0_block_size, .dot = dotQ1_0Q8_0 });
 
 pub const matmulQ1_0RhsRange = common.RangeFromTile(matmulQ1_0RhsTile);
 
-fn matmulQ4_1RhsTile(
-    out: []f32,
-    lhs_blocks: []const dtype_mod.BlockQ8_1,
-    rhs: *const types.QuantizedMatmulRhsQ4_1,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ4_1Q8_1(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+const matmulQ4_1RhsTile = common.RowOuterTile(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ4_1, 1, .{ .dot = dotQ4_1Q8_1 });
 
 pub const matmulQ4_1RhsRange = common.RangeFromTile(matmulQ4_1RhsTile);
 
-fn matmulQ5_0RhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const types.QuantizedMatmulRhsQ5_0,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ5_0Q8_0(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+const matmulQ5_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ5_0, 1, .{ .dot = dotQ5_0Q8_0 });
 
 pub const matmulQ5_0RhsRange = common.RangeFromTile(matmulQ5_0RhsTile);
 
-fn matmulQ5_1RhsTile(
-    out: []f32,
-    lhs_blocks: []const dtype_mod.BlockQ8_1,
-    rhs: *const types.QuantizedMatmulRhsQ5_1,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ5_1Q8_1(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+const matmulQ5_1RhsTile = common.RowOuterTile(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ5_1, 1, .{ .dot = dotQ5_1Q8_1 });
 
 pub const matmulQ5_1RhsRange = common.RangeFromTile(matmulQ5_1RhsTile);
 
-fn matmulQ2_KRhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const types.QuantizedMatmulRhsQ2_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.blocks_per_column;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-
-        while (j + common.qk_col_block <= c1) : (j += common.qk_col_block) {
-            var acc = [_]f32{0} ** common.qk_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_block = &lhs_row[block_index];
-                inline for (0..common.qk_col_block) |c| {
-                    const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
-                    acc[c] += dotQ2_KQ8_K(rhs_block, lhs_block);
-                }
-            }
-            inline for (0..common.qk_col_block) |c| out[i * n + j + c] = acc[c];
-        }
-
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ2_KQ8_K(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+const matmulQ2_KRhsTile = common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsQ2_K, common.qk_col_block, .{ .dot = dotQ2_KQ8_K });
 
 pub const matmulQ2_KRhsRange = common.RangeFromTile(matmulQ2_KRhsTile);
 
-fn matmulQ3_KRhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_K,
-    rhs: *const types.QuantizedMatmulRhsQ3_K,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    const blocks_per_row = rhs.blocks_per_column;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-
-        while (j + common.qk_col_block <= c1) : (j += common.qk_col_block) {
-            var acc = [_]f32{0} ** common.qk_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_block = &lhs_row[block_index];
-                inline for (0..common.qk_col_block) |c| {
-                    const rhs_block = &rhs.blocks[(j + c) * blocks_per_row + block_index];
-                    acc[c] += dotQ3_KQ8_K(rhs_block, lhs_block);
-                }
-            }
-            inline for (0..common.qk_col_block) |c| out[i * n + j + c] = acc[c];
-        }
-
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ3_KQ8_K(&rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
-}
+const matmulQ3_KRhsTile = common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsQ3_K, common.qk_col_block, .{ .dot = dotQ3_KQ8_K });
 
 pub const matmulQ3_KRhsRange = common.RangeFromTile(matmulQ3_KRhsTile);
 
@@ -1194,41 +978,20 @@ fn matmulTableQ8_0RhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    const rhs_block_size = dtype_mod.blockSize(rhs_dtype);
-    const lhs_blocks_per_rhs_block = rhs_block_size / types.q8_0_block_size;
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    const lhs_blocks_per_row = blocks_per_row * lhs_blocks_per_rhs_block;
+    TableQ8_0Tile(rhs_dtype)(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
+}
 
-    var row = r0;
-    while (row < r1) : (row += 1) {
-        const lhs_row = lhs_blocks[row * lhs_blocks_per_row ..][0..lhs_blocks_per_row];
-        var col = c0;
-
-        while (col + table_q8_0_col_block <= c1) : (col += table_q8_0_col_block) {
-            var acc = [_]f32{0} ** table_q8_0_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_offset = block_index * lhs_blocks_per_rhs_block;
-                const lhs_block = lhs_row[lhs_offset..][0..lhs_blocks_per_rhs_block];
-                inline for (0..table_q8_0_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(col + c) * blocks_per_row + block_index];
-                    acc[c] += dotTableQ8_0(rhs_dtype, rhs_block, lhs_block);
-                }
+/// The Q8_0-activation table tile of `rhs_dtype`: one RHS block spans
+/// `blockSize(rhs_dtype) / 32` activation blocks.
+fn TableQ8_0Tile(comptime rhs_dtype: DType) common.TileFn(BlockQ8_0, types.QuantizedMatmulRhsRowsFor(rhs_dtype)) {
+    return common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsRowsFor(rhs_dtype), table_q8_0_col_block, .{
+        .lhs_per_rhs = dtype_mod.blockSize(rhs_dtype) / types.q8_0_block_size,
+        .dot = struct {
+            fn dot(w: *const dtype_mod.Storage(rhs_dtype), a: []const BlockQ8_0) f32 {
+                return dotTableQ8_0(rhs_dtype, w, a);
             }
-            inline for (0..table_q8_0_col_block) |c| out[row * n + col + c] = acc[c];
-        }
-
-        while (col < c1) : (col += 1) {
-            const rhs_col = rhs.columnBlocks(col);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_offset = block_index * lhs_blocks_per_rhs_block;
-                acc += dotTableQ8_0(rhs_dtype, &rhs_col[block_index], lhs_row[lhs_offset..][0..lhs_blocks_per_rhs_block]);
-            }
-            out[row * n + col] = acc;
-        }
-    }
+        }.dot,
+    });
 }
 
 pub fn matmulTableQ8_KRhsRange(
@@ -1256,43 +1019,25 @@ pub fn matmulTableQ8_KRhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    // Multi-row LHS on iq4_xs: the generic loop below re-decodes every
-    // weight block once per LHS row; the decoded tile hoists the table
-    // decode out of the row loop (identical float sequence — bitwise equal,
-    // pinned by the randomized tile parity test in this file).
+    // Multi-row LHS on iq4_xs: the generic tile re-decodes every weight
+    // block once per LHS row; the decoded tile hoists the table decode out
+    // of the row loop (identical float sequence — bitwise equal, pinned by
+    // the randomized tile parity test in this file).
     if (comptime rhs_dtype == .iq4_xs) {
         if (r1 - r0 > 1) return matmulIQ4_XSTileDecoded(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
     }
-    const blocks_per_row = rhs.rows.blocks_per_row;
+    TableQ8_KTile(rhs_dtype)(out, lhs_blocks, rhs, n, r0, r1, c0, c1);
+}
 
-    var row = r0;
-    while (row < r1) : (row += 1) {
-        const lhs_row = lhs_blocks[row * blocks_per_row ..][0..blocks_per_row];
-        var col = c0;
-
-        while (col + table_q8_k_col_block <= c1) : (col += table_q8_k_col_block) {
-            var acc = [_]f32{0} ** table_q8_k_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_block = &lhs_row[block_index];
-                inline for (0..table_q8_k_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(col + c) * blocks_per_row + block_index];
-                    acc[c] += dotTableQ8_K(rhs_dtype, rhs_block, lhs_block);
-                }
+/// The Q8_K-activation table tile of `rhs_dtype`.
+fn TableQ8_KTile(comptime rhs_dtype: DType) common.TileFn(BlockQ8_K, types.QuantizedMatmulRhsRowsFor(rhs_dtype)) {
+    return common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsRowsFor(rhs_dtype), table_q8_k_col_block, .{
+        .dot = struct {
+            fn dot(w: *const dtype_mod.Storage(rhs_dtype), a: *const BlockQ8_K) f32 {
+                return dotTableQ8_K(rhs_dtype, w, a);
             }
-            inline for (0..table_q8_k_col_block) |c| out[row * n + col + c] = acc[c];
-        }
-
-        while (col < c1) : (col += 1) {
-            const rhs_col = rhs.columnBlocks(col);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotTableQ8_K(rhs_dtype, &rhs_col[block_index], &lhs_row[block_index]);
-            }
-            out[row * n + col] = acc;
-        }
-    }
+        }.dot,
+    });
 }
 
 /// LHS rows per decoded-tile pass: bounds the strided Q8_K activation

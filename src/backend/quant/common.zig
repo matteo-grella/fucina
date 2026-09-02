@@ -6,9 +6,10 @@
 //! primitives gate on comes from `backend/isa.zig` (the capability booleans
 //! and the int8-dot `tier`); nothing here reads `builtin.cpu`.
 //! Imported by quant.zig and the per-type kernel files (q8_0/q4_k/q5_k/q6_k/cold);
-//! it imports none of them. `types.zig` supplies the block layouts the shared
-//! Q8_Kx4 lane dots read.
+//! it imports none of them. `types.zig` and `dtype.zig` supply the block
+//! layouts the shared Q8_Kx4 lane dots and tile skeletons read.
 const std = @import("std");
+const dtype_mod = @import("../../dtype.zig");
 const isa = @import("../isa.zig");
 const types = @import("types.zig");
 
@@ -476,6 +477,8 @@ pub inline fn accumulateLaneRows(
 pub const q8_0_row_block: usize = 4;
 pub const q4_kx8_row_block: usize = 16;
 pub const qk_col_block: usize = 2;
+/// LHS rows per column-outer pass of the K-quant compact kernels.
+pub const moe_row_tile: usize = 4;
 pub const Q4V16u8 = @Vector(16, u8);
 pub const Q4V16i8 = @Vector(16, i8);
 pub const Q4V16i16 = @Vector(16, i16);
@@ -647,6 +650,26 @@ pub fn q4HighNibbleI8(v: QKV16u8) QKV16i8 {
     return @bitCast(v >> @as(QKV16u8, @splat(4)));
 }
 
+pub const ScaleMinK4 = struct {
+    scale: u8,
+    min: u8,
+};
+
+/// The 6-bit (scale, min) pair of sub-block `index` from a Q4_K/Q5_K
+/// 12-byte scales field (ggml `get_scale_min_k4`).
+pub fn getScaleMinK4(q: *const [types.k_scale_size]u8, index: usize) ScaleMinK4 {
+    if (index < 4) {
+        return .{
+            .scale = q[index] & 63,
+            .min = q[index + 4] & 63,
+        };
+    }
+    return .{
+        .scale = (q[index + 4] & 0x0f) | ((q[index - 4] >> 6) << 4),
+        .min = (q[index + 4] >> 4) | ((q[index] >> 6) << 4),
+    };
+}
+
 pub fn dotDense(a: []const f32, b: []const f32) f32 {
     var acc: f32 = 0;
     for (a, b) |x, y| acc += x * y;
@@ -670,6 +693,418 @@ pub fn RangeFromTile(comptime tile: anytype) blk: {
             tile(out, lhs, rhs, n, row_start, row_end, 0, n);
         }
     }.range;
+}
+
+// ---------------------------------------------------------------------------
+// Tile skeletons. A format keeps its dot/accumulate/unpack bodies and
+// instantiates one of these at comptime; the loop nests are the bitwise
+// contract every format shares (rows outer, K blocks in order, one f32
+// accumulator per output). Every instantiation is a plain
+// `matmul<Fmt>RhsTile` (`TileFn`) the format's `gemm` and `RangeFromTile`
+// take as-is.
+// ---------------------------------------------------------------------------
+
+/// The `matmul<Fmt>RhsTile` signature: `out[r0..r1, c0..c1]` (row stride
+/// `n`) from `LhsBlock` rows against an `Rhs` container.
+pub fn TileFn(comptime LhsBlock: type, comptime Rhs: type) type {
+    return fn ([]f32, []const LhsBlock, *const Rhs, usize, usize, usize, usize, usize) void;
+}
+
+/// RHS containers spell their block table two ways: the K-quant compact
+/// views carry `blocks`/`blocks_per_column`, the rows views wrap a
+/// `QuantizedRows*` (`rows.blocks`/`rows.blocks_per_row`).
+inline fn rhsBlocksPerColumn(rhs: anytype) usize {
+    return if (@hasField(@TypeOf(rhs.*), "blocks_per_column")) rhs.blocks_per_column else rhs.rows.blocks_per_row;
+}
+
+fn RhsBlocksSlice(comptime Rhs: type) type {
+    return if (@hasField(Rhs, "blocks_per_column")) @FieldType(Rhs, "blocks") else @FieldType(@FieldType(Rhs, "rows"), "blocks");
+}
+
+inline fn rhsBlocks(rhs: anytype) RhsBlocksSlice(@TypeOf(rhs.*)) {
+    return if (@hasField(@TypeOf(rhs.*), "blocks_per_column")) rhs.blocks else rhs.rows.blocks;
+}
+
+fn ReturnType(comptime f: anytype) type {
+    return @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+}
+
+/// The row-outer tile of the direct-dot formats: per LHS row the columns
+/// advance `col_block` at a time (one f32 accumulator per column, each LHS
+/// unit loaded once per K step) with a single-column tail; every output is
+/// the in-order sum of its K blocks' `arms.dot(rhs_block, lhs)` values.
+/// `lhs` is the LHS block pointer, or `arms.prepare(block)` when the format
+/// hoists a per-block conversion out of the column loop, or the run of
+/// `arms.lhs_per_rhs` LHS blocks one RHS block spans (a slice, for the
+/// formats whose dot takes one). `col_block == 1` is the plain per-column
+/// walk.
+pub fn RowOuterTile(comptime LhsBlock: type, comptime Rhs: type, comptime col_block: usize, comptime arms: anytype) TileFn(LhsBlock, Rhs) {
+    const Arms = @TypeOf(arms);
+    const lhs_run = @hasField(Arms, "lhs_per_rhs");
+    const lhs_per_rhs: usize = if (lhs_run) arms.lhs_per_rhs else 1;
+    const LhsUnit = if (lhs_run)
+        *const [lhs_per_rhs]LhsBlock
+    else if (@hasField(Arms, "prepare"))
+        ReturnType(arms.prepare)
+    else
+        *const LhsBlock;
+    return struct {
+        inline fn lhsUnit(lhs_row: []const LhsBlock, block_index: usize) LhsUnit {
+            if (comptime lhs_run) return lhs_row[block_index * lhs_per_rhs ..][0..lhs_per_rhs];
+            const block = &lhs_row[block_index];
+            return if (comptime @hasField(Arms, "prepare")) arms.prepare(block) else block;
+        }
+
+        fn tile(out: []f32, lhs_blocks: []const LhsBlock, rhs: *const Rhs, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            const blocks_per_row = rhsBlocksPerColumn(rhs);
+            const blocks = rhsBlocks(rhs);
+            const lhs_blocks_per_row = blocks_per_row * lhs_per_rhs;
+            var i = r0;
+            while (i < r1) : (i += 1) {
+                const lhs_row = lhs_blocks[i * lhs_blocks_per_row ..][0..lhs_blocks_per_row];
+                var j = c0;
+
+                if (comptime col_block > 1) {
+                    while (j + col_block <= c1) : (j += col_block) {
+                        var acc = [_]f32{0} ** col_block;
+                        var block_index: usize = 0;
+                        while (block_index < blocks_per_row) : (block_index += 1) {
+                            const lhs = lhsUnit(lhs_row, block_index);
+                            inline for (0..col_block) |c| {
+                                const rhs_block = &blocks[(j + c) * blocks_per_row + block_index];
+                                acc[c] += arms.dot(rhs_block, lhs);
+                            }
+                        }
+                        inline for (0..col_block) |c| out[i * n + j + c] = acc[c];
+                    }
+                }
+
+                while (j < c1) : (j += 1) {
+                    const rhs_col = rhs.columnBlocks(j);
+                    var acc: f32 = 0;
+                    var block_index: usize = 0;
+                    while (block_index < blocks_per_row) : (block_index += 1) {
+                        acc += arms.dot(&rhs_col[block_index], lhsUnit(lhs_row, block_index));
+                    }
+                    out[i * n + j] = acc;
+                }
+            }
+        }
+    }.tile;
+}
+
+inline fn storeLanes4(out: []f32, base: usize, acc: QKV4f32) void {
+    inline for (0..4) |lane| out[base + lane] = acc[lane];
+}
+
+inline fn storeLanes8(out: []f32, base: usize, acc: [2]QKV4f32) void {
+    inline for (0..2) |half| {
+        inline for (0..4) |lane| out[base + half * 4 + lane] = acc[half][lane];
+    }
+}
+
+/// The x4 lane-pack tile: `q8_0_row_block` rows per register block through
+/// `arms.rows` (one packed RHS block into the block's row accumulators),
+/// then single rows through `arms.one` (value-form accumulate) or, when the
+/// format splits the acc-independent part out as `arms.contribution`, two
+/// blocks per step with the adds landing in block order.
+pub fn LaneX4Tile(comptime LhsBlock: type, comptime Rhs: type, comptime arms: anytype) TileFn(LhsBlock, Rhs) {
+    const Arms = @TypeOf(arms);
+    return struct {
+        fn tile(out: []f32, lhs_blocks: []const LhsBlock, rhs: *const Rhs, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            std.debug.assert(c0 % 4 == 0);
+            std.debug.assert(c1 % 4 == 0);
+
+            const blocks_per_row = rhs.blocks_per_group;
+            var i = r0;
+            while (i + q8_0_row_block <= r1) : (i += q8_0_row_block) {
+                var j = c0;
+                while (j < c1) : (j += 4) {
+                    const rhs_group = rhs.groupBlocks(j / 4);
+                    var acc: [q8_0_row_block]QKV4f32 = undefined;
+                    inline for (0..q8_0_row_block) |r| acc[r] = @splat(0);
+
+                    var block_index: usize = 0;
+                    while (block_index < blocks_per_row) : (block_index += 1) {
+                        const rhs_block = &rhs_group[block_index];
+                        arms.rows(lhs_blocks, i, blocks_per_row, block_index, rhs_block, &acc);
+                    }
+
+                    inline for (0..q8_0_row_block) |r| storeLanes4(out, (i + r) * n + j, acc[r]);
+                }
+            }
+
+            while (i < r1) : (i += 1) {
+                const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
+                var j = c0;
+                while (j < c1) : (j += 4) {
+                    const rhs_group = rhs.groupBlocks(j / 4);
+                    var acc: QKV4f32 = @splat(0);
+                    var block_index: usize = 0;
+                    if (comptime @hasField(Arms, "contribution")) {
+                        // Block pairs: the two contributions carry no dependency on acc
+                        // or each other, so their integer dots pipeline; the adds land
+                        // in the original order (bitwise identical to the serial loop).
+                        while (block_index + 2 <= blocks_per_row) : (block_index += 2) {
+                            const t0 = arms.contribution(&lhs_row[block_index], &rhs_group[block_index]);
+                            const t1 = arms.contribution(&lhs_row[block_index + 1], &rhs_group[block_index + 1]);
+                            acc += t0;
+                            acc += t1;
+                        }
+                        if (block_index < blocks_per_row) {
+                            acc += arms.contribution(&lhs_row[block_index], &rhs_group[block_index]);
+                        }
+                    } else {
+                        while (block_index < blocks_per_row) : (block_index += 1) {
+                            acc = arms.one(&lhs_row[block_index], &rhs_group[block_index], acc);
+                        }
+                    }
+                    storeLanes4(out, i * n + j, acc);
+                }
+            }
+        }
+    }.tile;
+}
+
+/// The x8 lane-pack tile: `q4_kx8_row_block` rows per register block through
+/// `arms.rows`, then 8-row and 4-row blocks and single rows through
+/// `arms.one` (pointer-form accumulate into one `[2]QKV4f32` per row).
+pub fn LaneX8Tile(comptime LhsBlock: type, comptime Rhs: type, comptime arms: anytype) TileFn(LhsBlock, Rhs) {
+    return struct {
+        fn tile(out: []f32, lhs_blocks: []const LhsBlock, rhs: *const Rhs, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            std.debug.assert(c0 % 8 == 0);
+            std.debug.assert(c1 % 8 == 0);
+
+            const blocks_per_row = rhs.blocks_per_group;
+            var i = r0;
+            while (i + q4_kx8_row_block <= r1) : (i += q4_kx8_row_block) {
+                var j = c0;
+                while (j < c1) : (j += 8) {
+                    const rhs_group = rhs.groupBlocks(j / 8);
+                    var acc: [q4_kx8_row_block][2]QKV4f32 = undefined;
+                    inline for (0..q4_kx8_row_block) |r| {
+                        acc[r][0] = @splat(0);
+                        acc[r][1] = @splat(0);
+                    }
+
+                    var block_index: usize = 0;
+                    while (block_index < blocks_per_row) : (block_index += 1) {
+                        const rhs_block = &rhs_group[block_index];
+                        arms.rows(lhs_blocks, i, blocks_per_row, block_index, rhs_block, &acc);
+                    }
+
+                    inline for (0..q4_kx8_row_block) |r| storeLanes8(out, (i + r) * n + j, acc[r]);
+                }
+            }
+
+            while (i + 8 <= r1) : (i += 8) {
+                tailRows(8, out, lhs_blocks, rhs, n, i, c0, c1, blocks_per_row);
+            }
+
+            while (i + 4 <= r1) : (i += 4) {
+                tailRows(4, out, lhs_blocks, rhs, n, i, c0, c1, blocks_per_row);
+            }
+
+            while (i < r1) : (i += 1) {
+                const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
+                var j = c0;
+                while (j < c1) : (j += 8) {
+                    const rhs_group = rhs.groupBlocks(j / 8);
+                    var acc: [2]QKV4f32 = .{ @splat(0), @splat(0) };
+                    var block_index: usize = 0;
+                    while (block_index < blocks_per_row) : (block_index += 1) {
+                        arms.one(&lhs_row[block_index], &rhs_group[block_index], &acc);
+                    }
+                    storeLanes8(out, i * n + j, acc);
+                }
+            }
+        }
+
+        fn tailRows(
+            comptime row_block: usize,
+            out: []f32,
+            lhs_blocks: []const LhsBlock,
+            rhs: *const Rhs,
+            n: usize,
+            row_start: usize,
+            c0: usize,
+            c1: usize,
+            blocks_per_row: usize,
+        ) void {
+            var j = c0;
+            while (j < c1) : (j += 8) {
+                const rhs_group = rhs.groupBlocks(j / 8);
+                var acc: [row_block][2]QKV4f32 = undefined;
+                inline for (0..row_block) |r| {
+                    acc[r][0] = @splat(0);
+                    acc[r][1] = @splat(0);
+                }
+
+                var block_index: usize = 0;
+                while (block_index < blocks_per_row) : (block_index += 1) {
+                    const rhs_block = &rhs_group[block_index];
+                    inline for (0..row_block) |r| {
+                        const lhs = &lhs_blocks[(row_start + r) * blocks_per_row + block_index];
+                        arms.one(lhs, rhs_block, &acc[r]);
+                    }
+                }
+
+                inline for (0..row_block) |r| storeLanes8(out, (row_start + r) * n + j, acc[r]);
+            }
+        }
+    }.tile;
+}
+
+/// Whether an x8-over-Q8_Kx4 tile accepts a final row group shorter than
+/// four rows (stores only the `r1 - i` real rows) or requires `r1 % 4 == 0`.
+pub const RowGroupTail = enum { full, partial };
+
+/// The x8 lane-pack tile over 4-row-interleaved Q8_Kx4 activations: each
+/// step feeds one Q8_Kx4 group and one packed RHS block to `accumulate`
+/// (four rows x eight columns of accumulators).
+pub fn LaneX8Q8_Kx4Tile(comptime Rhs: type, comptime accumulate: anytype, comptime tail: RowGroupTail) TileFn(types.BlockQ8_Kx4, Rhs) {
+    return struct {
+        fn tile(out: []f32, lhs_blocks: []const types.BlockQ8_Kx4, rhs: *const Rhs, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            std.debug.assert(r0 % 4 == 0);
+            if (comptime tail == .full) std.debug.assert(r1 % 4 == 0);
+            std.debug.assert(c0 % 8 == 0);
+            std.debug.assert(c1 % 8 == 0);
+
+            const blocks_per_row = rhs.blocks_per_group;
+            var i = r0;
+            while (i < r1) : (i += 4) {
+                const full_row_group = tail == .full or i + 4 <= r1;
+                var j = c0;
+                while (j < c1) : (j += 8) {
+                    const rhs_group = rhs.groupBlocks(j / 8);
+                    const lhs_row_group = (i / 4) * blocks_per_row;
+                    var acc: [4][2]QKV4f32 = undefined;
+                    inline for (0..4) |row| {
+                        acc[row][0] = @splat(0);
+                        acc[row][1] = @splat(0);
+                    }
+
+                    var block_index: usize = 0;
+                    while (block_index < blocks_per_row) : (block_index += 1) {
+                        accumulate(&lhs_blocks[lhs_row_group + block_index], &rhs_group[block_index], &acc);
+                    }
+
+                    if (full_row_group) {
+                        inline for (0..4) |row| storeLanes8(out, (i + row) * n + j, acc[row]);
+                    } else {
+                        const valid_rows = r1 - i;
+                        inline for (0..4) |row| {
+                            if (row < valid_rows) storeLanes8(out, (i + row) * n + j, acc[row]);
+                        }
+                    }
+                }
+            }
+        }
+    }.tile;
+}
+
+/// Column-outer K-quant (Q4_K/Q5_K) matmul for the m>1 (batched MoE
+/// prefill) case: each weight sub-block is unpacked ONCE (`unpack`, 32 codes
+/// as two i8x16) and dotted against a tile of `moe_row_tile` LHS rows,
+/// amortizing the unpack over the batch instead of re-unpacking per row
+/// like the row-outer tile. Numerically identical to it (same per-block
+/// deferred-f32 reduction, same cross-block accumulation order).
+pub fn KQuantColOuterTile(comptime Rhs: type, comptime unpack: anytype) TileFn(dtype_mod.BlockQ8_K, Rhs) {
+    return struct {
+        fn tile(out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const Rhs, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            const bpc = rhs.blocks_per_column;
+            var j = c0;
+            while (j < c1) : (j += 1) {
+                const col = rhs.columnBlocks(j);
+                var row0 = r0;
+                while (row0 < r1) : (row0 += moe_row_tile) {
+                    const tn = @min(moe_row_tile, r1 - row0);
+                    var acc_f32 = [_]f32{0} ** moe_row_tile;
+                    var bi: usize = 0;
+                    while (bi < bpc) : (bi += 1) {
+                        const w = &col[bi];
+                        var iscale = [_]i32{0} ** moe_row_tile;
+                        var imin = [_]i32{0} ** moe_row_tile;
+                        inline for (0..8) |subblock| {
+                            const wv = unpack(w, subblock);
+                            const sm = getScaleMinK4(&w.scales, subblock);
+                            var r: usize = 0;
+                            while (r < tn) : (r += 1) {
+                                const a = &lhs_blocks[(row0 + r) * bpc + bi];
+                                const a0: QKV16i8 = @bitCast(a.qs[subblock * 32 ..][0..16].*);
+                                const a1: QKV16i8 = @bitCast(a.qs[subblock * 32 + 16 ..][0..16].*);
+                                const acc = dotUnpackedI8x32(wv[0], wv[1], a0, a1);
+                                const bsum = @as(i32, a.bsums[subblock * 2]) + @as(i32, a.bsums[subblock * 2 + 1]);
+                                iscale[r] += @as(i32, sm.scale) * acc;
+                                imin[r] += @as(i32, sm.min) * bsum;
+                            }
+                        }
+                        const d = f16BitsToF32(w.dm[0]);
+                        const dmin = f16BitsToF32(w.dm[1]);
+                        var r: usize = 0;
+                        while (r < tn) : (r += 1) {
+                            const ad = lhs_blocks[(row0 + r) * bpc + bi].d;
+                            acc_f32[r] += (d * ad) * @as(f32, @floatFromInt(iscale[r])) - (dmin * ad) * @as(f32, @floatFromInt(imin[r]));
+                        }
+                    }
+                    var r: usize = 0;
+                    while (r < tn) : (r += 1) out[(row0 + r) * n + j] = acc_f32[r];
+                }
+            }
+        }
+    }.tile;
+}
+
+/// Column-outer K-quant (Q4_K/Q5_K) matmul over **4-row-interleaved Q8_Kx4**
+/// activations. Like `KQuantColOuterTile` it unpacks each weight sub-block
+/// once and reuses it across the row tile, but it packs the four rows into
+/// the `sdot` lanes (`dot4RowsSubblockQ8_Kx4`) so the four rows share one
+/// i32x4 accumulator with no per-row horizontal reduction, and the
+/// deferred-f32 epilogue runs vector-wide over the four rows. `lhs_blocks`
+/// holds `ceil(m/4)` Q8_Kx4 groups per K-block (tail rows zero-padded, e.g.
+/// via `quantizeRowsQ8_Kx4PaddedInto`); `m` is the real row count so padded
+/// lanes are never stored. Bit-identical to the per-row column-outer /
+/// row-outer tile (same integer reduction, same cross-block f32
+/// accumulation order).
+pub fn KQuantColOuterQ8_Kx4Tile(comptime Rhs: type, comptime unpack: anytype) fn ([]f32, []const types.BlockQ8_Kx4, *const Rhs, usize, usize, usize, usize) void {
+    return struct {
+        fn tile(out: []f32, lhs_blocks: []const types.BlockQ8_Kx4, rhs: *const Rhs, n: usize, m: usize, c0: usize, c1: usize) void {
+            const bpc = rhs.blocks_per_column;
+            const row_groups = (m + 3) / 4;
+            var j = c0;
+            while (j < c1) : (j += 1) {
+                const col = rhs.columnBlocks(j);
+                var rg: usize = 0;
+                while (rg < row_groups) : (rg += 1) {
+                    const row0 = rg * 4;
+                    const tn = @min(@as(usize, 4), m - row0);
+                    var acc_f32: QKV4f32 = @splat(0);
+                    var bi: usize = 0;
+                    while (bi < bpc) : (bi += 1) {
+                        const w = &col[bi];
+                        const a = &lhs_blocks[rg * bpc + bi];
+                        var iscale: QKV4i32 = @splat(0);
+                        var imin: QKV4i32 = @splat(0);
+                        inline for (0..8) |subblock| {
+                            const wv = unpack(w, subblock);
+                            const sm = getScaleMinK4(&w.scales, subblock);
+                            const dot = dot4RowsSubblockQ8_Kx4(a, subblock, wv);
+                            iscale += @as(QKV4i32, @splat(@as(i32, sm.scale))) * dot;
+                            imin += @as(QKV4i32, @splat(@as(i32, sm.min))) * bsumPairQ8_Kx4(a, subblock);
+                        }
+                        const d = f16BitsToF32(w.dm[0]);
+                        const dmin = f16BitsToF32(w.dm[1]);
+                        const ad: QKV4f32 = a.d;
+                        acc_f32 += (@as(QKV4f32, @splat(d)) * ad) * @as(QKV4f32, @floatFromInt(iscale)) -
+                            (@as(QKV4f32, @splat(dmin)) * ad) * @as(QKV4f32, @floatFromInt(imin));
+                    }
+                    const acc_arr: [4]f32 = acc_f32;
+                    var r: usize = 0;
+                    while (r < tn) : (r += 1) out[(row0 + r) * n + j] = acc_arr[r];
+                }
+            }
+        }
+    }.tile;
 }
 
 // ---------------------------------------------------------------------------

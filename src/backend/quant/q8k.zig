@@ -637,22 +637,7 @@ pub fn q4Kx8Scales(values: *const [8 * 8]u8, comptime subblock: usize, comptime 
 pub fn dequantizeBlockQ8_KInto(dst: *[qk_k_block_size]f32, src: *const dtype_mod.BlockQ8_K) void {
     for (dst, src.qs) |*out, q| out.* = src.d * @as(f32, @floatFromInt(q));
 }
-const ScaleMinK4 = struct {
-    scale: u8,
-    min: u8,
-};
-pub fn getScaleMinK4(q: *const [types.k_scale_size]u8, index: usize) ScaleMinK4 {
-    if (index < 4) {
-        return .{
-            .scale = q[index] & 63,
-            .min = q[index + 4] & 63,
-        };
-    }
-    return .{
-        .scale = (q[index + 4] & 0x0f) | ((q[index - 4] >> 6) << 4),
-        .min = (q[index + 4] >> 4) | ((q[index] >> 6) << 4),
-    };
-}
+pub const getScaleMinK4 = common.getScaleMinK4;
 // ---------------------------------------------------------------------------
 // f32 -> K-quant reference encoders: shared iterative scale-search helpers,
 // ported operation-for-operation (f32 arithmetic, same rounding) from ggml's

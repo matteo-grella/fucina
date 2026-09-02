@@ -287,39 +287,18 @@ pub fn matmulQ8_0RhsTile(
     c1: usize,
 ) void {
     switch (isa.tier) {
-        .neon_i8mm, .neon_sdot => return matmulQ8_0RhsTileAarch64(out, lhs_blocks, rhs, n, r0, r1, c0, c1),
-        .x86_vnni, .x86_avx2, .portable, .scalar => {},
+        .neon_i8mm, .neon_sdot => matmulQ8_0RhsTileAarch64(out, lhs_blocks, rhs, n, r0, r1, c0, c1),
+        .x86_vnni, .x86_avx2, .portable, .scalar => matmulQ8_0RhsTilePortable(out, lhs_blocks, rhs, n, r0, r1, c0, c1),
     }
+}
 
-    const blocks_per_row = rhs.rows.blocks_per_row;
-    var i = r0;
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
+/// The non-NEON row-outer tile: the shared skeleton over `dotQ8_0Q8_0`,
+/// which takes the activation block first (its sign-trick operand order),
+/// so the skeleton's `(rhs_block, lhs_block)` call is swapped here.
+const matmulQ8_0RhsTilePortable = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ8_0, q8_0_col_block, .{ .dot = dotQ8_0WeightQ8_0 });
 
-        while (j + q8_0_col_block <= c1) : (j += q8_0_col_block) {
-            var acc = [_]f32{0} ** q8_0_col_block;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const lhs_block = &lhs_row[block_index];
-                inline for (0..q8_0_col_block) |c| {
-                    const rhs_block = &rhs.rows.blocks[(j + c) * blocks_per_row + block_index];
-                    acc[c] += dotQ8_0Q8_0(lhs_block, rhs_block);
-                }
-            }
-            inline for (0..q8_0_col_block) |c| out[i * n + j + c] = acc[c];
-        }
-
-        while (j < c1) : (j += 1) {
-            const rhs_col = rhs.columnBlocks(j);
-            var acc: f32 = 0;
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                acc += dotQ8_0Q8_0(&lhs_row[block_index], &rhs_col[block_index]);
-            }
-            out[i * n + j] = acc;
-        }
-    }
+fn dotQ8_0WeightQ8_0(w: *const BlockQ8_0, a: *const BlockQ8_0) f32 {
+    return dotQ8_0Q8_0(a, w);
 }
 
 fn matmulQ8_0RhsTileAarch64(
@@ -509,69 +488,7 @@ fn matmulQ8_0RhsTileAarch64(
 
 pub const matmulQ8_0RhsRange = common.RangeFromTile(matmulQ8_0RhsTile);
 
-pub fn matmulQ8_0x4RhsTile(
-    out: []f32,
-    lhs_blocks: []const BlockQ8_0,
-    rhs: *const types.QuantizedMatmulRhsQ8_0x4,
-    n: usize,
-    r0: usize,
-    r1: usize,
-    c0: usize,
-    c1: usize,
-) void {
-    std.debug.assert(c0 % 4 == 0);
-    std.debug.assert(c1 % 4 == 0);
-
-    const blocks_per_row = rhs.blocks_per_group;
-    var i = r0;
-    while (i + common.q8_0_row_block <= r1) : (i += common.q8_0_row_block) {
-        var j = c0;
-        while (j < c1) : (j += 4) {
-            const rhs_group = rhs.groupBlocks(j / 4);
-            var acc: [common.q8_0_row_block]QKV4f32 = undefined;
-            inline for (0..common.q8_0_row_block) |r| acc[r] = @splat(0);
-
-            var block_index: usize = 0;
-            while (block_index < blocks_per_row) : (block_index += 1) {
-                const rhs_block = &rhs_group[block_index];
-                accumulateQ8_0x4Rows(lhs_blocks, i, blocks_per_row, block_index, rhs_block, &acc);
-            }
-
-            inline for (0..common.q8_0_row_block) |r| {
-                out[(i + r) * n + j + 0] = acc[r][0];
-                out[(i + r) * n + j + 1] = acc[r][1];
-                out[(i + r) * n + j + 2] = acc[r][2];
-                out[(i + r) * n + j + 3] = acc[r][3];
-            }
-        }
-    }
-
-    while (i < r1) : (i += 1) {
-        const lhs_row = lhs_blocks[i * blocks_per_row ..][0..blocks_per_row];
-        var j = c0;
-        while (j < c1) : (j += 4) {
-            const rhs_group = rhs.groupBlocks(j / 4);
-            var acc: QKV4f32 = @splat(0);
-            var block_index: usize = 0;
-            // Block pairs: the two contributions carry no dependency on acc
-            // or each other, so their integer dots pipeline; the adds land
-            // in the original order (bitwise identical to the serial loop).
-            while (block_index + 2 <= blocks_per_row) : (block_index += 2) {
-                const t0 = contributionQ8_0x4(&lhs_row[block_index], &rhs_group[block_index]);
-                const t1 = contributionQ8_0x4(&lhs_row[block_index + 1], &rhs_group[block_index + 1]);
-                acc += t0;
-                acc += t1;
-            }
-            if (block_index < blocks_per_row) {
-                acc += contributionQ8_0x4(&lhs_row[block_index], &rhs_group[block_index]);
-            }
-            out[i * n + j + 0] = acc[0];
-            out[i * n + j + 1] = acc[1];
-            out[i * n + j + 2] = acc[2];
-            out[i * n + j + 3] = acc[3];
-        }
-    }
-}
+pub const matmulQ8_0x4RhsTile = common.LaneX4Tile(BlockQ8_0, types.QuantizedMatmulRhsQ8_0x4, .{ .rows = accumulateQ8_0x4Rows, .contribution = contributionQ8_0x4 });
 
 pub const matmulQ8_0x4RhsRange = common.RangeFromTile(matmulQ8_0x4RhsTile);
 
