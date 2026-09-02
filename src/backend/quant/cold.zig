@@ -1022,7 +1022,12 @@ fn TableQ8_KTile(comptime rhs_dtype: DType) common.TileFn(BlockQ8_K, types.Quant
     return common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsRowsFor(rhs_dtype), table_q8_k_col_block, .{
         .dot = struct {
             fn dot(w: *const dtype_mod.Storage(rhs_dtype), a: *const BlockQ8_K) f32 {
-                return dotTableQ8_K(rhs_dtype, w, a);
+                // Measured at m=1, n=512 and 2304: the IQ2_XS decoder runs 6%
+                // faster kept out of the four-wide column loop; every other
+                // table decoder is neutral or slower out of line (IQ3_XXS
+                // -15%), so the call mode is per format.
+                const mode: std.builtin.CallModifier = if (rhs_dtype == .iq2_xs) .never_inline else .auto;
+                return @call(mode, dotTableQ8_K, .{ rhs_dtype, w, a });
             }
         }.dot,
     });
