@@ -73,40 +73,52 @@ pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
 /// pre-validated call sites (thread-task bodies) never suppress the checked
 /// twin's error set with `catch unreachable`.
 ///
-/// One `@Vector` body on every architecture: 4-lane amax, scale, clamp,
-/// then `common.roundHalfAwayFromZeroVec4ToI32` (fcvtas on aarch64, the
-/// portable vector round elsewhere). Clamping before the round is
-/// equivalent to rounding first because the bounds are integral, so every
-/// byte equals the scalar `common.quantizeToI8` form (`x86dot_check.zig`
-/// pins the two against each other on every ISA it runs on).
+/// One `quantizeBlockQ8_0` per block.
 pub fn quantizeRowQ8_0IntoUnchecked(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
     std.debug.assert(src.len % types.q8_0_block_size == 0);
     std.debug.assert(dst.len == src.len / types.q8_0_block_size);
 
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
-        const row = src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-
-        var amaxv: QKV4f32 = @splat(0);
-        inline for (0..8) |j| {
-            const v: QKV4f32 = row[j * 4 ..][0..4].*;
-            amaxv = @max(amaxv, @abs(v));
-        }
-
-        const amax = @reduce(.Max, amaxv);
-        const d = amax / 127.0;
-        const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
-
-        dst[block_index].d = common.f32ToF16Bits(d);
-        inline for (0..8) |j| {
-            const v: QKV4f32 = row[j * 4 ..][0..4].*;
-            const scaled = v * @as(QKV4f32, @splat(inv_d));
-            const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
-            const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
-            inline for (0..4) |lane| dst[block_index].qs[j * 4 + lane] = @intCast(q[lane]);
-        }
+        dst[block_index] = quantizeBlockQ8_0(src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]);
     }
 }
+
+/// One Q8_0 block from 32 values, the body behind every Q8_0 activation
+/// layout (rows, Q8_0x4 lanes, the fused SwiGLU quantizer). One `@Vector`
+/// body on every architecture: 4-lane amax, scale, clamp, then
+/// `common.roundHalfAwayFromZeroVec4ToI32` (fcvtas on aarch64, the portable
+/// vector round elsewhere). Clamping before the round is equivalent to
+/// rounding first because the bounds are integral, so every byte equals the
+/// scalar `common.quantizeToI8` form (`x86dot_check.zig` pins the two
+/// against each other on every ISA it runs on).
+pub fn quantizeBlockQ8_0(src: *const [types.q8_0_block_size]f32) dtype_mod.BlockQ8_0 {
+    var amaxv: QKV4f32 = @splat(0);
+    inline for (0..8) |j| {
+        const v: QKV4f32 = src[j * 4 ..][0..4].*;
+        amaxv = @max(amaxv, @abs(v));
+    }
+    return quantizeBlockQ8_0Scaled(src, @reduce(.Max, amaxv));
+}
+
+/// The scale-and-round half of `quantizeBlockQ8_0` for a caller that
+/// already holds the block's amax.
+pub fn quantizeBlockQ8_0Scaled(src: *const [types.q8_0_block_size]f32, amax: f32) dtype_mod.BlockQ8_0 {
+    const d = amax / 127.0;
+    const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
+
+    var block: dtype_mod.BlockQ8_0 = undefined;
+    block.d = common.f32ToF16Bits(d);
+    inline for (0..8) |j| {
+        const v: QKV4f32 = src[j * 4 ..][0..4].*;
+        const scaled = v * @as(QKV4f32, @splat(inv_d));
+        const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
+        const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
+        inline for (0..4) |lane| block.qs[j * 4 + lane] = @intCast(q[lane]);
+    }
+    return block;
+}
+
 pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const dtype_mod.BlockQ8_0) !void {
     if (dst.len != try types.checkedProduct(src.len, types.q8_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
@@ -289,58 +301,61 @@ pub fn quantizeRowQ8_KInto(dst: []dtype_mod.BlockQ8_K, src: []const f32) !void {
 }
 
 /// `quantizeRowQ8_KInto` for callers that have already proven the lengths
-/// (same contract as `quantizeRowQ8_0IntoUnchecked`).
-///
-/// One `@Vector` body on every architecture: 4-lane amax, then per lane
-/// `common.roundNearestEvenVec4ToI32` (fcvtns on aarch64, the 2^23
-/// magic-number round elsewhere; |scaled| <= 127 keeps it exact) and the
-/// bsums from the same lanes. Byte-equal to the scalar
-/// `common.roundNearestEven` form (`x86dot_check.zig` pins the two).
+/// (same contract as `quantizeRowQ8_0IntoUnchecked`): one
+/// `quantizeBlockQ8_K` per block.
 pub fn quantizeRowQ8_KIntoUnchecked(dst: []dtype_mod.BlockQ8_K, src: []const f32) void {
     std.debug.assert(src.len % qk_k_block_size == 0);
     std.debug.assert(dst.len == src.len / qk_k_block_size);
 
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
-        const row = src[block_index * qk_k_block_size ..][0..qk_k_block_size];
-        var block = &dst[block_index];
-
-        var amaxv: QKV4f32 = @splat(0);
-        var vec_index: usize = 0;
-        while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-            const v: QKV4f32 = row[vec_index * 4 ..][0..4].*;
-            amaxv = @max(amaxv, @abs(v));
-        }
-        const amax = @reduce(.Max, amaxv);
-        var max_value: f32 = 0;
-        for (row) |v| {
-            if (@abs(v) == amax) {
-                max_value = v;
-                break;
-            }
-        }
-
-        if (amax == 0) {
-            block.d = 0;
-            @memset(&block.qs, 0);
-            @memset(&block.bsums, 0);
-            continue;
-        }
-
-        const inv_scale = -127.0 / max_value;
-        var bsums = [_]i32{0} ** 16;
-        vec_index = 0;
-        while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-            const v: QKV4f32 = row[vec_index * 4 ..][0..4].*;
-            const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
-            inline for (0..4) |lane| block.qs[vec_index * 4 + lane] = @intCast(q[lane]);
-            bsums[vec_index / 4] += @reduce(.Add, q);
-        }
-
-        for (&block.bsums, bsums) |*sum, value| sum.* = @intCast(value);
-        block.d = 1.0 / inv_scale;
+        dst[block_index] = quantizeBlockQ8_K(src[block_index * qk_k_block_size ..][0..qk_k_block_size]);
     }
 }
+
+/// One Q8_K block from 256 values, the body behind every Q8_K activation
+/// layout (rows, Q8_Kx4 lanes, Q8_Kx2Mmla pairs). One `@Vector` body on
+/// every architecture: 4-lane amax and the signed max it belongs to
+/// (`-127 / max` scale, so `qs` never holds -128), then per lane
+/// `common.roundNearestEvenVec4ToI32` (fcvtns on aarch64, the 2^23
+/// magic-number round elsewhere; |scaled| <= 127 keeps it exact) capped at
+/// 127, and the 16-group bsums from the same lanes. An all-zero block
+/// (d = 0) when every value is zero. Byte-equal to the scalar
+/// `common.roundNearestEven` form (`x86dot_check.zig` pins the two).
+pub fn quantizeBlockQ8_K(src: *const [qk_k_block_size]f32) dtype_mod.BlockQ8_K {
+    var amaxv: QKV4f32 = @splat(0);
+    var vec_index: usize = 0;
+    while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
+        const v: QKV4f32 = src[vec_index * 4 ..][0..4].*;
+        amaxv = @max(amaxv, @abs(v));
+    }
+    const amax = @reduce(.Max, amaxv);
+    var max_value: f32 = 0;
+    for (src) |v| {
+        if (@abs(v) == amax) {
+            max_value = v;
+            break;
+        }
+    }
+
+    if (amax == 0) return std.mem.zeroes(dtype_mod.BlockQ8_K);
+
+    var block: dtype_mod.BlockQ8_K = undefined;
+    const inv_scale = -127.0 / max_value;
+    var bsums = [_]i32{0} ** 16;
+    vec_index = 0;
+    while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
+        const v: QKV4f32 = src[vec_index * 4 ..][0..4].*;
+        const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
+        inline for (0..4) |lane| block.qs[vec_index * 4 + lane] = @intCast(q[lane]);
+        bsums[vec_index / 4] += @reduce(.Add, q);
+    }
+
+    for (&block.bsums, bsums) |*sum, value| sum.* = @intCast(value);
+    block.d = 1.0 / inv_scale;
+    return block;
+}
+
 pub fn quantizeRowsQ8_K(allocator: Allocator, src: *const Tensor) ![]dtype_mod.BlockQ8_K {
     const view = try src.rankView(2);
     const rows = view.dim(0);
@@ -399,58 +414,39 @@ pub fn quantizeRowsQ8_Kx4GroupsInto(blocks: []types.BlockQ8_Kx4, data: []const f
         );
     }
 }
+/// One 4-row group (`rows_in_group` real rows, the rest zero lanes) of
+/// `[rows_in_group, cols]` activation `data` into its `blocks.len`
+/// lane-packed Q8_Kx4 blocks.
 pub fn quantizeRowGroupQ8_Kx4Into(blocks: []types.BlockQ8_Kx4, data: []const f32, rows_in_group: usize, cols: usize) void {
     const blocks_per_row = blocks.len;
-    {
-        for (0..blocks_per_row) |block_index| {
-            var dst = &blocks[block_index];
-            inline for (0..4) |row_lane| {
-                const row = row_lane;
-                if (row >= rows_in_group) {
-                    zeroQ8Kx4Lane(dst, row_lane);
-                } else {
-                    const source = data[row * cols + block_index * qk_k_block_size ..][0..qk_k_block_size];
-
-                    var amaxv: QKV4f32 = @splat(0);
-                    var vec_index: usize = 0;
-                    while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-                        const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                        amaxv = @max(amaxv, @abs(v));
-                    }
-                    const amax = @reduce(.Max, amaxv);
-                    var max_value: f32 = 0;
-                    for (source) |v| {
-                        if (@abs(v) == amax) {
-                            max_value = v;
-                            break;
-                        }
-                    }
-
-                    if (amax == 0) {
-                        zeroQ8Kx4Lane(dst, row_lane);
-                    } else {
-                        const inv_scale = -127.0 / max_value;
-                        var bsums = [_]i32{0} ** 16;
-                        vec_index = 0;
-                        while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-                            const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                            const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
-                            inline for (0..4) |lane| {
-                                dst.qs[vec_index * 16 + row_lane * 4 + lane] = @intCast(q[lane]);
-                            }
-                            bsums[vec_index / 4] += @reduce(.Add, q);
-                        }
-
-                        inline for (0..16) |subblock| {
-                            dst.bsums[(subblock / 4) * 16 + row_lane * 4 + subblock % 4] = @intCast(bsums[subblock]);
-                        }
-                        dst.d[row_lane] = 1.0 / inv_scale;
-                    }
-                }
+    for (0..blocks_per_row) |block_index| {
+        const dst = &blocks[block_index];
+        inline for (0..4) |row_lane| {
+            if (row_lane >= rows_in_group) {
+                zeroQ8Kx4Lane(dst, row_lane);
+            } else {
+                const block = quantizeBlockQ8_K(data[row_lane * cols + block_index * qk_k_block_size ..][0..qk_k_block_size]);
+                storeQ8Kx4Lane(dst, row_lane, &block);
             }
         }
     }
 }
+
+/// Row `row_lane` of a Q8_Kx4 group from one Q8_K block: the 4-feature
+/// interleave (`qs[fg*16 + row*4 + lane]`) and the bsums interleave
+/// (`bsums[(sb/4)*16 + row*4 + sb%4]`) the Q8_Kx4 kernels read.
+pub fn storeQ8Kx4Lane(dst: *types.BlockQ8_Kx4, comptime row_lane: usize, src: *const dtype_mod.BlockQ8_K) void {
+    dst.d[row_lane] = src.d;
+    for (0..qk_k_block_size / 4) |feature_group| {
+        inline for (0..4) |lane| {
+            dst.qs[feature_group * 16 + row_lane * 4 + lane] = src.qs[feature_group * 4 + lane];
+        }
+    }
+    inline for (0..16) |subblock| {
+        dst.bsums[(subblock / 4) * 16 + row_lane * 4 + subblock % 4] = src.bsums[subblock];
+    }
+}
+
 pub fn zeroQ8Kx4Lane(block: *types.BlockQ8_Kx4, comptime row_lane: usize) void {
     block.d[row_lane] = 0;
     var feature_group: usize = 0;
@@ -484,47 +480,14 @@ pub fn quantizeRowsQ8_Kx2MmlaGroupsInto(blocks: []types.BlockQ8_Kx2Mmla, data: [
     for (group_start..group_end) |row_group| {
         for (0..blocks_per_row) |block_index| {
             var dst = &blocks[row_group * blocks_per_row + block_index];
-            var row_qs: [2][qk_k_block_size]i8 = undefined;
-            var row_bsums: [2][8]i32 = .{ [_]i32{0} ** 8, [_]i32{0} ** 8 };
-
+            var pair: [2]dtype_mod.BlockQ8_K = undefined;
             inline for (0..2) |row_lane| {
                 const row = row_group * 2 + row_lane;
-                const source = data[row * cols + block_index * qk_k_block_size ..][0..qk_k_block_size];
-
-                var amaxv: QKV4f32 = @splat(0);
-                var vec_index: usize = 0;
-                while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-                    const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                    amaxv = @max(amaxv, @abs(v));
-                }
-                const amax = @reduce(.Max, amaxv);
-                var max_value: f32 = 0;
-                for (source) |v| {
-                    if (@abs(v) == amax) {
-                        max_value = v;
-                        break;
-                    }
-                }
-
-                if (amax == 0) {
-                    dst.d[row_lane] = 0;
-                    @memset(row_qs[row_lane][0..], 0);
-                } else {
-                    const inv_scale = -127.0 / max_value;
-                    vec_index = 0;
-                    while (vec_index < qk_k_block_size / 4) : (vec_index += 1) {
-                        const v: QKV4f32 = source[vec_index * 4 ..][0..4].*;
-                        const q = @min(common.roundNearestEvenVec4ToI32(v * @as(QKV4f32, @splat(inv_scale))), @as(common.QKV4i32, @splat(127)));
-                        inline for (0..4) |lane| {
-                            row_qs[row_lane][vec_index * 4 + lane] = @intCast(q[lane]);
-                        }
-                        row_bsums[row_lane][vec_index / 8] += @reduce(.Add, q);
-                    }
-                    dst.d[row_lane] = 1.0 / inv_scale;
-                }
-
+                pair[row_lane] = quantizeBlockQ8_K(data[row * cols + block_index * qk_k_block_size ..][0..qk_k_block_size]);
+                dst.d[row_lane] = pair[row_lane].d;
+                // One smmla sub-block spans two Q8_K 16-groups.
                 inline for (0..8) |subblock| {
-                    dst.bsums[subblock * 2 + row_lane] = @intCast(row_bsums[row_lane][subblock]);
+                    dst.bsums[subblock * 2 + row_lane] = @intCast(@as(i32, pair[row_lane].bsums[subblock * 2]) + @as(i32, pair[row_lane].bsums[subblock * 2 + 1]));
                 }
             }
 
@@ -533,16 +496,17 @@ pub fn quantizeRowsQ8_Kx2MmlaGroupsInto(blocks: []types.BlockQ8_Kx2Mmla, data: [
                     const dst_base = subblock * 64 + half * 32;
                     const src_base = subblock * 32 + half * 16;
                     inline for (0..8) |lane| {
-                        dst.qs[dst_base + lane] = row_qs[0][src_base + lane];
-                        dst.qs[dst_base + 8 + lane] = row_qs[1][src_base + lane];
-                        dst.qs[dst_base + 16 + lane] = row_qs[0][src_base + 8 + lane];
-                        dst.qs[dst_base + 24 + lane] = row_qs[1][src_base + 8 + lane];
+                        dst.qs[dst_base + lane] = pair[0].qs[src_base + lane];
+                        dst.qs[dst_base + 8 + lane] = pair[1].qs[src_base + lane];
+                        dst.qs[dst_base + 16 + lane] = pair[0].qs[src_base + 8 + lane];
+                        dst.qs[dst_base + 24 + lane] = pair[1].qs[src_base + 8 + lane];
                     }
                 }
             }
         }
     }
 }
+
 pub fn packRowsQ8_Kx4(
     allocator: Allocator,
     blocks: []const dtype_mod.BlockQ8_K,
@@ -560,33 +524,16 @@ pub fn packRowsQ8_Kx4(
 
     for (0..row_groups) |group| {
         for (0..blocks_per_row) |block_index| {
-            const src = [_]*const dtype_mod.BlockQ8_K{
-                &blocks[(group * 4 + 0) * blocks_per_row + block_index],
-                &blocks[(group * 4 + 1) * blocks_per_row + block_index],
-                &blocks[(group * 4 + 2) * blocks_per_row + block_index],
-                &blocks[(group * 4 + 3) * blocks_per_row + block_index],
-            };
-            var dst = &packed_blocks[group * blocks_per_row + block_index];
-            inline for (0..4) |row| dst.d[row] = src[row].d;
-
-            for (0..qk_k_block_size / 4) |feature_group| {
-                inline for (0..4) |row| {
-                    inline for (0..4) |lane| {
-                        dst.qs[feature_group * 16 + row * 4 + lane] = src[row].qs[feature_group * 4 + lane];
-                    }
-                }
-            }
-
-            inline for (0..4) |row| {
-                inline for (0..16) |subblock| {
-                    dst.bsums[(subblock / 4) * 16 + row * 4 + subblock % 4] = src[row].bsums[subblock];
-                }
-            }
+            const dst = &packed_blocks[group * blocks_per_row + block_index];
+            inline for (0..4) |row| storeQ8Kx4Lane(dst, row, &blocks[(group * 4 + row) * blocks_per_row + block_index]);
         }
     }
 
     return packed_blocks;
 }
+
+/// `ceil(m/4)` Q8_Kx4 groups from `m` rows of Q8_K blocks, the lanes past
+/// `m` zeroed.
 pub fn packRowsQ8_Kx4PaddedInto(
     dst: []types.BlockQ8_Kx4,
     blocks: []const dtype_mod.BlockQ8_K,
@@ -596,27 +543,19 @@ pub fn packRowsQ8_Kx4PaddedInto(
     const row_groups = (m + 3) / 4;
     for (0..row_groups) |group| {
         for (0..blocks_per_row) |block_index| {
-            var d = &dst[group * blocks_per_row + block_index];
+            const d = &dst[group * blocks_per_row + block_index];
             inline for (0..4) |row_lane| {
                 const row = group * 4 + row_lane;
                 if (row >= m) {
                     zeroQ8Kx4Lane(d, row_lane);
                 } else {
-                    const src = &blocks[row * blocks_per_row + block_index];
-                    d.d[row_lane] = src.d;
-                    for (0..qk_k_block_size / 4) |feature_group| {
-                        inline for (0..4) |lane| {
-                            d.qs[feature_group * 16 + row_lane * 4 + lane] = src.qs[feature_group * 4 + lane];
-                        }
-                    }
-                    inline for (0..16) |subblock| {
-                        d.bsums[(subblock / 4) * 16 + row_lane * 4 + subblock % 4] = src.bsums[subblock];
-                    }
+                    storeQ8Kx4Lane(d, row_lane, &blocks[row * blocks_per_row + block_index]);
                 }
             }
         }
     }
 }
+
 pub fn q4Kx8D(bits: [8]u16, comptime group: usize) QKV4f32 {
     return common.f16x4BitsToF32(.{
         bits[group * 4 + 0],

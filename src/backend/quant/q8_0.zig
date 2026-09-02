@@ -71,41 +71,35 @@ pub fn quantizeRowsQ8_0x4PaddedGroupsInto(
     while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;
         while (block_index < blocks_per_row) : (block_index += 1) {
-            var dst = &blocks[row_group * blocks_per_row + block_index];
+            const dst = &blocks[row_group * blocks_per_row + block_index];
             inline for (0..4) |row_lane| {
                 const row = row_group * 4 + row_lane;
                 if (row >= rows) {
-                    dst.d[row_lane] = 0;
-                    inline for (0..8) |feature_group| {
-                        inline for (0..4) |lane| {
-                            dst.qs[feature_group * 16 + row_lane * 4 + lane] = 0;
-                        }
-                    }
+                    zeroQ8_0x4Lane(dst, row_lane);
                 } else {
-                    const source = data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-
-                    var amaxv: QKV4f32 = @splat(0);
-                    inline for (0..8) |feature_group| {
-                        const v: QKV4f32 = source[feature_group * 4 ..][0..4].*;
-                        amaxv = @max(amaxv, @abs(v));
-                    }
-
-                    const amax = @reduce(.Max, amaxv);
-                    const d = amax / 127.0;
-                    const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
-                    dst.d[row_lane] = common.f32ToF16Bits(d);
-
-                    inline for (0..8) |feature_group| {
-                        const v: QKV4f32 = source[feature_group * 4 ..][0..4].*;
-                        const scaled = v * @as(QKV4f32, @splat(inv_d));
-                        const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
-                        const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
-                        inline for (0..4) |lane| {
-                            dst.qs[feature_group * 16 + row_lane * 4 + lane] = @intCast(q[lane]);
-                        }
-                    }
+                    storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]));
                 }
             }
+        }
+    }
+}
+
+/// Row `row_lane` of a Q8_0x4 group from one Q8_0 block: the 4-feature
+/// interleave (`qs[fg*16 + row*4 + lane]`) the Q8_0x4 kernels read.
+fn storeQ8_0x4Lane(dst: *BlockQ8_0x4, comptime row_lane: usize, block: BlockQ8_0) void {
+    dst.d[row_lane] = block.d;
+    inline for (0..8) |feature_group| {
+        inline for (0..4) |lane| {
+            dst.qs[feature_group * 16 + row_lane * 4 + lane] = block.qs[feature_group * 4 + lane];
+        }
+    }
+}
+
+fn zeroQ8_0x4Lane(dst: *BlockQ8_0x4, comptime row_lane: usize) void {
+    dst.d[row_lane] = 0;
+    inline for (0..8) |feature_group| {
+        inline for (0..4) |lane| {
+            dst.qs[feature_group * 16 + row_lane * 4 + lane] = 0;
         }
     }
 }
@@ -126,31 +120,10 @@ pub fn quantizeRowsQ8_0x4GroupsInto(
     while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;
         while (block_index < blocks_per_row) : (block_index += 1) {
-            var dst = &blocks[row_group * blocks_per_row + block_index];
+            const dst = &blocks[row_group * blocks_per_row + block_index];
             inline for (0..4) |row_lane| {
                 const row = row_group * 4 + row_lane;
-                const source = data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-
-                var amaxv: QKV4f32 = @splat(0);
-                inline for (0..8) |feature_group| {
-                    const v: QKV4f32 = source[feature_group * 4 ..][0..4].*;
-                    amaxv = @max(amaxv, @abs(v));
-                }
-
-                const amax = @reduce(.Max, amaxv);
-                const d = amax / 127.0;
-                const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
-                dst.d[row_lane] = common.f32ToF16Bits(d);
-
-                inline for (0..8) |feature_group| {
-                    const v: QKV4f32 = source[feature_group * 4 ..][0..4].*;
-                    const scaled = v * @as(QKV4f32, @splat(inv_d));
-                    const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
-                    const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
-                    inline for (0..4) |lane| {
-                        dst.qs[feature_group * 16 + row_lane * 4 + lane] = @intCast(q[lane]);
-                    }
-                }
+                storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]));
             }
         }
     }
@@ -209,21 +182,17 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
     while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;
         while (block_index < blocks_per_row) : (block_index += 1) {
-            var dst = &blocks[row_group * blocks_per_row + block_index];
+            const dst = &blocks[row_group * blocks_per_row + block_index];
             inline for (0..4) |row_lane| {
                 const row = row_group * 4 + row_lane;
                 if (row >= rows) {
-                    dst.d[row_lane] = 0;
-                    inline for (0..8) |feature_group| {
-                        inline for (0..4) |lane| {
-                            dst.qs[feature_group * 16 + row_lane * 4 + lane] = 0;
-                        }
-                    }
+                    zeroQ8_0x4Lane(dst, row_lane);
                 } else {
                     const row_base = row * cols * 2;
                     const gate = data[row_base + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
                     const up = data[row_base + cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
 
+                    // The amax rides along with the fused SwiGLU values.
                     var amaxv: QKV4f32 = @splat(0);
                     inline for (0..8) |feature_group| {
                         const gate_v: QKV4f32 = gate[feature_group * 4 ..][0..4].*;
@@ -232,21 +201,7 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
                         values[feature_group * 4 ..][0..4].* = v;
                         amaxv = @max(amaxv, @abs(v));
                     }
-
-                    const amax = @reduce(.Max, amaxv);
-                    const d = amax / 127.0;
-                    const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
-                    dst.d[row_lane] = common.f32ToF16Bits(d);
-
-                    inline for (0..8) |feature_group| {
-                        const v: QKV4f32 = values[feature_group * 4 ..][0..4].*;
-                        const scaled = v * @as(QKV4f32, @splat(inv_d));
-                        const clamped = @max(@as(QKV4f32, @splat(-127.0)), @min(@as(QKV4f32, @splat(127.0)), scaled));
-                        const q = common.roundHalfAwayFromZeroVec4ToI32(clamped);
-                        inline for (0..4) |lane| {
-                            dst.qs[feature_group * 16 + row_lane * 4 + lane] = @intCast(q[lane]);
-                        }
-                    }
+                    storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0Scaled(&values, @reduce(.Max, amaxv)));
                 }
             }
         }
