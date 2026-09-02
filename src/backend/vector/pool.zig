@@ -19,9 +19,9 @@
 
 const std = @import("std");
 const isa = @import("../isa.zig");
-const parallel = @import("../../parallel.zig");
 const tensor = @import("../../tensor.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 
 const Tensor = tensor.Tensor;
 
@@ -42,21 +42,6 @@ pub const Pool2dDims = struct {
     pad_w: usize,
 };
 
-const Pool2dTask = struct {
-    out: []f32,
-    in: []const f32,
-    kind: PoolKind,
-    d: Pool2dDims,
-    oh_start: usize,
-    oh_end: usize,
-};
-
-fn runPool2dTask(task: *const Pool2dTask) void {
-    switch (task.kind) {
-        inline else => |k| pool2dRangeRows(k, task.out, task.in, task.d, task.oh_start, task.oh_end),
-    }
-}
-
 pub fn pool2dInto(
     pc: common.ParallelConfig,
     comptime kind: PoolKind,
@@ -65,28 +50,18 @@ pub fn pool2dInto(
     d: Pool2dDims,
 ) void {
     if (comptime isa.reference) return scalar.pool2dInto(kind, out, input, d);
-    const o = out.data();
-    const in = input.dataConst();
-    if (pc.pool) |pool| {
-        const work = d.oh * d.ow * d.c * d.kh * d.kw;
-        const tc = common.generalConvThreadCount(d.oh, work);
-        if (tc > 1) {
-            var tasks: [parallel.vector_max_threads]Pool2dTask = undefined;
-            for (0..tc) |ti| {
-                tasks[ti] = .{
-                    .out = o,
-                    .in = in,
-                    .kind = kind,
-                    .d = d,
-                    .oh_start = ti * d.oh / tc,
-                    .oh_end = (ti + 1) * d.oh / tc,
-                };
-            }
-            pool.parallelChunks(Pool2dTask, tasks[0..tc], runPool2dTask);
-            return;
+    const Ctx = struct { out: []f32, in: []const f32, d: Pool2dDims };
+    const rows = struct {
+        fn go(c: Ctx, oh_start: usize, oh_end: usize) void {
+            pool2dRangeRows(kind, c.out, c.in, c.d, oh_start, oh_end);
         }
+    };
+    const ctx: Ctx = .{ .out = out.data(), .in = input.dataConst(), .d = d };
+    if (pc.pool) |pool| {
+        const tc = common.generalConvThreadCount(d.oh, d.oh * d.ow * d.c * d.kh * d.kw);
+        if (tc > 1) return tile.forRange(pool, Ctx, ctx, d.oh, tc, rows.go);
     }
-    pool2dRangeRows(kind, o, in, d, 0, d.oh);
+    rows.go(ctx, 0, d.oh);
 }
 
 /// Compute output rows `[oh_start, oh_end)` — the per-worker range. Window
@@ -244,52 +219,27 @@ pub fn maxPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, input: *co
     }
 }
 
-const Upsample2xTask = struct {
-    out: []f32,
-    in: []const f32,
-    h: usize,
-    w: usize,
-    c: usize,
-    ih_start: usize,
-    ih_end: usize,
-};
-
-fn runUpsample2xTask(task: *const Upsample2xTask) void {
-    upsample2xRangeRows(task.out, task.in, task.h, task.w, task.c, task.ih_start, task.ih_end);
-}
-
 /// 2× nearest-neighbour upsample: `out[2h+i, 2w+j, :] = in[h, w, :]`
 /// (`i,j ∈ {0,1}`). One duplicated output row is built by widening each
 /// channel block, then the sibling row is a single row `@memcpy`. Parallel
 /// over input rows (disjoint output ranges — bit-identical to serial).
 pub fn upsample2xNearestInto(pc: common.ParallelConfig, out: *Tensor, input: *const Tensor, h: usize, w: usize, c: usize) void {
     if (comptime isa.reference) return scalar.upsample2xNearestInto(out, input, h, w, c);
-    const o = out.data();
-    const in = input.dataConst();
+    const Ctx = struct { out: []f32, in: []const f32, w: usize, c: usize };
+    const rows = struct {
+        fn go(ctx: Ctx, ih_start: usize, ih_end: usize) void {
+            upsample2xRangeRows(ctx.out, ctx.in, ctx.w, ctx.c, ih_start, ih_end);
+        }
+    };
+    const ctx: Ctx = .{ .out = out.data(), .in = input.dataConst(), .w = w, .c = c };
     if (pc.pool) |pool| {
         const tc = common.generalConvThreadCount(h, 4 * h * w * c);
-        if (tc > 1) {
-            var tasks: [parallel.vector_max_threads]Upsample2xTask = undefined;
-            for (0..tc) |ti| {
-                tasks[ti] = .{
-                    .out = o,
-                    .in = in,
-                    .h = h,
-                    .w = w,
-                    .c = c,
-                    .ih_start = ti * h / tc,
-                    .ih_end = (ti + 1) * h / tc,
-                };
-            }
-            pool.parallelChunks(Upsample2xTask, tasks[0..tc], runUpsample2xTask);
-            return;
-        }
+        if (tc > 1) return tile.forRange(pool, Ctx, ctx, h, tc, rows.go);
     }
-    upsample2xRangeRows(o, in, h, w, c, 0, h);
+    rows.go(ctx, 0, h);
 }
 
-fn upsample2xRangeRows(out: []f32, in: []const f32, h: usize, w: usize, c: usize, ih_start: usize, ih_end: usize) void {
-    _ = h;
+fn upsample2xRangeRows(out: []f32, in: []const f32, w: usize, c: usize, ih_start: usize, ih_end: usize) void {
     const orow_len = 2 * w * c;
     var ih: usize = ih_start;
     while (ih < ih_end) : (ih += 1) {

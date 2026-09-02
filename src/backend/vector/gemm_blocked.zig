@@ -43,6 +43,7 @@ const isa = @import("../isa.zig");
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 const ops = @import("../ops.zig");
 
 // ---------------- Microkernel shape ----------------
@@ -382,10 +383,10 @@ fn microKernelEdge(
     b_panel: []const f32,
     kc: usize,
 ) void {
-    var tile: [mr * nr]f32 align(@alignOf(common.Vf32)) = undefined;
-    microKernel(false, &tile, nr, a_panel, b_panel, kc);
+    var c_tile: [mr * nr]f32 align(@alignOf(common.Vf32)) = undefined;
+    microKernel(false, &c_tile, nr, a_panel, b_panel, kc);
     for (0..mr_eff) |r| {
-        const src = tile[r * nr ..][0..nr];
+        const src = c_tile[r * nr ..][0..nr];
         const dst = c[r * ldc ..];
         if (accumulate) {
             for (0..nr_eff) |j| dst[j] += src[j];
@@ -404,8 +405,8 @@ fn microKernelEdge(
 // meaningful slice of small-m GEMMs while every worker waits.
 const pack_b_parallel_min_floats: usize = 64 * 1024;
 
-const PackBTask = struct {
-    dst: []f32,
+/// The B~ pack payload; the parallel range is over nr-wide panels.
+const PackBCtx = struct {
     bd: []const f32,
     n: usize,
     k: usize,
@@ -415,12 +416,13 @@ const PackBTask = struct {
     nc_eff: usize,
 };
 
-fn packBTaskRunner(comptime orient: Orientation) fn (*const PackBTask) void {
+fn packBPanels(comptime orient: Orientation) fn (PackBCtx, usize, usize) void {
     return struct {
-        fn run(task: *const PackBTask) void {
-            packB(orient, task.dst, task.bd, task.n, task.k, task.pc, task.kc_eff, task.jc, task.nc_eff);
+        fn go(c: PackBCtx, panel_start: usize, panel_end: usize) void {
+            const j0 = panel_start * nr;
+            packB(orient, b_panel_storage[panel_start * c.kc_eff * nr ..], c.bd, c.n, c.k, c.pc, c.kc_eff, c.jc + j0, @min(c.nc_eff - j0, (panel_end - panel_start) * nr));
         }
-    }.run;
+    }.go;
 }
 
 fn packBParallel(
@@ -437,28 +439,13 @@ fn packBParallel(
     threads: usize,
 ) void {
     if (comptime !isa.is_aarch64) {
-        const pool = config.pool;
-        if (pool != null and threads > 1 and kc_eff * nc_eff >= pack_b_parallel_min_floats) {
-            const task_count = @max(@as(usize, 1), @min(threads, num_nr_panels));
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]PackBTask = undefined;
-                for (0..task_count) |ti| {
-                    const panel_start = ti * num_nr_panels / task_count;
-                    const panel_end = (ti + 1) * num_nr_panels / task_count;
-                    const j0 = panel_start * nr;
-                    tasks[ti] = .{
-                        .dst = b_panel_storage[panel_start * kc_eff * nr ..],
-                        .bd = bd,
-                        .n = n,
-                        .k = k,
-                        .pc = pc,
-                        .kc_eff = kc_eff,
-                        .jc = jc + j0,
-                        .nc_eff = @min(nc_eff - j0, (panel_end - panel_start) * nr),
-                    };
+        if (config.pool) |pool| {
+            if (threads > 1 and kc_eff * nc_eff >= pack_b_parallel_min_floats) {
+                const task_count = @max(@as(usize, 1), @min(threads, num_nr_panels));
+                if (task_count > 1) {
+                    const ctx: PackBCtx = .{ .bd = bd, .n = n, .k = k, .pc = pc, .kc_eff = kc_eff, .jc = jc, .nc_eff = nc_eff };
+                    return tile.forRange(pool, PackBCtx, ctx, num_nr_panels, task_count, comptime packBPanels(orient));
                 }
-                pool.?.parallelChunks(PackBTask, tasks[0..task_count], comptime packBTaskRunner(orient));
-                return;
             }
         }
     }
