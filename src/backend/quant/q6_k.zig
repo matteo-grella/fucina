@@ -1168,23 +1168,16 @@ test {
 /// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
 /// The fused gate/up pair kernel (`matmulQ6_Kx4RhsPairTile`) is a
 /// two-output contract outside the single-GEMM seam and keeps its name.
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    comptime std.debug.assert(g.weight == .q6_k);
-    comptime g.check();
-    const n = rhs.n;
-    switch (comptime g.rhs) {
-        .rows => switch (comptime g.order) {
-            .row_outer => matmulQ6_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            .col_outer => switch (comptime g.lhs) {
-                .q8_k => matmulQ6_KRhsCompactColOuter(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-                .q8_kx4 => {
-                    std.debug.assert(tile.r0 == 0);
-                    matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, tile.r1, tile.c0, tile.c1);
-                },
-                else => comptime unreachable,
-            },
-        },
-        .x4 => matmulQ6_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        else => comptime unreachable,
-    }
+/// The Q6_K kernels (see `q4_k.kernels`).
+pub const kernels = .{
+    .{ .g = ops.QuantGemm{ .weight = .q6_k, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ6_KRhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q6_k, .rhs = .rows, .lhs = .q8_k, .order = .col_outer }, .tile = matmulQ6_KRhsCompactColOuter },
+    .{ .g = ops.QuantGemm{ .weight = .q6_k, .rhs = .rows, .lhs = .q8_kx4, .order = .col_outer }, .tile = q8Kx4ColOuterTile },
+    .{ .g = ops.QuantGemm{ .weight = .q6_k, .rhs = .x4, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ6_Kx4RhsTile },
+};
+
+/// The col-outer Q8_Kx4 body covers the whole row range (`r0 == 0`).
+fn q8Kx4ColOuterTile(out: []f32, lhs: anytype, rhs: anytype, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+    std.debug.assert(r0 == 0);
+    matmulQ6_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, r1, c0, c1);
 }

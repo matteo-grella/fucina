@@ -1655,23 +1655,17 @@ test "attention q8 primitives: pair == single bitwise; weighted V row matches f6
 /// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
 /// The `.col_outer` q8_0x4-LHS form is the padded kernel: full row range
 /// (`tile.r0 == 0`), masked writes for `tile.r1 % 4 != 0`.
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    comptime std.debug.assert(g.weight == .q8_0);
-    comptime g.check();
-    const n = rhs.n;
-    switch (comptime g.rhs) {
-        .rows => matmulQ8_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .x4 => switch (comptime g.lhs) {
-            .q8_0 => matmulQ8_0x4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            .q8_0x4 => switch (comptime g.order) {
-                .row_outer => matmulQ8_0x4PackedRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-                .col_outer => {
-                    std.debug.assert(tile.r0 == 0);
-                    matmulQ8_0x4PackedPaddedRhsTile(out, lhs, rhs, tile.r1, n, tile.c0, tile.c1);
-                },
-            },
-            else => comptime unreachable,
-        },
-        else => comptime unreachable,
-    }
+/// The Q8_0 kernels (see `q4_k.kernels`). The `.col_outer` packed form
+/// is the padded kernel: whole row range, masked writes for `r1 % 4 != 0`.
+pub const kernels = .{
+    .{ .g = ops.QuantGemm{ .weight = .q8_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ8_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ8_0x4RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4, .order = .row_outer }, .tile = matmulQ8_0x4PackedRhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4, .order = .col_outer }, .tile = paddedPackedTile },
+};
+
+/// The padded packed body covers the whole row range (`r0 == 0`).
+fn paddedPackedTile(out: []f32, lhs: anytype, rhs: anytype, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+    std.debug.assert(r0 == 0);
+    matmulQ8_0x4PackedPaddedRhsTile(out, lhs, rhs, r1, n, c0, c1);
 }

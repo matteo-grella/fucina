@@ -1197,17 +1197,10 @@ test {
 /// body for `.{ g.weight, g.lhs }`. Output row stride is `rhs.n`. The
 /// slice-fed X4 and folded-plane kernels (PTQTP trit planes) take raw
 /// block slices instead of an RHS container and keep their names.
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    comptime std.debug.assert(g.weight == .tq2_0 or g.weight == .q2_0);
-    comptime g.check();
-    const n = rhs.n;
-    switch (comptime g.weight) {
-        .tq2_0 => switch (comptime g.lhs) {
-            .q8_k => matmulTQ2_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            .f32 => matmulTQ2_0F32RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            else => comptime unreachable,
-        },
-        .q2_0 => matmulQ2_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        else => comptime unreachable,
-    }
-}
+/// The ternary kernels (see `q4_k.kernels`): TQ2_0 over Q8_K or exact
+/// f32 activations, and the Q2_0 row tile over Q8_0 activations.
+pub const kernels = .{
+    .{ .g = ops.QuantGemm{ .weight = .tq2_0, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulTQ2_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .tq2_0, .rhs = .rows, .lhs = .f32, .order = .row_outer }, .tile = matmulTQ2_0F32RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q2_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ2_0RhsTile },
+};

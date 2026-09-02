@@ -765,27 +765,17 @@ test {
 
 /// The one Q5_K GEMM entry (`ops.QuantGemm`): comptime-selects the tile
 /// body for `.{ g.rhs, g.lhs, g.order }`. Output row stride is `rhs.n`.
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    comptime std.debug.assert(g.weight == .q5_k);
-    comptime g.check();
-    const n = rhs.n;
-    switch (comptime g.rhs) {
-        .rows => switch (comptime g.order) {
-            .row_outer => matmulQ5_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            .col_outer => switch (comptime g.lhs) {
-                .q8_k => matmulQ5_KRhsCompactColOuter(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-                .q8_kx4 => {
-                    std.debug.assert(tile.r0 == 0);
-                    matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, tile.r1, tile.c0, tile.c1);
-                },
-                else => comptime unreachable,
-            },
-        },
-        .x8 => switch (comptime g.lhs) {
-            .q8_k => matmulQ5_Kx8RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            .q8_kx4 => matmulQ5_Kx8Q8_Kx4RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-            else => comptime unreachable,
-        },
-        else => comptime unreachable,
-    }
+/// The Q5_K kernels (see `q4_k.kernels`).
+pub const kernels = .{
+    .{ .g = ops.QuantGemm{ .weight = .q5_k, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ5_KRhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q5_k, .rhs = .rows, .lhs = .q8_k, .order = .col_outer }, .tile = matmulQ5_KRhsCompactColOuter },
+    .{ .g = ops.QuantGemm{ .weight = .q5_k, .rhs = .rows, .lhs = .q8_kx4, .order = .col_outer }, .tile = q8Kx4ColOuterTile },
+    .{ .g = ops.QuantGemm{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ5_Kx8RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_kx4, .order = .row_outer }, .tile = matmulQ5_Kx8Q8_Kx4RhsTile },
+};
+
+/// The col-outer Q8_Kx4 body covers the whole row range (`r0 == 0`).
+fn q8Kx4ColOuterTile(out: []f32, lhs: anytype, rhs: anytype, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+    std.debug.assert(r0 == 0);
+    matmulQ5_KCompactQ8_Kx4ColOuter(out, lhs, rhs, n, r1, c0, c1);
 }

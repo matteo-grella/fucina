@@ -2486,19 +2486,43 @@ test "iq4_xs decoded tile matmul matches the per-row generic path bitwise" {
 /// Output row stride is `rhs.n`. The Q2_0 scalar reference twin
 /// (`matmulQ2_0RhsRefRange`) is the scalar provider's bespoke arm, outside
 /// the seam.
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    comptime g.check();
-    const n = rhs.n;
-    switch (comptime g.weight) {
-        .q1_0 => matmulQ1_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q4_0 => matmulQ4_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q4_1 => matmulQ4_1RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q5_0 => matmulQ5_0RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q5_1 => matmulQ5_1RhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q2_k => matmulQ2_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .q3_k => matmulQ3_KRhsTile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .iq4_nl, .mxfp4, .nvfp4 => matmulTableQ8_0RhsTile(g.weight, out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .tq1_0 => matmulTableQ8_KRhsTile(g.weight, out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1),
-        else => comptime unreachable,
-    }
+/// The cold-format kernels (see `q4_k.kernels`): every rarely-served
+/// format's row tile over the activation form its `rowsLhs` names.
+pub const kernels = .{
+    .{ .g = ops.QuantGemm{ .weight = .q1_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ1_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q4_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ4_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q4_1, .rhs = .rows, .lhs = .q8_1, .order = .row_outer }, .tile = matmulQ4_1RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q5_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ5_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q5_1, .rhs = .rows, .lhs = .q8_1, .order = .row_outer }, .tile = matmulQ5_1RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q2_k, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ2_KRhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .q3_k, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulQ3_KRhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .iq4_nl, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = tableQ8_0Tile(.iq4_nl) },
+    .{ .g = ops.QuantGemm{ .weight = .mxfp4, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = tableQ8_0Tile(.mxfp4) },
+    .{ .g = ops.QuantGemm{ .weight = .nvfp4, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = tableQ8_0Tile(.nvfp4) },
+    .{ .g = ops.QuantGemm{ .weight = .iq1_s, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq1_s) },
+    .{ .g = ops.QuantGemm{ .weight = .iq1_m, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq1_m) },
+    .{ .g = ops.QuantGemm{ .weight = .iq2_xxs, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq2_xxs) },
+    .{ .g = ops.QuantGemm{ .weight = .iq2_xs, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq2_xs) },
+    .{ .g = ops.QuantGemm{ .weight = .iq2_s, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq2_s) },
+    .{ .g = ops.QuantGemm{ .weight = .iq3_xxs, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq3_xxs) },
+    .{ .g = ops.QuantGemm{ .weight = .iq3_s, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq3_s) },
+    .{ .g = ops.QuantGemm{ .weight = .iq4_xs, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.iq4_xs) },
+    .{ .g = ops.QuantGemm{ .weight = .tq1_0, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = tableQ8_KTile(.tq1_0) },
+};
+
+/// The table-decoded tiles, bound to their format.
+fn tableQ8_0Tile(comptime dt: DType) fn ([]f32, []const dtype_mod.BlockQ8_0, ops.RhsOf(.{ .weight = dt, .lhs = .q8_0 }), usize, usize, usize, usize, usize) void {
+    return struct {
+        fn tile(out: []f32, lhs: []const dtype_mod.BlockQ8_0, rhs: ops.RhsOf(.{ .weight = dt, .lhs = .q8_0 }), n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            matmulTableQ8_0RhsTile(dt, out, lhs, rhs, n, r0, r1, c0, c1);
+        }
+    }.tile;
+}
+
+fn tableQ8_KTile(comptime dt: DType) fn ([]f32, []const dtype_mod.BlockQ8_K, ops.RhsOf(.{ .weight = dt, .lhs = .q8_k }), usize, usize, usize, usize, usize) void {
+    return struct {
+        fn tile(out: []f32, lhs: []const dtype_mod.BlockQ8_K, rhs: ops.RhsOf(.{ .weight = dt, .lhs = .q8_k }), n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+            matmulTableQ8_KRhsTile(dt, out, lhs, rhs, n, r0, r1, c0, c1);
+        }
+    }.tile;
 }

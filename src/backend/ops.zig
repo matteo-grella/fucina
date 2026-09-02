@@ -414,9 +414,10 @@ pub const Tile = struct {
 
 /// A quantized GEMM request at the kernel seam: `weight` names the RHS
 /// block format, `rhs` its interleave, `lhs` the activation form, `order`
-/// the loop nest. `supported` is the one matrix of existing kernels; each
-/// format file's `gemm(comptime g, out, lhs, rhs, tile)` rejects anything
-/// outside it at compile time, naming the combination.
+/// the loop nest. Which requests have a kernel is each format file's
+/// `kernels` table (`quant.supported` reads it; `quant.gemm` dispatches on
+/// it and rejects anything outside it at compile time, naming the
+/// combination).
 pub const QuantGemm = struct {
     weight: dtype_mod.DType,
     rhs: RhsPack = .rows,
@@ -438,43 +439,6 @@ pub const QuantGemm = struct {
             .q2_k, .q3_k, .q4_k, .q5_k, .q6_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .tq1_0, .tq2_0 => .q8_k,
             else => @compileError("QuantGemm.rowsLhs: no quantized rows kernel for weight ." ++ @tagName(weight)),
         };
-    }
-
-    /// The one matrix of existing kernels, transcribed from the per-format
-    /// tile bodies. A combination outside it has no kernel.
-    pub fn supported(comptime g: QuantGemm) bool {
-        return switch (g.weight) {
-            .q4_k => switch (g.rhs) {
-                .rows => (g.lhs == .q8_k) or (g.lhs == .q8_kx4 and g.order == .col_outer),
-                .x4 => g.lhs == .q8_k and g.order == .row_outer,
-                .x8 => (g.lhs == .q8_k or g.lhs == .q8_kx4) and g.order == .row_outer,
-                .x2mmla => (g.lhs == .q8_k or g.lhs == .q8_kx2mmla) and g.order == .row_outer,
-            },
-            .q5_k, .q6_k => switch (g.rhs) {
-                .rows => (g.lhs == .q8_k) or (g.lhs == .q8_kx4 and g.order == .col_outer),
-                .x4 => g.weight == .q6_k and g.lhs == .q8_k and g.order == .row_outer,
-                .x8 => g.weight == .q5_k and (g.lhs == .q8_k or g.lhs == .q8_kx4) and g.order == .row_outer,
-                .x2mmla => false,
-            },
-            .q8_0 => switch (g.rhs) {
-                .rows => g.lhs == .q8_0 and g.order == .row_outer,
-                // The `.col_outer` q8_0x4 form is the padded kernel: full
-                // row range, masked writes for r1 % 4 != 0.
-                .x4 => (g.lhs == .q8_0 and g.order == .row_outer) or g.lhs == .q8_0x4,
-                else => false,
-            },
-            .tq2_0 => g.rhs == .rows and (g.lhs == .q8_k or g.lhs == .f32) and g.order == .row_outer,
-            .q1_0, .q2_0, .q4_0, .q5_0, .q4_1, .q5_1, .q2_k, .q3_k, .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_nl, .iq4_xs, .tq1_0, .mxfp4, .nvfp4 => g.rhs == .rows and g.lhs == rowsLhs(g.weight) and g.order == .row_outer,
-            else => false,
-        };
-    }
-
-    /// `@compileError` naming the combination unless `supported`.
-    pub fn check(comptime g: QuantGemm) void {
-        if (comptime !g.supported()) @compileError(std.fmt.comptimePrint(
-            "QuantGemm: no kernel for weight .{s} with rhs .{s}, lhs .{s}, order .{s}",
-            .{ @tagName(g.weight), @tagName(g.rhs), @tagName(g.lhs), @tagName(g.order) },
-        ));
     }
 };
 

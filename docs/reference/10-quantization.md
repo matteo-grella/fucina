@@ -409,12 +409,12 @@ and needs no deinit).
 One seam sits below it: the backend addresses its quantized kernels by an
 `ops.QuantGemm` request, `{ weight: DType, rhs: RhsPack{rows, x4, x8,
 x2mmla}, lhs: LhsForm{f32, q8_k, q8_kx4, q8_kx2mmla, q8_0, q8_0x4, q8_1},
-order: LoopOrder{row_outer, col_outer} }`, whose `supported()` is the
-one matrix of existing kernels (an unsupported combination is a compile
-error naming it). Every packed container states its interleave as
-`pub const pack`, each format file exports one
-`gemm(comptime g, out, lhs, rhs, tile)` over its tile bodies, and
-`quant.gemm` dispatches on `g.weight`.
+order: LoopOrder{row_outer, col_outer} }`. Every packed container states
+its interleave as `pub const pack`, each format file exports one
+`kernels` table pairing a request with its tile body, `quant.gemm`
+dispatches on that table, and `quant.supported` reads it as the one
+matrix of existing kernels (an unsupported combination is a compile error
+naming it).
 
 At the LLM layer ([§13](13-the-model-stack-fucina_models.md)), `fucina_models`'s `weights.zig` wraps each quantized
 projection as a struct holding the original blocks plus a

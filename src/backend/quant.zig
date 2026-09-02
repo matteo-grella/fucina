@@ -421,21 +421,49 @@ pub fn x4PrefixRows(comptime weight: DType, m: usize) usize {
     };
 }
 
-/// The one quantized GEMM entry over a request `g` (`backend/ops.zig`
-/// `QuantGemm`): dispatches at comptime to the owning format file's
-/// `gemm`, which selects the tile body for `.{ g.rhs, g.lhs, g.order }`.
-/// The output row stride is `rhs.n`; `tile` bounds the rows and columns
-/// written; an unsupported combination is a compile error naming it
-/// (`QuantGemm.supported` is the matrix).
-pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
-    switch (comptime g.weight) {
-        .q4_k => q4_k.gemm(g, out, lhs, rhs, tile),
-        .q5_k => q5_k.gemm(g, out, lhs, rhs, tile),
-        .q6_k => q6_k.gemm(g, out, lhs, rhs, tile),
-        .q8_0 => q8_0.gemm(g, out, lhs, rhs, tile),
-        .tq2_0, .q2_0 => ternary.gemm(g, out, lhs, rhs, tile),
-        else => cold.gemm(g, out, lhs, rhs, tile),
+/// The format file owning `weight`'s kernels (its `kernels` table).
+fn formatOf(comptime weight: DType) type {
+    return switch (weight) {
+        .q4_k => q4_k,
+        .q5_k => q5_k,
+        .q6_k => q6_k,
+        .q8_0 => q8_0,
+        .tq2_0, .q2_0 => ternary,
+        else => cold,
+    };
+}
+
+/// True when a kernel exists for `g`: the owning format's `kernels` table
+/// has an entry for exactly this request. The one matrix of existing
+/// kernels; `gemm` dispatches on the same table.
+pub fn supported(comptime g: ops.QuantGemm) bool {
+    comptime {
+        for (formatOf(g.weight).kernels) |k| {
+            if (std.meta.eql(k.g, g)) return true;
+        }
+        return false;
     }
+}
+
+/// `@compileError` naming the combination unless `supported`.
+pub fn check(comptime g: ops.QuantGemm) void {
+    if (comptime !supported(g)) @compileError(std.fmt.comptimePrint(
+        "quant.gemm: no kernel for weight .{s} with rhs .{s}, lhs .{s}, order .{s}",
+        .{ @tagName(g.weight), @tagName(g.rhs), @tagName(g.lhs), @tagName(g.order) },
+    ));
+}
+
+/// The one quantized GEMM entry over a request `g` (`backend/ops.zig`
+/// `QuantGemm`): the owning format's `kernels` table entry for `g` runs
+/// its tile body over `[r0, r1) x [c0, c1)` at output row stride `rhs.n`.
+/// An unsupported combination is a compile error naming it.
+pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.RhsOf(g), tile: ops.Tile) void {
+    comptime check(g);
+    const n = rhs.n;
+    inline for (formatOf(g.weight).kernels) |k| {
+        if (comptime std.meta.eql(k.g, g)) return k.tile(out, lhs, rhs, n, tile.r0, tile.r1, tile.c0, tile.c1);
+    }
+    comptime unreachable;
 }
 
 /// The compact (GGUF-native block layout) matmul RHS of one format
@@ -448,11 +476,7 @@ pub const LanePackedRhs = types.LanePackedRhs;
 /// True when `dt` has the batched column-outer compact kernel
 /// (`matmul*RhsCompactColOuter`); q2_k/q3_k stay on the row-outer tile.
 pub fn hasCompactColOuter(comptime dt: DType) bool {
-    return switch (dt) {
-        .q4_k, .q5_k, .q6_k => true,
-        .q2_k, .q3_k => false,
-        else => @compileError("no compact matmul RHS view for dtype ." ++ @tagName(dt)),
-    };
+    return supported(.{ .weight = dt, .lhs = .q8_k, .order = .col_outer });
 }
 
 /// Row-outer tile over a compact RHS view, by format: the

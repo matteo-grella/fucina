@@ -623,11 +623,11 @@ row access, the interleaved pack layouts and RHS containers, and the
 portable kernels every arm shares; backend dispatch consumes
 `AnyQuantizedMatmulRhs` internally. Each tier is addressed by one
 request type. The backend seam is `ops.QuantGemm`, the request
-`{ weight, rhs: RhsPack, lhs: LhsForm, order: LoopOrder }` with
-`supported()` as the one matrix of existing kernels: every packed container states its interleave
-as `pub const pack`, each format file exports one
-`gemm(comptime g, out, lhs, rhs, tile)` over its tile bodies,
-`quant.gemm` dispatches on `g.weight`, and the dispatch tier (the vector
+`{ weight, rhs: RhsPack, lhs: LhsForm, order: LoopOrder }`: every packed
+container states its interleave as `pub const pack`, each format file
+exports one `kernels` table (request, tile body) over its tile bodies,
+`quant.gemm` dispatches on that table and `quant.supported` reads it (the
+one matrix of existing kernels), and the dispatch tier (the vector
 parallel split `gemm2D`, the `AnyQuantizedMatmulRhs` union entry,
 `kernels.matmulPacked` over container `(dtype, pack)`,
 `kernels.matmulPackedSlice` for pre-quantized LHS slices) selects

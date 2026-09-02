@@ -60,6 +60,12 @@ this point; earlier history is `git log`.
   (`backend.quantized_matmul.types.RhsLifetime`; `exec.RhsLifetime` and
   `fucina.RhsLifetime` still name it); the packed weight's lifetime is
   read through `rhsLifetime()`/`setRhsLifetime()`.
+- The kernel matrix is spelled once: each `backend/quant/<fmt>.zig` exports
+  a `kernels` table pairing an `ops.QuantGemm` request with its tile body,
+  `backend.quantized_matmul.gemm` dispatches on that table, and
+  `backend.quantized_matmul.supported`/`check` read it
+  (`ops.QuantGemm.supported`/`check` and the per-format `gemm` switches are
+  gone; `hasCompactColOuter` derives from the table).
 - The quantized RHS containers are two generics in
   `src/backend/quant/types.zig`: `CompactRhs(dtype)` (every `.rows`
   container: `allocator: ?Allocator`, `blocks: []const Storage(dtype)`,
