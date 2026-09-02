@@ -1575,15 +1575,14 @@ pub fn packedRhsType(comptime T: type, comptime op_name: []const u8) type {
     return Rhs;
 }
 
-/// The packed RHS containers the facade dispatches on.
+/// The packed RHS containers the facade dispatches on: the dense f32
+/// panel, and every quantized container whose `pack` is a lane interleave
+/// (the compact `.rows` containers are the quantized `dot`'s operand, not
+/// `dotPacked`'s). Derived from the container, never a list.
 pub fn isPackedRhsType(comptime Rhs: type) bool {
-    return Rhs == backend_mod.PackedDenseRhs or
-        Rhs == backend_mod.QuantizedMatmulRhsQ8_0x4 or
-        Rhs == backend_mod.QuantizedMatmulRhsQ6_Kx4 or
-        Rhs == backend_mod.QuantizedMatmulRhsQ5_Kx8 or
-        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx8 or
-        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx2Mmla or
-        Rhs == backend_mod.QuantizedMatmulRhsQ4_Kx4;
+    if (Rhs == backend_mod.PackedDenseRhs) return true;
+    if (@typeInfo(Rhs) != .@"struct" or !@hasDecl(Rhs, "pack") or !@hasDecl(Rhs, "dtype")) return false;
+    return Rhs.pack != .rows;
 }
 
 test {
