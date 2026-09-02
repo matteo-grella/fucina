@@ -585,8 +585,8 @@ seconds and ~24 GB saved at load), on Q4_K-transcoded experts, under
 wrappers) over `decodePacked` / `batchPacked` / `decodeRaw` / `batchRaw`.
 The kernel bodies live with the family
 (`src/models/gemma/moe_gu.zig`, re-exported as `gemma.moe.moe_gu`); batch
-entries consume the shared counting-sort route plan (`exec/moe_chain.zig`,
-reached through the `ExecContext.moe_chain` seam) with an expert-major
+entries consume the shared counting-sort route plan (`moe/chain.zig`,
+reached as `fucina.moe.chain`) with an expert-major
 scatter that stays deliberately serial to keep each token's summation
 order fixed against the parity oracles.
 

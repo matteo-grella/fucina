@@ -1,9 +1,9 @@
 //! Shared batched-MoE scheduling scaffolding: the expert-grouped route plan
 //! (counting sort), the gather → gate/up → act → down phase-chain machinery,
 //! the phase chunking constants/helpers, and the profile timer pair. Consumed
-//! by the qwen-style MoE op (`exec/moe.zig`) and — through the
-//! `ExecContext.moe_chain` re-export — by the gemma MoE engines at the models
-//! layer, so scheduler fixes and chunk retunes land once for every family.
+//! by the expert FFN engines (`expert_ffn.zig`) and — as `fucina.moe.chain` —
+//! by the gemma MoE engines at the models layer, so scheduler fixes and chunk
+//! retunes land once for every family.
 const std = @import("std");
 const thread = @import("../thread.zig");
 
@@ -15,7 +15,7 @@ pub fn moeBatchProfileStart(enabled: bool, io: ?std.Io) i128 {
 
 // Returns i64 (not i128): elapsed deltas fit comfortably, accumulators
 // coerce, and i64 keeps the carved MoE task structs at align <= 8 so they
-// can live in the u64-backed decode scratch (`carveMoeDecodeScratch`).
+// can live in the u64-backed decode scratch (`carveDecodeScratch`).
 pub fn moeBatchProfileElapsed(start: i128, io: ?std.Io) i64 {
     return @intCast(std.Io.Clock.awake.now(io.?).nanoseconds - start);
 }

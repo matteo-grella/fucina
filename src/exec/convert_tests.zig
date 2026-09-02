@@ -6,7 +6,6 @@ const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
 const exec_elementwise = @import("elementwise.zig");
 const exec_row_ops = @import("../backend.zig").rows;
-const exec_moe_chain = @import("moe_chain.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");

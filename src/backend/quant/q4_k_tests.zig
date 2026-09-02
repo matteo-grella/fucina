@@ -357,7 +357,7 @@ test "Q4_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
 }
 
 test "Q4_K col-outer kernels: split column ranges are bit-identical to full range" {
-    // The batched-MoE phase chunking (exec/moe_chain.zig) hands these kernels
+    // The batched-MoE phase chunking (moe/chain.zig) hands these kernels
     // [c0, c1) column ranges at 256-column boundaries; a column's bits must
     // not depend on which range computed it, so one full-range call must
     // equal two chunked calls writing into the same-shaped buffer.

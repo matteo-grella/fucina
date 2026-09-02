@@ -287,6 +287,9 @@ pub fn matmulQ6_KCompactQ8_Kx4ColOuter(
 
 pub const matmulQ6_Kx4RhsTile = common.LaneX4Tile(BlockQ8_K, types.QuantizedMatmulRhsQ6_Kx4, .{ .rows = accumulateQ6_Kx4Rows, .one = accumulateQ6_Kx4 });
 
+/// Gate and up rows of one expert in a single pass over the shared LHS: the
+/// tile of the gemma fused gate|up MoE engine (`models/gemma/moe_gu.zig`),
+/// not of the generic quantized matmul route.
 pub fn matmulQ6_Kx4RhsPairTile(
     gate_out: []f32,
     up_out: []f32,

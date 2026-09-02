@@ -170,7 +170,7 @@ Deliberate deltas from the paper:
   same-window decode runs): **+14% at K=2 and +30% at K=3** over the
   pre-pack fused path. Odd `n` or unreadable plane storage falls back to
   the row kernels — identical bits, just slower.
-- **MoE expert stacks** (`MoeRhs.ptqtp`, `src/exec/moe.zig`): expert
+- **MoE expert stacks** (`MoeRhs.ptqtp`, `src/moe/expert_ffn.zig`): expert
   stacks quantized at K=2/3 run through the fused MoE ops — the tile dot
   runs the ternary kernel once per plane and SUMS per element in fixed
   plane order before the gated nonlinearity, so a PTQTP expert equals the
@@ -580,7 +580,7 @@ smmla would close it on ARMv8.6+ targets).
 - Decode dispatch: ~140 fork-joins/token remain at 1.7B (linears + attention
   + norms), worth ~3–5 ms against a ~64 t/s ARM ceiling at K=3. The
   dependency-respecting fix is a per-layer phase chain
-  (`thread.parallelChained`, `exec/moe_chain.zig` precedent, family-local
+  (`thread.parallelChained`, `moe/chain.zig` precedent, family-local
   per the placement policy) — a second decode path with a parity burden;
   cheaper spin/dispatch-cost tuning should be measured first.
 - Per-row selective third plane (plane3 over a chosen row subset + row

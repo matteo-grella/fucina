@@ -1,16 +1,17 @@
 //! Mixture-of-Experts execution: the `MoeRhs` expert-stack container, the
 //! per-format expert tile dot (dense, K-quant, ternary plane, streamed),
-//! the single-token decode entries over the grow-only `MoeDecodeScratch`
-//! arena, and the batched expert FFN over `moe_chain`'s phase machinery.
-//! Domain module: every op receives an explicit `*ExecContext`.
+//! the single-token decode entries carving the runtime's decode scratch
+//! arena, and the batched expert FFN over `chain`'s phase machinery.
+//! Every op receives an explicit `*ExecContext`.
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
 const fucina_dtype = @import("../dtype.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
+const Carver = @import("../exec.zig").ScratchArena.Carver;
 const backend_ops = backend_mod.ops;
 const expert_store = @import("../store/expert_store.zig");
-const moe_chain = @import("moe_chain.zig");
+const moe_chain = @import("chain.zig");
 const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
@@ -30,8 +31,8 @@ fn gatedPairs(gated: Gated, g: []f32, gate: []const f32, up: []const f32) void {
 }
 const Tensor = tensor.Tensor;
 
-// Shared batched-MoE scheduling scaffolding (exec/moe_chain.zig), also
-// consumed by the gemma MoE engines via `ExecContext.moe_chain`.
+// Shared batched-MoE scheduling scaffolding (chain.zig), also consumed by
+// the gemma MoE engines via `fucina.moe.chain`.
 const moeBatchProfileStart = moe_chain.moeBatchProfileStart;
 const moeBatchProfileElapsed = moe_chain.moeBatchProfileElapsed;
 const moeDecodeColumnSplit = moe_chain.moeDecodeColumnSplit;
@@ -524,7 +525,7 @@ const ptqtp_acc_cols: usize = 1024;
 /// change results: each out[r][c] is an independent dot and the ternary
 /// kernel's 4-column body and width-1 tail agree bitwise, so any
 /// row/column partition yields identical values. The scratch is
-/// task-private stack rather than a MoeScratchCarver region: this dot runs
+/// task-private stack rather than a decode-scratch region: this dot runs
 /// inside column-split worker tasks that share the carved per-expert
 /// buffers, so a bounded private buffer is the allocation-free choice that
 /// stays race-free under any task partition.
@@ -601,49 +602,18 @@ fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend
     }
 }
 
-/// Grow-only scratch backing the single-row MoE decode ops: the per-token region sizes
-/// are model constants, so after the first token the hot path performs no
-/// allocations and takes one uncontended mutex instead of several
-/// allocator/pool round-trips per layer. The mutex is held for the whole
-/// op because the expert tasks write into carved slices.
-pub const MoeDecodeScratch = struct {
-    mutex: thread.Mutex = .{},
-    words: []u64 = &.{},
-
-    pub fn deinit(self: *MoeDecodeScratch, allocator: Allocator) void {
-        if (self.words.len > 0) allocator.free(self.words);
-        self.* = undefined;
-    }
-};
-
-pub fn lockMoeDecodeScratch(ctx: *ExecContext) void {
-    ctx.moe_scratch.mutex.lock();
+/// The single-row decode entries carve their per-token regions out of the
+/// runtime's decode scratch arena; the caller holds its lock for the
+/// lifetime of the returned view.
+pub fn lockDecodeScratch(ctx: *ExecContext) void {
+    ctx.decode_scratch.lock();
 }
 
-pub fn unlockMoeDecodeScratch(ctx: *ExecContext) void {
-    ctx.moe_scratch.mutex.unlock();
+pub fn unlockDecodeScratch(ctx: *ExecContext) void {
+    ctx.decode_scratch.unlock();
 }
 
-const MoeScratchCarver = struct {
-    base: [*]u8,
-    offset: usize = 0,
-
-    fn carve(self: *MoeScratchCarver, comptime T: type, n: usize) ![]T {
-        const start = std.mem.alignForward(usize, self.offset, @alignOf(T));
-        const byte_len = std.math.mul(usize, n, @sizeOf(T)) catch return tensor.TensorError.InvalidDataLength;
-        self.offset = std.math.add(usize, start, byte_len) catch return tensor.TensorError.InvalidDataLength;
-        const ptr: [*]T = @ptrCast(@alignCast(self.base + start));
-        return ptr[0..n];
-    }
-
-    fn need(comptime T: type, offset: usize, n: usize) !usize {
-        const start = std.mem.alignForward(usize, offset, @alignOf(T));
-        const byte_len = std.math.mul(usize, n, @sizeOf(T)) catch return tensor.TensorError.InvalidDataLength;
-        return std.math.add(usize, start, byte_len) catch return tensor.TensorError.InvalidDataLength;
-    }
-};
-
-pub fn MoeDecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
+pub fn DecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
     return struct {
         qx: []dtype_mod.BlockQ8_K,
         gate_buf: []f32,
@@ -655,7 +625,7 @@ pub fn MoeDecodeScratchView(comptime QgBlock: type, comptime Task: type) type {
     };
 }
 
-pub fn MoeDecodeChainScratchView(comptime QgBlock: type, comptime State: type, comptime Task: type) type {
+pub fn DecodeChainScratchView(comptime QgBlock: type, comptime State: type, comptime Task: type) type {
     return struct {
         qx: []dtype_mod.BlockQ8_K,
         gate_buf: []f32,
@@ -668,11 +638,11 @@ pub fn MoeDecodeChainScratchView(comptime QgBlock: type, comptime State: type, c
     };
 }
 
-/// Carve the per-token MoE decode scratch regions out of `moe_scratch`,
-/// growing it once if needed. Caller must hold `moe_scratch.mutex` for the
-/// lifetime of the returned view. All region types align to <= 8 (the u64
+/// Carve the per-token MoE decode scratch regions out of the runtime's
+/// decode scratch arena, growing it once if needed. Caller must hold its
+/// lock (`lockDecodeScratch`) for the lifetime of the returned view. All region types align to <= 8 (the u64
 /// backing store's natural alignment).
-pub fn carveMoeDecodeScratch(
+pub fn carveDecodeScratch(
     ctx: *ExecContext,
     comptime QgBlock: type,
     comptime Task: type,
@@ -681,7 +651,7 @@ pub fn carveMoeDecodeScratch(
     out_pe: usize,
     hidden: usize,
     blocks_per_g: usize,
-) !MoeDecodeScratchView(QgBlock, Task) {
+) !DecodeScratchView(QgBlock, Task) {
     comptime {
         if (@alignOf(dtype_mod.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(Task) > 8) {
             @compileError("MoE scratch regions must align to <= 8");
@@ -692,23 +662,15 @@ pub fn carveMoeDecodeScratch(
     const out_len = try checkedMoeProduct(top_k, hidden);
 
     var total: usize = 0;
-    total = try MoeScratchCarver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(QgBlock, total, qg_len);
-    total = try MoeScratchCarver.need(f32, total, out_len);
-    total = try MoeScratchCarver.need(Task, total, top_k);
+    total = try Carver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(QgBlock, total, qg_len);
+    total = try Carver.need(f32, total, out_len);
+    total = try Carver.need(Task, total, top_k);
 
-    const rounded_total = std.math.add(usize, total, @sizeOf(u64) - 1) catch return tensor.TensorError.InvalidDataLength;
-    const words_needed = rounded_total / @sizeOf(u64);
-    const scratch = &ctx.moe_scratch;
-    if (scratch.words.len < words_needed) {
-        const grown = try ctx.allocator().alloc(u64, words_needed);
-        if (scratch.words.len > 0) ctx.allocator().free(scratch.words);
-        scratch.words = grown;
-    }
-    var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
+    var carver = Carver{ .base = try ctx.decode_scratch.reserve(ctx.allocator(), total) };
     return .{
         .qx = try carver.carve(dtype_mod.BlockQ8_K, hidden_blocks),
         .gate_buf = try carver.carve(f32, gate_len),
@@ -720,7 +682,7 @@ pub fn carveMoeDecodeScratch(
     };
 }
 
-pub fn carveMoeDecodeChainScratch(
+pub fn carveDecodeChainScratch(
     ctx: *ExecContext,
     comptime QgBlock: type,
     comptime State: type,
@@ -731,7 +693,7 @@ pub fn carveMoeDecodeChainScratch(
     hidden: usize,
     blocks_per_g: usize,
     task_count: usize,
-) !MoeDecodeChainScratchView(QgBlock, State, Task) {
+) !DecodeChainScratchView(QgBlock, State, Task) {
     comptime {
         if (@alignOf(dtype_mod.BlockQ8_K) > 8 or @alignOf(QgBlock) > 8 or @alignOf(State) > 8 or @alignOf(Task) > 8) {
             @compileError("MoE scratch regions must align to <= 8");
@@ -742,24 +704,16 @@ pub fn carveMoeDecodeChainScratch(
     const out_len = try checkedMoeProduct(top_k, hidden);
 
     var total: usize = 0;
-    total = try MoeScratchCarver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(f32, total, gate_len);
-    total = try MoeScratchCarver.need(QgBlock, total, qg_len);
-    total = try MoeScratchCarver.need(f32, total, out_len);
-    total = try MoeScratchCarver.need(State, total, top_k);
-    total = try MoeScratchCarver.need(Task, total, task_count);
+    total = try Carver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(f32, total, gate_len);
+    total = try Carver.need(QgBlock, total, qg_len);
+    total = try Carver.need(f32, total, out_len);
+    total = try Carver.need(State, total, top_k);
+    total = try Carver.need(Task, total, task_count);
 
-    const rounded_total = std.math.add(usize, total, @sizeOf(u64) - 1) catch return tensor.TensorError.InvalidDataLength;
-    const words_needed = rounded_total / @sizeOf(u64);
-    const scratch = &ctx.moe_scratch;
-    if (scratch.words.len < words_needed) {
-        const grown = try ctx.allocator().alloc(u64, words_needed);
-        if (scratch.words.len > 0) ctx.allocator().free(scratch.words);
-        scratch.words = grown;
-    }
-    var carver = MoeScratchCarver{ .base = @ptrCast(scratch.words.ptr) };
+    var carver = Carver{ .base = try ctx.decode_scratch.reserve(ctx.allocator(), total) };
     return .{
         .qx = try carver.carve(dtype_mod.BlockQ8_K, hidden_blocks),
         .gate_buf = try carver.carve(f32, gate_len),
@@ -1005,7 +959,7 @@ fn runMoeDecodeChainWave(
 /// landed experts after `acquireFinish` — the weighted reduce stays in
 /// original selection order, so the output is bit-identical either way.
 /// `x` is (1, hidden) of K-quant experts; returns (1, hidden).
-pub fn moeExpertFfn(
+pub fn expertFfn(
     ctx: *ExecContext,
     x: *const Tensor,
     gate: *const MoeRhs,
@@ -1061,9 +1015,9 @@ pub fn moeExpertFfn(
     defer if (qg8_all.len > 0) ctx.allocator().free(qg8_all);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    lockMoeDecodeScratch(ctx);
-    defer unlockMoeDecodeScratch(ctx);
-    const sv = try carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    lockDecodeScratch(ctx);
+    defer unlockDecodeScratch(ctx);
+    const sv = try carveDecodeChainScratch(ctx, dtype_mod.BlockQ8_K, MoeDecodeChainState, MoeDecodeChainTask, hidden_blocks_k, top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     const gate_buf = sv.gate_buf;
     const up_buf = sv.up_buf;
     const g_buf = sv.g_buf;
@@ -1421,7 +1375,7 @@ fn runMoeBatchSwiGluTaskOpaque(ctx: *anyopaque) void {
 /// `parallelChained` arm that overlaps stages where the chain form is
 /// eligible). Staging instead of per-expert chains keeps every worker busy
 /// across experts of unequal token counts; scratch lives in the context's
-/// persistent `moe_scratch`.
+/// persistent `decode_scratch`.
 fn runMoeBatchPhased(
     ctx: *ExecContext,
     pool: *thread.Pool,
@@ -1694,7 +1648,7 @@ fn runMoeBatchScatterTask(task: *const MoeBatchScatterTask) void {
 /// instead of re-read per token, and the whole layer is one pooled dispatch
 /// over experts. `x` is (seq, hidden); `selected`/`weights` are seq*top_k
 /// (row-major per token). Returns (seq, hidden).
-pub fn moeExpertFfnBatch(
+pub fn expertFfnBatch(
     ctx: *ExecContext,
     x: *const Tensor,
     gate: *const MoeRhs,

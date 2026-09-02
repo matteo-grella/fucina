@@ -42,6 +42,7 @@ Top-down; a band may depend only on bands at or below it:
 | facade | `src/fucina.zig` (the `fucina` module root) |
 | ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/es/**`, `src/ptqtp.zig`, `src/gguf.zig`, `src/gguf/**`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
+| moe | `src/moe.zig`, `src/moe/**` (the MoE band: the `MoeRhs` expert-stack container, the decode and batched-prefill expert FFN engines, the phase-chain scheduling every family shares, the decode-scratch views family engines carve) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
 | store | `src/store/**` (disk-streamed block stores: the out-of-core MoE expert tier — `expert_store.zig` the facade over the `io`/`geometry`/`tiers`/`policy`/`persist` concern files) |
 | backend | `src/backend.zig`, `src/backend/**` (the one CPU kernel provider behind the conformance-checked `backend.kernels` set; the single-implementation fused kernels live beside their ops in `exec/`) |
@@ -164,18 +165,18 @@ Execution runtime:
   root-anchored import cycle (see *Layering And Enforcement*).
 - `src/exec/buffer_pool.zig`: the reusable transient-buffer pool leaf.
 - `src/exec/` domain modules: `attention.zig`, `matmul.zig`,
-  `quant_matmul.zig`, `moe.zig`, `moe_chain.zig`,
+  `quant_matmul.zig`,
   `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
   `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
   `conv.zig`, `pool.zig`. These are not public API; `src/exec.zig` remains
   the runtime boundary.
-- `src/exec/moe_chain.zig`: shared batched-MoE scheduling scaffolding
-  (expert-grouped route plan, gather → gate/up → act → down phase-chain
-  machinery, chunking helpers, profile timers). Consumed by `exec/moe.zig`
-  and, through the `ExecContext.moe_chain` seam, by the gemma fused
-  gate|up kernels (`models/gemma/moe_gu.zig`), so scheduler fixes land
-  once for every family.
+- `src/moe/chain.zig` (the moe band above exec): shared batched-MoE
+  scheduling scaffolding (expert-grouped route plan, gather → gate/up →
+  act → down phase-chain machinery, chunking helpers, profile timers).
+  Consumed by `moe/expert_ffn.zig` and, as `fucina.moe.chain`, by the
+  gemma fused gate|up kernels (`models/gemma/moe_gu.zig`), so scheduler
+  fixes land once for every family.
 
 Backends:
 
@@ -462,7 +463,7 @@ is the canonical in-tree name for allowed-raw zones.
   of training intermediates; see `MEMORY-MODEL.md` and `TRAINING.md`),
 
 and declares the model/session execution state beside it, including the
-grow-only MoE decode scratch (`moe_scratch`).
+grow-only decode scratch arena (`decode_scratch`, carved by the MoE band).
 
 The substrate functions that operate on these fields (lifecycle, scopes,
 worker team, tensor allocation primitives) are free functions in
@@ -500,7 +501,7 @@ Important execution paths:
   seams. `RhsLifetime` distinguishes `transient` RHS bytes from
   `stable_process` ones (process-lifetime mmap or registered device-resident
   storage) — only the latter may be cached address-keyed by a backend.
-- MoE (`src/exec/moe.zig` + `moe_chain.zig`) executes batched expert FFNs as
+- MoE (`src/moe/expert_ffn.zig` + `chain.zig`, the moe band above exec) executes batched expert FFNs as
   a phase chain over the hot team; the route plan is a counting sort shared
   across families.
 
@@ -764,8 +765,9 @@ the runtime through the public `ExecContext` surface (or the
 (`models/gemma/moe_gu.zig`), the Kimi KDA recurrence
 (`models/research/kimi3/delta_attention.zig`), and the DeepSeek YaRN
 frequency blend (`models/ops.zig`) live under this rule; the shared MoE
-DECODE/BATCH engines (`exec/moe.zig`, `exec/moe_chain.zig`, `MoeRhs`)
-stay in exec because every MoE family schedules through them.
+DECODE/BATCH engines (`moe/expert_ffn.zig`, `moe/chain.zig`, `MoeRhs`)
+are their own band above exec because every MoE family schedules through
+them.
 
 ### The decoder contract and the architecture registry
 
@@ -994,7 +996,7 @@ behavioral tests, and `arch-check` ignores the imports inside them.
   family and the glm4moe trunk, and `serving.open` is the load-and-serve
   entry for the Conversation families; the OTHER families still wire their
   own config/loader/decoder (the shared seams are `weights.zig`,
-  `gguf_meta.zig`, `chat.zig`, `host_ops.zig`, and `moe_chain`), and no
+  `gguf_meta.zig`, `chat.zig`, `host_ops.zig`, and `moe.chain`), and no
   descriptor covers recurrent/MLA/hyper-connection vocabularies yet.
 - No documented thread-safety contract for users sharing tensor handles
   across threads (the runtime's internal pools are thread-safe; handle

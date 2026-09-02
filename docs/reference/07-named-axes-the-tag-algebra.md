@@ -365,7 +365,7 @@ the source transform is the identity for the classic ops):
 `left * σ(right)`, `left * silu(right)`, `left * gelu(right)`; the MoE
 entries take an `exec.Gated{ .op, .clamp }` whose optional clamp bounds both
 operands first (`clamp(left, ±c) * silu(min(right, c))`, DeepSeek V4's
-clamped SwiGLU at `c = 10`; [§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)),
+clamped SwiGLU at `c = 10`; [§4.18](04-tensor-operations.md#418-moe-entries-srcmoezig)),
 and `25·tanh(left/25) * 4·tanh(right/4)·σ(right)` for `.situ` (Kimi K3's
 SiTU: a soft-bounded SiLU gate over a soft-clamped up input). The output
 is always a newly materialized contiguous tensor in result-tag order.

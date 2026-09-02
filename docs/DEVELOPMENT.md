@@ -112,8 +112,8 @@ Reusable engines other `src/models` consumers should import go in
 stay app-local in `apps/<name>/`; generic helpers stay flat in
 `src/models/`; family-specific kernel orchestration lives in the family over
 the `fucina.internal` seam, never inside the generic exec runtime; shared
-cross-family scheduling lives once in exec and is re-exported
-(`exec/moe_chain.zig` is the pattern). New core tensor ops belong in the
+cross-family scheduling lives once in the moe band (`moe/chain.zig` is
+the pattern). New core tensor ops belong in the
 exec/backend bands — but a good port usually needs none: nanochat is
 entirely app-local over the public facade. The apps band itself has two
 homes: `examples/<name>/` is teaching code (one `main.zig`, a README is
@@ -168,7 +168,7 @@ into the [reference](reference/00-index.md), whose snippets are machine-verified
 | RoPE | interleaved/half/tail-aligned modes, partial rotary, freq-factor (YaRN-style) tables, inverse tables, hand-fillable `RopeTable` | [§4.12](reference/04-tensor-operations.md#412-rotary-position-embedding-srcagtensorzig-srcexecropezig) |
 | Norms, softmax, losses | rmsNorm family (incl. fused mul/add/rope), layerNorm, groupNorm; softmax with scale/mask/sinks; `crossEntropy` (smoothing, ignore-index, accum scale), mse/huber/bce/kl/nll | [§4.10](reference/04-tensor-operations.md#410-softmax-family-srcagtensorzig-srcexecsoftmaxzig)–4.11, [§4.15](reference/04-tensor-operations.md#415-losses-and-similarity-srcagtensorzig-srcexeclosszig) |
 | Vision / conv | channel-last conv2d (im2col GEMM + Winograd), conv1d/causal/transpose, pool2d, prelu, channelAffine, upsample, zeroPad2d — all with autograd | [§4.14](reference/04-tensor-operations.md#414-convolution-and-channel-last-vision-ops-srcagtensorzig) |
-| MoE | `routerTopK`, `moeExpertFfn`/`Batch`, `MoeRhs` packed containers, `moe_chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | [§4.16](reference/04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig), [§4.18](reference/04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig), [§13.2](reference/13-the-model-stack-fucina_models.md#132-weight-loading-srcweightszig) |
+| MoE | `routerTopK`, `moe.expertFfn`/`Batch`, `MoeRhs` packed containers, `moe.chain` scheduling, disk-streamed experts (`ExpertStore`) for models larger than RAM | [§4.16](reference/04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig), [§4.18](reference/04-tensor-operations.md#418-moe-entries-srcmoezig), [§13.2](reference/13-the-model-stack-fucina_models.md#132-weight-loading-srcweightszig) |
 | Autograd machinery | seeded backward (`backwardWithGrad`), `noGrad`, activation checkpointing, `customVjp`, `gradcheck`; VJP inventory in [§5.8](reference/05-automatic-differentiation.md#58-vjp-coverage-inventory-srcagbackward) | [§5](reference/05-automatic-differentiation.md) |
 | Training | SGD/AdamW/Adam/Muon/APOLLO (torch-golden-parity), `OptimizerSet` param groups, LR schedules, clipping, `ParamRegistry`, LoRA adapters, ES (incl. ternary-native), 16-bit leaves with f32 grads + optimizer masters | [§11](reference/11-training-optimizers-evolution-strategies-lora-and-checkpoints.md) |
 | Quantized weights | hot packed kernels (Q4_K/Q5_K/Q6_K/Q8_0/TQ2_0 + 2-bit expert tier), cold decode (IQ*, FP4…), byte-exact ggml encoders, PTQTP trit-planes, fake-quant round trips (FP8/FP4 microscaling, Hadamard, f16) | [§10](reference/10-quantization.md) |

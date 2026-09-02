@@ -214,7 +214,7 @@ pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void {
 }
 
 pub fn deinit(self: *ExecContext) void {
-    self.moe_scratch.deinit(self.rt.allocator);
+    self.decode_scratch.deinit(self.rt.allocator);
     if (self.rt.dot_backward_worker_ready) {
         self.rt.dot_backward_worker.deinit();
     }

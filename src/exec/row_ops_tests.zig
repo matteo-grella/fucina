@@ -7,7 +7,6 @@ const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
 const exec_elementwise = @import("elementwise.zig");
 const exec_row_ops = backend_mod.rows;
-const exec_moe_chain = @import("moe_chain.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
@@ -21,7 +20,8 @@ const CrossEntropyOptions = exec.CrossEntropyOptions;
 const Reduction = exec.Reduction;
 
 const util = @import("test_util.zig");
-const buildTestMoeRhsQ5K = util.buildTestMoeRhsQ5K;
+const moe_mod = @import("../moe.zig");
+const buildTestMoeRhsQ5K = @import("../moe/test_util.zig").buildTestMoeRhsQ5K;
 const f16BitsFromF32 = util.f16BitsFromF32;
 
 test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bitwise" {
@@ -196,12 +196,12 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
             s.* = (p * 5) % n_expert;
             w.* = 0.25 + 0.01 * @as(f32, @floatFromInt(p % 13));
         }
-        var batch_out = try ctx.moeExpertFfnBatch(&mx, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
+        var batch_out = try moe_mod.expertFfnBatch(&ctx, &mx, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
         defer batch_out.deinit();
         for (0..seq) |t| {
             var row = try ctx.fromSlice(.f32, .{ 1, hidden }, mx_vals[t * hidden ..][0..hidden]);
             defer row.deinit();
-            var row_out = try ctx.moeExpertFfn(&row, &gate, &up, &down, selected[t * top_k ..][0..top_k], weights[t * top_k ..][0..top_k], out_pe, .{ .op = .swiglu }, null, null);
+            var row_out = try moe_mod.expertFfn(&ctx, &row, &gate, &up, &down, selected[t * top_k ..][0..top_k], weights[t * top_k ..][0..top_k], out_pe, .{ .op = .swiglu }, null, null);
             defer row_out.deinit();
             try std.testing.expectEqualSlices(f32, row_out.dataConst(), batch_out.dataConst()[t * hidden ..][0..hidden]);
         }

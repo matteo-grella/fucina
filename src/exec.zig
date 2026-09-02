@@ -15,13 +15,12 @@ const backend_ops = backend_mod.ops;
 const tensor = @import("tensor.zig");
 
 const exec_attention = @import("exec/attention.zig");
-const exec_moe = @import("exec/moe.zig");
-const exec_moe_chain = @import("exec/moe_chain.zig");
 const exec_matmul = @import("exec/matmul.zig");
 const exec_elementwise = @import("exec/elementwise.zig");
 const exec_quant_matmul = @import("exec/quant_matmul.zig");
 const exec_buffer_pool = @import("exec/buffer_pool.zig");
 const exec_runtime = @import("exec/runtime.zig");
+const exec_scratch = @import("exec/scratch_arena.zig");
 const exec_convert = @import("exec/convert.zig");
 const exec_rope = @import("exec/rope.zig");
 const exec_softmax = @import("exec/softmax.zig");
@@ -36,8 +35,6 @@ const exec_pool = @import("exec/pool.zig");
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
-
-pub const MoeBatchProfile = exec_moe.MoeBatchProfile;
 
 pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
@@ -107,7 +104,7 @@ pub const RmsNormBackwardOptions = exec_norm.RmsNormBackwardOptions;
 pub const RmsNormBackwardResult = exec_norm.RmsNormBackwardResult;
 pub const SnakeBackwardParamsResult = exec_elementwise.SnakeBackwardParamsResult;
 
-const MoeDecodeScratch = exec_moe.MoeDecodeScratch;
+pub const ScratchArena = exec_scratch.ScratchArena;
 pub const MatmulKind = exec_matmul.MatmulKind;
 pub const BmmKind = exec_matmul.BmmKind;
 pub const BmmBatchMode = exec_matmul.BmmBatchMode;
@@ -158,9 +155,10 @@ pub const ExecContext = struct {
     /// and on streamed MoE the expert-fetch amortization — the part that
     /// pays — is preserved).
     rowwise_numerics_pinned: u32 = 0,
-    /// Grow-only MoE-decode scratch (`exec/moe.zig`): carved by the
-    /// single-row MoE entries under its own mutex.
-    moe_scratch: MoeDecodeScratch = .{},
+    /// Grow-only typed scratch for the per-token decode paths
+    /// (`exec/scratch_arena.zig`): the MoE band carves its views here
+    /// under the arena's own lock.
+    decode_scratch: ScratchArena = .{},
 
     pub const ScopeEntry = exec_runtime.ScopeEntry;
     pub const ScopeRelease = exec_runtime.ScopeRelease;
@@ -478,28 +476,6 @@ pub const ExecContext = struct {
     pub const tryMatmulQuantRhs = exec_quant_matmul.tryMatmulQuantRhs;
     pub const tryMatmulTernaryFolded = exec_quant_matmul.tryMatmulTernaryFolded;
     pub const tryMatmulQuantRhsSharedInput = exec_quant_matmul.tryMatmulQuantRhsSharedInput;
-
-    // ----------------------------------------------------------------------
-    // MoE: routing scratch and the expert chains (exec/moe.zig, exec/moe_chain.zig)
-    // ----------------------------------------------------------------------
-    /// A Mixture-of-Experts projection: all experts of one layer's gate/up/down
-    /// stacked into a single RHS buffer. The implementation lives in exec/moe.zig;
-    /// this alias preserves the public ExecContext.MoeRhs surface.
-    pub const MoeRhs = exec_moe.MoeRhs;
-    /// Shared batched-MoE scheduling scaffolding (route plan, phase-chain
-    /// machinery, chunk helpers, profile timers). Lives in exec/moe_chain.zig;
-    /// exposed as an ExecContext decl so the gemma fused gate|up engines
-    /// (`models/gemma/moe_gu.zig`) reach the exact same types through the
-    /// `fucina` root.
-    pub const moe_chain = exec_moe_chain;
-    pub const lockMoeDecodeScratch = exec_moe.lockMoeDecodeScratch;
-    pub const unlockMoeDecodeScratch = exec_moe.unlockMoeDecodeScratch;
-    pub const MoeDecodeScratchView = exec_moe.MoeDecodeScratchView;
-    pub const MoeDecodeChainScratchView = exec_moe.MoeDecodeChainScratchView;
-    pub const carveMoeDecodeScratch = exec_moe.carveMoeDecodeScratch;
-    pub const carveMoeDecodeChainScratch = exec_moe.carveMoeDecodeChainScratch;
-    pub const moeExpertFfn = exec_moe.moeExpertFfn;
-    pub const moeExpertFfnBatch = exec_moe.moeExpertFfnBatch;
 };
 
 test {
@@ -509,7 +485,6 @@ test {
     _ = @import("exec/elementwise_tests.zig");
     _ = @import("exec/gather_scatter_tests.zig");
     _ = @import("exec/matmul_tests.zig");
-    _ = @import("exec/moe_tests.zig");
     _ = @import("exec/norm_tests.zig");
     _ = @import("exec/reduce_tests.zig");
     _ = @import("exec/rope_tests.zig");

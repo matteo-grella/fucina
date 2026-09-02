@@ -5,9 +5,10 @@
 const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
-const exec_elementwise = @import("elementwise.zig");
+const exec_elementwise = @import("../exec/elementwise.zig");
 const exec_row_ops = @import("../backend.zig").rows;
-const exec_moe_chain = @import("moe_chain.zig");
+const chain = @import("chain.zig");
+const expert_ffn = @import("expert_ffn.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
@@ -33,7 +34,7 @@ test "moe route plan groups pairs by expert with a consistent inverse" {
         0, 2, 1, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0,
     };
 
-    const result = try exec_moe_chain.buildMoeRoutePlan(allocator, &selected, n_expert, false, null);
+    const result = try chain.buildMoeRoutePlan(allocator, &selected, n_expert, false, null);
     var route = result.plan;
     defer route.deinit();
 
@@ -61,7 +62,7 @@ test "moe route plan groups pairs by expert with a consistent inverse" {
     }
     for (0..selected.len) |p| try std.testing.expectEqual(p, route.order[route.inv[p]]);
 
-    try std.testing.expectError(error.IndexOutOfBounds, exec_moe_chain.buildMoeRoutePlan(allocator, &selected, 3, false, null));
+    try std.testing.expectError(error.IndexOutOfBounds, chain.buildMoeRoutePlan(allocator, &selected, 3, false, null));
 }
 
 test "moe token-major scatter: range split is bit-identical to serial" {
@@ -83,7 +84,7 @@ test "moe token-major scatter: range split is bit-identical to serial" {
         w.* = 0.1 + random.float(f32);
     }
 
-    const result = try exec_moe_chain.buildMoeRoutePlan(allocator, selected, n_expert, false, null);
+    const result = try chain.buildMoeRoutePlan(allocator, selected, n_expert, false, null);
     var route = result.plan;
     defer route.deinit();
 
@@ -100,14 +101,14 @@ test "moe token-major scatter: range split is bit-identical to serial" {
 
     const out_full = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(out_full);
-    exec_moe_chain.scatterTokenMajor(out_full, down_rows, weights, route.inv, hidden, top_k, 0, seq);
+    chain.scatterTokenMajor(out_full, down_rows, weights, route.inv, hidden, top_k, 0, seq);
 
     // The parallel path's decomposition: disjoint token ranges, any split.
     const out_split = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(out_split);
-    exec_moe_chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 0, 4);
-    exec_moe_chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 4, 5);
-    exec_moe_chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 5, seq);
+    chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 0, 4);
+    chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 4, 5);
+    chain.scatterTokenMajor(out_split, down_rows, weights, route.inv, hidden, top_k, 5, seq);
     try std.testing.expectEqualSlices(f32, out_full, out_split);
 
     // Exact reference in the same per-row accumulation order, straight from
@@ -131,15 +132,15 @@ test "moe token-major scatter: range split is bit-identical to serial" {
 }
 
 test "moe small-m col width: 256 strictly below the worker task budget, 0 at and above" {
-    const chunk = exec_moe_chain.moe_phase_small_m_col_chunk;
+    const chunk = chain.moe_phase_small_m_col_chunk;
     const workers: usize = 8;
     // workers * moe_phase_small_m_task_budget_mul = 128 active experts.
-    try std.testing.expectEqual(@as(usize, 128), workers * exec_moe_chain.moe_phase_small_m_task_budget_mul);
-    try std.testing.expectEqual(@as(usize, 0), exec_moe_chain.moeSmallMColWidth(0, workers));
-    try std.testing.expectEqual(@as(usize, chunk), exec_moe_chain.moeSmallMColWidth(1, workers));
-    try std.testing.expectEqual(@as(usize, chunk), exec_moe_chain.moeSmallMColWidth(127, workers));
-    try std.testing.expectEqual(@as(usize, 0), exec_moe_chain.moeSmallMColWidth(128, workers));
-    try std.testing.expectEqual(@as(usize, 0), exec_moe_chain.moeSmallMColWidth(129, workers));
+    try std.testing.expectEqual(@as(usize, 128), workers * chain.moe_phase_small_m_task_budget_mul);
+    try std.testing.expectEqual(@as(usize, 0), chain.moeSmallMColWidth(0, workers));
+    try std.testing.expectEqual(@as(usize, chunk), chain.moeSmallMColWidth(1, workers));
+    try std.testing.expectEqual(@as(usize, chunk), chain.moeSmallMColWidth(127, workers));
+    try std.testing.expectEqual(@as(usize, 0), chain.moeSmallMColWidth(128, workers));
+    try std.testing.expectEqual(@as(usize, 0), chain.moeSmallMColWidth(129, workers));
 }
 
 test "moe phase chunks tile [0, out_dim) contiguously with 256-aligned splits" {
@@ -154,12 +155,12 @@ test "moe phase chunks tile [0, out_dim) contiguously with 256-aligned splits" {
     for (out_dims) |out_dim| {
         for (ms) |m| {
             for (small_m_widths) |small_m_width| {
-                const width = exec_moe_chain.moePhaseColWidth(m, out_dim, small_m_width);
-                const chunks = exec_moe_chain.moePhaseChunkCount(width, out_dim);
+                const width = chain.moePhaseColWidth(m, out_dim, small_m_width);
+                const chunks = chain.moePhaseChunkCount(width, out_dim);
                 try std.testing.expect(chunks >= 1);
                 var expected_c0: usize = 0;
                 for (0..chunks) |chunk| {
-                    const b = exec_moe_chain.moePhaseChunkBounds(chunk, width, out_dim);
+                    const b = chain.moePhaseChunkBounds(chunk, width, out_dim);
                     try std.testing.expect(b.c0 < b.c1);
                     try std.testing.expectEqual(expected_c0, b.c0);
                     if (chunks > 1) try std.testing.expectEqual(@as(usize, 0), b.c0 % 256);
@@ -184,7 +185,7 @@ test "moe batched ffn: phased chain output is deterministic across identical run
     const n_expert: usize = 8;
     const hidden: usize = 512;
     const out_pe: usize = 512;
-    try std.testing.expect(seq * top_k >= exec_moe_chain.moe_batch_phase_min_pairs);
+    try std.testing.expect(seq * top_k >= chain.moe_batch_phase_min_pairs);
 
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -214,7 +215,7 @@ test "moe batched ffn: phased chain output is deterministic across identical run
     const first = try allocator.alloc(f32, seq * hidden);
     defer allocator.free(first);
     for (0..8) |run| {
-        var out = try ctx.moeExpertFfnBatch(&x, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
+        var out = try expert_ffn.expertFfnBatch(&ctx, &x, &gate, &up, &down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
         defer out.deinit();
         if (run == 0) {
             @memcpy(first, out.dataConst());

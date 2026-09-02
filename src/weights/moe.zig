@@ -18,8 +18,9 @@ const common = @import("common.zig");
 const Tensor = ag_mod.Tensor;
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
-const MoeRhs = exec_mod.ExecContext.MoeRhs;
-const MoeBatchProfile = exec_mod.MoeBatchProfile;
+const moe_mod = @import("../moe.zig");
+const MoeRhs = moe_mod.MoeRhs;
+const MoeBatchProfile = moe_mod.MoeBatchProfile;
 const Gated = exec_mod.Gated;
 const ExpertStore = expert_store.ExpertStore;
 const Error = common.Error;
@@ -399,7 +400,8 @@ pub fn moeGatedFfnSeq(
     if (input.requiresGrad()) return Error.GradUnsupported;
     const raw_input = input.asRawTensor();
     var raw = if (input.dim(.seq) == 1)
-        try ctx.moeExpertFfn(
+        try moe_mod.expertFfn(
+            ctx,
             raw_input,
             gate,
             up,
@@ -412,7 +414,8 @@ pub fn moeGatedFfnSeq(
             profile,
         )
     else
-        try ctx.moeExpertFfnBatch(
+        try moe_mod.expertFfnBatch(
+            ctx,
             raw_input,
             gate,
             up,

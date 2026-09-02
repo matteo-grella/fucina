@@ -39,7 +39,7 @@ pub const ExecContext = struct {
     rt: Runtime,                     // the runtime substrate
     quant_dot_gpu_disabled: std.atomic.Value(u32), // open disableQuantDotGpu scopes
     rowwise_numerics_pinned: u32, // open pinRowwiseNumerics scopes
-    moe_scratch: MoeDecodeScratch,   // grow-only MoE decode scratch
+    decode_scratch: ScratchArena,    // grow-only typed decode scratch (the MoE band carves it)
 
     pub fn allocator(self: *const ExecContext) Allocator // rt.allocator, the public accessor
     pub const init = exec_runtime.init;      // (self: *ExecContext, allocator: Allocator) void
@@ -138,23 +138,24 @@ forward only and `close()` it after (scopes nest — the backing field is
 `rowwiseNumericsPinned()` is the query). The
 scope and pool methods are covered below.
 
-**MoE decode scratch** (`moe_scratch`, ops in `src/exec/moe.zig`). A
-grow-only, mutex-guarded scratch region backing the single-row MoE decode
-ops: the per-token region sizes are model constants, so after the first
-token the hot path performs no allocations — one uncontended lock instead of
-several allocator/pool round-trips per layer. The discipline is
-`lockMoeDecodeScratch()` … carve … run … `unlockMoeDecodeScratch()`, holding
-the lock for the whole op because the expert tasks write into the carved
-slices. `carveMoeDecodeScratch(QgBlock, Task, hidden_blocks, top_k, out_pe,
-hidden, blocks_per_g)` returns a `MoeDecodeScratchView(QgBlock, Task)` —
-borrowed slices carved from the region (`qx` Q8_K activation blocks,
+**Decode scratch arena** (`decode_scratch`, `src/exec/scratch_arena.zig`). A
+grow-only, mutex-guarded scratch region for the per-token decode paths that
+carve typed slices instead of allocating: the per-token region sizes are
+model constants, so after the first token the hot path performs no
+allocations — one uncontended lock instead of several allocator round-trips
+per layer. The discipline is `lock()` … `reserve` + carve … run …
+`unlock()`, holding the lock for the whole op because the tasks write into
+the carved slices; every carved type must align to ≤ 8 (the u64 backing
+store; compile error otherwise). The MoE band (`fucina.moe`) is its
+consumer: `carveDecodeScratch(ctx, QgBlock, Task, hidden_blocks, top_k,
+out_pe, hidden, blocks_per_g)` returns a `DecodeScratchView(QgBlock,
+Task)` — borrowed slices (`qx` Q8_K activation blocks,
 `gate_buf`/`up_buf`/`g_buf`, `qg`, `outs`, `tasks`), valid only while the
-lock is held; `carveMoeDecodeChainScratch` adds a `states` slice and a
+lock is held; `carveDecodeChainScratch` adds a `states` slice and a
 caller-sized task count for dependency-chained decode
-(`MoeDecodeChainScratchView`). Every carved type must align to ≤ 8 (compile
-error otherwise). This is the seam in-tree LLM-band code uses to build
-custom MoE decode paths (`src/models/gemma/moe.zig`, [§13](13-the-model-stack-fucina_models.md)); `deinit` frees the
-scratch with the context.
+(`DecodeChainScratchView`). This is the seam in-tree LLM-band code uses to
+build custom MoE decode paths (`src/models/gemma/moe_gu.zig`, [§13](13-the-model-stack-fucina_models.md));
+`deinit` frees the arena with the context.
 
 ## 6.2 The memory model: who owns an op result (`docs/MEMORY-MODEL.md`)
 

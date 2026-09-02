@@ -872,16 +872,16 @@ embedding path of every GGUF model
 Mixture-of-experts is conditional computation: a router picks `k` experts
 per token and only those run — a model holds far more parameters than any
 token's compute touches. The routed expert FFN runs *below* the tag facade,
-directly on `ExecContext`, and is **inference-only** (`docs/reference/04-tensor-operations.md` §4.18):
+in the `fucina.moe` band over `ExecContext`, and is **inference-only** (`docs/reference/04-tensor-operations.md` §4.18):
 
 ```zig
-pub fn moeExpertFfn(self: *ExecContext, x: *const Tensor,
+pub fn expertFfn(ctx: *ExecContext, x: *const Tensor,
     gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs,
     selected: []const usize, weights: []const f32,
     out_pe: usize, act: GatedOp, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor
 ```
 
-*(signature from `src/exec.zig`; impl `src/exec/moe.zig`)*
+*(signature from `src/moe.zig`; impl `src/moe/expert_ffn.zig`)*
 
 It computes the route-weighted sum over the selected experts of
 `down(act(gate(x), up(x)))` — §5.5's gated activation, routed. `MoeRhs` is a
@@ -891,14 +891,14 @@ resident quantized formats — `q4_k`, `q5_k`, `q6_k`, `q8_0`, `tq2_0`,
 `ptqtp`, `q2_k`, `iq2_xxs`, `iq3_xxs`, `iq2_s`, `iq4_xs`, `q3_k` — plus a
 `streamed` arm resolving expert blocks from disk through
 `fucina.expert_store`: models larger than RAM decode through it
-(`src/exec/moe.zig:105`; [Chapter 13](13-inference-tricks.md)).
+(`src/moe/expert_ffn.zig:106`; [Chapter 13](13-inference-tricks.md)).
 
 > **Zig note** — `MoeRhs` is a `union(enum)`: a tagged union, Zig's sum
 > type. One op fans out over many storage formats with a single `switch`,
 > and the compiler checks exhaustiveness. Its `deinit` shows a lovely idiom:
 > `switch (self.*) { .streamed => {}, inline else => |*value|
 > value.deinit() }` — `inline else` stamps out one arm per remaining variant
-> at comptime, each with the right concrete type (`src/exec/moe.zig`).
+> at comptime, each with the right concrete type (`src/moe/expert_ffn.zig`).
 
 ## 5.12 Determinism as a design stance
 
@@ -1135,7 +1135,7 @@ material.
   RMSNorm/LayerNorm, RoPE, grouped attention, convolutions, fused losses,
   selection, and gather/scatter — each with its differentiability rules
   stated, including the inference-only entries (packed-RHS GEMMs,
-  `moeExpertFfn`).
+  `moe.expertFfn`).
 - Ownership has two disciplines: deinit-ASAP (and `ctx.replace`) for
   inference, exec scopes for training — and scopes are *not* an inference
   optimization (measured 2 vs 32 live buffers on a 32-op chain).
@@ -1160,7 +1160,7 @@ material.
 - `src/tag_ops.zig` — the lowering tier: `pointwise` is the 25-line
   crystallization of "validate once, view, dispatch".
 - `src/exec/softmax.zig`, `src/exec/loss.zig`, `src/exec/topk.zig`,
-  `src/exec/moe.zig` — leaf modules (not public API, but the best reading on
+  `src/moe/expert_ffn.zig` — leaf modules (not public API, but the best reading on
   how each family really works).
 - `src/rng.zig` — the counter-based RNG contract, six lines at its core.
 - `docs/reference/04-tensor-operations.md` §4 and §6 — the machine-verified catalogue this

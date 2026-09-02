@@ -64,6 +64,7 @@ const Band = enum {
     facade,
     ag, // ag + training/serialization + model I/O
     tagged,
+    moe,
     exec,
     store,
     backend,
@@ -80,6 +81,7 @@ const Band = enum {
             .facade => "facade",
             .ag => "ag + training/serialization",
             .tagged => "tagged",
+            .moe => "moe",
             .exec => "exec",
             .store => "store",
             .backend => "backend",
@@ -132,6 +134,9 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/weights/", .band = .ag },
 
     .{ .path = "src/tag_ops.zig", .band = .tagged },
+
+    .{ .path = "src/moe.zig", .band = .moe },
+    .{ .path = "src/moe/", .band = .moe },
 
     .{ .path = "src/exec.zig", .band = .exec },
     .{ .path = "src/exec/", .band = .exec },

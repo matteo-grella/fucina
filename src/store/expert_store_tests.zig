@@ -5,6 +5,7 @@
 //! eviction, and batched prefill whose active set overflows the cache. Plus
 //! store lifecycle/geometry validation.
 const std = @import("std");
+const moe_mod = @import("../moe.zig");
 const dtype_mod = @import("../dtype.zig");
 const backend_mod = @import("../backend.zig");
 const exec = @import("../exec.zig");
@@ -12,7 +13,7 @@ const expert_store = @import("expert_store.zig");
 
 const qm = backend_mod.quantized_matmul;
 const ExecContext = exec.ExecContext;
-const MoeRhs = ExecContext.MoeRhs;
+const MoeRhs = moe_mod.MoeRhs;
 const ExpertStore = expert_store.ExpertStore;
 
 const hidden: usize = 256; // one Q8_K superblock per row
@@ -97,9 +98,9 @@ const Fixture = struct {
         var x = try ctx.fromSlice(.f32, .{ 1, hidden }, x_vals);
         defer x.deinit();
 
-        var want = try ctx.moeExpertFfn(&x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(ctx, &x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &gate, &up, &down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(ctx, &x, &gate, &up, &down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -169,9 +170,9 @@ const Fixture = struct {
         var x = try ctx.fromSlice(.f32, .{ 1, hidden }, x_vals);
         defer x.deinit();
 
-        var want = try ctx.moeExpertFfn(&x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(ctx, &x, &self.resident_gate, &self.resident_up, &self.resident_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &self.streamed_gate, &self.streamed_up, &self.streamed_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(ctx, &x, &self.streamed_gate, &self.streamed_up, &self.streamed_down, selected, weights, out_pe, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -233,9 +234,9 @@ test "streamed MoE batched prefill is bit-exact when the active set overflows th
         w.* = 0.25 + 0.01 * @as(f32, @floatFromInt(p % 13));
     }
 
-    var want = try ctx.moeExpertFfnBatch(&x, &fx.resident_gate, &fx.resident_up, &fx.resident_down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
+    var want = try moe_mod.expertFfnBatch(&ctx, &x, &fx.resident_gate, &fx.resident_up, &fx.resident_down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
     defer want.deinit();
-    var got = try ctx.moeExpertFfnBatch(&x, &fx.streamed_gate, &fx.streamed_up, &fx.streamed_down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
+    var got = try moe_mod.expertFfnBatch(&ctx, &x, &fx.streamed_gate, &fx.streamed_up, &fx.streamed_down, &selected, &weights, top_k, out_pe, .{ .op = .swiglu }, null, null);
     defer got.deinit();
     try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
 
@@ -484,9 +485,9 @@ test "q8_0 experts with non-256-aligned dims: streamed decode is bit-exact vs re
     // Cold, warm, and evicting decodes must all match the resident path
     // bit-for-bit.
     for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, ds_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         // A sanity guard on the fixture itself: Q8_0's f16 block scale
         // overflows past |activation| ~8.3e6, which would NaN both paths
@@ -594,9 +595,9 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
@@ -611,9 +612,9 @@ test "tq2_0 ternary experts: streamed decode and batch are bit-exact vs resident
     defer xb.deinit();
     const selected = [_]usize{ 0, 3, 1, 2, 2, 0, 3, 1, 0, 1 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     for (want_b.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
@@ -827,7 +828,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.6, 0.4 };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
         for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
 
@@ -844,7 +845,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
         try std.testing.expectEqualSlices(f32, ref, want.dataConst());
 
         // (c): streamed == resident, always.
-        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -859,7 +860,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
     for (want_b.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
 
@@ -884,7 +885,7 @@ test "ptqtp multi-plane experts: fused MoE sums planes like the dense path; stre
     }
 
     // (c) streamed batch == resident batch.
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
@@ -1092,7 +1093,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.6, 0.4 };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
         for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
 
@@ -1107,7 +1108,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
         try std.testing.expectEqualSlices(f32, ref, want.dataConst());
 
         // (b) streamed fill-fold == resident fold, always.
-        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &streamed_gate, &streamed_up, &streamed_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -1122,7 +1123,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
     const want_b_data = want_b.dataConst();
     for (0..m) |t| {
@@ -1139,7 +1140,7 @@ test "tie-folded ptqtp experts: resident fold serves the one-pass kernel; stream
         }
         try std.testing.expectEqualSlices(f32, ref, want_b_data[t * t_hidden ..][0..t_hidden]);
     }
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
@@ -1250,9 +1251,9 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     var x = try ctx.fromSlice(.f32, .{ 1, t_hidden }, x_vals);
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 3 }, .{ 0, 3 }, .{ 1, 2 }, .{ 0, 3 } }) |pair| {
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &streamed_gate, &streamed_up, &streamed_down, &pair, &.{ 0.6, 0.4 }, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         for (want.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
@@ -1266,9 +1267,9 @@ test "q2_k, iq2_xxs, and iq3_xxs experts: streamed decode and batch are bit-exac
     defer xb.deinit();
     const selected = [_]usize{ 0, 3, 1, 2, 2, 0, 3, 1, 0, 1 };
     const routing = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &streamed_gate, &streamed_up, &streamed_down, &selected, &routing, 2, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     for (want_b.dataConst()) |v| try std.testing.expect(!std.math.isNan(v));
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
@@ -1530,9 +1531,9 @@ test "parallel demand reads: fan-out stays bit-exact, drives a mirror concurrent
     var gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
     var up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
     var down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
-    var want = try ctx.moeExpertFfnBatch(&x, &fx.resident_gate, &fx.resident_up, &fx.resident_down, &selected, &routing, top_k, out_pe, .{ .op = .swiglu }, null, null);
+    var want = try moe_mod.expertFfnBatch(&ctx, &x, &fx.resident_gate, &fx.resident_up, &fx.resident_down, &selected, &routing, top_k, out_pe, .{ .op = .swiglu }, null, null);
     defer want.deinit();
-    var got = try ctx.moeExpertFfnBatch(&x, &gate, &up, &down, &selected, &routing, top_k, out_pe, .{ .op = .swiglu }, null, null);
+    var got = try moe_mod.expertFfnBatch(&ctx, &x, &gate, &up, &down, &selected, &routing, top_k, out_pe, .{ .op = .swiglu }, null, null);
     defer got.deinit();
     try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     try std.testing.expect(store.copy_bytes[0].load(.monotonic) > 0);
@@ -2022,9 +2023,9 @@ test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs;
         var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
         var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
         var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate_planes, &resident_up_planes, &resident_down_planes, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate_planes, &resident_up_planes, &resident_down_planes, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
         try std.testing.expect(store.l2_expert_hits.load(.monotonic) >= 2);
@@ -2056,9 +2057,9 @@ test "l2 tier: fold-mode flip drops coverage instead of corrupting folded slabs;
         var s_gate: MoeRhs = .{ .streamed = store.streamedRhs(0, .gate) };
         var s_up: MoeRhs = .{ .streamed = store.streamedRhs(0, .up) };
         var s_down: MoeRhs = .{ .streamed = store.streamedRhs(0, .down) };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate_folded, &resident_up_folded, &resident_down_folded, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate_folded, &resident_up_folded, &resident_down_folded, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
         try std.testing.expectEqual(@as(u64, 0), store.l2_expert_hits.load(.monotonic));
@@ -2184,9 +2185,9 @@ test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kerne
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.55, 0.45 };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -2205,9 +2206,9 @@ test "native folded (tq2_0_fx4) experts: streamed pack serves the one-pass kerne
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
@@ -2340,9 +2341,9 @@ test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismat
     defer x.deinit();
     for ([_][2]usize{ .{ 0, 1 }, .{ 0, 1 }, .{ 1, 0 } }) |pair| {
         const routing = [_]f32{ 0.65, 0.35 };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
     }
@@ -2358,9 +2359,9 @@ test "slab-native fx4 records: one-pread misses serve bit-exact; geometry mismat
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     try std.testing.expectEqualSlices(f32, want_b.dataConst(), got_b.dataConst());
 }
@@ -2497,9 +2498,9 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
         defer x0.deinit();
         const pair0 = [2]usize{ 0, 1 };
         const routing0 = [_]f32{ 0.55, 0.45 };
-        var want0 = try ctx.moeExpertFfn(&x0, &resident_gate, &resident_up, &resident_down, &pair0, &routing0, t_ffn, .{ .op = .swiglu }, null, null);
+        var want0 = try moe_mod.expertFfn(&ctx, &x0, &resident_gate, &resident_up, &resident_down, &pair0, &routing0, t_ffn, .{ .op = .swiglu }, null, null);
         defer want0.deinit();
-        var got0 = try ctx.moeExpertFfn(&x0, &p_gate, &p_up, &p_down, &pair0, &routing0, t_ffn, .{ .op = .swiglu }, null, null);
+        var got0 = try moe_mod.expertFfn(&ctx, &x0, &p_gate, &p_up, &p_down, &pair0, &routing0, t_ffn, .{ .op = .swiglu }, null, null);
         defer got0.deinit();
         try Approx.expectClose(want0.dataConst(), got0.dataConst());
     }
@@ -2536,9 +2537,9 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
     for (0..2) |round| {
         const pair = [2]usize{ 0, 1 };
         const routing = [_]f32{ 0.55, 0.45 };
-        var want = try ctx.moeExpertFfn(&x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var want = try moe_mod.expertFfn(&ctx, &x, &resident_gate, &resident_up, &resident_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer want.deinit();
-        var got = try ctx.moeExpertFfn(&x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
+        var got = try moe_mod.expertFfn(&ctx, &x, &s_gate, &s_up, &s_down, &pair, &routing, t_ffn, .{ .op = .swiglu }, null, null);
         defer got.deinit();
         try Approx.expectClose(want.dataConst(), got.dataConst());
         if (round == 0) {
@@ -2562,9 +2563,9 @@ test "mxfp4 experts: streamed serving matches an exact q8_0 mirror; miss==hit bi
     defer xb.deinit();
     const selected = [_]usize{ 0, 1, 1, 0, 0, 1, 1, 0, 0, 0 };
     const routing_b = [_]f32{ 0.6, 0.4, 0.5, 0.5, 0.7, 0.3, 0.2, 0.8, 0.9, 0.1 };
-    var want_b = try ctx.moeExpertFfnBatch(&xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var want_b = try moe_mod.expertFfnBatch(&ctx, &xb, &resident_gate, &resident_up, &resident_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer want_b.deinit();
-    var got_b = try ctx.moeExpertFfnBatch(&xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
+    var got_b = try moe_mod.expertFfnBatch(&ctx, &xb, &s_gate, &s_up, &s_down, &selected, &routing_b, top_k, t_ffn, .{ .op = .swiglu }, null, null);
     defer got_b.deinit();
     try Approx.expectClose(want_b.dataConst(), got_b.dataConst());
 }

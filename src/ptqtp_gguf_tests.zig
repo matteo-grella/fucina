@@ -5,6 +5,7 @@
 //! fused weights row-slice to per-source planes that re-fuse losslessly,
 //! and save→load→save is byte-stable.
 const std = @import("std");
+const moe_mod = @import("moe.zig");
 const fucina = @import("fucina.zig");
 const weights = @import("weights.zig");
 const ptqtp_gguf = @import("ptqtp_gguf.zig");
@@ -702,7 +703,9 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
         var views: [2]fucina.internal.backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
         for ([2][]fucina.quant.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
             views[p] = .{
-                .allocator = null, .blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc], .blocks_per_column = bpc,
+                .allocator = null,
+                .blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc],
+                .blocks_per_column = bpc,
                 .k = in_dim,
                 .n = out_dim,
             };
@@ -847,9 +850,9 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
     defer x.deinit();
     const pairs = [2]usize{ 0, 2 };
     const routing = [_]f32{ 0.7, 0.3 };
-    var want = try ctx.moeExpertFfn(&x, &sib_rhs, &sib_rhs, &sib_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
+    var want = try moe_mod.expertFfn(&ctx, &x, &sib_rhs, &sib_rhs, &sib_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
     defer want.deinit();
-    var got = try ctx.moeExpertFfn(&x, &fx4_rhs, &fx4_rhs, &fx4_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
+    var got = try moe_mod.expertFfn(&ctx, &x, &fx4_rhs, &fx4_rhs, &fx4_rhs, &pairs, &routing, t_out, .{ .op = .swiglu }, null, null);
     defer got.deinit();
     try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
 }

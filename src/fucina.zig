@@ -63,6 +63,9 @@ pub const rng = @import("rng.zig");
 /// Parallel execution policies over the worker pool: chunked loops,
 /// reduction scaffolding, thread-count gates.
 pub const parallel = @import("parallel.zig");
+/// The MoE band: expert stacks, the routed expert FFN engines, the shared
+/// phase-chain scheduling and the decode-scratch views.
+pub const moe = @import("moe.zig");
 /// Tuning policy: the typed table of every FUCINA_* route gate and numeric
 /// crossover (read-once env load, measured defaults, programmatic pins),
 /// and the per-context `Overrides` (`ExecContext.setTuning`).
@@ -276,9 +279,9 @@ pub const ExecContext = exec.ExecContext;
 /// Caller promise about an RHS pointer's lifetime (gates the stable-RHS caches).
 pub const RhsLifetime = exec.RhsLifetime;
 /// A MoE expert stack's RHS: resident (borrowed or owned) or streamed through an `ExpertStore`.
-pub const MoeRhs = exec.ExecContext.MoeRhs;
+pub const MoeRhs = moe.MoeRhs;
 /// Per-phase timing counters for the batched MoE paths.
-pub const MoeBatchProfile = exec.MoeBatchProfile;
+pub const MoeBatchProfile = moe.MoeBatchProfile;
 /// Gated-activation selector for the fused gate/up FFN kernels (silu/gelu variants).
 pub const GatedOp = exec.GatedOp;
 pub const Gated = exec.Gated;
@@ -377,6 +380,7 @@ test {
     _ = tensor;
     _ = backend;
     _ = exec;
+    _ = moe;
     _ = tag_ops;
     _ = ag;
     _ = param_registry_mod;

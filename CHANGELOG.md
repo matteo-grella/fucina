@@ -25,6 +25,17 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- MoE is its own band, `fucina.moe` (`src/moe.zig`, `src/moe/`), above
+  exec: `moe.MoeRhs`, `moe.MoeBatchProfile`, `moe.expertFfn(ctx, ...)`,
+  `moe.expertFfnBatch(ctx, ...)`, `moe.chain` (the shared phase-chain
+  scheduling) and the decode-scratch views (`lockDecodeScratch`,
+  `carveDecodeScratch`, `carveDecodeChainScratch`, `DecodeScratchView`,
+  `DecodeChainScratchView`). `ExecContext.moeExpertFfn`/`moeExpertFfnBatch`,
+  `ExecContext.MoeRhs`, `ExecContext.moe_chain` and the `*MoeDecodeScratch*`
+  decls are gone (`fucina.MoeRhs` and `fucina.MoeBatchProfile` still name
+  the types). The runtime keeps one generic grow-only decode scratch arena
+  (`ExecContext.decode_scratch`, `exec.ScratchArena`) that the MoE band
+  carves; it no longer knows MoE.
 - `Tensor.linearDistill` is gone from the core: the fused linear +
   sparse-soft-target distillation loss is `models.text.linear_distill.
   linearDistill(ctx, x, weight, rows, classes, probs, options)`, a custom

@@ -359,7 +359,7 @@ K3's SiTU) is the one member that also transforms the up side:
 `25·tanh(self/25) · 4·tanh(other/4)·sigmoid(other)` — a soft-bounded SiLU
 gate (beta 4) on a soft-clamped up input (linear beta 25).
 `glu`/`swiglu`/`geglu`/`situ` are direct aliases of `gated(..., op)`.
-Differentiable in both operands. The MoE entries ([§4.18](04-tensor-operations.md#418-moe-facade-entries-srcexecmoezig-srcexeczig)) take the
+Differentiable in both operands. The MoE entries ([§4.18](04-tensor-operations.md#418-moe-entries-srcmoezig)) take the
 activation with its parameter, `exec.Gated{ .op, .clamp }`: with `clamp`
 set, the gate is `min(gate, clamp)` before the activation and `up` is
 clamped to `[-clamp, clamp]` (DeepSeek V4's clamped SwiGLU is
@@ -1988,20 +1988,21 @@ test "select, multi-axis slice, and tensor-valued indexSelect" {
 }
 ```
 
-## 4.18 MoE facade entries (`src/exec/moe.zig`, `src/exec.zig`)
+## 4.18 MoE entries (`src/moe.zig`)
 
-Routed expert FFNs run below the tag facade, directly on `ExecContext`
+Routed expert FFNs run below the tag facade, in the `fucina.moe` band over
+`ExecContext`
 (inference-only; [§10](10-quantization.md) covers the quantized layouts, [§13](13-the-model-stack-fucina_models.md) the LLM integration):
 
 ```zig
 pub const MoeRhs = union(enum) { q4_k: ..., q5_k: ..., q6_k: ..., q8_0: ...,
     tq2_0: ..., ptqtp: ..., q2_k: ..., iq2_xxs: ..., iq3_xxs: ..., iq2_s: ...,
     iq4_xs: ..., q3_k: ..., streamed: ... };  // fucina.MoeRhs
-pub fn moeExpertFfn(self: *ExecContext, x: *const Tensor,
+pub fn expertFfn(ctx: *ExecContext, x: *const Tensor,
     gate: *const MoeRhs, up: *const MoeRhs, down: *const MoeRhs,
     selected: []const usize, weights: []const f32,
     out_pe: usize, act: GatedOp, io: ?std.Io, profile: ?*MoeBatchProfile) !Tensor
-pub fn moeExpertFfnBatch(..., top_k: usize, ...) !Tensor
+pub fn expertFfnBatch(..., top_k: usize, ...) !Tensor
 ```
 
 `fucina.MoeRhs` stacks all experts of one layer's gate/up/down projection
@@ -2020,14 +2021,14 @@ The streamed tier gathers a `ProjSpec` with `plane_count`/`plane_offsets`
 pointing at the persisted `<name>.ptqtpK` sibling tensors ([§13.2.1](13-the-model-stack-fucina_models.md#132-weight-loading-srcweightszig)), and
 `ProjSpec.fold` folds the two plane row-blocks into the pack on the way
 into the slab (disk layout unchanged).
-`moeExpertFfn` computes the route-weighted sum over the selected experts of
-`down(act(gate(x), up(x)))` for a single token; `moeExpertFfnBatch` is the
+`moe.expertFfn` computes the route-weighted sum over the selected experts of
+`down(act(gate(x), up(x)))` for a single token; `moe.expertFfnBatch` is the
 batched-prefill variant taking the per-token `selected`/`weights` produced
 by `routerTopK` ([§4.16](04-tensor-operations.md#416-selection-argmax-topk-sort-routertopk-srcagtensorzig-srcexectopkzig)). `fucina.MoeBatchProfile` is an optional wall-clock
 breakdown the caller can pass to profile a run.
 
-`ExecContext.moe_chain` re-exports the shared batched-MoE scheduling
-scaffolding of `src/exec/moe_chain.zig` — the expert-grouped route plan,
+`fucina.moe.chain` is the shared batched-MoE scheduling scaffolding
+(`src/moe/chain.zig`) — the expert-grouped route plan,
 the phase-chain machinery, chunk helpers, and the profile timer pair — so
 in-tree LLM-band MoE engines ([§13](13-the-model-stack-fucina_models.md)) reach the exact same types through the
 `fucina` root.

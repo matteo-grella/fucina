@@ -3,10 +3,10 @@
 //! rows), plus the packed x4 arms and the GPU batch path. Gemma is the
 //! one family with this weight shape, so the kernels live with it; the
 //! tagged facade wrappers are in `moe.zig` next door. Decode carves the
-//! shared MoE decode scratch through the public `ExecContext` scratch
-//! seam; batch rides the phase-chain scheduling that `ExecContext`
-//! exposes as `moe_chain` (the shared batched-MoE scaffolding stays in
-//! the exec band).
+//! runtime's decode scratch through the MoE band's view seam
+//! (`fucina.moe.carveDecodeChainScratch`); batch rides the phase-chain
+//! scheduling of `fucina.moe.chain` (the shared batched-MoE scaffolding
+//! stays in the moe band).
 const std = @import("std");
 
 const fucina = @import("fucina");
@@ -22,7 +22,7 @@ const ExecContext = fucina.ExecContext;
 const MoeBatchProfile = fucina.MoeBatchProfile;
 const Tensor = tensor.Tensor;
 
-const moe_chain = ExecContext.moe_chain;
+const moe_chain = fucina.moe.chain;
 const moeBatchProfileStart = moe_chain.moeBatchProfileStart;
 const moeBatchProfileElapsed = moe_chain.moeBatchProfileElapsed;
 const moeDecodeColumnSplit = moe_chain.moeDecodeColumnSplit;
@@ -175,9 +175,9 @@ fn guDecodeBody(
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
-    ExecContext.lockMoeDecodeScratch(ctx);
-    defer ExecContext.unlockMoeDecodeScratch(ctx);
-    const sv = try ExecContext.carveMoeDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.blockCountForDType(.q8_k, hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    fucina.moe.lockDecodeScratch(ctx);
+    defer fucina.moe.unlockDecodeScratch(ctx);
+    const sv = try fucina.moe.carveDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.blockCountForDType(.q8_k, hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
