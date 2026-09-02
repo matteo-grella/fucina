@@ -1,10 +1,12 @@
 //! Dense f32/f16/f64/bf16 GEMM: the one `gemm` entry over `ops.Gemm`
 //! (orientation, operand dtypes, store/accumulate), its rows/cols parallel
-//! dispatch over `tile.forRange`, and the inner range/cols/row kernels.
-//! Shared-core symbols (ParallelConfig, contiguous-data helpers, thread-count
-//! gates, the V* width aliases) come from `common.zig`; the @Vector
-//! primitives from `primitives.zig`; blocked-tile cores from
-//! `gemm_blocked.zig`.
+//! dispatch over `tile.forRange`, and the inner kernels: the NN/TN
+//! row-block kernel `gemmRows` over an `NnFamily` (f32 plain, f32 trans-A,
+//! f16, bf16) and the NT tile/dot kernels over an `NtFamily` (f32, f16 in
+//! native lanes, f16 widened, bf16 RHS). Shared-core symbols
+//! (ParallelConfig, contiguous-data helpers, thread-count gates, the V*
+//! width aliases) come from `common.zig`; the @Vector primitives from
+//! `primitives.zig`; blocked-tile cores from `gemm_blocked.zig`.
 //! gemmNNRange/gemmTNRange/gemmNTRange are pub for the batched GEMM module.
 
 const std = @import("std");
@@ -33,15 +35,17 @@ const Vf32Wide = common.Vf32ForF16;
 
 // f16-RHS GEMM accumulator policy. On aarch64 NEON the f16 x f16 @mulAdd arms
 // are native fmla.8h (double the f32 lane throughput), so half-precision
-// accumulation is the fast path there. Every other ISA — x86-64 without
-// AVX512-FP16 in particular — legalizes f16 vector arithmetic by promoting
-// through f32 and rounding back PER OPERATION (vcvtph2ps/vcvtps2ph around
-// every fmadd, scalarized reductions, accumulator spills), so those targets
-// take the *Wide twins below: widen each f16 load once (F16C vcvtph2ps) and
-// accumulate in f32, mirroring the bf16-RHS kernels. This changes non-aarch64
-// results (one final rounding instead of per-step f16 rounding — strictly more
-// accurate); aarch64 output is bit-identical to before.
+// accumulation is the fast path there (the `.f16_native` NT family). Every
+// other ISA — x86-64 without AVX512-FP16 in particular — legalizes f16 vector
+// arithmetic by promoting through f32 and rounding back PER OPERATION
+// (vcvtph2ps/vcvtps2ph around every fmadd, scalarized reductions,
+// accumulator spills), so those targets take the `.f16_wide` family: widen
+// each f16 load once (F16C vcvtph2ps) and accumulate in f32, mirroring the
+// bf16-RHS kernels. This changes non-aarch64 results (one final rounding
+// instead of per-step f16 rounding — strictly more accurate); aarch64 output
+// is bit-identical to before.
 const f16_accum_native = isa.is_aarch64;
+const f16_rhs_family: NtFamily = if (f16_accum_native) .f16_native else .f16_wide;
 
 // ---------------- MatMul (2-D) ----------------
 
@@ -49,20 +53,6 @@ const f16_accum_native = isa.is_aarch64;
 /// `.accumulate` adds it to the existing output (C += A·B — the BLAS beta=1
 /// epilogue). Comptime so `.store` kernels compile exactly as before.
 pub const StoreMode = enum { store, accumulate };
-
-inline fn storeVec(comptime mode: StoreMode, dst: *[vector_len]f32, acc: Vf32) void {
-    dst.* = switch (mode) {
-        .store => acc,
-        .accumulate => @as(Vf32, dst.*) + acc,
-    };
-}
-
-inline fn storeScalar(comptime mode: StoreMode, dst: *f32, s: f32) void {
-    dst.* = switch (mode) {
-        .store => s,
-        .accumulate => dst.* + s,
-    };
-}
 
 /// The dense GEMM over contiguous slices: one entry for every orientation
 /// and operand-dtype combination the vector kernels implement (the set is
@@ -161,7 +151,7 @@ pub fn gemmNTRowPath(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []const
     gemmNTRange(cd, ad, bd, m, n, k, 0, m);
 }
 
-// ---------------- Inner kernels ----------------
+// ---------------- Parallel dispatch ----------------
 
 // One payload shape per element-type family; the splits and spawns are
 // `tile.forRange` (same proportional boundaries as the retired per-family
@@ -264,137 +254,497 @@ fn maybeParallelNTBf16Rhs(pc: ParallelConfig, cd: []f32, ad: []const f32, bd: []
     return maybeRowsCols(pc, Ctx, .{ .cd = cd, .ad = ad, .bd = bd, .m = m, .n = n, .k = k }, m, n, k, rangeRunner(Ctx, gemmNTBf16RhsRange), rangeRunner(Ctx, gemmNTBf16RhsCols));
 }
 
+/// The empty-range / k = 0 preamble every range and cols kernel shares:
+/// nothing to do for an empty rectangle; at k = 0 a store zeroes its
+/// rectangle of C and an accumulate leaves it untouched. True when the
+/// caller is done.
+inline fn zeroIfEmpty(comptime mode: StoreMode, cd: anytype, n: usize, k: usize, row_start: usize, row_end: usize, col_start: usize, col_end: usize) bool {
+    if (row_start == row_end or col_start == col_end) return true;
+    if (k != 0) return false;
+    if (comptime mode == .store) {
+        for (row_start..row_end) |i| @memset(cd[i * n + col_start .. i * n + col_end], 0);
+    }
+    return true;
+}
+
+// ---------------- NN/TN row-block kernels ----------------
+
+/// The row-block kernel's operand families: the element type, where A[r, p]
+/// sits (row-major `[m, k]`, or `[k, m]` for the transposed-A walk), how an
+/// element widens to the f32 accumulator, whether the product fuses
+/// (`@mulAdd` for f32; the 16-bit families keep the separate multiply and
+/// add), and how the accumulator narrows on store.
+const NnFamily = enum {
+    f32,
+    f32_trans_a,
+    f16,
+    bf16,
+
+    fn Elem(comptime fam: NnFamily) type {
+        return switch (fam) {
+            .f32, .f32_trans_a => f32,
+            .f16 => f16,
+            .bf16 => u16,
+        };
+    }
+
+    fn isF32(comptime fam: NnFamily) bool {
+        return fam == .f32 or fam == .f32_trans_a;
+    }
+
+    inline fn elemA(comptime fam: NnFamily, ad: []const fam.Elem(), row: usize, p: usize, m: usize, k: usize) f32 {
+        return switch (fam) {
+            .f32 => ad[row * k + p],
+            .f32_trans_a => ad[p * m + row],
+            .f16 => @floatCast(ad[row * k + p]),
+            .bf16 => dtype_mod.bf16ToF32(ad[row * k + p]),
+        };
+    }
+
+    inline fn vecB(comptime fam: NnFamily, bd: []const fam.Elem(), idx: usize) Vf32 {
+        return switch (fam) {
+            .f32, .f32_trans_a => bd[idx..][0..vector_len].*,
+            .f16 => @floatCast(@as(Vf16ForF32, bd[idx..][0..vector_len].*)),
+            .bf16 => primitives.bf16VecToF32(bd[idx..][0..vector_len].*),
+        };
+    }
+
+    inline fn elemB(comptime fam: NnFamily, bd: []const fam.Elem(), idx: usize) f32 {
+        return switch (fam) {
+            .f32, .f32_trans_a => bd[idx],
+            .f16 => @floatCast(bd[idx]),
+            .bf16 => dtype_mod.bf16ToF32(bd[idx]),
+        };
+    }
+
+    inline fn mulAddVec(comptime fam: NnFamily, av: Vf32, bv: Vf32, acc: Vf32) Vf32 {
+        return if (comptime fam.isF32()) @mulAdd(Vf32, av, bv, acc) else acc + av * bv;
+    }
+
+    inline fn mulAdd(comptime fam: NnFamily, av: f32, bv: f32, s: f32) f32 {
+        return if (comptime fam.isF32()) @mulAdd(f32, av, bv, s) else s + av * bv;
+    }
+
+    inline fn storeVec(comptime fam: NnFamily, comptime mode: StoreMode, dst: *[vector_len]fam.Elem(), acc: Vf32) void {
+        dst.* = switch (fam) {
+            .f32, .f32_trans_a => switch (mode) {
+                .store => acc,
+                .accumulate => @as(Vf32, dst.*) + acc,
+            },
+            .f16 => @as(Vf16ForF32, @floatCast(acc)),
+            .bf16 => f32VecToBf16(acc),
+        };
+    }
+
+    inline fn storeScalar(comptime fam: NnFamily, comptime mode: StoreMode, dst: *fam.Elem(), s: f32) void {
+        dst.* = switch (fam) {
+            .f32, .f32_trans_a => switch (mode) {
+                .store => s,
+                .accumulate => dst.* + s,
+            },
+            .f16 => @floatCast(s),
+            .bf16 => dtype_mod.f32ToBf16(s),
+        };
+    }
+};
+
+/// Column-vector unroll of a row block: two vectors per pass for the row
+/// blocks, one for the single row (the historical widths).
+fn colWidths(comptime R: usize) []const usize {
+    return if (R == 1) &.{1} else &.{ 2, 1 };
+}
+
+/// C[row .. row + R, col_start .. col_end) (+)= A · B for one `R`-row
+/// block in the (i, p, j) order: A[r, p] broadcast against contiguous B row
+/// vectors, `colWidths(R)` vectors per pass, then the scalar column tail.
+/// `inline for` over rows and vectors, so the emitted per-element op order
+/// is the hand-unrolled 12/8/4/1 kernels' this replaces.
+inline fn gemmRows(
+    comptime R: usize,
+    comptime fam: NnFamily,
+    comptime mode: StoreMode,
+    cd: []fam.Elem(),
+    ad: []const fam.Elem(),
+    bd: []const fam.Elem(),
+    row: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+    col_start: usize,
+    col_end: usize,
+) void {
+    comptime if (mode == .accumulate and !fam.isF32()) @compileError("gemmRows: accumulate is the f32 epilogue only");
+    var j = col_start;
+    inline for (comptime colWidths(R)) |C| {
+        while (j + C * vector_len <= col_end) : (j += C * vector_len) {
+            var acc: [R][C]Vf32 = undefined;
+            inline for (0..R) |r| {
+                inline for (0..C) |c| acc[r][c] = @splat(0);
+            }
+            for (0..k) |p| {
+                var b: [C]Vf32 = undefined;
+                inline for (0..C) |c| b[c] = fam.vecB(bd, p * n + j + c * vector_len);
+                inline for (0..R) |r| {
+                    const av: Vf32 = @splat(fam.elemA(ad, row + r, p, m, k));
+                    inline for (0..C) |c| acc[r][c] = fam.mulAddVec(av, b[c], acc[r][c]);
+                }
+            }
+            inline for (0..R) |r| {
+                inline for (0..C) |c| fam.storeVec(mode, cd[(row + r) * n + j + c * vector_len ..][0..vector_len], acc[r][c]);
+            }
+        }
+    }
+    while (j < col_end) : (j += 1) {
+        var sums: [R]f32 = [_]f32{0} ** R;
+        for (0..k) |p| {
+            const bv = fam.elemB(bd, p * n + j);
+            inline for (0..R) |r| sums[r] = fam.mulAdd(fam.elemA(ad, row + r, p, m, k), bv, sums[r]);
+        }
+        inline for (0..R) |r| fam.storeScalar(mode, &cd[(row + r) * n + j], sums[r]);
+    }
+}
+
+/// Rows [row_start, row_end) of C over columns [col_start, col_end) as row
+/// blocks: the widest width in `widths` that still fits, then the narrower
+/// ones (the 12/8/4/1 walk of the 16-bit NN families, 8/4/1 of the f32
+/// ones, single rows for the column-split kernels), each block through
+/// `gemmRows`.
+inline fn gemmRowBlocks(
+    comptime widths: []const usize,
+    comptime fam: NnFamily,
+    comptime mode: StoreMode,
+    cd: []fam.Elem(),
+    ad: []const fam.Elem(),
+    bd: []const fam.Elem(),
+    m: usize,
+    n: usize,
+    k: usize,
+    row_start: usize,
+    row_end: usize,
+    col_start: usize,
+    col_end: usize,
+) void {
+    // The walk unrolls every width's rows x vectors inline-for nest into
+    // this scope, past the default 1000-branch quota.
+    @setEvalBranchQuota(10_000);
+    var i = row_start;
+    inline for (widths) |R| {
+        while (i + R <= row_end) : (i += R) gemmRows(R, fam, mode, cd, ad, bd, i, m, n, k, col_start, col_end);
+    }
+}
+
 pub fn gemmNNRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     gemmNNRangeMode(.store, cd, ad, bd, m, n, k, row_start, row_end);
 }
 
 fn gemmNNRangeMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
-    _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        if (comptime mode == .store) {
-            for (row_start..row_end) |i| {
-                @memset(cd[i * n .. (i + 1) * n], 0);
-            }
-        }
-        return;
-    }
+    if (zeroIfEmpty(mode, cd, n, k, row_start, row_end, 0, n)) return;
+    gemmRowBlocks(&.{ 8, 4, 1 }, .f32, mode, cd, ad, bd, m, n, k, row_start, row_end, 0, n);
+}
 
-    var i = row_start;
-    while (i + 8 <= row_end) : (i += 8) {
-        gemmNNRows8(mode, cd, ad, bd, i, n, k);
-    }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmNNRows4(mode, cd, ad, bd, i, n, k);
-    }
-    while (i < row_end) : (i += 1) {
-        gemmNNRow(mode, cd, ad, bd, i, n, k);
-    }
+fn gemmNNColsMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
+    if (zeroIfEmpty(mode, cd, n, k, 0, m, col_start, col_end)) return;
+    gemmRowBlocks(&.{1}, .f32, mode, cd, ad, bd, m, n, k, 0, m, col_start, col_end);
 }
 
 pub fn gemmTNRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
+    if (zeroIfEmpty(.store, cd, n, k, row_start, row_end, 0, n)) return;
+    gemmRowBlocks(&.{ 8, 4, 1 }, .f32_trans_a, .store, cd, ad, bd, m, n, k, row_start, row_end, 0, n);
+}
+
+fn gemmTNCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
+    if (zeroIfEmpty(.store, cd, n, k, 0, m, col_start, col_end)) return;
+    gemmRowBlocks(&.{1}, .f32_trans_a, .store, cd, ad, bd, m, n, k, 0, m, col_start, col_end);
+}
+
+fn gemmNNRangeF16(cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
+    if (zeroIfEmpty(.store, cd, n, k, row_start, row_end, 0, n)) return;
+    gemmRowBlocks(&.{ 12, 8, 4, 1 }, .f16, .store, cd, ad, bd, m, n, k, row_start, row_end, 0, n);
+}
+
+// Column-sliced f16 NN kernel: columns [col_start, col_end) for all m rows
+// (row stride stays `n`). Used for small-m (< vector_column_min_m) f16
+// matmuls where row-parallelism is denied; rows tile 8/4/1 to reuse each
+// loaded B vector across the tile.
+fn gemmNNColsF16(cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
+    if (zeroIfEmpty(.store, cd, n, k, 0, m, col_start, col_end)) return;
+    gemmRowBlocks(&.{ 8, 4, 1 }, .f16, .store, cd, ad, bd, m, n, k, 0, m, col_start, col_end);
+}
+
+/// All-bf16 C[row_start..row_end, n] = A · B (operands AND result bf16;
+/// accumulation in f32, one rounding at the final store). Row-blocked
+/// 12/8/4/1 over the row range so a thread team splits by rows; each block
+/// walks B once in k-major order (the NN layout's streaming direction).
+fn gemmNNRangeBf16(cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
+    if (zeroIfEmpty(.store, cd, n, k, row_start, row_end, 0, n)) return;
+    gemmRowBlocks(&.{ 12, 8, 4, 1 }, .bf16, .store, cd, ad, bd, m, n, k, row_start, row_end, 0, n);
+}
+
+// ---------------- NT tile and dot kernels ----------------
+
+/// The NT (`C = A · Bᵀ`, B rows contiguous in k) operand families: the
+/// operand and accumulator element types, the vector widths the rows x 4
+/// tiles and the single-row `dot4` run at, and how each operand reaches
+/// the accumulator. `.f16_native` accumulates in f16 lanes (aarch64
+/// fmla.8h); `.f16_wide` and `.bf16` widen each load to f32 (see
+/// `f16_accum_native`).
+const NtFamily = enum {
+    f32,
+    f16_native,
+    f16_wide,
+    bf16,
+
+    fn A(comptime fam: NtFamily) type {
+        return switch (fam) {
+            .f32, .bf16 => f32,
+            .f16_native, .f16_wide => f16,
+        };
     }
 
-    var i = row_start;
-    while (i + 8 <= row_end) : (i += 8) {
-        gemmTNRows8(cd, ad, bd, i, m, n, k);
+    fn B(comptime fam: NtFamily) type {
+        return switch (fam) {
+            .f32 => f32,
+            .f16_native, .f16_wide => f16,
+            .bf16 => u16,
+        };
     }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmTNRows4(cd, ad, bd, i, m, n, k);
+
+    fn Acc(comptime fam: NtFamily) type {
+        return if (fam == .f16_native) f16 else f32;
     }
-    while (i < row_end) : (i += 1) {
-        gemmTNRow(cd, ad, bd, i, m, n, k);
+
+    /// rows x 4 tile width: the f16 lane width for the native family, the
+    /// f32 width otherwise. Vf32-width groups for bf16 ON PURPOSE: rows x 4
+    /// accumulators at the wide (f16-vector) width are 32 NEON registers at
+    /// rows = 4 — total spill, measured 1.6x SLOWER at m=4. The wide widen
+    /// lives only in the single-row kernels (`dot4` / `vecDotBf16RhsToF32`),
+    /// whose 4-8 accumulators fit with room for operands.
+    fn tileWidth(comptime fam: NtFamily) usize {
+        return if (fam == .f16_native) vector_len_f16 else vector_len;
+    }
+
+    /// Single-row `dot4` width: the f16 lane width for the native family;
+    /// the wide (f16-vector) width for bf16, where one u16 load +
+    /// shift-widen feeds a double-width f32 FMA, halving loop overhead vs
+    /// Vf32 groups — the bf16 arm's answer to the f16 kernels' native lane
+    /// width.
+    fn dotWidth(comptime fam: NtFamily) usize {
+        return switch (fam) {
+            .f16_native, .bf16 => vector_len_f16,
+            .f32, .f16_wide => vector_len,
+        };
+    }
+
+    /// Accumulator chains per column in `dot4`: two for f32 (even/odd
+    /// vector steps keep eight independent FMA chains in flight, since a
+    /// single chain per column is latency-bound; the fused 4-chain form
+    /// measured slower on the 253-row NT prefill shapes), one otherwise.
+    fn dotChains(comptime fam: NtFamily) usize {
+        return if (fam == .f32) 2 else 1;
+    }
+
+    inline fn vecA(comptime fam: NtFamily, comptime W: usize, ad: []const fam.A(), idx: usize) @Vector(W, fam.Acc()) {
+        return switch (fam) {
+            .f32, .f16_native, .bf16 => ad[idx..][0..W].*,
+            .f16_wide => @floatCast(@as(@Vector(W, f16), ad[idx..][0..W].*)),
+        };
+    }
+
+    inline fn vecB(comptime fam: NtFamily, comptime W: usize, bd: []const fam.B(), idx: usize) @Vector(W, fam.Acc()) {
+        return switch (fam) {
+            .f32, .f16_native => bd[idx..][0..W].*,
+            .f16_wide => @floatCast(@as(@Vector(W, f16), bd[idx..][0..W].*)),
+            .bf16 => if (W == vector_len_f16) primitives.bf16VecToF32Wide(bd[idx..][0..W].*) else primitives.bf16VecToF32(bd[idx..][0..W].*),
+        };
+    }
+
+    inline fn elemA(comptime fam: NtFamily, ad: []const fam.A(), idx: usize) f32 {
+        return switch (fam) {
+            .f32, .bf16 => ad[idx],
+            .f16_native, .f16_wide => @floatCast(ad[idx]),
+        };
+    }
+
+    inline fn elemB(comptime fam: NtFamily, bd: []const fam.B(), idx: usize) f32 {
+        return switch (fam) {
+            .f32 => bd[idx],
+            .f16_native, .f16_wide => @floatCast(bd[idx]),
+            .bf16 => dtype_mod.bf16ToF32(bd[idx]),
+        };
+    }
+
+    inline fn reduce(comptime fam: NtFamily, comptime W: usize, v: @Vector(W, fam.Acc())) f32 {
+        return if (comptime fam == .f16_native) @floatCast(@reduce(.Add, v)) else @reduce(.Add, v);
+    }
+
+    /// The scalar tail step: fused for f32, the separate multiply and add
+    /// for the 16-bit families.
+    inline fn tail(comptime fam: NtFamily, s: f32, av: f32, bv: f32) f32 {
+        return if (comptime fam == .f32) @mulAdd(f32, av, bv, s) else s + av * bv;
+    }
+
+    /// The single-column dot behind the leftover columns of a row.
+    inline fn vecDot(comptime fam: NtFamily, x: []const fam.A(), y: []const fam.B()) f32 {
+        return switch (fam) {
+            .f32 => primitives.vecDot(x, y),
+            .f16_native => vecDotF16HalfAccumToF32(x, y),
+            .f16_wide => primitives.vecDotF16ToF32(x, y),
+            .bf16 => vecDotBf16RhsToF32(x, y),
+        };
+    }
+};
+
+/// C[0..rows, col_start..col_end) = A[rows, k] · Bᵀ for one `rows`-row
+/// block (`cd`/`ad` already sliced to the block): rows x 4 accumulator
+/// tiles over the family's tile width, each B row loaded once per step and
+/// broadcast down the rows, the lanes reduced to f32, the scalar tail fused
+/// in; then the rows x 1 leftover columns the same way.
+inline fn gemmNTRowsBlock(comptime rows: usize, comptime fam: NtFamily, cd: []f32, ad: []const fam.A(), bd: []const fam.B(), n: usize, k: usize, col_start: usize, col_end: usize) void {
+    const W = comptime fam.tileWidth();
+    const V = @Vector(W, fam.Acc());
+    var j = col_start;
+    while (j + 4 <= col_end) : (j += 4) {
+        var acc: [rows][4]V = undefined;
+        inline for (0..rows) |r| {
+            inline for (0..4) |c| acc[r][c] = @splat(0);
+        }
+
+        var p: usize = 0;
+        while (p + W <= k) : (p += W) {
+            var b: [4]V = undefined;
+            inline for (0..4) |c| b[c] = fam.vecB(W, bd, (j + c) * k + p);
+            inline for (0..rows) |r| {
+                const av = fam.vecA(W, ad, r * k + p);
+                inline for (0..4) |c| acc[r][c] = @mulAdd(V, av, b[c], acc[r][c]);
+            }
+        }
+
+        var sums: [rows][4]f32 = undefined;
+        inline for (0..rows) |r| {
+            inline for (0..4) |c| sums[r][c] = fam.reduce(W, acc[r][c]);
+        }
+        while (p < k) : (p += 1) {
+            inline for (0..rows) |r| {
+                const av = fam.elemA(ad, r * k + p);
+                inline for (0..4) |c| sums[r][c] = fam.tail(sums[r][c], av, fam.elemB(bd, (j + c) * k + p));
+            }
+        }
+
+        inline for (0..rows) |r| {
+            inline for (0..4) |c| cd[r * n + j + c] = sums[r][c];
+        }
+    }
+
+    while (j < col_end) : (j += 1) {
+        var acc: [rows]V = undefined;
+        inline for (0..rows) |r| acc[r] = @splat(0);
+
+        var p: usize = 0;
+        while (p + W <= k) : (p += W) {
+            const bv = fam.vecB(W, bd, j * k + p);
+            inline for (0..rows) |r| acc[r] = @mulAdd(V, fam.vecA(W, ad, r * k + p), bv, acc[r]);
+        }
+
+        var sums: [rows]f32 = undefined;
+        inline for (0..rows) |r| sums[r] = fam.reduce(W, acc[r]);
+        while (p < k) : (p += 1) {
+            const bv = fam.elemB(bd, j * k + p);
+            inline for (0..rows) |r| sums[r] = fam.tail(sums[r], fam.elemA(ad, r * k + p), bv);
+        }
+        inline for (0..rows) |r| cd[r * n + j] = sums[r];
+    }
+}
+
+/// Four B rows against one A row, fused (`out[c] = A · B[b_row + c]`):
+/// `dotChains` independent accumulator chains per column over the family's
+/// dot width, the chains summed, the lanes reduced, then the scalar tail
+/// fused in; the order is fixed per element regardless of the caller's
+/// column split.
+inline fn dot4(comptime fam: NtFamily, out: []f32, a: []const fam.A(), b: []const fam.B(), b_row: usize, k: usize) void {
+    const W = comptime fam.dotWidth();
+    const chains = comptime fam.dotChains();
+    const V = @Vector(W, fam.Acc());
+    var acc: [4][chains]V = undefined;
+    inline for (0..4) |c| {
+        inline for (0..chains) |h| acc[c][h] = @splat(0);
+    }
+
+    var p: usize = 0;
+    while (p + chains * W <= k) : (p += chains * W) {
+        var av: [chains]V = undefined;
+        inline for (0..chains) |h| av[h] = fam.vecA(W, a, p + h * W);
+        inline for (0..4) |c| {
+            inline for (0..chains) |h| acc[c][h] = @mulAdd(V, av[h], fam.vecB(W, b, (b_row + c) * k + p + h * W), acc[c][h]);
+        }
+    }
+    if (comptime chains > 1) {
+        while (p + W <= k) : (p += W) {
+            const av = fam.vecA(W, a, p);
+            inline for (0..4) |c| acc[c][0] = @mulAdd(V, av, fam.vecB(W, b, (b_row + c) * k + p), acc[c][0]);
+        }
+    }
+
+    var s: [4]f32 = undefined;
+    inline for (0..4) |c| {
+        var lanes = acc[c][0];
+        inline for (1..chains) |h| lanes += acc[c][h];
+        s[c] = fam.reduce(W, lanes);
+    }
+    while (p < k) : (p += 1) {
+        const av = fam.elemA(a, p);
+        inline for (0..4) |c| s[c] = fam.tail(s[c], av, fam.elemB(b, (b_row + c) * k + p));
+    }
+    inline for (0..4) |c| out[c] = s[c];
+}
+
+/// One C row over columns [col_start, col_end): `dot4` per 4-column
+/// block, the family's dot for the leftover columns.
+inline fn gemmNTRow(comptime fam: NtFamily, c_row: []f32, a_row: []const fam.A(), bd: []const fam.B(), k: usize, col_start: usize, col_end: usize) void {
+    var j = col_start;
+    while (j + 4 <= col_end) : (j += 4) dot4(fam, c_row[j .. j + 4], a_row, bd, j, k);
+    while (j < col_end) : (j += 1) c_row[j] = fam.vecDot(a_row, bd[j * k .. (j + 1) * k]);
+}
+
+/// C[0..m, col_start..col_end) = A[m, k] · Bᵀ as 6/4/3/2/1 row blocks
+/// (a 4+3 split preferred over 6+1: the single-row tail measured slower),
+/// each block streaming every RHS column once; single rows through
+/// `gemmNTRow`.
+fn gemmNTRowsCols(comptime fam: NtFamily, cd: []f32, ad: []const fam.A(), bd: []const fam.B(), m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
+    if (zeroIfEmpty(.store, cd, n, k, 0, m, col_start, col_end)) return;
+    // The 6/4/3/2 blocks unroll their rows x 4 inline-for nests into this
+    // scope, past the default 1000-branch quota.
+    @setEvalBranchQuota(10_000);
+    var i: usize = 0;
+    // Avoid a 6+1 split; the scalar row tail is slower than 4+3 here.
+    while (i + 6 <= m and m - (i + 6) != 1) : (i += 6) {
+        gemmNTRowsBlock(6, fam, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
+    }
+    while (i + 4 <= m) : (i += 4) {
+        gemmNTRowsBlock(4, fam, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
+    }
+    if (i + 3 <= m) {
+        gemmNTRowsBlock(3, fam, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
+        i += 3;
+    }
+    if (i + 2 <= m) {
+        gemmNTRowsBlock(2, fam, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
+        i += 2;
+    }
+    while (i < m) : (i += 1) {
+        gemmNTRow(fam, cd[i * n .. (i + 1) * n], ad[i * k .. (i + 1) * k], bd, k, col_start, col_end);
     }
 }
 
 pub fn gemmNTRange(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
-    }
-
+    if (zeroIfEmpty(.store, cd, n, k, row_start, row_end, 0, n)) return;
     for (row_start..row_end) |i| {
-        const a_row = ad[i * k .. (i + 1) * k];
-        var j: usize = 0;
-        while (j + 4 <= n) : (j += 4) {
-            dot4(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
-        }
-        while (j < n) : (j += 1) {
-            cd[i * n + j] = primitives.vecDot(a_row, bd[j * k .. (j + 1) * k]);
-        }
-    }
-}
-
-fn gemmNNColsMode(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        if (comptime mode == .store) {
-            for (0..m) |i| {
-                @memset(cd[i * n + col_start .. i * n + col_end], 0);
-            }
-        }
-        return;
-    }
-    for (0..m) |i| {
-        var j = col_start;
-        while (j + vector_len <= col_end) : (j += vector_len) {
-            var acc: Vf32 = @splat(0);
-            for (0..k) |p| {
-                acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[i * k + p])), @as(Vf32, bd[p * n + j ..][0..vector_len].*), acc);
-            }
-            storeVec(mode, cd[i * n + j ..][0..vector_len], acc);
-        }
-        while (j < col_end) : (j += 1) {
-            var s: f32 = 0;
-            for (0..k) |p| s = @mulAdd(f32, ad[i * k + p], bd[p * n + j], s);
-            storeScalar(mode, &cd[i * n + j], s);
-        }
-    }
-}
-
-fn gemmTNCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
-        }
-        return;
-    }
-    for (0..m) |i| {
-        var j = col_start;
-        while (j + vector_len <= col_end) : (j += vector_len) {
-            var acc: Vf32 = @splat(0);
-            for (0..k) |p| {
-                acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + i])), @as(Vf32, bd[p * n + j ..][0..vector_len].*), acc);
-            }
-            cd[i * n + j ..][0..vector_len].* = acc;
-        }
-        while (j < col_end) : (j += 1) {
-            var s: f32 = 0;
-            for (0..k) |p| s = @mulAdd(f32, ad[p * m + i], bd[p * n + j], s);
-            cd[i * n + j] = s;
-        }
+        gemmNTRow(.f32, cd[i * n .. (i + 1) * n], ad[i * k .. (i + 1) * k], bd, k, 0, n);
     }
 }
 
 fn gemmNTCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
-        }
-        return;
-    }
+    if (zeroIfEmpty(.store, cd, n, k, 0, m, col_start, col_end)) return;
     // Column tile OUTER, rows inner: the 4-row B tile stays cache-hot across
     // all m A rows, so B streams once total instead of once per row (at m=8
     // the row-outer order cost 8x the memory traffic — the whole RHS weight
@@ -403,7 +753,7 @@ fn gemmNTCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k
     var j = col_start;
     while (j + 4 <= col_end) : (j += 4) {
         for (0..m) |i| {
-            dot4(cd[i * n + j .. i * n + j + 4], ad[i * k .. (i + 1) * k], bd, j, k);
+            dot4(.f32, cd[i * n + j .. i * n + j + 4], ad[i * k .. (i + 1) * k], bd, j, k);
         }
     }
     while (j < col_end) : (j += 1) {
@@ -413,889 +763,31 @@ fn gemmNTCols(cd: []f32, ad: []const f32, bd: []const f32, m: usize, n: usize, k
     }
 }
 
+// The row-range forms of the NT f16/bf16 RHS kernels: the cols walk over
+// the row slice.
 fn gemmNTF16RhsRange(cd: []f32, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
-    }
-
-    var i = row_start;
-    // Avoid a 6+1 split; the scalar row tail is slower than 4+3 here.
-    while (i + 6 <= row_end and row_end - (i + 6) != 1) : (i += 6) {
-        gemmNTF16RhsSmallRowsCols(6, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-    }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmNTF16RhsM4Cols(cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-    }
-    if (i + 3 <= row_end) {
-        gemmNTF16RhsSmallRowsCols(3, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-        i += 3;
-    }
-    if (i + 2 <= row_end) {
-        gemmNTF16RhsSmallRowsCols(2, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-        i += 2;
-    }
-
-    while (i < row_end) : (i += 1) {
-        const a_row = ad[i * k .. (i + 1) * k];
-        var j: usize = 0;
-        while (j + 4 <= n) : (j += 4) {
-            dot4F16Rhs(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
-        }
-        while (j < n) : (j += 1) {
-            cd[i * n + j] = vecDotF16HalfAccumToF32(a_row, bd[j * k .. (j + 1) * k]);
-        }
-    }
+    gemmNTRowsCols(f16_rhs_family, cd[row_start * n ..], ad[row_start * k ..], bd, row_end - row_start, n, k, 0, n);
 }
 
 fn gemmNTF16RhsCols(cd: []f32, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
-        }
-        return;
-    }
-    var i: usize = 0;
-    // Avoid a 6+1 split; the scalar row tail is slower than 4+3 here.
-    while (i + 6 <= m and m - (i + 6) != 1) : (i += 6) {
-        gemmNTF16RhsSmallRowsCols(6, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-    }
-    while (i + 4 <= m) : (i += 4) {
-        gemmNTF16RhsM4Cols(cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-    }
-    if (i + 3 <= m) {
-        gemmNTF16RhsSmallRowsCols(3, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-        i += 3;
-    }
-    if (i + 2 <= m) {
-        gemmNTF16RhsSmallRowsCols(2, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-        i += 2;
-    }
-
-    while (i < m) : (i += 1) {
-        const a_row = ad[i * k .. (i + 1) * k];
-        var j = col_start;
-        while (j + 4 <= col_end) : (j += 4) {
-            dot4F16Rhs(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
-        }
-        while (j < col_end) : (j += 1) {
-            cd[i * n + j] = vecDotF16HalfAccumToF32(a_row, bd[j * k .. (j + 1) * k]);
-        }
-    }
-}
-
-inline fn gemmNTF16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []const f16, bd: []const f16, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (comptime !f16_accum_native) {
-        return gemmNTF16RhsSmallRowsColsWide(rows, cd, ad, bd, n, k, col_start, col_end);
-    }
-    var j = col_start;
-    while (j + 4 <= col_end) : (j += 4) {
-        var acc: [rows][4]Vf16 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                acc[r][c] = @splat(0);
-            }
-        }
-
-        var p: usize = 0;
-        while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-            const b0: Vf16 = bd[(j + 0) * k + p ..][0..vector_len_f16].*;
-            const b1: Vf16 = bd[(j + 1) * k + p ..][0..vector_len_f16].*;
-            const b2: Vf16 = bd[(j + 2) * k + p ..][0..vector_len_f16].*;
-            const b3: Vf16 = bd[(j + 3) * k + p ..][0..vector_len_f16].*;
-            inline for (0..rows) |r| {
-                const av: Vf16 = ad[r * k + p ..][0..vector_len_f16].*;
-                acc[r][0] = @mulAdd(Vf16, av, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf16, av, b1, acc[r][1]);
-                acc[r][2] = @mulAdd(Vf16, av, b2, acc[r][2]);
-                acc[r][3] = @mulAdd(Vf16, av, b3, acc[r][3]);
-            }
-        }
-
-        var sums: [rows][4]f32 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                sums[r][c] = @floatCast(@reduce(.Add, acc[r][c]));
-            }
-        }
-        while (p < k) : (p += 1) {
-            inline for (0..rows) |r| {
-                const av = @as(f32, @floatCast(ad[r * k + p]));
-                sums[r][0] += av * @as(f32, @floatCast(bd[(j + 0) * k + p]));
-                sums[r][1] += av * @as(f32, @floatCast(bd[(j + 1) * k + p]));
-                sums[r][2] += av * @as(f32, @floatCast(bd[(j + 2) * k + p]));
-                sums[r][3] += av * @as(f32, @floatCast(bd[(j + 3) * k + p]));
-            }
-        }
-
-        inline for (0..rows) |r| {
-            cd[r * n + j + 0] = sums[r][0];
-            cd[r * n + j + 1] = sums[r][1];
-            cd[r * n + j + 2] = sums[r][2];
-            cd[r * n + j + 3] = sums[r][3];
-        }
-    }
-
-    while (j < col_end) : (j += 1) {
-        var acc: [rows]Vf16 = undefined;
-        inline for (0..rows) |r| acc[r] = @splat(0);
-
-        var p: usize = 0;
-        while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-            const bv: Vf16 = bd[j * k + p ..][0..vector_len_f16].*;
-            inline for (0..rows) |r| {
-                const av: Vf16 = ad[r * k + p ..][0..vector_len_f16].*;
-                acc[r] = @mulAdd(Vf16, av, bv, acc[r]);
-            }
-        }
-
-        var sums: [rows]f32 = undefined;
-        inline for (0..rows) |r| sums[r] = @floatCast(@reduce(.Add, acc[r]));
-        while (p < k) : (p += 1) {
-            const bv = @as(f32, @floatCast(bd[j * k + p]));
-            inline for (0..rows) |r| {
-                sums[r] += @as(f32, @floatCast(ad[r * k + p])) * bv;
-            }
-        }
-        inline for (0..rows) |r| {
-            cd[r * n + j] = sums[r];
-        }
-    }
-}
-
-fn gemmNTF16RhsM4Cols(cd: []f32, ad: []const f16, bd: []const f16, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (comptime !f16_accum_native) {
-        return gemmNTF16RhsSmallRowsColsWide(4, cd, ad, bd, n, k, col_start, col_end);
-    }
-    var j = col_start;
-    while (j + 4 <= col_end) : (j += 4) {
-        var acc: [4][4]Vf16 = undefined;
-        inline for (0..4) |r| {
-            inline for (0..4) |c| {
-                acc[r][c] = @splat(0);
-            }
-        }
-
-        var p: usize = 0;
-        while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-            const b0: Vf16 = bd[(j + 0) * k + p ..][0..vector_len_f16].*;
-            const b1: Vf16 = bd[(j + 1) * k + p ..][0..vector_len_f16].*;
-            const b2: Vf16 = bd[(j + 2) * k + p ..][0..vector_len_f16].*;
-            const b3: Vf16 = bd[(j + 3) * k + p ..][0..vector_len_f16].*;
-            inline for (0..4) |r| {
-                const av: Vf16 = ad[r * k + p ..][0..vector_len_f16].*;
-                acc[r][0] = @mulAdd(Vf16, av, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf16, av, b1, acc[r][1]);
-                acc[r][2] = @mulAdd(Vf16, av, b2, acc[r][2]);
-                acc[r][3] = @mulAdd(Vf16, av, b3, acc[r][3]);
-            }
-        }
-
-        var sums: [4][4]f32 = undefined;
-        inline for (0..4) |r| {
-            inline for (0..4) |c| {
-                sums[r][c] = @floatCast(@reduce(.Add, acc[r][c]));
-            }
-        }
-        while (p < k) : (p += 1) {
-            inline for (0..4) |r| {
-                const av = @as(f32, @floatCast(ad[r * k + p]));
-                sums[r][0] += av * @as(f32, @floatCast(bd[(j + 0) * k + p]));
-                sums[r][1] += av * @as(f32, @floatCast(bd[(j + 1) * k + p]));
-                sums[r][2] += av * @as(f32, @floatCast(bd[(j + 2) * k + p]));
-                sums[r][3] += av * @as(f32, @floatCast(bd[(j + 3) * k + p]));
-            }
-        }
-
-        inline for (0..4) |r| {
-            cd[r * n + j + 0] = sums[r][0];
-            cd[r * n + j + 1] = sums[r][1];
-            cd[r * n + j + 2] = sums[r][2];
-            cd[r * n + j + 3] = sums[r][3];
-        }
-    }
-
-    while (j < col_end) : (j += 1) {
-        var acc: [4]Vf16 = undefined;
-        inline for (0..4) |r| acc[r] = @splat(0);
-
-        var p: usize = 0;
-        while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-            const bv: Vf16 = bd[j * k + p ..][0..vector_len_f16].*;
-            inline for (0..4) |r| {
-                const av: Vf16 = ad[r * k + p ..][0..vector_len_f16].*;
-                acc[r] = @mulAdd(Vf16, av, bv, acc[r]);
-            }
-        }
-
-        var sums: [4]f32 = undefined;
-        inline for (0..4) |r| sums[r] = @floatCast(@reduce(.Add, acc[r]));
-        while (p < k) : (p += 1) {
-            const bv = @as(f32, @floatCast(bd[j * k + p]));
-            inline for (0..4) |r| {
-                sums[r] += @as(f32, @floatCast(ad[r * k + p])) * bv;
-            }
-        }
-        inline for (0..4) |r| {
-            cd[r * n + j] = sums[r];
-        }
-    }
-}
-
-// f32-accumulate twin of gemmNTF16RhsSmallRowsCols/M4Cols for ISAs without
-// native f16 arithmetic (see f16_accum_native): each f16 chunk is widened once
-// per load and everything accumulates in f32 — the gemmNTBf16RhsSmallRowsCols
-// shape with F16C converts instead of bit shifts.
-inline fn gemmNTF16RhsSmallRowsColsWide(comptime rows: usize, cd: []f32, ad: []const f16, bd: []const f16, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    var j = col_start;
-    while (j + 4 <= col_end) : (j += 4) {
-        var acc: [rows][4]Vf32 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                acc[r][c] = @splat(0);
-            }
-        }
-
-        var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[(j + 0) * k + p ..][0..vector_len].*));
-            const b1: Vf32 = @floatCast(@as(Vf16ForF32, bd[(j + 1) * k + p ..][0..vector_len].*));
-            const b2: Vf32 = @floatCast(@as(Vf16ForF32, bd[(j + 2) * k + p ..][0..vector_len].*));
-            const b3: Vf32 = @floatCast(@as(Vf16ForF32, bd[(j + 3) * k + p ..][0..vector_len].*));
-            inline for (0..rows) |r| {
-                const av: Vf32 = @floatCast(@as(Vf16ForF32, ad[r * k + p ..][0..vector_len].*));
-                acc[r][0] = @mulAdd(Vf32, av, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf32, av, b1, acc[r][1]);
-                acc[r][2] = @mulAdd(Vf32, av, b2, acc[r][2]);
-                acc[r][3] = @mulAdd(Vf32, av, b3, acc[r][3]);
-            }
-        }
-
-        var sums: [rows][4]f32 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                sums[r][c] = @reduce(.Add, acc[r][c]);
-            }
-        }
-        while (p < k) : (p += 1) {
-            inline for (0..rows) |r| {
-                const av = @as(f32, @floatCast(ad[r * k + p]));
-                sums[r][0] += av * @as(f32, @floatCast(bd[(j + 0) * k + p]));
-                sums[r][1] += av * @as(f32, @floatCast(bd[(j + 1) * k + p]));
-                sums[r][2] += av * @as(f32, @floatCast(bd[(j + 2) * k + p]));
-                sums[r][3] += av * @as(f32, @floatCast(bd[(j + 3) * k + p]));
-            }
-        }
-
-        inline for (0..rows) |r| {
-            cd[r * n + j + 0] = sums[r][0];
-            cd[r * n + j + 1] = sums[r][1];
-            cd[r * n + j + 2] = sums[r][2];
-            cd[r * n + j + 3] = sums[r][3];
-        }
-    }
-
-    while (j < col_end) : (j += 1) {
-        var acc: [rows]Vf32 = undefined;
-        inline for (0..rows) |r| acc[r] = @splat(0);
-
-        var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            const bv: Vf32 = @floatCast(@as(Vf16ForF32, bd[j * k + p ..][0..vector_len].*));
-            inline for (0..rows) |r| {
-                const av: Vf32 = @floatCast(@as(Vf16ForF32, ad[r * k + p ..][0..vector_len].*));
-                acc[r] = @mulAdd(Vf32, av, bv, acc[r]);
-            }
-        }
-
-        var sums: [rows]f32 = undefined;
-        inline for (0..rows) |r| sums[r] = @reduce(.Add, acc[r]);
-        while (p < k) : (p += 1) {
-            const bv = @as(f32, @floatCast(bd[j * k + p]));
-            inline for (0..rows) |r| {
-                sums[r] += @as(f32, @floatCast(ad[r * k + p])) * bv;
-            }
-        }
-        inline for (0..rows) |r| {
-            cd[r * n + j] = sums[r];
-        }
-    }
+    gemmNTRowsCols(f16_rhs_family, cd, ad, bd, m, n, k, col_start, col_end);
 }
 
 fn gemmNTBf16RhsRange(cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
-    }
-
-    var i = row_start;
-    // Avoid a 6+1 split; the scalar row tail is slower than 4+3 here.
-    while (i + 6 <= row_end and row_end - (i + 6) != 1) : (i += 6) {
-        gemmNTBf16RhsSmallRowsCols(6, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-    }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmNTBf16RhsSmallRowsCols(4, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-    }
-    if (i + 3 <= row_end) {
-        gemmNTBf16RhsSmallRowsCols(3, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-        i += 3;
-    }
-    if (i + 2 <= row_end) {
-        gemmNTBf16RhsSmallRowsCols(2, cd[i * n ..], ad[i * k ..], bd, n, k, 0, n);
-        i += 2;
-    }
-
-    while (i < row_end) : (i += 1) {
-        const a_row = ad[i * k .. (i + 1) * k];
-        var j: usize = 0;
-        while (j + 4 <= n) : (j += 4) {
-            dot4Bf16Rhs(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
-        }
-        while (j < n) : (j += 1) {
-            cd[i * n + j] = vecDotBf16RhsToF32(a_row, bd[j * k .. (j + 1) * k]);
-        }
-    }
+    gemmNTRowsCols(.bf16, cd[row_start * n ..], ad[row_start * k ..], bd, row_end - row_start, n, k, 0, n);
 }
 
 /// C[m, col_start..col_end] = A[m, k] · Bᵀ where B rows are bf16 and stay
 /// bf16 in-register (widened per SIMD lane, never materialized as f32).
-/// Row-blocked 6/4/1 with a 4+3 split preferred over 6+1 (the scalar row
-/// tail measured slower); each row block streams every RHS column once.
 fn gemmNTBf16RhsCols(cd: []f32, ad: []const f32, bd: []const u16, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
-        }
-        return;
-    }
-    var i: usize = 0;
-    // Avoid a 6+1 split; the scalar row tail is slower than 4+3 here.
-    while (i + 6 <= m and m - (i + 6) != 1) : (i += 6) {
-        gemmNTBf16RhsSmallRowsCols(6, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-    }
-    while (i + 4 <= m) : (i += 4) {
-        gemmNTBf16RhsSmallRowsCols(4, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-    }
-    if (i + 3 <= m) {
-        gemmNTBf16RhsSmallRowsCols(3, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-        i += 3;
-    }
-    if (i + 2 <= m) {
-        gemmNTBf16RhsSmallRowsCols(2, cd[i * n ..], ad[i * k ..], bd, n, k, col_start, col_end);
-        i += 2;
-    }
-
-    while (i < m) : (i += 1) {
-        const a_row = ad[i * k .. (i + 1) * k];
-        var j = col_start;
-        while (j + 4 <= col_end) : (j += 4) {
-            dot4Bf16Rhs(cd[i * n + j .. i * n + j + 4], a_row, bd, j, k);
-        }
-        while (j < col_end) : (j += 1) {
-            cd[i * n + j] = vecDotBf16RhsToF32(a_row, bd[j * k .. (j + 1) * k]);
-        }
-    }
+    gemmNTRowsCols(.bf16, cd, ad, bd, m, n, k, col_start, col_end);
 }
 
-inline fn gemmNTBf16RhsSmallRowsCols(comptime rows: usize, cd: []f32, ad: []const f32, bd: []const u16, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    // Vf32-width groups ON PURPOSE: rows x 4 accumulators at the wide
-    // (f16-vector) width are 32 NEON registers at rows = 4 — total spill,
-    // measured 1.6x SLOWER at m=4. The wide widen lives only in the
-    // single-row kernels (dot4Bf16Rhs / vecDotBf16RhsToF32), whose 4-8
-    // accumulators fit with room for operands.
-    var j = col_start;
-    while (j + 4 <= col_end) : (j += 4) {
-        var acc: [rows][4]Vf32 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                acc[r][c] = @splat(0);
-            }
-        }
-
-        var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            const b0 = primitives.bf16VecToF32(bd[(j + 0) * k + p ..][0..vector_len].*);
-            const b1 = primitives.bf16VecToF32(bd[(j + 1) * k + p ..][0..vector_len].*);
-            const b2 = primitives.bf16VecToF32(bd[(j + 2) * k + p ..][0..vector_len].*);
-            const b3 = primitives.bf16VecToF32(bd[(j + 3) * k + p ..][0..vector_len].*);
-            inline for (0..rows) |r| {
-                const av: Vf32 = ad[r * k + p ..][0..vector_len].*;
-                acc[r][0] = @mulAdd(Vf32, av, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf32, av, b1, acc[r][1]);
-                acc[r][2] = @mulAdd(Vf32, av, b2, acc[r][2]);
-                acc[r][3] = @mulAdd(Vf32, av, b3, acc[r][3]);
-            }
-        }
-
-        var sums: [rows][4]f32 = undefined;
-        inline for (0..rows) |r| {
-            inline for (0..4) |c| {
-                sums[r][c] = @reduce(.Add, acc[r][c]);
-            }
-        }
-        while (p < k) : (p += 1) {
-            inline for (0..rows) |r| {
-                const av = ad[r * k + p];
-                sums[r][0] += av * dtype_mod.bf16ToF32(bd[(j + 0) * k + p]);
-                sums[r][1] += av * dtype_mod.bf16ToF32(bd[(j + 1) * k + p]);
-                sums[r][2] += av * dtype_mod.bf16ToF32(bd[(j + 2) * k + p]);
-                sums[r][3] += av * dtype_mod.bf16ToF32(bd[(j + 3) * k + p]);
-            }
-        }
-
-        inline for (0..rows) |r| {
-            cd[r * n + j + 0] = sums[r][0];
-            cd[r * n + j + 1] = sums[r][1];
-            cd[r * n + j + 2] = sums[r][2];
-            cd[r * n + j + 3] = sums[r][3];
-        }
-    }
-
-    while (j < col_end) : (j += 1) {
-        var acc: [rows]Vf32 = undefined;
-        inline for (0..rows) |r| acc[r] = @splat(0);
-
-        var p: usize = 0;
-        while (p + vector_len <= k) : (p += vector_len) {
-            const bv = primitives.bf16VecToF32(bd[j * k + p ..][0..vector_len].*);
-            inline for (0..rows) |r| {
-                const av: Vf32 = ad[r * k + p ..][0..vector_len].*;
-                acc[r] = @mulAdd(Vf32, av, bv, acc[r]);
-            }
-        }
-
-        var sums: [rows]f32 = undefined;
-        inline for (0..rows) |r| sums[r] = @reduce(.Add, acc[r]);
-        while (p < k) : (p += 1) {
-            const bv = dtype_mod.bf16ToF32(bd[j * k + p]);
-            inline for (0..rows) |r| {
-                sums[r] += ad[r * k + p] * bv;
-            }
-        }
-        inline for (0..rows) |r| {
-            cd[r * n + j] = sums[r];
-        }
-    }
-}
-
-inline fn gemmNNRows4(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc00: Vf32 = @splat(0);
-        var acc01: Vf32 = @splat(0);
-        var acc10: Vf32 = @splat(0);
-        var acc11: Vf32 = @splat(0);
-        var acc20: Vf32 = @splat(0);
-        var acc21: Vf32 = @splat(0);
-        var acc30: Vf32 = @splat(0);
-        var acc31: Vf32 = @splat(0);
-
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
-            const a0: Vf32 = @splat(ad[(row + 0) * k + p]);
-            const a1: Vf32 = @splat(ad[(row + 1) * k + p]);
-            const a2: Vf32 = @splat(ad[(row + 2) * k + p]);
-            const a3: Vf32 = @splat(ad[(row + 3) * k + p]);
-            acc00 = @mulAdd(Vf32, a0, b0, acc00);
-            acc01 = @mulAdd(Vf32, a0, b1, acc01);
-            acc10 = @mulAdd(Vf32, a1, b0, acc10);
-            acc11 = @mulAdd(Vf32, a1, b1, acc11);
-            acc20 = @mulAdd(Vf32, a2, b0, acc20);
-            acc21 = @mulAdd(Vf32, a2, b1, acc21);
-            acc30 = @mulAdd(Vf32, a3, b0, acc30);
-            acc31 = @mulAdd(Vf32, a3, b1, acc31);
-        }
-
-        storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc00);
-        storeVec(mode, cd[(row + 0) * n + j + vector_len ..][0..vector_len], acc01);
-        storeVec(mode, cd[(row + 1) * n + j ..][0..vector_len], acc10);
-        storeVec(mode, cd[(row + 1) * n + j + vector_len ..][0..vector_len], acc11);
-        storeVec(mode, cd[(row + 2) * n + j ..][0..vector_len], acc20);
-        storeVec(mode, cd[(row + 2) * n + j + vector_len ..][0..vector_len], acc21);
-        storeVec(mode, cd[(row + 3) * n + j ..][0..vector_len], acc30);
-        storeVec(mode, cd[(row + 3) * n + j + vector_len ..][0..vector_len], acc31);
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc0: Vf32 = @splat(0);
-        var acc1: Vf32 = @splat(0);
-        var acc2: Vf32 = @splat(0);
-        var acc3: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc0 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 0) * k + p])), b0, acc0);
-            acc1 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 1) * k + p])), b0, acc1);
-            acc2 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 2) * k + p])), b0, acc2);
-            acc3 = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + 3) * k + p])), b0, acc3);
-        }
-        storeVec(mode, cd[(row + 0) * n + j ..][0..vector_len], acc0);
-        storeVec(mode, cd[(row + 1) * n + j ..][0..vector_len], acc1);
-        storeVec(mode, cd[(row + 2) * n + j ..][0..vector_len], acc2);
-        storeVec(mode, cd[(row + 3) * n + j ..][0..vector_len], acc3);
-    }
-    while (j < n) : (j += 1) {
-        var s0: f32 = 0;
-        var s1: f32 = 0;
-        var s2: f32 = 0;
-        var s3: f32 = 0;
-        for (0..k) |p| {
-            const b = bd[p * n + j];
-            s0 = @mulAdd(f32, ad[(row + 0) * k + p], b, s0);
-            s1 = @mulAdd(f32, ad[(row + 1) * k + p], b, s1);
-            s2 = @mulAdd(f32, ad[(row + 2) * k + p], b, s2);
-            s3 = @mulAdd(f32, ad[(row + 3) * k + p], b, s3);
-        }
-        storeScalar(mode, &cd[(row + 0) * n + j], s0);
-        storeScalar(mode, &cd[(row + 1) * n + j], s1);
-        storeScalar(mode, &cd[(row + 2) * n + j], s2);
-        storeScalar(mode, &cd[(row + 3) * n + j], s3);
-    }
-}
-
-inline fn gemmNNRows8(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [8][2]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
-            inline for (0..8) |r| {
-                const a: Vf32 = @splat(ad[(row + r) * k + p]);
-                acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
-            }
-        }
-
-        inline for (0..8) |r| {
-            storeVec(mode, cd[(row + r) * n + j ..][0..vector_len], acc[r][0]);
-            storeVec(mode, cd[(row + r) * n + j + vector_len ..][0..vector_len], acc[r][1]);
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [8]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            inline for (0..8) |r| {
-                acc[r] = @mulAdd(Vf32, @as(Vf32, @splat(ad[(row + r) * k + p])), b, acc[r]);
-            }
-        }
-        inline for (0..8) |r| {
-            storeVec(mode, cd[(row + r) * n + j ..][0..vector_len], acc[r]);
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [8]f32 = [_]f32{0} ** 8;
-        for (0..k) |p| {
-            const b = bd[p * n + j];
-            inline for (0..8) |r| {
-                sums[r] = @mulAdd(f32, ad[(row + r) * k + p], b, sums[r]);
-            }
-        }
-        inline for (0..8) |r| {
-            storeScalar(mode, &cd[(row + r) * n + j], sums[r]);
-        }
-    }
-}
-
-inline fn gemmNNRow(comptime mode: StoreMode, cd: []f32, ad: []const f32, bd: []const f32, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[row * k + p])), b, acc);
-        }
-        storeVec(mode, cd[row * n + j ..][0..vector_len], acc);
-    }
-    while (j < n) : (j += 1) {
-        var s: f32 = 0;
-        for (0..k) |p| s = @mulAdd(f32, ad[row * k + p], bd[p * n + j], s);
-        storeScalar(mode, &cd[row * n + j], s);
-    }
-}
-
-inline fn gemmTNRows8(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [8][2]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
-            inline for (0..8) |r| {
-                const a: Vf32 = @splat(ad[p * m + row + r]);
-                acc[r][0] = @mulAdd(Vf32, a, b0, acc[r][0]);
-                acc[r][1] = @mulAdd(Vf32, a, b1, acc[r][1]);
-            }
-        }
-
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = acc[r][0];
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = acc[r][1];
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [8]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            inline for (0..8) |r| {
-                acc[r] = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + r])), b, acc[r]);
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = acc[r];
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [8]f32 = [_]f32{0} ** 8;
-        for (0..k) |p| {
-            const b = bd[p * n + j];
-            inline for (0..8) |r| {
-                sums[r] = @mulAdd(f32, ad[p * m + row + r], b, sums[r]);
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j] = sums[r];
-        }
-    }
-}
-
-inline fn gemmTNRows4(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc00: Vf32 = @splat(0);
-        var acc01: Vf32 = @splat(0);
-        var acc10: Vf32 = @splat(0);
-        var acc11: Vf32 = @splat(0);
-        var acc20: Vf32 = @splat(0);
-        var acc21: Vf32 = @splat(0);
-        var acc30: Vf32 = @splat(0);
-        var acc31: Vf32 = @splat(0);
-
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            const b1: Vf32 = bd[p * n + j + vector_len ..][0..vector_len].*;
-            const a0: Vf32 = @splat(ad[p * m + row + 0]);
-            const a1: Vf32 = @splat(ad[p * m + row + 1]);
-            const a2: Vf32 = @splat(ad[p * m + row + 2]);
-            const a3: Vf32 = @splat(ad[p * m + row + 3]);
-            acc00 = @mulAdd(Vf32, a0, b0, acc00);
-            acc01 = @mulAdd(Vf32, a0, b1, acc01);
-            acc10 = @mulAdd(Vf32, a1, b0, acc10);
-            acc11 = @mulAdd(Vf32, a1, b1, acc11);
-            acc20 = @mulAdd(Vf32, a2, b0, acc20);
-            acc21 = @mulAdd(Vf32, a2, b1, acc21);
-            acc30 = @mulAdd(Vf32, a3, b0, acc30);
-            acc31 = @mulAdd(Vf32, a3, b1, acc31);
-        }
-
-        cd[(row + 0) * n + j ..][0..vector_len].* = acc00;
-        cd[(row + 0) * n + j + vector_len ..][0..vector_len].* = acc01;
-        cd[(row + 1) * n + j ..][0..vector_len].* = acc10;
-        cd[(row + 1) * n + j + vector_len ..][0..vector_len].* = acc11;
-        cd[(row + 2) * n + j ..][0..vector_len].* = acc20;
-        cd[(row + 2) * n + j + vector_len ..][0..vector_len].* = acc21;
-        cd[(row + 3) * n + j ..][0..vector_len].* = acc30;
-        cd[(row + 3) * n + j + vector_len ..][0..vector_len].* = acc31;
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc0: Vf32 = @splat(0);
-        var acc1: Vf32 = @splat(0);
-        var acc2: Vf32 = @splat(0);
-        var acc3: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b0: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc0 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 0])), b0, acc0);
-            acc1 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 1])), b0, acc1);
-            acc2 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 2])), b0, acc2);
-            acc3 = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row + 3])), b0, acc3);
-        }
-        cd[(row + 0) * n + j ..][0..vector_len].* = acc0;
-        cd[(row + 1) * n + j ..][0..vector_len].* = acc1;
-        cd[(row + 2) * n + j ..][0..vector_len].* = acc2;
-        cd[(row + 3) * n + j ..][0..vector_len].* = acc3;
-    }
-    while (j < n) : (j += 1) {
-        var s0: f32 = 0;
-        var s1: f32 = 0;
-        var s2: f32 = 0;
-        var s3: f32 = 0;
-        for (0..k) |p| {
-            const b = bd[p * n + j];
-            s0 = @mulAdd(f32, ad[p * m + row + 0], b, s0);
-            s1 = @mulAdd(f32, ad[p * m + row + 1], b, s1);
-            s2 = @mulAdd(f32, ad[p * m + row + 2], b, s2);
-            s3 = @mulAdd(f32, ad[p * m + row + 3], b, s3);
-        }
-        cd[(row + 0) * n + j] = s0;
-        cd[(row + 1) * n + j] = s1;
-        cd[(row + 2) * n + j] = s2;
-        cd[(row + 3) * n + j] = s3;
-    }
-}
-
-inline fn gemmTNRow(cd: []f32, ad: []const f32, bd: []const f32, row: usize, m: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b: Vf32 = bd[p * n + j ..][0..vector_len].*;
-            acc = @mulAdd(Vf32, @as(Vf32, @splat(ad[p * m + row])), b, acc);
-        }
-        cd[row * n + j ..][0..vector_len].* = acc;
-    }
-    while (j < n) : (j += 1) {
-        var s: f32 = 0;
-        for (0..k) |p| s = @mulAdd(f32, ad[p * m + row], bd[p * n + j], s);
-        cd[row * n + j] = s;
-    }
-}
-
-/// Four B rows against one A row, fused: two accumulator chains per
-/// column (even/odd vector steps) keep eight independent FMA chains in
-/// flight, since a single chain per column is latency-bound (the fused
-/// 4-chain form measured slower than the unfused one on the 253-row NT
-/// prefill shapes). The two chains are summed, the lanes reduced, then the
-/// scalar tail fused in; the order is fixed per element regardless of the
-/// caller's column split.
-inline fn dot4(out: []f32, a: []const f32, b: []const f32, b_row: usize, k: usize) void {
-    var acc: [4][2]Vf32 = undefined;
-    inline for (0..4) |c| {
-        acc[c][0] = @splat(0);
-        acc[c][1] = @splat(0);
-    }
-
-    var p: usize = 0;
-    while (p + 2 * vector_len <= k) : (p += 2 * vector_len) {
-        const av0: Vf32 = a[p..][0..vector_len].*;
-        const av1: Vf32 = a[p + vector_len ..][0..vector_len].*;
-        inline for (0..4) |c| {
-            acc[c][0] = @mulAdd(Vf32, av0, @as(Vf32, b[(b_row + c) * k + p ..][0..vector_len].*), acc[c][0]);
-            acc[c][1] = @mulAdd(Vf32, av1, @as(Vf32, b[(b_row + c) * k + p + vector_len ..][0..vector_len].*), acc[c][1]);
-        }
-    }
-    while (p + vector_len <= k) : (p += vector_len) {
-        const av: Vf32 = a[p..][0..vector_len].*;
-        inline for (0..4) |c| {
-            acc[c][0] = @mulAdd(Vf32, av, @as(Vf32, b[(b_row + c) * k + p ..][0..vector_len].*), acc[c][0]);
-        }
-    }
-
-    var s0 = @reduce(.Add, acc[0][0] + acc[0][1]);
-    var s1 = @reduce(.Add, acc[1][0] + acc[1][1]);
-    var s2 = @reduce(.Add, acc[2][0] + acc[2][1]);
-    var s3 = @reduce(.Add, acc[3][0] + acc[3][1]);
-    while (p < k) : (p += 1) {
-        const av = a[p];
-        s0 = @mulAdd(f32, av, b[(b_row + 0) * k + p], s0);
-        s1 = @mulAdd(f32, av, b[(b_row + 1) * k + p], s1);
-        s2 = @mulAdd(f32, av, b[(b_row + 2) * k + p], s2);
-        s3 = @mulAdd(f32, av, b[(b_row + 3) * k + p], s3);
-    }
-    out[0] = s0;
-    out[1] = s1;
-    out[2] = s2;
-    out[3] = s3;
-}
-
-inline fn dot4F16Rhs(out: []f32, a: []const f16, b: []const f16, b_row: usize, k: usize) void {
-    if (comptime !f16_accum_native) {
-        return dot4F16RhsWide(out, a, b, b_row, k);
-    }
-    var acc0: Vf16 = @splat(0);
-    var acc1: Vf16 = @splat(0);
-    var acc2: Vf16 = @splat(0);
-    var acc3: Vf16 = @splat(0);
-
-    var p: usize = 0;
-    while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-        const av: Vf16 = a[p..][0..vector_len_f16].*;
-        acc0 = @mulAdd(Vf16, av, b[(b_row + 0) * k + p ..][0..vector_len_f16].*, acc0);
-        acc1 = @mulAdd(Vf16, av, b[(b_row + 1) * k + p ..][0..vector_len_f16].*, acc1);
-        acc2 = @mulAdd(Vf16, av, b[(b_row + 2) * k + p ..][0..vector_len_f16].*, acc2);
-        acc3 = @mulAdd(Vf16, av, b[(b_row + 3) * k + p ..][0..vector_len_f16].*, acc3);
-    }
-
-    var s0: f32 = @floatCast(@reduce(.Add, acc0));
-    var s1: f32 = @floatCast(@reduce(.Add, acc1));
-    var s2: f32 = @floatCast(@reduce(.Add, acc2));
-    var s3: f32 = @floatCast(@reduce(.Add, acc3));
-    while (p < k) : (p += 1) {
-        const av = @as(f32, @floatCast(a[p]));
-        s0 += av * @as(f32, @floatCast(b[(b_row + 0) * k + p]));
-        s1 += av * @as(f32, @floatCast(b[(b_row + 1) * k + p]));
-        s2 += av * @as(f32, @floatCast(b[(b_row + 2) * k + p]));
-        s3 += av * @as(f32, @floatCast(b[(b_row + 3) * k + p]));
-    }
-    out[0] = s0;
-    out[1] = s1;
-    out[2] = s2;
-    out[3] = s3;
-}
-
-// f32-accumulate twin of dot4F16Rhs (see f16_accum_native): the dot4Bf16Rhs
-// shape with F16C converts instead of bit shifts.
-inline fn dot4F16RhsWide(out: []f32, a: []const f16, b: []const f16, b_row: usize, k: usize) void {
-    var acc0: Vf32 = @splat(0);
-    var acc1: Vf32 = @splat(0);
-    var acc2: Vf32 = @splat(0);
-    var acc3: Vf32 = @splat(0);
-
-    var p: usize = 0;
-    while (p + vector_len <= k) : (p += vector_len) {
-        const av: Vf32 = @floatCast(@as(Vf16ForF32, a[p..][0..vector_len].*));
-        acc0 = @mulAdd(Vf32, av, @floatCast(@as(Vf16ForF32, b[(b_row + 0) * k + p ..][0..vector_len].*)), acc0);
-        acc1 = @mulAdd(Vf32, av, @floatCast(@as(Vf16ForF32, b[(b_row + 1) * k + p ..][0..vector_len].*)), acc1);
-        acc2 = @mulAdd(Vf32, av, @floatCast(@as(Vf16ForF32, b[(b_row + 2) * k + p ..][0..vector_len].*)), acc2);
-        acc3 = @mulAdd(Vf32, av, @floatCast(@as(Vf16ForF32, b[(b_row + 3) * k + p ..][0..vector_len].*)), acc3);
-    }
-
-    var s0 = @reduce(.Add, acc0);
-    var s1 = @reduce(.Add, acc1);
-    var s2 = @reduce(.Add, acc2);
-    var s3 = @reduce(.Add, acc3);
-    while (p < k) : (p += 1) {
-        const av = @as(f32, @floatCast(a[p]));
-        s0 += av * @as(f32, @floatCast(b[(b_row + 0) * k + p]));
-        s1 += av * @as(f32, @floatCast(b[(b_row + 1) * k + p]));
-        s2 += av * @as(f32, @floatCast(b[(b_row + 2) * k + p]));
-        s3 += av * @as(f32, @floatCast(b[(b_row + 3) * k + p]));
-    }
-    out[0] = s0;
-    out[1] = s1;
-    out[2] = s2;
-    out[3] = s3;
-}
-
+/// The f16-lane single-column dot (`.f16_native`): four fmla.8h chains,
+/// summed and reduced to f32, then the scalar tail.
 inline fn vecDotF16HalfAccumToF32(x: []const f16, y: []const f16) f32 {
-    if (comptime !f16_accum_native) {
-        return primitives.vecDotF16ToF32(x, y);
-    }
     var i: usize = 0;
     var acc0: Vf16 = @splat(0);
     var acc1: Vf16 = @splat(0);
@@ -1329,41 +821,8 @@ inline fn vecDotF16HalfAccumToF32(x: []const f16, y: []const f16) f32 {
     return sum;
 }
 
-inline fn dot4Bf16Rhs(out: []f32, a: []const f32, b: []const u16, b_row: usize, k: usize) void {
-    // Wide (f16-vector-width) groups: one u16 load + shift-widen feeds a
-    // double-width f32 FMA, halving loop overhead vs the old Vf32 groups —
-    // the bf16 arm's answer to the f16 kernels' native-lane width.
-    var acc0: Vf32Wide = @splat(0);
-    var acc1: Vf32Wide = @splat(0);
-    var acc2: Vf32Wide = @splat(0);
-    var acc3: Vf32Wide = @splat(0);
-
-    var p: usize = 0;
-    while (p + vector_len_f16 <= k) : (p += vector_len_f16) {
-        const av: Vf32Wide = a[p..][0..vector_len_f16].*;
-        acc0 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 0) * k + p ..][0..vector_len_f16].*), acc0);
-        acc1 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 1) * k + p ..][0..vector_len_f16].*), acc1);
-        acc2 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 2) * k + p ..][0..vector_len_f16].*), acc2);
-        acc3 = @mulAdd(Vf32Wide, av, primitives.bf16VecToF32Wide(b[(b_row + 3) * k + p ..][0..vector_len_f16].*), acc3);
-    }
-
-    var s0 = @reduce(.Add, acc0);
-    var s1 = @reduce(.Add, acc1);
-    var s2 = @reduce(.Add, acc2);
-    var s3 = @reduce(.Add, acc3);
-    while (p < k) : (p += 1) {
-        const av = a[p];
-        s0 += av * dtype_mod.bf16ToF32(b[(b_row + 0) * k + p]);
-        s1 += av * dtype_mod.bf16ToF32(b[(b_row + 1) * k + p]);
-        s2 += av * dtype_mod.bf16ToF32(b[(b_row + 2) * k + p]);
-        s3 += av * dtype_mod.bf16ToF32(b[(b_row + 3) * k + p]);
-    }
-    out[0] = s0;
-    out[1] = s1;
-    out[2] = s2;
-    out[3] = s3;
-}
-
+/// The bf16-RHS single-column dot: four wide (f16-vector-width) f32 chains
+/// over shift-widened bf16 loads, summed and reduced, then the scalar tail.
 inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
     var i: usize = 0;
     var acc0: Vf32Wide = @splat(0);
@@ -1398,6 +857,8 @@ inline fn vecDotBf16RhsToF32(x: []const f32, y: []const u16) f32 {
     return sum;
 }
 
+// ---------------- f64 and the typed scalar fallback ----------------
+
 fn gemmNNRangeF64(cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
     _ = m;
     for (row_start..row_end) |i| {
@@ -1414,535 +875,6 @@ fn gemmNNRangeF64(cd: []f64, ad: []const f64, bd: []const f64, m: usize, n: usiz
             for (0..k) |p| acc += ad[i * k + p] * bd[p * n + j];
             cd[i * n + j] = acc;
         }
-    }
-}
-
-fn gemmNNRangeF16(cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
-    _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
-    }
-
-    var i = row_start;
-    while (i + 12 <= row_end) : (i += 12) {
-        gemmNNRows12F16(cd, ad, bd, i, n, k);
-    }
-    while (i + 8 <= row_end) : (i += 8) {
-        gemmNNRows8F16(cd, ad, bd, i, n, k);
-    }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmNNRows4F16(cd, ad, bd, i, n, k);
-    }
-    while (i < row_end) : (i += 1) {
-        gemmNNRowF16(cd, ad, bd, i, n, k);
-    }
-}
-
-// Column-sliced f16 NN kernel: computes columns [col_start, col_end) for all m
-// rows. Row stride stays `n`. Used for small-m (< vector_column_min_m) f16
-// matmuls where row-parallelism is denied; rows are tiled to reuse each loaded
-// B vector across the tile (mirrors the gemmNNRows*F16 inner structure).
-inline fn gemmNNRowsColsF16(
-    comptime R: usize,
-    cd: []f16,
-    ad: []const f16,
-    bd: []const f16,
-    row: usize,
-    n: usize,
-    k: usize,
-    col_start: usize,
-    col_end: usize,
-) void {
-    var j = col_start;
-    while (j + 2 * vector_len <= col_end) : (j += 2 * vector_len) {
-        var acc: [R][2]Vf32 = undefined;
-        inline for (0..R) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            const b1: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j + vector_len ..][0..vector_len].*));
-            inline for (0..R) |r| {
-                const a: Vf32 = @splat(@as(f32, @floatCast(ad[(row + r) * k + p])));
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
-            }
-        }
-        inline for (0..R) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][0]));
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][1]));
-        }
-    }
-    while (j + vector_len <= col_end) : (j += vector_len) {
-        var acc: [R]Vf32 = undefined;
-        inline for (0..R) |r| acc[r] = @splat(0);
-        for (0..k) |p| {
-            const b: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            inline for (0..R) |r| {
-                acc[r] += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + r) * k + p])))) * b;
-            }
-        }
-        inline for (0..R) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r]));
-        }
-    }
-    while (j < col_end) : (j += 1) {
-        var sums: [R]f32 = [_]f32{0} ** R;
-        for (0..k) |p| {
-            const b = @as(f32, @floatCast(bd[p * n + j]));
-            inline for (0..R) |r| {
-                sums[r] += @as(f32, @floatCast(ad[(row + r) * k + p])) * b;
-            }
-        }
-        inline for (0..R) |r| cd[(row + r) * n + j] = @floatCast(sums[r]);
-    }
-}
-
-fn gemmNNColsF16(cd: []f16, ad: []const f16, bd: []const f16, m: usize, n: usize, k: usize, col_start: usize, col_end: usize) void {
-    if (col_start == col_end or m == 0) return;
-    if (k == 0) {
-        for (0..m) |i| {
-            @memset(cd[i * n + col_start .. i * n + col_end], 0);
-        }
-        return;
-    }
-    var i: usize = 0;
-    while (i + 8 <= m) : (i += 8) gemmNNRowsColsF16(8, cd, ad, bd, i, n, k, col_start, col_end);
-    while (i + 4 <= m) : (i += 4) gemmNNRowsColsF16(4, cd, ad, bd, i, n, k, col_start, col_end);
-    while (i < m) : (i += 1) gemmNNRowsColsF16(1, cd, ad, bd, i, n, k, col_start, col_end);
-}
-
-/// All-bf16 C[row_start..row_end, n] = A · B (operands AND result bf16;
-/// accumulation in f32, one rounding at the final store). Row-blocked
-/// 12/8/4/1 over the row range so a thread team splits by rows; each block
-/// walks B once in k-major order (the NN layout's streaming direction).
-fn gemmNNRangeBf16(cd: []u16, ad: []const u16, bd: []const u16, m: usize, n: usize, k: usize, row_start: usize, row_end: usize) void {
-    _ = m;
-    if (row_start == row_end or n == 0) return;
-    if (k == 0) {
-        for (row_start..row_end) |i| {
-            @memset(cd[i * n .. (i + 1) * n], 0);
-        }
-        return;
-    }
-
-    var i = row_start;
-    while (i + 12 <= row_end) : (i += 12) {
-        gemmNNRows12Bf16(cd, ad, bd, i, n, k);
-    }
-    while (i + 8 <= row_end) : (i += 8) {
-        gemmNNRows8Bf16(cd, ad, bd, i, n, k);
-    }
-    while (i + 4 <= row_end) : (i += 4) {
-        gemmNNRows4Bf16(cd, ad, bd, i, n, k);
-    }
-    while (i < row_end) : (i += 1) {
-        gemmNNRowBf16(cd, ad, bd, i, n, k);
-    }
-}
-
-inline fn gemmNNRows12F16(cd: []f16, ad: []const f16, bd: []const f16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [12][2]Vf32 = undefined;
-        inline for (0..12) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            const b1: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j + vector_len ..][0..vector_len].*));
-            inline for (0..12) |r| {
-                const a: Vf32 = @splat(@as(f32, @floatCast(ad[(row + r) * k + p])));
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
-            }
-        }
-
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][0]));
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][1]));
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [12]Vf32 = undefined;
-        inline for (0..12) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            inline for (0..12) |r| {
-                acc[r] += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + r) * k + p])))) * b;
-            }
-        }
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r]));
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [12]f32 = [_]f32{0} ** 12;
-        for (0..k) |p| {
-            const b = @as(f32, @floatCast(bd[p * n + j]));
-            inline for (0..12) |r| {
-                sums[r] += @as(f32, @floatCast(ad[(row + r) * k + p])) * b;
-            }
-        }
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j] = @floatCast(sums[r]);
-        }
-    }
-}
-
-inline fn gemmNNRows8F16(cd: []f16, ad: []const f16, bd: []const f16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [8][2]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            const b1: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j + vector_len ..][0..vector_len].*));
-            inline for (0..8) |r| {
-                const a: Vf32 = @splat(@as(f32, @floatCast(ad[(row + r) * k + p])));
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
-            }
-        }
-
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][0]));
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r][1]));
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [8]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            inline for (0..8) |r| {
-                acc[r] += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + r) * k + p])))) * b;
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc[r]));
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [8]f32 = [_]f32{0} ** 8;
-        for (0..k) |p| {
-            const b = @as(f32, @floatCast(bd[p * n + j]));
-            inline for (0..8) |r| {
-                sums[r] += @as(f32, @floatCast(ad[(row + r) * k + p])) * b;
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j] = @floatCast(sums[r]);
-        }
-    }
-}
-
-inline fn gemmNNRows4F16(cd: []f16, ad: []const f16, bd: []const f16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc00: Vf32 = @splat(0);
-        var acc01: Vf32 = @splat(0);
-        var acc10: Vf32 = @splat(0);
-        var acc11: Vf32 = @splat(0);
-        var acc20: Vf32 = @splat(0);
-        var acc21: Vf32 = @splat(0);
-        var acc30: Vf32 = @splat(0);
-        var acc31: Vf32 = @splat(0);
-
-        for (0..k) |p| {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            const b1: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j + vector_len ..][0..vector_len].*));
-            const a0: Vf32 = @splat(@as(f32, @floatCast(ad[(row + 0) * k + p])));
-            const a1: Vf32 = @splat(@as(f32, @floatCast(ad[(row + 1) * k + p])));
-            const a2: Vf32 = @splat(@as(f32, @floatCast(ad[(row + 2) * k + p])));
-            const a3: Vf32 = @splat(@as(f32, @floatCast(ad[(row + 3) * k + p])));
-            acc00 += a0 * b0;
-            acc01 += a0 * b1;
-            acc10 += a1 * b0;
-            acc11 += a1 * b1;
-            acc20 += a2 * b0;
-            acc21 += a2 * b1;
-            acc30 += a3 * b0;
-            acc31 += a3 * b1;
-        }
-
-        cd[(row + 0) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc00));
-        cd[(row + 0) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc01));
-        cd[(row + 1) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc10));
-        cd[(row + 1) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc11));
-        cd[(row + 2) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc20));
-        cd[(row + 2) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc21));
-        cd[(row + 3) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc30));
-        cd[(row + 3) * n + j + vector_len ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc31));
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc0: Vf32 = @splat(0);
-        var acc1: Vf32 = @splat(0);
-        var acc2: Vf32 = @splat(0);
-        var acc3: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b0: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            acc0 += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + 0) * k + p])))) * b0;
-            acc1 += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + 1) * k + p])))) * b0;
-            acc2 += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + 2) * k + p])))) * b0;
-            acc3 += @as(Vf32, @splat(@as(f32, @floatCast(ad[(row + 3) * k + p])))) * b0;
-        }
-        cd[(row + 0) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc0));
-        cd[(row + 1) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc1));
-        cd[(row + 2) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc2));
-        cd[(row + 3) * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc3));
-    }
-    while (j < n) : (j += 1) {
-        var s0: f32 = 0;
-        var s1: f32 = 0;
-        var s2: f32 = 0;
-        var s3: f32 = 0;
-        for (0..k) |p| {
-            const b = @as(f32, @floatCast(bd[p * n + j]));
-            s0 += @as(f32, @floatCast(ad[(row + 0) * k + p])) * b;
-            s1 += @as(f32, @floatCast(ad[(row + 1) * k + p])) * b;
-            s2 += @as(f32, @floatCast(ad[(row + 2) * k + p])) * b;
-            s3 += @as(f32, @floatCast(ad[(row + 3) * k + p])) * b;
-        }
-        cd[(row + 0) * n + j] = @floatCast(s0);
-        cd[(row + 1) * n + j] = @floatCast(s1);
-        cd[(row + 2) * n + j] = @floatCast(s2);
-        cd[(row + 3) * n + j] = @floatCast(s3);
-    }
-}
-
-inline fn gemmNNRowF16(cd: []f16, ad: []const f16, bd: []const f16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const a32: f32 = @floatCast(ad[row * k + p]);
-            const b32: Vf32 = @floatCast(@as(Vf16ForF32, bd[p * n + j ..][0..vector_len].*));
-            acc += @as(Vf32, @splat(a32)) * b32;
-        }
-        cd[row * n + j ..][0..vector_len].* = @as(Vf16ForF32, @floatCast(acc));
-    }
-    while (j < n) : (j += 1) {
-        var acc: f32 = 0;
-        for (0..k) |p| {
-            acc += @as(f32, @floatCast(ad[row * k + p])) * @as(f32, @floatCast(bd[p * n + j]));
-        }
-        cd[row * n + j] = @floatCast(acc);
-    }
-}
-
-inline fn gemmNNRows12Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [12][2]Vf32 = undefined;
-        inline for (0..12) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
-            inline for (0..12) |r| {
-                const a: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]));
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
-            }
-        }
-
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = f32VecToBf16(acc[r][0]);
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc[r][1]);
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [12]Vf32 = undefined;
-        inline for (0..12) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            inline for (0..12) |r| {
-                acc[r] += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]))) * b;
-            }
-        }
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = f32VecToBf16(acc[r]);
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [12]f32 = [_]f32{0} ** 12;
-        for (0..k) |p| {
-            const b = dtype_mod.bf16ToF32(bd[p * n + j]);
-            inline for (0..12) |r| {
-                sums[r] += dtype_mod.bf16ToF32(ad[(row + r) * k + p]) * b;
-            }
-        }
-        inline for (0..12) |r| {
-            cd[(row + r) * n + j] = dtype_mod.f32ToBf16(sums[r]);
-        }
-    }
-}
-
-inline fn gemmNNRows8Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc: [8][2]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r][0] = @splat(0);
-            acc[r][1] = @splat(0);
-        }
-
-        for (0..k) |p| {
-            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
-            inline for (0..8) |r| {
-                const a: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]));
-                acc[r][0] += a * b0;
-                acc[r][1] += a * b1;
-            }
-        }
-
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = f32VecToBf16(acc[r][0]);
-            cd[(row + r) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc[r][1]);
-        }
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: [8]Vf32 = undefined;
-        inline for (0..8) |r| {
-            acc[r] = @splat(0);
-        }
-        for (0..k) |p| {
-            const b = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            inline for (0..8) |r| {
-                acc[r] += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + r) * k + p]))) * b;
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j ..][0..vector_len].* = f32VecToBf16(acc[r]);
-        }
-    }
-    while (j < n) : (j += 1) {
-        var sums: [8]f32 = [_]f32{0} ** 8;
-        for (0..k) |p| {
-            const b = dtype_mod.bf16ToF32(bd[p * n + j]);
-            inline for (0..8) |r| {
-                sums[r] += dtype_mod.bf16ToF32(ad[(row + r) * k + p]) * b;
-            }
-        }
-        inline for (0..8) |r| {
-            cd[(row + r) * n + j] = dtype_mod.f32ToBf16(sums[r]);
-        }
-    }
-}
-
-inline fn gemmNNRows4Bf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + 2 * vector_len <= n) : (j += 2 * vector_len) {
-        var acc00: Vf32 = @splat(0);
-        var acc01: Vf32 = @splat(0);
-        var acc10: Vf32 = @splat(0);
-        var acc11: Vf32 = @splat(0);
-        var acc20: Vf32 = @splat(0);
-        var acc21: Vf32 = @splat(0);
-        var acc30: Vf32 = @splat(0);
-        var acc31: Vf32 = @splat(0);
-
-        for (0..k) |p| {
-            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            const b1 = primitives.bf16VecToF32(bd[p * n + j + vector_len ..][0..vector_len].*);
-            const a0: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 0) * k + p]));
-            const a1: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 1) * k + p]));
-            const a2: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 2) * k + p]));
-            const a3: Vf32 = @splat(dtype_mod.bf16ToF32(ad[(row + 3) * k + p]));
-            acc00 += a0 * b0;
-            acc01 += a0 * b1;
-            acc10 += a1 * b0;
-            acc11 += a1 * b1;
-            acc20 += a2 * b0;
-            acc21 += a2 * b1;
-            acc30 += a3 * b0;
-            acc31 += a3 * b1;
-        }
-
-        cd[(row + 0) * n + j ..][0..vector_len].* = f32VecToBf16(acc00);
-        cd[(row + 0) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc01);
-        cd[(row + 1) * n + j ..][0..vector_len].* = f32VecToBf16(acc10);
-        cd[(row + 1) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc11);
-        cd[(row + 2) * n + j ..][0..vector_len].* = f32VecToBf16(acc20);
-        cd[(row + 2) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc21);
-        cd[(row + 3) * n + j ..][0..vector_len].* = f32VecToBf16(acc30);
-        cd[(row + 3) * n + j + vector_len ..][0..vector_len].* = f32VecToBf16(acc31);
-    }
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc0: Vf32 = @splat(0);
-        var acc1: Vf32 = @splat(0);
-        var acc2: Vf32 = @splat(0);
-        var acc3: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const b0 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            acc0 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 0) * k + p]))) * b0;
-            acc1 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 1) * k + p]))) * b0;
-            acc2 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 2) * k + p]))) * b0;
-            acc3 += @as(Vf32, @splat(dtype_mod.bf16ToF32(ad[(row + 3) * k + p]))) * b0;
-        }
-        cd[(row + 0) * n + j ..][0..vector_len].* = f32VecToBf16(acc0);
-        cd[(row + 1) * n + j ..][0..vector_len].* = f32VecToBf16(acc1);
-        cd[(row + 2) * n + j ..][0..vector_len].* = f32VecToBf16(acc2);
-        cd[(row + 3) * n + j ..][0..vector_len].* = f32VecToBf16(acc3);
-    }
-    while (j < n) : (j += 1) {
-        var s0: f32 = 0;
-        var s1: f32 = 0;
-        var s2: f32 = 0;
-        var s3: f32 = 0;
-        for (0..k) |p| {
-            const b = dtype_mod.bf16ToF32(bd[p * n + j]);
-            s0 += dtype_mod.bf16ToF32(ad[(row + 0) * k + p]) * b;
-            s1 += dtype_mod.bf16ToF32(ad[(row + 1) * k + p]) * b;
-            s2 += dtype_mod.bf16ToF32(ad[(row + 2) * k + p]) * b;
-            s3 += dtype_mod.bf16ToF32(ad[(row + 3) * k + p]) * b;
-        }
-        cd[(row + 0) * n + j] = dtype_mod.f32ToBf16(s0);
-        cd[(row + 1) * n + j] = dtype_mod.f32ToBf16(s1);
-        cd[(row + 2) * n + j] = dtype_mod.f32ToBf16(s2);
-        cd[(row + 3) * n + j] = dtype_mod.f32ToBf16(s3);
-    }
-}
-
-inline fn gemmNNRowBf16(cd: []u16, ad: []const u16, bd: []const u16, row: usize, n: usize, k: usize) void {
-    var j: usize = 0;
-    while (j + vector_len <= n) : (j += vector_len) {
-        var acc: Vf32 = @splat(0);
-        for (0..k) |p| {
-            const a32 = dtype_mod.bf16ToF32(ad[row * k + p]);
-            const b32 = primitives.bf16VecToF32(bd[p * n + j ..][0..vector_len].*);
-            acc += @as(Vf32, @splat(a32)) * b32;
-        }
-        cd[row * n + j ..][0..vector_len].* = f32VecToBf16(acc);
-    }
-    while (j < n) : (j += 1) {
-        var acc: f32 = 0;
-        for (0..k) |p| {
-            acc += dtype_mod.bf16ToF32(ad[row * k + p]) * dtype_mod.bf16ToF32(bd[p * n + j]);
-        }
-        cd[row * n + j] = dtype_mod.f32ToBf16(acc);
     }
 }
 
