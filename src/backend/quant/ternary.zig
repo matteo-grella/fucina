@@ -117,28 +117,6 @@ fn encodeCrumbs(block: *BlockTQ2_0, x: *const [types.qk_k_block_size]f32, id: f3
     }
 }
 
-pub fn quantizedMatmulRhsTQ2_0FromBlocks(
-    allocator: Allocator,
-    k: usize,
-    n: usize,
-    blocks: []const BlockTQ2_0,
-) !types.QuantizedMatmulRhsTQ2_0 {
-    const blocks_per_row = try tq2_0BlockCount(k);
-    if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
-    const owned = try allocator.dupe(BlockTQ2_0, blocks);
-    return .{
-        .rows = .{
-            .allocator = allocator,
-            .blocks = owned,
-            .rows = n,
-            .cols = k,
-            .blocks_per_row = blocks_per_row,
-        },
-        .k = k,
-        .n = n,
-    };
-}
-
 /// Wrap caller-owned TQ2_0 blocks (row-major [n] weight rows of k/256
 /// blocks each; view row c = weight row c = output column c) as a matmul
 /// RHS WITHOUT copying: the container borrows `blocks` (allocator = null),
@@ -1156,8 +1134,6 @@ pub fn matmulQ2_0RhsTile(
         }
     }
 }
-
-pub const matmulQ2_0RhsRange = common.RangeFromTile(matmulQ2_0RhsTile);
 
 // ---------------- f32-activation path (mul-free, IEEE-exact) ----------------
 

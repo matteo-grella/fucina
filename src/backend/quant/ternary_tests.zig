@@ -542,7 +542,7 @@ test "hot q2_0 matmul matches the cold table path bitwise" {
     const want = try allocator.alloc(f32, m * n);
     defer allocator.free(want);
 
-    ternary.matmulQ2_0RhsRange(got, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+    ternary.matmulQ2_0RhsTile(got, qlhs.blocks, &packed_rhs.rhs, n, 0, m, 0, n);
     qm.cold.matmulQ2_0RhsRefRange(want, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
 
     try std.testing.expectEqualSlices(f32, want, got);
@@ -574,7 +574,7 @@ test "q2_0 tile splits reproduce the full range bitwise" {
     const split = try allocator.alloc(f32, m * n);
     defer allocator.free(split);
 
-    ternary.matmulQ2_0RhsRange(full, qlhs.blocks, &packed_rhs.rhs, m, n, 0, m);
+    ternary.matmulQ2_0RhsTile(full, qlhs.blocks, &packed_rhs.rhs, n, 0, m, 0, n);
 
     // Row split landing mid row-pair (the parallel dispatch's range shape).
     ternary.matmulQ2_0RhsTile(split, qlhs.blocks, &packed_rhs.rhs, n, 0, 3, 0, n);
@@ -616,7 +616,7 @@ test "q2_0 code 3 (+2d) agrees between hot and cold paths" {
 
     var got: [m * n]f32 = undefined;
     var want: [m * n]f32 = undefined;
-    ternary.matmulQ2_0RhsRange(&got, qlhs.blocks, &rhs, m, n, 0, m);
+    ternary.matmulQ2_0RhsTile(&got, qlhs.blocks, &rhs, n, 0, m, 0, n);
     qm.cold.matmulQ2_0RhsRefRange(&want, qlhs.blocks, &rhs, m, n, 0, m);
     try std.testing.expectEqualSlices(f32, &want, &got);
 }

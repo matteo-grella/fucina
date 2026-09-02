@@ -135,7 +135,7 @@ test "ggml_q8_0x4 packed lhs matches plain lhs matmul" {
     try q8k.quantizeRowsQ8_0Into(&lhs_plain, &lhs);
 
     var lhs_packed: [(m / 4) * blocks_per_row]types.BlockQ8_0x4 = undefined;
-    try q8_0.quantizeRowsQ8_0x4Into(&lhs_packed, &lhs);
+    try q8_0.quantizeRowsQ8_0x4PaddedInto(&lhs_packed, &lhs);
 
     var rhs_rows = try q8k.quantizeRowsQ8_0(allocator, &rhs_dense);
     defer rhs_rows.deinit();
@@ -186,7 +186,7 @@ test "ggml_q8_0x4 packed ColsFirst dual-row path matches plain matmul" {
 
     const lhs_packed = try allocator.alloc(types.BlockQ8_0x4, (m / 4) * blocks_per_row);
     defer allocator.free(lhs_packed);
-    try q8_0.quantizeRowsQ8_0x4Into(lhs_packed, &lhs);
+    try q8_0.quantizeRowsQ8_0x4PaddedInto(lhs_packed, &lhs);
 
     var rhs_rows = try q8k.quantizeRowsQ8_0(allocator, &rhs_dense);
     defer rhs_rows.deinit();
@@ -399,7 +399,7 @@ test "ggml_q8_0x4 packed matmul entry points match the scalar-arm reference" {
 
     const lhs_packed = try allocator.alloc(qm.BlockQ8_0x4, (m / 4) * blocks_per_row);
     defer allocator.free(lhs_packed);
-    try q8_0.quantizeRowsQ8_0x4Into(lhs_packed, &lhs);
+    try q8_0.quantizeRowsQ8_0x4PaddedInto(lhs_packed, &lhs);
 
     var rhs_rows = try q8k.quantizeRowsQ8_0(allocator, &rhs_dense);
     defer rhs_rows.deinit();

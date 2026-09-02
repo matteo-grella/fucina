@@ -255,7 +255,6 @@ test "ggml_q4_0 rejects partial GGML blocks" {
     var blocks: [1]dtype_mod.BlockQ4_0 = undefined;
 
     try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, cold.quantizeRowQ4_0Into(&blocks, &src));
-    try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, cold.q4_0BlockCount(src.len));
 }
 
 test "ggml_q8_1 activation quantization rounds ties away from zero" {

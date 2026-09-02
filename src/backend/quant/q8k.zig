@@ -361,7 +361,7 @@ pub fn quantizeRowsQ8_Kx4Into(blocks: []types.BlockQ8_Kx4, src: *const Tensor) !
 pub fn quantizeRowsQ8_Kx4PaddedInto(blocks: []types.BlockQ8_Kx4, src: *const Tensor) !void {
     return quantizeRowsQ8_Kx4IntoImpl(blocks, src, true);
 }
-pub fn quantizeRowsQ8_Kx4IntoImpl(blocks: []types.BlockQ8_Kx4, src: *const Tensor, comptime pad_rows: bool) !void {
+fn quantizeRowsQ8_Kx4IntoImpl(blocks: []types.BlockQ8_Kx4, src: *const Tensor, comptime pad_rows: bool) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);

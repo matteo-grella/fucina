@@ -26,30 +26,19 @@ const f16BitsToF32 = common.f16BitsToF32;
 const sdotI8x16 = common.sdotI8x16;
 const sdotI8x16Lane = common.sdotI8x16Lane;
 
-pub fn quantizeRowsQ8_0x4Into(blocks: []BlockQ8_0x4, src: *const Tensor) !void {
-    return quantizeRowsQ8_0x4IntoImpl(blocks, src, false);
-}
-
+/// The `[rows, cols]` activation tensor into `ceil(rows/4)` Q8_0x4 groups
+/// per K block (the final partial group's lanes zeroed).
 pub fn quantizeRowsQ8_0x4PaddedInto(blocks: []BlockQ8_0x4, src: *const Tensor) !void {
-    return quantizeRowsQ8_0x4IntoImpl(blocks, src, true);
-}
-
-fn quantizeRowsQ8_0x4IntoImpl(blocks: []BlockQ8_0x4, src: *const Tensor, comptime pad_rows: bool) !void {
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
-    if (!pad_rows and rows % 4 != 0) return tensor.TensorError.InvalidShape;
 
     const blocks_per_row = try q8k.q8_0BlockCount(cols);
-    const row_groups = if (pad_rows) (rows + 3) / 4 else rows / 4;
+    const row_groups = (rows + 3) / 4;
     if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
-    if (pad_rows) {
-        quantizeRowsQ8_0x4PaddedGroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
-    } else {
-        quantizeRowsQ8_0x4GroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
-    }
+    quantizeRowsQ8_0x4PaddedGroupsInto(blocks, data, rows, cols, blocks_per_row, 0, row_groups);
 }
 
 /// 4-row groups `[row_group_start, row_group_end)` of the `[rows, cols]`

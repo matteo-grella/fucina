@@ -160,7 +160,7 @@ pub fn getRowsQ4_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ4_0, indi
     }
 }
 
-pub fn q4_0BlockCount(len: usize) !usize {
+fn q4_0BlockCount(len: usize) !usize {
     return types.blockCountExact(types.q4_0_block_size, len);
 }
 
@@ -176,7 +176,7 @@ pub fn q1_0BlockCount(len: usize) !usize {
     return types.blockCountExact(types.q1_0_block_size, len);
 }
 
-pub fn q2_0BlockCount(len: usize) !usize {
+fn q2_0BlockCount(len: usize) !usize {
     return types.blockCountExact(types.q2_0_block_size, len);
 }
 
@@ -192,7 +192,7 @@ pub fn q5_1BlockCount(len: usize) !usize {
     return types.blockCountExact(types.q5_1_block_size, len);
 }
 
-pub fn q8_1BlockCount(len: usize) !usize {
+fn q8_1BlockCount(len: usize) !usize {
     return types.blockCountExact(types.q8_1_block_size, len);
 }
 
@@ -931,19 +931,11 @@ pub const matmulQ4_0RhsRange = common.RangeFromTile(matmulQ4_0RhsTile);
 /// One Q1_0 block (128 weights) spans four Q8_0 activation blocks.
 const matmulQ1_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ1_0, 1, .{ .lhs_per_rhs = types.q1_0_block_size / types.q8_0_block_size, .dot = dotQ1_0Q8_0 });
 
-pub const matmulQ1_0RhsRange = common.RangeFromTile(matmulQ1_0RhsTile);
-
 const matmulQ4_1RhsTile = common.RowOuterTile(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ4_1, 1, .{ .dot = dotQ4_1Q8_1 });
-
-pub const matmulQ4_1RhsRange = common.RangeFromTile(matmulQ4_1RhsTile);
 
 const matmulQ5_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ5_0, 1, .{ .dot = dotQ5_0Q8_0 });
 
-pub const matmulQ5_0RhsRange = common.RangeFromTile(matmulQ5_0RhsTile);
-
 const matmulQ5_1RhsTile = common.RowOuterTile(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ5_1, 1, .{ .dot = dotQ5_1Q8_1 });
-
-pub const matmulQ5_1RhsRange = common.RangeFromTile(matmulQ5_1RhsTile);
 
 const matmulQ2_KRhsTile = common.RowOuterTile(BlockQ8_K, types.QuantizedMatmulRhsQ2_K, common.qk_col_block, .{ .dot = dotQ2_KQ8_K });
 
@@ -2161,7 +2153,7 @@ test "ggml_q1_0 dot and matmul consume loaded blocks" {
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulQ1_0RhsRange(&out, &q8, &rhs, 1, 2, 0, 1);
+    matmulQ1_0RhsTile(&out, &q8, &rhs, 2, 0, 1, 0, 2);
     try std.testing.expectEqual(out[0], out[1]);
     try std.testing.expectEqual(dotQ1_0Q8_0(&q1, &q8), out[0]);
 }
@@ -2215,7 +2207,7 @@ test "ggml_q4_1 dot and matmul consume loaded blocks" {
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulQ4_1RhsRange(&out, &.{q8}, &rhs, 1, 2, 0, 1);
+    matmulQ4_1RhsTile(&out, &.{q8}, &rhs, 2, 0, 1, 0, 2);
     try std.testing.expectEqual(out[0], out[1]);
     try std.testing.expectEqual(dotQ4_1Q8_1(&q4, &q8), out[0]);
 }
@@ -2240,7 +2232,7 @@ test "ggml_q5_0 dot and matmul consume loaded blocks" {
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulQ5_0RhsRange(&out, &.{q8}, &rhs, 1, 2, 0, 1);
+    matmulQ5_0RhsTile(&out, &.{q8}, &rhs, 2, 0, 1, 0, 2);
     try std.testing.expectEqual(out[0], out[1]);
     try std.testing.expectEqual(dotQ5_0Q8_0(&q5, &q8), out[0]);
 }
@@ -2265,7 +2257,7 @@ test "ggml_q5_1 dot and matmul consume loaded blocks" {
         .n = 2,
     };
     var out: [2]f32 = undefined;
-    matmulQ5_1RhsRange(&out, &.{q8}, &rhs, 1, 2, 0, 1);
+    matmulQ5_1RhsTile(&out, &.{q8}, &rhs, 2, 0, 1, 0, 2);
     try std.testing.expectEqual(out[0], out[1]);
     try std.testing.expectEqual(dotQ5_1Q8_1(&q5, &q8), out[0]);
 }
@@ -2402,53 +2394,6 @@ test "iq2_xxs and iq3_xxs sdot dots match the lane-based reference bitwise" {
                 qs_index += 8;
             }
             try std.testing.expectEqual(want, dotIQ3_XXSQ8_K(&w3, &a));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Hot q4_0 row kernels: fused nibble-unpack dot and weighted accumulate
-// without materializing the row (the q4 centroid-residual attention read
-// path is DRAM-bound only if dequantization stays in registers).
-
-/// dot(x, dequant(blocks)); x.len == blocks.len * 32.
-pub fn vecDotQ4_0F32(blocks: []const dtype_mod.BlockQ4_0, x: []const f32) f32 {
-    const V = @Vector(8, f32);
-    const U = @Vector(8, u8);
-    const I = @Vector(8, i16);
-    var acc: V = @splat(0);
-    for (blocks, 0..) |*block, bi| {
-        const scale = f16BitsToF32(block.d);
-        const base = bi * types.q4_0_block_size;
-        var blk: V = @splat(0);
-        inline for (0..2) |h| {
-            const qv: U = block.qs[h * 8 ..][0..8].*;
-            const lo: V = @floatFromInt(@as(I, @intCast(qv & @as(U, @splat(0xF)))) - @as(I, @splat(8)));
-            const hi: V = @floatFromInt(@as(I, @intCast(qv >> @splat(4))) - @as(I, @splat(8)));
-            blk = @mulAdd(V, lo, x[base + h * 8 ..][0..8].*, blk);
-            blk = @mulAdd(V, hi, x[base + 16 + h * 8 ..][0..8].*, blk);
-        }
-        acc = @mulAdd(V, blk, @as(V, @splat(scale)), acc);
-    }
-    return @reduce(.Add, acc);
-}
-
-/// out (+)= weight * dequant(blocks); out.len == blocks.len * 32.
-pub fn weightedQ4_0Row(comptime accumulate: bool, out: []f32, blocks: []const dtype_mod.BlockQ4_0, weight: f32) void {
-    const V = @Vector(8, f32);
-    const U = @Vector(8, u8);
-    const I = @Vector(8, i16);
-    for (blocks, 0..) |*block, bi| {
-        const ws: V = @splat(weight * f16BitsToF32(block.d));
-        const base = bi * types.q4_0_block_size;
-        inline for (0..2) |h| {
-            const qv: U = block.qs[h * 8 ..][0..8].*;
-            const lo: V = @floatFromInt(@as(I, @intCast(qv & @as(U, @splat(0xF)))) - @as(I, @splat(8)));
-            const hi: V = @floatFromInt(@as(I, @intCast(qv >> @splat(4))) - @as(I, @splat(8)));
-            const dst_lo = out[base + h * 8 ..][0..8];
-            const dst_hi = out[base + 16 + h * 8 ..][0..8];
-            dst_lo.* = if (accumulate) @mulAdd(V, lo, ws, @as(V, dst_lo.*)) else lo * ws;
-            dst_hi.* = if (accumulate) @mulAdd(V, hi, ws, @as(V, dst_hi.*)) else hi * ws;
         }
     }
 }
