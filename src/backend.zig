@@ -97,8 +97,10 @@ pub const offload = @import("backend/offload.zig");
 // curated upper-band vocabulary is `simd` below.
 pub const vector_impl = @import("backend/vector.zig");
 // Row-kernel vocabulary seam: the Task payloads (pure slices/dims) the
-// fused row kernels in `kernels` take, their `run*Task` pool-adapter forms,
-// and the comptime task factories (the fused activation+quantize workers).
+// fused row kernels in `kernels` take, the inner-lane `run*Task` pool
+// adapters, and the comptime task factories (the fused activation+quantize
+// workers); the row kernels themselves are dispatched by value through
+// `ExecContext.dispatchRangeOr`.
 // Single implementation, `backend/vector/rows.zig`; the serial kernel
 // entries themselves are reached through `kernels`, never through this
 // namespace by name.

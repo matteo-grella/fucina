@@ -3,7 +3,7 @@
 //! backward stats, cross-entropy rows, dropout, scatter-add, gated
 //! activations, and the fused activation+re-quantize passes the quantized
 //! matmuls chain onto), each with its `Task` payload (pure slices/dims —
-//! no runtime types) and its `run*Task` pool-adapter form. The serial
+//! no runtime types). The serial
 //! kernel entries are registered in `native.zig`'s `kernels` table; the
 //! `exec/` domain modules that own the ops (`softmax.zig`, `norm.zig`,
 //! `loss.zig`, `quant_matmul.zig`, ...) validate, lay out, allocate and
@@ -76,14 +76,8 @@ pub const SplitSwiGluTask = struct {
     outer_end: usize,
 };
 
-pub const SplitGluTask = struct {
-    input: []const f32,
-    output: []f32,
-    axis_dim: usize,
-    half: usize,
-    outer_start: usize,
-    outer_end: usize,
-};
+/// The glu twin carries the same payload: one task type, two kernels.
+pub const SplitGluTask = SplitSwiGluTask;
 
 // Activation flavor for the fused activation+quantize+packed-GEMM ops.
 pub const FusedActKind = enum { split_swiglu, geglu_quant, rms_norm_mul };
@@ -214,15 +208,7 @@ pub const SplitSwiGluBackwardTask = struct {
     outer_end: usize,
 };
 
-pub const SplitGluBackwardTask = struct {
-    input: []const f32,
-    grad: []const f32,
-    output: []f32,
-    axis_dim: usize,
-    half: usize,
-    outer_start: usize,
-    outer_end: usize,
-};
+pub const SplitGluBackwardTask = SplitSwiGluBackwardTask;
 
 pub const RmsNormMulRopeHalfTask = struct {
     input: []const f32,
@@ -392,23 +378,10 @@ pub const SoftmaxRowsTask = struct {
     row_end: usize,
 };
 
-/// Shared task shape for the fused log-domain row kernels: `logsumexpRows`
-/// writes ONE output slot per row; `logSoftmaxRows` writes a full row.
-pub const LogRowsTask = struct {
-    input: []const f32,
-    output: []f32,
-    axis_dim: usize,
-    row_start: usize,
-    row_end: usize,
-};
-
-pub fn runLogsumexpRowsTask(task: *const LogRowsTask) void {
-    logsumexpRows(task.*);
-}
-
-pub fn runLogSoftmaxRowsTask(task: *const LogRowsTask) void {
-    logSoftmaxRows(task.*);
-}
+/// The fused log-domain row kernels share the softmax payload:
+/// `logsumexpRows` writes ONE output slot per row, `logSoftmaxRows` a
+/// full row.
+pub const LogRowsTask = SoftmaxRowsTask;
 
 /// SIMD row max with the log-domain non-finite guard: rows whose max is
 /// ±inf shift by 0 instead (torch logsumexp/log_softmax convention — an
@@ -581,10 +554,6 @@ pub const DistillStatsRowsTask = struct {
     row_end: usize,
 };
 
-pub fn runDistillStatsRowsTask(task: *const DistillStatsRowsTask) void {
-    distillStatsRows(task.*);
-}
-
 /// Per-row {max, sum_exp} over the class axis — the softmax statistics the
 /// sparse-soft-target losses need (no labels: every row in range counts).
 /// Same vector kernels (and therefore the same f32 values) as
@@ -636,10 +605,6 @@ pub const DistillBackwardRowsTask = struct {
     row_start: usize,
     row_end: usize,
 };
-
-pub fn runDistillBackwardRowsTask(task: *const DistillBackwardRowsTask) void {
-    distillBackwardRows(task.*);
-}
 
 pub fn distillBackwardRows(task: DistillBackwardRowsTask) void {
     if (comptime isa.reference) return scalar.distillBackwardRows(task);
@@ -708,14 +673,6 @@ pub const ScatterAddRowsTask = struct {
     row_end: usize,
 };
 
-pub fn runSplitSwiGluTask(task: *const SplitSwiGluTask) void {
-    splitSwiGluRows(task.*);
-}
-
-pub fn runSplitGluTask(task: *const SplitGluTask) void {
-    splitGluRows(task.*);
-}
-
 pub fn runSplitSwiGluQuantQ8_0x4Task(task: *const SplitSwiGluQuantQ8_0x4Task) void {
     quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
         task.blocks,
@@ -726,90 +683,6 @@ pub fn runSplitSwiGluQuantQ8_0x4Task(task: *const SplitSwiGluQuantQ8_0x4Task) vo
         task.row_group_start,
         task.row_group_end,
     );
-}
-
-pub fn runSplitSwiGluBackwardTask(task: *const SplitSwiGluBackwardTask) void {
-    splitSwiGluBackwardRows(task.*);
-}
-
-pub fn runSplitGluBackwardTask(task: *const SplitGluBackwardTask) void {
-    splitGluBackwardRows(task.*);
-}
-
-pub fn runRmsNormMulRopeHalfTask(task: *const RmsNormMulRopeHalfTask) void {
-    rmsNormMulRopeHalfVectors(task.*);
-}
-
-pub fn runRmsNormMulRowsTask(task: *const RmsNormMulRowsTask) void {
-    rmsNormMulRows(task.*);
-}
-
-pub fn runRmsNormMulAddRowsTask(task: *const RmsNormMulAddRowsTask) void {
-    rmsNormMulAddRows(task.*);
-}
-
-pub fn runRmsNormMulBackwardInputRowsTask(task: *const RmsNormMulBackwardInputRowsTask) void {
-    rmsNormMulBackwardInputRows(task.*);
-}
-
-pub fn runRmsNormMulBackwardWeightRowsTask(task: *const RmsNormMulBackwardWeightRowsTask) void {
-    rmsNormMulBackwardWeightRows(task.*);
-}
-
-pub fn runRmsNormWeightGradBlocksTask(task: *const RmsNormWeightGradBlocksTask) void {
-    rmsNormWeightGradBlocks(task.*);
-}
-
-pub fn runRmsNormWeightGradReduceTask(task: *const RmsNormWeightGradReduceTask) void {
-    rmsNormWeightGradReduce(task.*);
-}
-
-pub fn runLayerNormRowsTask(task: *const LayerNormRowsTask) void {
-    layerNormRows(task.*);
-}
-
-pub fn runLayerNormBackwardInputRowsTask(task: *const LayerNormBackwardInputRowsTask) void {
-    layerNormBackwardInputRows(task.*);
-}
-
-pub fn runLayerNormRowStatsTask(task: *const LayerNormRowStatsTask) void {
-    layerNormRowStats(task.*);
-}
-
-pub fn runLayerNormParamGradColumnsTask(task: *const LayerNormParamGradColumnsTask) void {
-    layerNormParamGradColumns(task.*);
-}
-
-pub fn runSoftmaxRowsTask(task: *const SoftmaxRowsTask) void {
-    softmaxRows(task.*);
-}
-
-pub fn runSoftmaxExtRowsTask(comptime rank: usize, comptime axis: usize) fn (*const SoftmaxExtRowsTask(rank)) void {
-    return struct {
-        fn run(task: *const SoftmaxExtRowsTask(rank)) void {
-            softmaxExtRows(rank, axis, task.*);
-        }
-    }.run;
-}
-
-pub fn runSoftmaxBackwardRowsTask(task: *const SoftmaxBackwardRowsTask) void {
-    softmaxBackwardRows(task.*);
-}
-
-pub fn runCrossEntropyLossRowsTask(task: *const CrossEntropyLossRowsTask) void {
-    crossEntropyLossRows(task.*);
-}
-
-pub fn runCrossEntropyBackwardRowsTask(task: *const CrossEntropyBackwardRowsTask) void {
-    crossEntropyBackwardRows(task.*);
-}
-
-pub fn runScatterAddRowsTask(task: *const ScatterAddRowsTask) void {
-    scatterAddRows(task.*);
-}
-
-pub fn runDropoutRangeTask(task: *const DropoutRangeTask) void {
-    dropoutRange(task.*);
 }
 
 pub fn splitSwiGluRows(task: SplitSwiGluTask) void {

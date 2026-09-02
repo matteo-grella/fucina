@@ -31,15 +31,8 @@ const productBeforeAxis = shape_mod.productBeforeAxis;
 const contiguousStridesArray = shape_mod.contiguousStrides;
 
 const SplitSwiGluTask = exec_row_ops.SplitSwiGluTask;
-const SplitGluTask = exec_row_ops.SplitGluTask;
 const SplitSwiGluBackwardTask = exec_row_ops.SplitSwiGluBackwardTask;
-const SplitGluBackwardTask = exec_row_ops.SplitGluBackwardTask;
 const DropoutRangeTask = exec_row_ops.DropoutRangeTask;
-const runSplitSwiGluTask = exec_row_ops.runSplitSwiGluTask;
-const runSplitGluTask = exec_row_ops.runSplitGluTask;
-const runSplitSwiGluBackwardTask = exec_row_ops.runSplitSwiGluBackwardTask;
-const runSplitGluBackwardTask = exec_row_ops.runSplitGluBackwardTask;
-const runDropoutRangeTask = exec_row_ops.runDropoutRangeTask;
 const splitSwiGluRows = backend_mod.kernels.splitSwiGluRows;
 const splitGluRows = backend_mod.kernels.splitGluRows;
 const splitSwiGluBackwardRows = backend_mod.kernels.splitSwiGluBackwardRows;
@@ -531,21 +524,11 @@ pub fn splitGated(
 
 fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
     if (axis >= rank) @compileError("axis out of bounds");
-    const Task = switch (op) {
-        .swiglu => SplitSwiGluTask,
-        .glu => SplitGluTask,
-        .geglu => @compileError("no split-geglu row kernel or gate-half convention exists"),
-        .situ => @compileError("no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
-    };
-    const runTask = switch (op) {
-        .swiglu => runSplitSwiGluTask,
-        .glu => runSplitGluTask,
-        else => unreachable,
-    };
     const rowsKernel = switch (op) {
         .swiglu => splitSwiGluRows,
         .glu => splitGluRows,
-        else => unreachable,
+        .geglu => @compileError("no split-geglu row kernel or gate-half convention exists"),
+        .situ => @compileError("no split-situ kernel (K3 projects gate and up separately; use the pointwise `situ`)"),
     };
 
     const source = try x.rankView(rank);
@@ -567,18 +550,14 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     if (inner == 1) {
-        const base: Task = .{
+        ctx.dispatchRangeOr(SplitSwiGluTask, "outer_start", "outer_end", .{
             .input = input,
             .output = output,
             .axis_dim = axis_dim,
             .half = half,
             .outer_start = 0,
             .outer_end = outer,
-        };
-        if (out.len() >= parallel.fused_chain_len_threshold) {
-            if (ctx.dispatchRange(Task, "outer_start", "outer_end", base, outer, runTask)) return out;
-        }
-        rowsKernel(base);
+        }, outer, out.len() >= parallel.fused_chain_len_threshold, rowsKernel);
         return out;
     }
 
@@ -601,74 +580,22 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
 }
 
 pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const axis_dim = source.shape[axis];
-    if (axis_dim % 2 != 0) return tensor.TensorError.InvalidShape;
-    const half = axis_dim / 2;
-
-    var expected_grad_shape = source.shape;
-    expected_grad_shape[axis] = half;
-    const grad_view = try gy.rankView(rank);
-    if (!std.mem.eql(usize, grad_view.shape[0..], expected_grad_shape[0..])) return tensor.TensorError.ShapeMismatch;
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(.f32, gy);
-    defer ggy.deinit();
-    const input = xx.tensor().dataConst();
-    const grad = ggy.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    if (inner == 1) {
-        const base_task: SplitSwiGluBackwardTask = .{
-            .input = input,
-            .grad = grad,
-            .output = output,
-            .axis_dim = axis_dim,
-            .half = half,
-            .outer_start = 0,
-            .outer_end = outer,
-        };
-        if (out.len() >= parallel.split_backward_len_threshold and outer > 1) {
-            if (ctx.dispatchRange(SplitSwiGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitSwiGluBackwardTask)) {
-                return out;
-            }
-        }
-
-        splitSwiGluBackwardRows(base_task);
-        return out;
-    }
-
-    for (0..outer) |outer_i| {
-        const in_base = outer_i * axis_dim * inner;
-        const grad_base = outer_i * half * inner;
-        for (0..half) |axis_i| {
-            for (0..inner) |inner_i| {
-                const gate_offset = in_base + axis_i * inner + inner_i;
-                const up_offset = in_base + (half + axis_i) * inner + inner_i;
-                const grad_value = grad[grad_base + axis_i * inner + inner_i];
-                const gate = input[gate_offset];
-                const up = input[up_offset];
-                const sigmoid_value = backend_ops.sigmoidScalar(gate);
-                const silu_value = gate * sigmoid_value;
-                const silu_deriv = sigmoid_value * (1 + gate * (1 - sigmoid_value));
-                output[gate_offset] = grad_value * up * silu_deriv;
-                output[up_offset] = grad_value * silu_value;
-            }
-        }
-    }
-    return out;
+    return splitGatedBackward(ctx, .swiglu, rank, x, gy, axis);
 }
 
 pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
+    return splitGatedBackward(ctx, .glu, rank, x, gy, axis);
+}
+
+/// VJP of `splitGated`: one body, the op selecting the row kernel and the
+/// per-element derivative (the gate-half conventions differ, see the
+/// forward).
+fn splitGatedBackward(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
+    const rowsKernel = switch (op) {
+        .swiglu => splitSwiGluBackwardRows,
+        .glu => splitGluBackwardRows,
+        else => @compileError("no split backward kernel for this gated op"),
+    };
 
     const source = try x.rankView(rank);
     const axis_dim = source.shape[axis];
@@ -691,41 +618,49 @@ pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tenso
     errdefer out.deinit();
     const output = out.data();
 
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    if (inner == 1) {
-        const base_task: SplitGluBackwardTask = .{
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    if (g.inner == 1) {
+        ctx.dispatchRangeOr(SplitSwiGluBackwardTask, "outer_start", "outer_end", .{
             .input = input,
             .grad = grad,
             .output = output,
             .axis_dim = axis_dim,
             .half = half,
             .outer_start = 0,
-            .outer_end = outer,
-        };
-        if (out.len() >= parallel.split_backward_len_threshold and outer > 1) {
-            if (ctx.dispatchRange(SplitGluBackwardTask, "outer_start", "outer_end", base_task, outer, runSplitGluBackwardTask)) {
-                return out;
-            }
-        }
-
-        splitGluBackwardRows(base_task);
+            .outer_end = g.outer,
+        }, g.outer, out.len() >= parallel.split_backward_len_threshold and g.outer > 1, rowsKernel);
         return out;
     }
 
-    for (0..outer) |outer_i| {
-        const in_base = outer_i * axis_dim * inner;
-        const grad_base = outer_i * half * inner;
+    for (0..g.outer) |outer_i| {
+        const in_base = outer_i * axis_dim * g.inner;
+        const grad_base = outer_i * half * g.inner;
         for (0..half) |axis_i| {
-            for (0..inner) |inner_i| {
-                const up_offset = in_base + axis_i * inner + inner_i;
-                const gate_offset = in_base + (half + axis_i) * inner + inner_i;
-                const grad_value = grad[grad_base + axis_i * inner + inner_i];
-                const up = input[up_offset];
-                const gate = input[gate_offset];
-                const sigmoid_value = backend_ops.sigmoidScalar(gate);
-                output[up_offset] = grad_value * sigmoid_value;
-                output[gate_offset] = grad_value * up * sigmoid_value * (1 - sigmoid_value);
+            for (0..g.inner) |inner_i| {
+                const first_offset = in_base + axis_i * g.inner + inner_i;
+                const second_offset = in_base + (half + axis_i) * g.inner + inner_i;
+                const grad_value = grad[grad_base + axis_i * g.inner + inner_i];
+                switch (comptime op) {
+                    .swiglu => {
+                        // The gate is the FIRST half.
+                        const gate = input[first_offset];
+                        const up = input[second_offset];
+                        const sigmoid_value = backend_ops.sigmoidScalar(gate);
+                        const silu_value = gate * sigmoid_value;
+                        const silu_deriv = sigmoid_value * (1 + gate * (1 - sigmoid_value));
+                        output[first_offset] = grad_value * up * silu_deriv;
+                        output[second_offset] = grad_value * silu_value;
+                    },
+                    .glu => {
+                        // The gate is the SECOND half.
+                        const up = input[first_offset];
+                        const gate = input[second_offset];
+                        const sigmoid_value = backend_ops.sigmoidScalar(gate);
+                        output[first_offset] = grad_value * sigmoid_value;
+                        output[second_offset] = grad_value * up * sigmoid_value * (1 - sigmoid_value);
+                    },
+                    else => unreachable,
+                }
             }
         }
     }
@@ -1186,13 +1121,7 @@ fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor 
     // Counter-based RNG: any flat element range computes independently, so
     // the split is bitwise neutral (same per-element mask and arithmetic
     // for any thread count).
-    if (input.len >= parallel.vector_elementwise_len_threshold) {
-        if (ctx.dispatchRange(DropoutRangeTask, "start", "end", base_task, input.len, runDropoutRangeTask)) {
-            return out;
-        }
-    }
-
-    dropoutRange(base_task);
+    ctx.dispatchRangeOr(DropoutRangeTask, "start", "end", base_task, input.len, input.len >= parallel.vector_elementwise_len_threshold, dropoutRange);
     return out;
 }
 

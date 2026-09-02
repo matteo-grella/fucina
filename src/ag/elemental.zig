@@ -314,26 +314,12 @@ fn dispatchElemental(comptime Body: type, body: Body, ctx: *ExecContext) void {
         body: Body,
         start: usize,
         end: usize,
-        fn run(task: *const @This()) void {
+        fn run(task: @This()) void {
             task.body.span(task.start, task.end);
         }
     };
     const len = bodyLen(Body, body);
-    const base: Task = .{ .body = body, .start = 0, .end = len };
-    if (len >= parallel.vector_elementwise_len_threshold) {
-        if (ctx.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), len);
-            var tasks: [parallel.vector_max_threads]Task = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = base;
-                tasks[task_i].start = task_i * len / task_count;
-                tasks[task_i].end = (task_i + 1) * len / task_count;
-            }
-            pool.parallelChunks(Task, tasks[0..task_count], Task.run);
-            return;
-        }
-    }
-    Task.run(&base);
+    ctx.dispatchRangeOr(Task, "start", "end", .{ .body = body, .start = 0, .end = len }, len, len >= parallel.vector_elementwise_len_threshold, Task.run);
 }
 
 fn bodyLen(comptime Body: type, body: Body) usize {

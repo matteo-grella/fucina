@@ -10,7 +10,6 @@ const tag_ops = @import("../../tag_ops.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
 const vector_primitives = @import("../../backend.zig").simd;
-const backend_tile = @import("../../backend.zig").tile;
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -137,34 +136,26 @@ pub fn IdentityBackward(comptime tags: anytype) type {
 /// depends only on its own inputs, so chunking is partition-invariant —
 /// bitwise-equal to the serial loop — and the select/derivative VJPs over
 /// vocab-sized gradients stop serializing the backward pass. The gate
-/// (length threshold, pool presence, thread count) stays here; the split
-/// itself rides `backend.tile.forRange`, whose `i * total / n` boundaries
-/// are the ones this helper always used.
+/// (length threshold) stays here; the split is the runtime's.
 fn vjpMapChunked(comptime Env: type, ctx: *ExecContext, env: Env, as: []const Env.Elem, gys: []const f32, dsts: []f32) void {
     const Chunk = struct {
         env: Env,
         as: []const Env.Elem,
         gys: []const f32,
         dsts: []f32,
+        start: usize,
+        end: usize,
 
-        fn run(chunk: @This(), start: usize, end: usize) void {
+        fn run(chunk: @This()) void {
             if (comptime @hasDecl(Env, "runSlice")) {
-                chunk.env.runSlice(chunk.dsts[start..end], chunk.as[start..end], chunk.gys[start..end]);
+                chunk.env.runSlice(chunk.dsts[chunk.start..chunk.end], chunk.as[chunk.start..chunk.end], chunk.gys[chunk.start..chunk.end]);
             } else {
-                for (chunk.as[start..end], chunk.gys[start..end], chunk.dsts[start..end]) |a, grad, *dst| dst.* = chunk.env.apply(a, grad);
+                for (chunk.as[chunk.start..chunk.end], chunk.gys[chunk.start..chunk.end], chunk.dsts[chunk.start..chunk.end]) |a, grad, *dst| dst.* = chunk.env.apply(a, grad);
             }
         }
     };
-    const chunk: Chunk = .{ .env = env, .as = as, .gys = gys, .dsts = dsts };
     const total = dsts.len;
-    if (total >= parallel.vector_elementwise_len_threshold) {
-        if (ctx.workPool()) |pool| {
-            const task_count = parallel.cpuThreadCount(parallel.vector_max_threads);
-            backend_tile.forRange(pool, Chunk, chunk, total, task_count, Chunk.run);
-            return;
-        }
-    }
-    Chunk.run(chunk, 0, total);
+    ctx.dispatchRangeOr(Chunk, "start", "end", .{ .env = env, .as = as, .gys = gys, .dsts = dsts, .start = 0, .end = total }, total, total >= parallel.vector_elementwise_len_threshold, Chunk.run);
 }
 
 pub const ReluBackward = struct {

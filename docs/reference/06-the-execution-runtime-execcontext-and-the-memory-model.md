@@ -466,7 +466,9 @@ test "fromSlice copies; fromBorrowedSlice wraps caller storage" {
 
 Internal substrate helpers (aliased on `ExecContext` for the domain
 modules; not part of the op surface): `dispatchRange` /
-`dispatchRangeCapped`, the `enableNative*PoolForWork` pool gates, and
+`dispatchRangeCapped` / `dispatchRangeOr` (the last one carries the
+serial arm and synthesizes the pool adapter, so a row kernel is named
+once, by value), the `enableNative*PoolForWork` pool gates, and
 `prepareContiguous(dtype, x)` returning `PreparedTensorOf(dtype)`
 (`PreparedTensor` is the f32 instantiation) — a borrowed-or-owned union
 whose `deinit` is a no-op on the borrowed arm, so hot paths can

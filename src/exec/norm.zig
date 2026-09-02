@@ -42,17 +42,6 @@ const LayerNormParamGradColumnsTask = exec_row_ops.LayerNormParamGradColumnsTask
 const RmsNormInnerTask = exec_row_ops.RmsNormInnerTask;
 const RmsNormBackwardInputInnerTask = exec_row_ops.RmsNormBackwardInputInnerTask;
 const LayerNormInnerTask = exec_row_ops.LayerNormInnerTask;
-const runRmsNormMulRopeHalfTask = exec_row_ops.runRmsNormMulRopeHalfTask;
-const runRmsNormMulRowsTask = exec_row_ops.runRmsNormMulRowsTask;
-const runRmsNormMulAddRowsTask = exec_row_ops.runRmsNormMulAddRowsTask;
-const runRmsNormMulBackwardInputRowsTask = exec_row_ops.runRmsNormMulBackwardInputRowsTask;
-const runRmsNormMulBackwardWeightRowsTask = exec_row_ops.runRmsNormMulBackwardWeightRowsTask;
-const runRmsNormWeightGradBlocksTask = exec_row_ops.runRmsNormWeightGradBlocksTask;
-const runRmsNormWeightGradReduceTask = exec_row_ops.runRmsNormWeightGradReduceTask;
-const runLayerNormRowsTask = exec_row_ops.runLayerNormRowsTask;
-const runLayerNormBackwardInputRowsTask = exec_row_ops.runLayerNormBackwardInputRowsTask;
-const runLayerNormRowStatsTask = exec_row_ops.runLayerNormRowStatsTask;
-const runLayerNormParamGradColumnsTask = exec_row_ops.runLayerNormParamGradColumnsTask;
 const runRmsNormInnerTask = exec_row_ops.runRmsNormInnerTask;
 const runRmsNormBackwardInputInnerTask = exec_row_ops.runRmsNormBackwardInputInnerTask;
 const runLayerNormInnerTask = exec_row_ops.runLayerNormInnerTask;
@@ -177,12 +166,100 @@ pub fn rmsNorm(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
     return ctx.storeAs(compute, dtype, out);
 }
 
+/// One body for every option combination: weighted last-axis rows go
+/// through the fused row kernels (with or without the residual), a
+/// non-last axis through the inner-lane kernel, everything else through
+/// the scalar loop. Each arm computes the same expression in the same
+/// order, so neither an option nor the layout is ever a different numeric
+/// result.
 fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormOptions(.f32)) !Tensor {
-    if (options.weight) |weight| {
-        if (options.residual) |residual| return rmsNormMulAdd(ctx, rank, x, weight, residual, axis, eps);
-        return rmsNormMul(ctx, rank, x, weight, axis, eps);
+    if (options.residual) |r| try tensor.requireSameShape(x, r);
+    const source = try x.rankView(rank);
+    const axis_dim = source.shape[axis];
+
+    var xx = try ctx.prepareContiguous(.f32, x);
+    defer xx.deinit();
+    var ww = try prepareAffineTerm(ctx, options.weight, axis_dim);
+    defer ww.deinit();
+    var rr = try prepareOptionalAs(ctx, .f32, .f32, options.residual);
+    defer rr.deinit();
+    const input = xx.tensor().dataConst();
+    const weights = ww.slice();
+    const residual_data: ?[]const f32 = if (rr.tensorPtr()) |t| t.dataConst() else null;
+
+    var out = try ctx.empty(.f32, source.shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
+    if (g.inner == 1 and weights != null and source.len() >= parallel.row_kernel_len_threshold) {
+        if (residual_data) |res| {
+            ctx.dispatchRangeOr(RmsNormMulAddRowsTask, "row_start", "row_end", .{
+                .input = input,
+                .weights = weights.?,
+                .residual = res,
+                .output = output,
+                .axis_dim = axis_dim,
+                .inv_axis_dim = inv_axis_dim,
+                .eps = eps,
+                .row_start = 0,
+                .row_end = g.outer,
+            }, g.outer, g.outer > 1, rmsNormMulAddRows);
+        } else {
+            ctx.dispatchRangeOr(RmsNormMulRowsTask, "row_start", "row_end", .{
+                .input = input,
+                .weights = weights.?,
+                .output = output,
+                .axis_dim = axis_dim,
+                .inv_axis_dim = inv_axis_dim,
+                .eps = eps,
+                .row_start = 0,
+                .row_end = g.outer,
+            }, g.outer, g.outer > 1, rmsNormMulRows);
+        }
+        return out;
     }
-    return rmsNormPlain(ctx, rank, x, options.residual, axis, eps);
+
+    if (g.inner > 1) {
+        // Non-last axis: the inner-lane kernel (lane ranges split across
+        // the pool; per-lane order equals the scalar loop below).
+        var scratch = try ctx.empty(.f32, .{g.inner});
+        defer scratch.deinit();
+        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
+            .input = input,
+            .weights = weights,
+            .residual = residual_data,
+            .output = output,
+            .axis_dim = axis_dim,
+            .inner = g.inner,
+            .scratch = scratch.data(),
+            .outer = g.outer,
+            .inv_axis_dim = inv_axis_dim,
+            .eps = eps,
+            .inner_start = 0,
+            .inner_end = g.inner,
+        }, source.len(), g.inner, runRmsNormInnerTask);
+        return out;
+    }
+    for (0..g.outer) |outer_i| {
+        const base = outer_i * axis_dim * g.inner;
+        for (0..g.inner) |inner_i| {
+            var sumsq: f32 = 0;
+            for (0..axis_dim) |axis_i| {
+                const value = input[base + axis_i * g.inner + inner_i];
+                sumsq += value * value;
+            }
+            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
+            for (0..axis_dim) |axis_i| {
+                const offset = base + axis_i * g.inner + inner_i;
+                var value = input[offset] * scale_value;
+                if (weights) |w| value = value * w[axis_i];
+                output[offset] = if (residual_data) |r| r[offset] + value else value;
+            }
+        }
+    }
+    return out;
 }
 
 /// VJP of rmsNorm; computes only the requested gradients. dx recomputes the
@@ -196,307 +273,61 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 pub fn rmsNormBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32, options: RmsNormBackwardOptions) !RmsNormBackwardResult {
     var result = RmsNormBackwardResult{};
     errdefer result.deinit();
-    if (options.need_input) {
-        result.input = if (options.weight) |weight|
-            try rmsNormBackwardInputWeighted(ctx, rank, x, weight, gy, axis, eps)
-        else
-            try rmsNormBackwardInputPlain(ctx, rank, x, gy, axis, eps);
-    }
+    if (options.need_input) result.input = try rmsNormBackwardInput(ctx, rank, x, options.weight, gy, axis, eps);
     if (options.need_weight) result.weight = try rmsNormBackwardWeight(ctx, rank, x, gy, axis, eps);
     return result;
 }
 
-fn rmsNormPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, residual: ?*const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-    if (residual) |r| try tensor.requireSameShape(x, r);
-
-    const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const input = xx.tensor().dataConst();
-    var rr: ?ExecContext.PreparedTensor = null;
-    defer if (rr) |*p| p.deinit();
-    var residual_data: ?[]const f32 = null;
-    if (residual) |r| {
-        rr = try ctx.prepareContiguous(.f32, r);
-        residual_data = rr.?.tensor().dataConst();
-    }
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner > 1) {
-        // Non-last axis: the inner-lane kernel (lane ranges split across
-        // the pool; per-lane order equals the scalar loop below).
-        var scratch = try ctx.empty(.f32, .{inner});
-        defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
-            .input = input,
-            .weights = null,
-            .residual = residual_data,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inner = inner,
-            .scratch = scratch.data(),
-            .outer = outer,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runRmsNormInnerTask);
-        return out;
-    }
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sumsq: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const value = input[base + axis_i * inner + inner_i];
-                sumsq += value * value;
-            }
-            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                const value = input[offset] * scale_value;
-                output[offset] = if (residual_data) |r| r[offset] + value else value;
-            }
-        }
-    }
-    return out;
-}
-
-fn rmsNormMul(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const weight_view = try weight.rankView(1);
-    const axis_dim = source.shape[axis];
-    if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    var ww = try ctx.prepareContiguous(.f32, weight);
-    defer ww.deinit();
-    const input = xx.tensor().dataConst();
-    const weights = ww.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
-        const base_task: RmsNormMulRowsTask = .{
-            .input = input,
-            .weights = weights,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1) {
-            if (ctx.dispatchRange(RmsNormMulRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulRowsTask)) {
-                return out;
-            }
-        }
-
-        rmsNormMulRows(base_task);
-        return out;
-    }
-
-    if (inner > 1) {
-        // Non-last axis: the inner-lane kernel (lane ranges split across
-        // the pool; per-lane order equals the scalar loop below).
-        var scratch = try ctx.empty(.f32, .{inner});
-        defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
-            .input = input,
-            .weights = weights,
-            .residual = null,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inner = inner,
-            .scratch = scratch.data(),
-            .outer = outer,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runRmsNormInnerTask);
-        return out;
-    }
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sumsq: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const value = input[base + axis_i * inner + inner_i];
-                sumsq += value * value;
-            }
-            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = input[offset] * scale_value * weights[axis_i];
-            }
-        }
-    }
-    return out;
-}
-
-fn rmsNormMulAdd(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, weight: *const Tensor, residual: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-    try tensor.requireSameShape(x, residual);
-
-    const source = try x.rankView(rank);
-    const weight_view = try weight.rankView(1);
-    const axis_dim = source.shape[axis];
-    if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    var ww = try ctx.prepareContiguous(.f32, weight);
-    defer ww.deinit();
-    var rr = try ctx.prepareContiguous(.f32, residual);
-    defer rr.deinit();
-    const input = xx.tensor().dataConst();
-    const weights = ww.tensor().dataConst();
-    const residual_data = rr.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
-        const base_task: RmsNormMulAddRowsTask = .{
-            .input = input,
-            .weights = weights,
-            .residual = residual_data,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1) {
-            if (ctx.dispatchRange(RmsNormMulAddRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulAddRowsTask)) {
-                return out;
-            }
-        }
-
-        rmsNormMulAddRows(base_task);
-        return out;
-    }
-
-    if (inner > 1) {
-        // Non-last axis: the inner-lane kernel (lane ranges split across
-        // the pool; per-lane order equals the scalar loop below).
-        var scratch = try ctx.empty(.f32, .{inner});
-        defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
-            .input = input,
-            .weights = weights,
-            .residual = residual_data,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inner = inner,
-            .scratch = scratch.data(),
-            .outer = outer,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runRmsNormInnerTask);
-        return out;
-    }
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sumsq: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const value = input[base + axis_i * inner + inner_i];
-                sumsq += value * value;
-            }
-            const scale_value = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = residual_data[offset] + input[offset] * scale_value * weights[axis_i];
-            }
-        }
-    }
-    return out;
-}
-
-fn rmsNormBackwardInputWeighted(
+/// dx of rmsNorm, weighted or plain per `weight`: the weighted last-axis
+/// rows take the fused row kernel, a non-last axis the inner-lane kernel,
+/// everything else the scalar loop. The two correction-term associations
+/// are the ones each arm always used.
+fn rmsNormBackwardInput(
     ctx: *ExecContext,
     comptime rank: usize,
     x: *const Tensor,
-    weight: *const Tensor,
+    weight: ?*const Tensor,
     gy: *const Tensor,
     comptime axis: usize,
     eps: f32,
 ) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(x, gy);
-
     const source = try x.rankView(rank);
-    const weight_view = try weight.rankView(1);
     const axis_dim = source.shape[axis];
-    if (weight_view.dim(0) != axis_dim) return tensor.TensorError.ShapeMismatch;
 
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    var ww = try ctx.prepareContiguous(.f32, weight);
+    var ww = try prepareAffineTerm(ctx, weight, axis_dim);
     defer ww.deinit();
     var ggy = try ctx.prepareContiguous(.f32, gy);
     defer ggy.deinit();
     const input = xx.tensor().dataConst();
-    const weights = ww.tensor().dataConst();
+    const weights = ww.slice();
     const grad = ggy.tensor().dataConst();
 
     var out = try ctx.empty(.f32, source.shape);
     errdefer out.deinit();
     const output = out.data();
 
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner == 1 and source.len() >= parallel.row_kernel_len_threshold) {
-        const base_task: RmsNormMulBackwardInputRowsTask = .{
+    if (g.inner == 1 and weights != null and source.len() >= parallel.row_kernel_len_threshold) {
+        ctx.dispatchRangeOr(RmsNormMulBackwardInputRowsTask, "row_start", "row_end", .{
             .input = input,
-            .weights = weights,
+            .weights = weights.?,
             .grad = grad,
             .output = output,
             .axis_dim = axis_dim,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
             .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1) {
-            if (ctx.dispatchRange(RmsNormMulBackwardInputRowsTask, "row_start", "row_end", base_task, outer, runRmsNormMulBackwardInputRowsTask)) {
-                return out;
-            }
-        }
-
-        rmsNormMulBackwardInputRows(base_task);
+            .row_end = g.outer,
+        }, g.outer, g.outer > 1, rmsNormMulBackwardInputRows);
         return out;
     }
 
-    if (inner > 1) {
-        var scratch = try ctx.empty(.f32, .{2 * inner});
+    if (g.inner > 1) {
+        var scratch = try ctx.empty(.f32, .{2 * g.inner});
         defer scratch.deinit();
         ctx.dispatchInnerLanes(RmsNormBackwardInputInnerTask, .{
             .input = input,
@@ -504,36 +335,44 @@ fn rmsNormBackwardInputWeighted(
             .grad = grad,
             .output = output,
             .axis_dim = axis_dim,
-            .inner = inner,
+            .inner = g.inner,
             .scratch = scratch.data(),
-            .outer = outer,
+            .outer = g.outer,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
             .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runRmsNormBackwardInputInnerTask);
+            .inner_end = g.inner,
+        }, source.len(), g.inner, runRmsNormBackwardInputInnerTask);
         return out;
     }
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
+    for (0..g.outer) |outer_i| {
+        const base = outer_i * axis_dim * g.inner;
+        for (0..g.inner) |inner_i| {
             var sumsq: f32 = 0;
             var dot_acc: f32 = 0;
             for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
+                const offset = base + axis_i * g.inner + inner_i;
                 const value = input[offset];
                 sumsq += value * value;
-                dot_acc += grad[offset] * weights[axis_i] * value;
+                dot_acc += weightedGrad(grad[offset], weights, axis_i) * value;
             }
             const rms_scale = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            const correction_scale = rms_scale * rms_scale * rms_scale * inv_axis_dim * dot_acc;
+            const correction = if (weights != null)
+                rms_scale * rms_scale * rms_scale * inv_axis_dim * dot_acc
+            else
+                dot_acc * inv_axis_dim * rms_scale * rms_scale * rms_scale;
             for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = grad[offset] * weights[axis_i] * rms_scale - input[offset] * correction_scale;
+                const offset = base + axis_i * g.inner + inner_i;
+                output[offset] = weightedGrad(grad[offset], weights, axis_i) * rms_scale - input[offset] * correction;
             }
         }
     }
     return out;
+}
+
+/// `gy * weight[i]` when the forward had a weight, `gy` otherwise.
+inline fn weightedGrad(gy: f32, weights: ?[]const f32, i: usize) f32 {
+    return if (weights) |w| gy * w[i] else gy;
 }
 
 fn rmsNormBackwardWeight(
@@ -601,9 +440,7 @@ fn rmsNormBackwardWeight(
             .block_start = 0,
             .block_end = block_count,
         };
-        if (!ctx.dispatchRange(RmsNormWeightGradBlocksTask, "block_start", "block_end", blocks_task, block_count, runRmsNormWeightGradBlocksTask)) {
-            backend_mod.kernels.rmsNormWeightGradBlocks(blocks_task);
-        }
+        ctx.dispatchRangeOr(RmsNormWeightGradBlocksTask, "block_start", "block_end", blocks_task, block_count, true, backend_mod.kernels.rmsNormWeightGradBlocks);
         const reduce_task: RmsNormWeightGradReduceTask = .{
             .partials = partials,
             .output = output,
@@ -612,9 +449,7 @@ fn rmsNormBackwardWeight(
             .col_start = 0,
             .col_end = axis_dim,
         };
-        const reduce_pooled = partials.len >= parallel.row_kernel_len_threshold and
-            ctx.dispatchRange(RmsNormWeightGradReduceTask, "col_start", "col_end", reduce_task, axis_dim, runRmsNormWeightGradReduceTask);
-        if (!reduce_pooled) backend_mod.kernels.rmsNormWeightGradReduce(reduce_task);
+        ctx.dispatchRangeOr(RmsNormWeightGradReduceTask, "col_start", "col_end", reduce_task, axis_dim, partials.len >= parallel.row_kernel_len_threshold, backend_mod.kernels.rmsNormWeightGradReduce);
         return out;
     }
 
@@ -740,13 +575,7 @@ pub fn rmsNormMulRopeWithTable(
             .vector_end = total_vectors,
         };
 
-        if (total_vectors > 1 and source.len() >= parallel.fused_chain_len_threshold) {
-            if (ctx.dispatchRange(RmsNormMulRopeHalfTask, "vector_start", "vector_end", base_task, total_vectors, runRmsNormMulRopeHalfTask)) {
-                return out;
-            }
-        }
-
-        rmsNormMulRopeHalfVectors(base_task);
+        ctx.dispatchRangeOr(RmsNormMulRopeHalfTask, "vector_start", "vector_end", base_task, total_vectors, total_vectors > 1 and source.len() >= parallel.fused_chain_len_threshold, rmsNormMulRopeHalfVectors);
         return out;
     }
 
@@ -818,67 +647,6 @@ pub fn rmsNormMulRopeWithTable(
     return out;
 }
 
-fn rmsNormBackwardInputPlain(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize, eps: f32) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-    try tensor.requireSameShape(x, gy);
-
-    const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    var ggy = try ctx.prepareContiguous(.f32, gy);
-    defer ggy.deinit();
-    const input = xx.tensor().dataConst();
-    const gyd = ggy.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
-    if (inner > 1) {
-        var scratch = try ctx.empty(.f32, .{2 * inner});
-        defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormBackwardInputInnerTask, .{
-            .input = input,
-            .weights = null,
-            .grad = gyd,
-            .output = output,
-            .axis_dim = axis_dim,
-            .inner = inner,
-            .scratch = scratch.data(),
-            .outer = outer,
-            .inv_axis_dim = inv_axis_dim,
-            .eps = eps,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runRmsNormBackwardInputInnerTask);
-        return out;
-    }
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            var sumsq: f32 = 0;
-            var dot_acc: f32 = 0;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                const value = input[offset];
-                sumsq += value * value;
-                dot_acc += gyd[offset] * value;
-            }
-            const inv_rms = 1 / @sqrt(sumsq * inv_axis_dim + eps);
-            const correction = dot_acc * inv_axis_dim * inv_rms * inv_rms * inv_rms;
-            for (0..axis_dim) |axis_i| {
-                const offset = base + axis_i * inner + inner_i;
-                output[offset] = gyd[offset] * inv_rms - input[offset] * correction;
-            }
-        }
-    }
-    return out;
-}
-
 /// LayerNorm with PyTorch semantics over `axis`: y = (x − μ)/√(σ² + eps),
 /// where μ is the row mean and σ² is the BIASED variance (divide by N —
 /// matches torch.nn.LayerNorm and ggml_norm). Statistics are two-pass per
@@ -910,12 +678,7 @@ pub fn layerNormRows(
         .row_start = 0,
         .row_end = rows,
     };
-    if (input.len >= parallel.row_kernel_len_threshold and rows > 1) {
-        if (ctx.dispatchRange(LayerNormRowsTask, "row_start", "row_end", base_task, rows, runLayerNormRowsTask)) {
-            return out;
-        }
-    }
-    backend_mod.kernels.layerNormRows(base_task);
+    ctx.dispatchRangeOr(LayerNormRowsTask, "row_start", "row_end", base_task, rows, input.len >= parallel.row_kernel_len_threshold and rows > 1, backend_mod.kernels.layerNormRows);
     return out;
 }
 
@@ -1001,13 +764,7 @@ fn layerNormDispatchAxisRank(
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1) {
-            if (ctx.dispatchRange(LayerNormRowsTask, "row_start", "row_end", base_task, outer, runLayerNormRowsTask)) {
-                return out;
-            }
-        }
-
-        backend_mod.kernels.layerNormRows(base_task);
+        ctx.dispatchRangeOr(LayerNormRowsTask, "row_start", "row_end", base_task, outer, outer > 1, backend_mod.kernels.layerNormRows);
         return out;
     }
 
@@ -1199,70 +956,41 @@ fn layerNormBackwardDispatchAxisRank(
                 .row_start = 0,
                 .row_end = outer,
             };
-            var dispatched = false;
-            if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-                if (ctx.dispatchRange(LayerNormBackwardInputRowsTask, "row_start", "row_end", base_task, outer, runLayerNormBackwardInputRowsTask)) {
-                    dispatched = true;
-                }
-            }
-            if (!dispatched) layerNormBackwardInputRows(base_task);
+            ctx.dispatchRangeOr(LayerNormBackwardInputRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, layerNormBackwardInputRows);
         }
 
         if (need_weight or need_bias) {
-            var dispatched = false;
-            if (outer > 1 and axis_dim > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-                if (ctx.workPool()) |pool| {
-                    // Per-row {mean, 1/σ} scratch, then the
-                    // column-partitioned accumulation: both stages are
-                    // bitwise identical for any thread count (see the
-                    // task structs / kernels), unlike per-task row
-                    // partials combined in task order.
-                    var stats: []f32 = &.{};
-                    defer if (stats.len > 0) ctx.allocator().free(stats);
-                    if (need_weight) {
-                        stats = try ctx.allocator().alloc(f32, 2 * outer);
-                        const stats_base: LayerNormRowStatsTask = .{
-                            .input = input,
-                            .stats = stats,
-                            .axis_dim = axis_dim,
-                            .inv_axis_dim = inv_axis_dim,
-                            .eps = eps,
-                            .row_start = 0,
-                            .row_end = outer,
-                        };
-                        const row_task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), outer);
-                        var row_tasks: [parallel.vector_max_threads]LayerNormRowStatsTask = undefined;
-                        for (0..row_task_count) |task_i| {
-                            row_tasks[task_i] = stats_base;
-                            row_tasks[task_i].row_start = task_i * outer / row_task_count;
-                            row_tasks[task_i].row_end = (task_i + 1) * outer / row_task_count;
-                        }
-                        pool.parallelChunks(LayerNormRowStatsTask, row_tasks[0..row_task_count], runLayerNormRowStatsTask);
-                    }
-
-                    const col_base: LayerNormParamGradColumnsTask = .{
+            if (outer > 1 and axis_dim > 1 and source.len() >= parallel.row_kernel_len_threshold and ctx.workPool() != null) {
+                // Per-row {mean, 1/σ} scratch, then the column-partitioned
+                // accumulation: both stages are bitwise identical for any
+                // thread count (see the task structs / kernels), unlike
+                // per-task row partials combined in task order.
+                var stats: []f32 = &.{};
+                defer if (stats.len > 0) ctx.allocator().free(stats);
+                if (need_weight) {
+                    stats = try ctx.allocator().alloc(f32, 2 * outer);
+                    ctx.dispatchRangeOr(LayerNormRowStatsTask, "row_start", "row_end", .{
                         .input = input,
-                        .grad = grad,
                         .stats = stats,
-                        .dweight = if (result.weight) |*value| value.data() else null,
-                        .dbias = if (result.bias) |*value| value.data() else null,
-                        .rows = outer,
                         .axis_dim = axis_dim,
-                        .col_start = 0,
-                        .col_end = axis_dim,
-                    };
-                    const col_task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), axis_dim);
-                    var col_tasks: [parallel.vector_max_threads]LayerNormParamGradColumnsTask = undefined;
-                    for (0..col_task_count) |task_i| {
-                        col_tasks[task_i] = col_base;
-                        col_tasks[task_i].col_start = task_i * axis_dim / col_task_count;
-                        col_tasks[task_i].col_end = (task_i + 1) * axis_dim / col_task_count;
-                    }
-                    pool.parallelChunks(LayerNormParamGradColumnsTask, col_tasks[0..col_task_count], runLayerNormParamGradColumnsTask);
-                    dispatched = true;
+                        .inv_axis_dim = inv_axis_dim,
+                        .eps = eps,
+                        .row_start = 0,
+                        .row_end = outer,
+                    }, outer, true, layerNormRowStats);
                 }
-            }
-            if (!dispatched) {
+                ctx.dispatchRangeOr(LayerNormParamGradColumnsTask, "col_start", "col_end", .{
+                    .input = input,
+                    .grad = grad,
+                    .stats = stats,
+                    .dweight = if (result.weight) |*value| value.data() else null,
+                    .dbias = if (result.bias) |*value| value.data() else null,
+                    .rows = outer,
+                    .axis_dim = axis_dim,
+                    .col_start = 0,
+                    .col_end = axis_dim,
+                }, axis_dim, true, layerNormParamGradColumns);
+            } else {
                 layerNormAffineParamGradRows(
                     input,
                     grad,

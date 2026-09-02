@@ -76,9 +76,11 @@ fn AxisFoldTask(comptime dtype: DType, comptime fold: AxisFold) type {
         inner_end: usize,
 
         const In = dtype_mod.Scalar(dtype);
-        const output_dtype = if (fold == .int_sum) .i64 else dtype_mod.outputDType(.reduction, dtype);
-        const Out = dtype_mod.Scalar(output_dtype);
+        pub const output_dtype = if (fold == .int_sum) .i64 else dtype_mod.outputDType(.reduction, dtype);
+        pub const Out = dtype_mod.Scalar(output_dtype);
         const compute_dtype = if (fold == .int_sum) .i64 else dtype_mod.computeDType(.reduction, dtype);
+        /// What the streaming arm accumulates into.
+        pub const identity: Out = if (fold == .prod) 1 else 0;
 
         fn run(task: *const @This()) void {
             const lanes = task.inner_end - task.inner_start;
@@ -162,13 +164,11 @@ pub fn sum(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(d
         return ctx.scalar(.i64, intSumSlice(dtype, xx.tensor().dataConst()));
     }
     comptime ensureForwardFloatMath(dtype);
-    const compute_dtype = comptime dtype_mod.computeDType(.reduction, dtype);
     const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
 
     var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
 
-    _ = compute_dtype;
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
     var out = try ctx.scalar(output_dtype, kernels.sumSliceTyped(ctx.pc(), dtype, xx.tensor().dataConst()));
     errdefer out.deinit();
@@ -183,116 +183,90 @@ pub fn sumAxis(
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype_mod.outputDType(.reduction, dtype)) {
-    if (comptime dtype == .f32) return sumAxisF32(ctx, rank, x, axis);
-    if (comptime isIntSum(dtype)) return intSumAxis(ctx, dtype, rank, x, axis);
+    if (comptime isIntSum(dtype)) return reduceAxis(ctx, dtype, .int_sum, rank, x, axis);
     comptime ensureForwardFloatMath(dtype);
-    const output_dtype = comptime dtype_mod.outputDType(.reduction, dtype);
-
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const out_rank = if (rank == 1) 1 else rank - 1;
-    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-
-    var xx = try ctx.prepareContiguous(dtype, x);
-    defer xx.deinit();
-    const xp = xx.tensor();
-    const input = xp.dataConst();
-
-    var out = try ctx.zeros(output_dtype, out_shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    if (rank == 1) {
-        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        output[0] = kernels.sumSliceTyped(ctx.pc(), dtype, input);
-        return out;
-    }
-
-    if (comptime axis == rank - 1) {
-        const axis_dim = source.shape[axis];
-        for (0..output.len) |row| {
-            const base = row * axis_dim;
-            output[row] = kernels.sumSliceTyped(ctx.pc(), dtype, input[base..][0..axis_dim]);
-        }
-        return out;
-    }
-
-    foldAxisStreaming(ctx, dtype, .sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
-    return out;
+    return reduceAxis(ctx, dtype, .sum, rank, x, axis);
 }
 
-fn intSumAxis(
+/// The three layouts of an axis reduction, one body per fold: rank 1 is
+/// the whole-tensor kernel, the last axis one row kernel per output, any
+/// other axis the streaming `(outer, axis, inner)` fold. The output is
+/// pre-filled with the fold's identity, which the streaming arm
+/// accumulates into and the other arms overwrite.
+fn reduceAxis(
     ctx: *ExecContext,
     comptime dtype: DType,
+    comptime fold: AxisFold,
     comptime rank: usize,
     x: *const tensor.TensorOf(dtype),
     comptime axis: usize,
-) !tensor.TensorOf(.i64) {
-    if (axis >= rank) @compileError("axis out of bounds");
-
+) !tensor.TensorOf(AxisFoldTask(dtype, fold).output_dtype) {
+    const Task = AxisFoldTask(dtype, fold);
     const source = try x.rankView(rank);
     const out_rank = if (rank == 1) 1 else rank - 1;
     const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
 
     var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();
-    const input = xx.tensor().dataConst();
-
-    var out = try ctx.zeros(.i64, out_shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    if (rank == 1) {
-        output[0] = intSumSlice(dtype, input);
-        return out;
-    }
-
-    if (comptime axis == rank - 1) {
-        const axis_dim = source.shape[axis];
-        for (0..output.len) |row| {
-            output[row] = intSumSlice(dtype, input[row * axis_dim ..][0..axis_dim]);
-        }
-        return out;
-    }
-
-    foldAxisStreaming(ctx, dtype, .int_sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
-    return out;
-}
-
-fn sumAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const out_rank = if (rank == 1) 1 else rank - 1;
-    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
     const xp = xx.tensor();
     const input = xp.dataConst();
 
-    var out = try ctx.zeros(.f32, out_shape);
+    var out = try ctx.full(Task.output_dtype, out_shape, Task.identity);
     errdefer out.deinit();
     const output = out.data();
 
     if (rank == 1) {
-        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try kernels.sumInto(ctx.pc(), &out, xp);
+        try reduceWhole(ctx, dtype, fold, &out, xp);
         return out;
     }
-
     if (comptime axis == rank - 1) {
         const axis_dim = source.shape[axis];
-        for (0..output.len) |row| {
-            const base = row * axis_dim;
-            output[row] = kernels.sumSlice(input[base..][0..axis_dim]);
-        }
+        for (0..output.len) |row| output[row] = reduceRow(ctx, dtype, fold, input[row * axis_dim ..][0..axis_dim]);
         return out;
     }
-
-    foldAxisStreaming(ctx, .f32, .sum, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    foldAxisStreaming(ctx, dtype, fold, input, output, g.outer, g.axis_dim, g.inner);
     return out;
+}
+
+/// The rank-1 arm of `reduceAxis`: one whole-tensor kernel into the scalar
+/// output (the pooled SIMD kernels for the float folds).
+fn reduceWhole(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime fold: AxisFold,
+    out: *tensor.TensorOf(AxisFoldTask(dtype, fold).output_dtype),
+    xp: *const tensor.TensorOf(dtype),
+) !void {
+    switch (comptime fold) {
+        .int_sum => out.data()[0] = intSumSlice(dtype, xp.dataConst()),
+        .sum => {
+            ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+            if (comptime dtype == .f32) {
+                try kernels.sumInto(ctx.pc(), out, xp);
+            } else {
+                out.data()[0] = kernels.sumSliceTyped(ctx.pc(), dtype, xp.dataConst());
+            }
+        },
+        .prod => {
+            ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
+            try kernels.prodInto(ctx.pc(), out, xp);
+        },
+    }
+}
+
+/// The last-axis arm of `reduceAxis`: one row kernel per output element.
+fn reduceRow(
+    ctx: *ExecContext,
+    comptime dtype: DType,
+    comptime fold: AxisFold,
+    values: []const dtype_mod.Scalar(dtype),
+) AxisFoldTask(dtype, fold).Out {
+    return switch (comptime fold) {
+        .int_sum => intSumSlice(dtype, values),
+        .sum => if (comptime dtype == .f32) kernels.sumSlice(values) else kernels.sumSliceTyped(ctx.pc(), dtype, values),
+        .prod => kernels.prodSlice(values),
+    };
 }
 
 /// Cumulative sum along `axis` (torch.cumsum), preserving the input shape:
@@ -663,45 +637,9 @@ pub fn prod(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x: *
     const compute = comptime ExecContext.widenedCompute(dtype, "prod");
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
-    var out = try prodF32(ctx, rank, xx.tensor(), axis);
+    var out = try reduceAxis(ctx, .f32, .prod, rank, xx.tensor(), axis);
     errdefer out.deinit();
     return ctx.storeAs(compute, comptime dtype_mod.outputDType(.reduction, dtype), out);
-}
-
-fn prodF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const out_rank = if (rank == 1) 1 else rank - 1;
-    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const xp = xx.tensor();
-    const input = xp.dataConst();
-
-    var out = try ctx.empty(.f32, out_shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    if (rank == 1) {
-        ctx.enableNativeVectorPoolForWork(xp.len(), parallel.vector_elementwise_len_threshold);
-        try kernels.prodInto(ctx.pc(), &out, xp);
-        return out;
-    }
-
-    if (comptime axis == rank - 1) {
-        const axis_dim = source.shape[axis];
-        for (0..output.len) |row| {
-            const base = row * axis_dim;
-            output[row] = kernels.prodSlice(input[base..][0..axis_dim]);
-        }
-        return out;
-    }
-
-    for (output) |*value| value.* = 1;
-    foldAxisStreaming(ctx, .f32, .prod, input, output, productBeforeAxis(rank, source.shape, axis), source.shape[axis], productAfterAxis(rank, source.shape, axis));
-    return out;
 }
 
 fn meanAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {

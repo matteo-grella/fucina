@@ -210,7 +210,7 @@ Backends:
   `winograd.zig` — F(2×2,3×3) conv transforms for the no-BLAS conv route,
   `rows.zig` — the fused row kernels (softmax/logsumexp, layer/RMS norm,
   cross-entropy, dropout, scatter-add, gated activations, the inner-lane
-  strided-axis family) with their Task payloads and `run*Task` adapters,
+  strided-axis family) with their Task payloads,
   `attention.zig` — the grouped-causal attention kernels (per-query units,
   query-tiled online-softmax prefill, tiled backward + BLAS strips,
   multi-stream decode) with their Task payloads and adapters,

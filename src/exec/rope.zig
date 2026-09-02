@@ -493,10 +493,7 @@ fn applyRope(
     // pool is engaged for prefill-sized inputs only; a decode step's
     // handful of vectors stays on the calling thread. The gate decides
     // POOLING only, never per-vector math.
-    if (total_vectors > 1 and input.len >= parallel.vector_elementwise_len_threshold / 8) {
-        if (ctx.dispatchRange(Task, "vector_start", "vector_end", task, total_vectors, Task.run)) return out;
-    }
-    Task.run(&task);
+    ctx.dispatchRangeOr(Task, "vector_start", "vector_end", task, total_vectors, total_vectors > 1 and input.len >= parallel.vector_elementwise_len_threshold / 8, Task.run);
     return out;
 }
 
@@ -524,7 +521,7 @@ fn RopeVectorsTask(
         vector_start: usize,
         vector_end: usize,
 
-        fn run(task: *const @This()) void {
+        fn run(task: @This()) void {
             const input = task.input;
             const output = task.output;
             const sin_values = task.sin_values;

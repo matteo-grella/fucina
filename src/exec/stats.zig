@@ -77,49 +77,9 @@ pub fn argmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x:
 }
 
 fn argmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const input = xx.tensor().dataConst();
-
-    const out_rank = if (rank == 1) 1 else rank - 1;
-    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var out = try ctx.empty(.i64, out_shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    for (0..outer) |outer_i| {
-        const base = outer_i * axis_dim * inner;
-        for (0..inner) |inner_i| {
-            // Seed with -inf and compare strictly, like extremumAxis
-            // below: a NaN never wins (NaN compares false), instead of the
-            // old input[first] seed whose result depended on WHERE the NaN
-            // sat. `best_i == axis_dim` is the "no position holds
-            // best_value yet" sentinel; the else-if captures the first
-            // element equal to the seed (a row whose maximum is -inf
-            // itself), and the final fallback to 0 is the all-NaN case
-            // (see the NaN contract above).
-            var best_i: usize = axis_dim;
-            var best_value = -std.math.inf(f32);
-            for (0..axis_dim) |axis_i| {
-                const value = input[base + axis_i * inner + inner_i];
-                if (value > best_value) {
-                    best_value = value;
-                    best_i = axis_i;
-                } else if (best_i == axis_dim and value == best_value) {
-                    best_i = axis_i;
-                }
-            }
-            if (best_i == axis_dim) best_i = 0;
-            output[outer_i * inner + inner_i] = @intCast(best_i);
-        }
-    }
-    return out;
+    var result = try extremumAxis(ctx, rank, x, axis, .max);
+    result.values.deinit();
+    return result.indices;
 }
 
 const ExtremumOp = enum { max, min };

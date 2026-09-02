@@ -404,6 +404,30 @@ pub fn dispatchRange(
     return self.dispatchRangeCapped(Task, start_field, end_field, base_task, count, count, run);
 }
 
+/// `dispatchRange` with its serial arm: split `[0, count)` across the
+/// pool when `parallel_ok` and the pool takes it, else run `kernel` on
+/// the whole base task. The pool adapter is synthesized here, so a row
+/// kernel is stated once (`kernels.softmaxRows`), never as a `run*Task`
+/// twin beside it.
+pub fn dispatchRangeOr(
+    self: *ExecContext,
+    comptime Task: type,
+    comptime start_field: []const u8,
+    comptime end_field: []const u8,
+    base_task: Task,
+    count: usize,
+    parallel_ok: bool,
+    comptime kernel: fn (Task) void,
+) void {
+    const Adapter = struct {
+        fn run(task: *const Task) void {
+            kernel(task.*);
+        }
+    };
+    if (parallel_ok and self.dispatchRange(Task, start_field, end_field, base_task, count, Adapter.run)) return;
+    kernel(base_task);
+}
+
 // Minimum lanes per task when splitting an inner-lane kernel across the
 // pool: below this the per-dispatch cost outweighs the split.
 const min_inner_lanes_per_task = 64;

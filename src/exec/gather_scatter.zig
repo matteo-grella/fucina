@@ -26,7 +26,6 @@ const contiguousStridesArray = shape_mod.contiguousStrides;
 const coordinateForLinear = backend_mod.rows.coordinateForLinear;
 
 const ScatterAddRowsTask = exec_row_ops.ScatterAddRowsTask;
-const runScatterAddRowsTask = exec_row_ops.runScatterAddRowsTask;
 
 // --- model-serving: relposShift (parakeet) ----------------------------------
 // Single consumer family: the parakeet FastConformer encoder and its
@@ -347,7 +346,7 @@ const TakeAlongTask = struct {
     outer_end: usize,
 };
 
-fn runTakeAlongTask(task: *const TakeAlongTask) void {
+fn takeAlongRows(task: TakeAlongTask) void {
     // Indices are pre-validated; each task owns disjoint outer slices of
     // the output, so parallel writes never overlap and the result is
     // bitwise identical for any thread count.
@@ -411,10 +410,7 @@ pub fn takeAlong(
         .outer_start = 0,
         .outer_end = outer,
     };
-    if (outer > 1 and out_len >= parallel.vector_elementwise_len_threshold) {
-        if (ctx.dispatchRange(TakeAlongTask, "outer_start", "outer_end", base_task, outer, runTakeAlongTask)) return out;
-    }
-    runTakeAlongTask(&base_task);
+    ctx.dispatchRangeOr(TakeAlongTask, "outer_start", "outer_end", base_task, outer, outer > 1 and out_len >= parallel.vector_elementwise_len_threshold, takeAlongRows);
     return out;
 }
 
@@ -494,10 +490,7 @@ fn scatterAlongImpl(
         .outer_start = 0,
         .outer_end = outer,
     };
-    if (outer > 1 and src_len >= parallel.vector_elementwise_len_threshold) {
-        if (ctx.dispatchRange(ScatterAlongTask(mode), "outer_start", "outer_end", base_task, outer, runScatterAlongTask(mode))) return out;
-    }
-    runScatterAlongTask(mode)(&base_task);
+    ctx.dispatchRangeOr(ScatterAlongTask(mode), "outer_start", "outer_end", base_task, outer, outer > 1 and src_len >= parallel.vector_elementwise_len_threshold, scatterAlongRows(mode));
     return out;
 }
 
@@ -517,13 +510,13 @@ fn ScatterAlongTask(comptime mode: ScatterMode) type {
     };
 }
 
-fn runScatterAlongTask(comptime mode: ScatterMode) fn (*const ScatterAlongTask(mode)) void {
+fn scatterAlongRows(comptime mode: ScatterMode) fn (ScatterAlongTask(mode)) void {
     return struct {
         // Indices are pre-validated. Each task owns disjoint outer slices
         // of the output — duplicates only collide WITHIN a slice, where
         // the serial row-major order is preserved, so accumulation order
         // and last-write-wins are bitwise identical for any thread count.
-        fn run(task: *const ScatterAlongTask(mode)) void {
+        fn run(task: ScatterAlongTask(mode)) void {
             for (task.outer_start..task.outer_end) |outer_i| {
                 const out_base = outer_i * task.axis_dim * task.inner;
                 const src_base = outer_i * task.src_axis_len * task.inner;
@@ -630,22 +623,7 @@ pub fn sliceGradient(ctx: *ExecContext, comptime rank: usize, grad: *const Tenso
         .outer_end = productBeforeAxis(rank, source_shape, axis),
     };
     const total_bytes = base.outer_end * base.dim * base.inner * @sizeOf(f32);
-    if (total_bytes >= 2 << 20 and base.outer_end > 1) {
-        if (ctx.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), base.outer_end);
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]SliceGradientFillTask = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = base;
-                    tasks[task_i].outer_start = task_i * base.outer_end / task_count;
-                    tasks[task_i].outer_end = (task_i + 1) * base.outer_end / task_count;
-                }
-                pool.parallelChunks(SliceGradientFillTask, tasks[0..task_count], runSliceGradientFillTask);
-                return out;
-            }
-        }
-    }
-    runSliceGradientFillTask(&base);
+    ctx.dispatchRangeOr(SliceGradientFillTask, "outer_start", "outer_end", base, base.outer_end, total_bytes >= 2 << 20 and base.outer_end > 1, sliceGradientFill);
     return out;
 }
 
@@ -660,7 +638,7 @@ const SliceGradientFillTask = struct {
     outer_end: usize,
 };
 
-fn runSliceGradientFillTask(task: *const SliceGradientFillTask) void {
+fn sliceGradientFill(task: SliceGradientFillTask) void {
     const before = task.start * task.inner;
     const mid = task.len * task.inner;
     const after = (task.dim - task.start - task.len) * task.inner;
@@ -721,8 +699,7 @@ pub fn scatterAdd(
                 .row_start = 0,
                 .row_end = rows,
             };
-            if (!ctx.dispatchRange(ScatterAddRowsTask, "row_start", "row_end", base_task, rows, runScatterAddRowsTask))
-                runScatterAddRowsTask(&base_task);
+            ctx.dispatchRangeOr(ScatterAddRowsTask, "row_start", "row_end", base_task, rows, true, backend_mod.kernels.scatterAddRows);
             return out;
         }
 

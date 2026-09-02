@@ -24,14 +24,10 @@ const shapeWithoutAxis = shape_mod.withoutAxis;
 
 const CrossEntropyLossRowsTask = exec_row_ops.CrossEntropyLossRowsTask;
 const CrossEntropyBackwardRowsTask = exec_row_ops.CrossEntropyBackwardRowsTask;
-const runCrossEntropyLossRowsTask = exec_row_ops.runCrossEntropyLossRowsTask;
-const runCrossEntropyBackwardRowsTask = exec_row_ops.runCrossEntropyBackwardRowsTask;
 const crossEntropyLossRows = backend_mod.kernels.crossEntropyLossRows;
 const crossEntropyBackwardRows = backend_mod.kernels.crossEntropyBackwardRows;
 const DistillStatsRowsTask = exec_row_ops.DistillStatsRowsTask;
 const DistillBackwardRowsTask = exec_row_ops.DistillBackwardRowsTask;
-const runDistillStatsRowsTask = exec_row_ops.runDistillStatsRowsTask;
-const runDistillBackwardRowsTask = exec_row_ops.runDistillBackwardRowsTask;
 const distillStatsRows = backend_mod.kernels.distillStatsRows;
 const distillBackwardRows = backend_mod.kernels.distillBackwardRows;
 
@@ -208,13 +204,7 @@ pub fn crossEntropyLoss(
             .row_start = 0,
             .row_end = outer,
         };
-        var dispatched = false;
-        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (ctx.dispatchRange(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyLossRowsTask)) {
-                dispatched = true;
-            }
-        }
-        if (!dispatched) crossEntropyLossRows(base_task);
+        ctx.dispatchRangeOr(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, crossEntropyLossRows);
     } else {
         const eps = options.label_smoothing;
         const eps_uniform = eps / @as(f32, @floatFromInt(class_count));
@@ -452,12 +442,7 @@ pub const LinearCrossEntropyGrads = struct {
 /// either way â disjoint row writes).
 fn dispatchCrossEntropyBackwardRows(ctx: *ExecContext, base_task: CrossEntropyBackwardRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (ctx.dispatchRange(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, runCrossEntropyBackwardRowsTask)) {
-            return;
-        }
-    }
-    crossEntropyBackwardRows(base_task);
+    ctx.dispatchRangeOr(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold, crossEntropyBackwardRows);
 }
 
 /// Fused VJP of `loss = CE(xÂ·Wáµ, labels)` over the forward's saved logits
@@ -598,12 +583,7 @@ pub const LinearDistillForward = struct {
 
 fn dispatchDistillStatsRows(ctx: *ExecContext, base_task: DistillStatsRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (ctx.dispatchRange(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, runDistillStatsRowsTask)) {
-            return;
-        }
-    }
-    distillStatsRows(base_task);
+    ctx.dispatchRangeOr(DistillStatsRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold, distillStatsRows);
 }
 
 /// Fused forward. `rows[i]` is the x row whose distribution entry `i`
@@ -703,12 +683,7 @@ fn orderUsize(context: usize, item: usize) std.math.Order {
 
 fn dispatchDistillBackwardRows(ctx: *ExecContext, base_task: DistillBackwardRowsTask) void {
     const outer = base_task.row_end;
-    if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) {
-        if (ctx.dispatchRange(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, runDistillBackwardRowsTask)) {
-            return;
-        }
-    }
-    distillBackwardRows(base_task);
+    ctx.dispatchRangeOr(DistillBackwardRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold, distillBackwardRows);
 }
 
 /// Fused VJP over the forward's saved selected-row logits and statistics.

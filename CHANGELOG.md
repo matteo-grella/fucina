@@ -36,6 +36,16 @@ this point; earlier history is `git log`.
   (`shape.elementCount(&array)` / `shape.product`), `requireSameShapeOf`
   (`tensor.requireSameShape` is dtype-generic), and the deprecated
   `rows`/`cols` accessors.
+- The exec axis-op skeleton is stated once per family: `ExecContext.
+  dispatchRangeOr` is the one pool-or-serial tail (it synthesizes the pool
+  adapter, so the `run*Task` twins beside the row kernels are gone);
+  `reduce.zig` folds sum/int-sum/prod through one `reduceAxis`,
+  `softmax.zig` drives softmax/logSoftmax/logsumexp through one row-family
+  driver, `norm.zig` has one rmsNorm body over optional weight and
+  residual and one backward-input body, the split-gated backward pair is
+  one body, argmax is the extremum core, and the plain hand-rolled pool
+  splits in exec and ag ride the runtime helper. `LogRowsTask`,
+  `SplitGluTask` and `SplitGluBackwardTask` are aliases of their twins.
 
 ## 0.4.0 - 2026-08-27
 

@@ -23,9 +23,6 @@ const productBeforeAxis = shape_mod.productBeforeAxis;
 const contiguousStridesArray = shape_mod.contiguousStrides;
 
 const SoftmaxRowsTask = exec_row_ops.SoftmaxRowsTask;
-const LogRowsTask = exec_row_ops.LogRowsTask;
-const runLogsumexpRowsTask = exec_row_ops.runLogsumexpRowsTask;
-const runLogSoftmaxRowsTask = exec_row_ops.runLogSoftmaxRowsTask;
 const logsumexpRows = backend_mod.kernels.logsumexpRows;
 const logSoftmaxRows = backend_mod.kernels.logSoftmaxRows;
 const shapeWithoutAxis = shape_mod.withoutAxis;
@@ -38,9 +35,6 @@ const runLogsumexpInnerTask = exec_row_ops.runLogsumexpInnerTask;
 const runLogSoftmaxInnerTask = exec_row_ops.runLogSoftmaxInnerTask;
 const runSoftmaxBackwardInnerTask = exec_row_ops.runSoftmaxBackwardInnerTask;
 
-const runSoftmaxRowsTask = exec_row_ops.runSoftmaxRowsTask;
-const runSoftmaxExtRowsTask = exec_row_ops.runSoftmaxExtRowsTask;
-const runSoftmaxBackwardRowsTask = exec_row_ops.runSoftmaxBackwardRowsTask;
 const softmaxRows = backend_mod.kernels.softmaxRows;
 const softmaxExtRows = backend_mod.kernels.softmaxExtRows;
 const softmaxBackwardRows = backend_mod.kernels.softmaxBackwardRows;
@@ -72,52 +66,7 @@ pub fn logsumexp(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize,
 }
 
 fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    const out_rank = if (rank == 1) 1 else rank - 1;
-    const out_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const input = xx.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, out_shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    if (inner == 1) {
-        const base_task: LogRowsTask = .{
-            .input = input,
-            .output = output,
-            .axis_dim = axis_dim,
-            .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (ctx.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogsumexpRowsTask)) {
-                return out;
-            }
-        }
-        logsumexpRows(base_task);
-        return out;
-    }
-
-    var scratch = try ctx.empty(.f32, .{2 * inner});
-    defer scratch.deinit();
-    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
-        .input = input,
-        .output = output,
-        .axis_dim = axis_dim,
-        .inner = inner,
-        .scratch = scratch.data(),
-        .outer = outer,
-        .inner_start = 0,
-        .inner_end = inner,
-    }, source.len(), inner, runLogsumexpInnerTask);
-    return out;
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = true, .rows = logsumexpRows, .inner = runLogsumexpInnerTask });
 }
 
 /// Log-softmax along `axis` (torch.log_softmax), shape-preserving:
@@ -136,50 +85,7 @@ pub fn logSoftmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize
 }
 
 fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
-
-    const source = try x.rankView(rank);
-    var xx = try ctx.prepareContiguous(.f32, x);
-    defer xx.deinit();
-    const input = xx.tensor().dataConst();
-
-    var out = try ctx.empty(.f32, source.shape);
-    errdefer out.deinit();
-    const output = out.data();
-
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    if (inner == 1) {
-        const base_task: LogRowsTask = .{
-            .input = input,
-            .output = output,
-            .axis_dim = axis_dim,
-            .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (ctx.dispatchRange(LogRowsTask, "row_start", "row_end", base_task, outer, runLogSoftmaxRowsTask)) {
-                return out;
-            }
-        }
-        logSoftmaxRows(base_task);
-        return out;
-    }
-
-    var scratch = try ctx.empty(.f32, .{2 * inner});
-    defer scratch.deinit();
-    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
-        .input = input,
-        .output = output,
-        .axis_dim = axis_dim,
-        .inner = inner,
-        .scratch = scratch.data(),
-        .outer = outer,
-        .inner_start = 0,
-        .inner_end = inner,
-    }, source.len(), inner, runLogSoftmaxInnerTask);
-    return out;
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = logSoftmaxRows, .inner = runLogSoftmaxInnerTask });
 }
 
 /// One f32 kernel; 16-bit inputs follow the `.widened` policy.
@@ -193,50 +99,57 @@ pub fn softmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
 }
 
 fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (axis >= rank) @compileError("axis out of bounds");
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = softmaxRows, .inner = runSoftmaxInnerTask });
+}
 
+/// What distinguishes the three row ops over one driver: whether the axis
+/// is removed, the fused last-axis row kernel, and the inner-lane kernel.
+const RowFamily = struct {
+    reduces: bool,
+    rows: fn (SoftmaxRowsTask) void,
+    inner: fn (*const SoftmaxInnerTask) void,
+};
+
+/// The one driver of the softmax family: last-axis rows through the fused
+/// row kernel (pool-split above the row threshold), any other axis through
+/// the inner-lane kernel over a `2 * inner` scratch.
+fn rowFamilyF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime family: RowFamily) !Tensor {
     const source = try x.rankView(rank);
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
     const input = xx.tensor().dataConst();
 
-    var out = try ctx.empty(.f32, source.shape);
+    const out_rank = if (rank == 1) 1 else rank - 1;
+    const reduced_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
+    const out_shape: []const usize = if (family.reduces) &reduced_shape else &source.shape;
+    var out = try ctx.empty(.f32, out_shape);
     errdefer out.deinit();
     const output = out.data();
 
-    const axis_dim = source.shape[axis];
-    const inner = productAfterAxis(rank, source.shape, axis);
-    const outer = productBeforeAxis(rank, source.shape, axis);
-    if (inner == 1) {
-        const base_task: SoftmaxRowsTask = .{
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    if (g.inner == 1) {
+        ctx.dispatchRangeOr(SoftmaxRowsTask, "row_start", "row_end", .{
             .input = input,
             .output = output,
-            .axis_dim = axis_dim,
+            .axis_dim = g.axis_dim,
             .row_start = 0,
-            .row_end = outer,
-        };
-        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (ctx.dispatchRange(SoftmaxRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxRowsTask)) {
-                return out;
-            }
-        }
-
-        softmaxRows(base_task);
+            .row_end = g.outer,
+        }, g.outer, g.outer > 1 and source.len() >= parallel.row_kernel_len_threshold, family.rows);
         return out;
     }
 
-    var scratch = try ctx.empty(.f32, .{2 * inner});
+    var scratch = try ctx.empty(.f32, .{2 * g.inner});
     defer scratch.deinit();
     ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
         .input = input,
         .output = output,
-        .axis_dim = axis_dim,
-        .inner = inner,
+        .axis_dim = g.axis_dim,
+        .inner = g.inner,
         .scratch = scratch.data(),
-        .outer = outer,
+        .outer = g.outer,
         .inner_start = 0,
-        .inner_end = inner,
-    }, source.len(), inner, runSoftmaxInnerTask);
+        .inner_end = g.inner,
+    }, source.len(), g.inner, family.inner);
     return out;
 }
 
@@ -321,13 +234,12 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
         .row_start = 0,
         .row_end = rows,
     };
-    if (rows > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-        if (ctx.dispatchRange(SoftmaxExtRowsTask(rank), "row_start", "row_end", base_task, rows, runSoftmaxExtRowsTask(rank, axis))) {
-            return out;
+    const Kernel = struct {
+        fn run(task: SoftmaxExtRowsTask(rank)) void {
+            softmaxExtRows(rank, axis, task);
         }
-    }
-
-    softmaxExtRows(rank, axis, base_task);
+    };
+    ctx.dispatchRangeOr(SoftmaxExtRowsTask(rank), "row_start", "row_end", base_task, rows, rows > 1 and source.len() >= parallel.row_kernel_len_threshold, Kernel.run);
     return out;
 }
 
@@ -362,13 +274,7 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
             .row_start = 0,
             .row_end = outer,
         };
-        if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) {
-            if (ctx.dispatchRange(SoftmaxBackwardRowsTask, "row_start", "row_end", base_task, outer, runSoftmaxBackwardRowsTask)) {
-                return out;
-            }
-        }
-
-        softmaxBackwardRows(base_task);
+        ctx.dispatchRangeOr(SoftmaxBackwardRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, softmaxBackwardRows);
         return out;
     }
 
