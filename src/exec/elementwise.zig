@@ -56,13 +56,13 @@ pub fn tryTailBroadcastElementwise(comptime op: ElementwiseOp, out: *Tensor, a: 
 
     if (a.isContiguous()) {
         if (tailBroadcastInfo(b)) |bi| {
-            elementwiseContigTailBroadcast(op, out_data, a.dataConst(), bi, false);
+            tailBroadcastRows(op, false, out_data, a.dataConst(), bi);
             return true;
         }
     }
     if (b.isContiguous()) {
         if (tailBroadcastInfo(a)) |ai| {
-            elementwiseContigTailBroadcast(op, out_data, b.dataConst(), ai, true);
+            tailBroadcastRows(op, true, out_data, b.dataConst(), ai);
             return true;
         }
     }
@@ -83,316 +83,51 @@ pub fn tryTailBroadcastElementwise(comptime op: ElementwiseOp, out: *Tensor, a: 
     return true;
 }
 
-fn elementwiseContigTailBroadcast(
-    comptime op: ElementwiseOp,
-    out: []f32,
-    contiguous: []const f32,
-    broadcast: TailBroadcastInfo,
-    broadcast_is_left: bool,
-) void {
-    if (broadcast.inner == 1) {
-        elementwiseContigScalarBroadcast(op, out, contiguous, broadcast.values[0], broadcast_is_left);
-        return;
-    }
+/// `out = op(contiguous, broadcast)`, `broadcast` on the left when
+/// `broadcast_is_left`: one tail row of `inner` values reused across every
+/// row of `out`, or one scalar across all of it. `out` may alias
+/// `contiguous` (the in-place form).
+fn tailBroadcastRows(comptime op: ElementwiseOp, comptime broadcast_is_left: bool, out: []f32, contiguous: []const f32, broadcast: TailBroadcastInfo) void {
+    const inner = broadcast.inner;
+    if (inner == 1) return opRow(op, broadcast_is_left, out, contiguous, broadcast.values[0]);
     var base: usize = 0;
-    while (base < out.len) : (base += broadcast.inner) {
-        var j: usize = 0;
-        switch (op) {
-            .add => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const cv: ElementwiseVec = contiguous[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    out[base + j ..][0..elementwise_vector_len].* = cv + bv;
-                }
-            },
-            .sub => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const cv: ElementwiseVec = contiguous[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    out[base + j ..][0..elementwise_vector_len].* = if (broadcast_is_left) bv - cv else cv - bv;
-                }
-            },
-            .mul => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const cv: ElementwiseVec = contiguous[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    out[base + j ..][0..elementwise_vector_len].* = cv * bv;
-                }
-            },
-            .div => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const cv: ElementwiseVec = contiguous[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    out[base + j ..][0..elementwise_vector_len].* = if (broadcast_is_left) bv / cv else cv / bv;
-                }
-            },
-            .max, .min => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const cv: ElementwiseVec = contiguous[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    out[base + j ..][0..elementwise_vector_len].* = maxMinVec(op, cv, bv);
-                }
-            },
-        }
-        while (j < broadcast.inner) : (j += 1) {
-            const c = contiguous[base + j];
-            const b = broadcast.values[j];
-            out[base + j] = if (broadcast_is_left)
-                applyElementwise(op, b, c)
-            else
-                applyElementwise(op, c, b);
-        }
+    while (base < out.len) : (base += inner) {
+        opRow(op, broadcast_is_left, out[base..][0..inner], contiguous[base..][0..inner], broadcast.values[0..inner]);
     }
 }
 
-fn elementwiseContigScalarBroadcast(
-    comptime op: ElementwiseOp,
-    out: []f32,
-    contiguous: []const f32,
-    scalar: f32,
-    broadcast_is_left: bool,
-) void {
-    const sv: ElementwiseVec = @splat(scalar);
-    var i: usize = 0;
-    switch (op) {
-        .add => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const cv: ElementwiseVec = contiguous[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = cv + sv;
-            }
-        },
-        .sub => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const cv: ElementwiseVec = contiguous[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = if (broadcast_is_left) sv - cv else cv - sv;
-            }
-        },
-        .mul => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const cv: ElementwiseVec = contiguous[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = cv * sv;
-            }
-        },
-        .div => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const cv: ElementwiseVec = contiguous[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = if (broadcast_is_left) sv / cv else cv / sv;
-            }
-        },
-        .max, .min => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const cv: ElementwiseVec = contiguous[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = maxMinVec(op, cv, sv);
-            }
-        },
+/// One row `out[j] = op(x[j], y_j)` (`op(y_j, x[j])` when `y_is_left`),
+/// `y` a same-length slice or one scalar: full vectors, then the scalar
+/// tail. `out` may alias `x`.
+fn opRow(comptime op: ElementwiseOp, comptime y_is_left: bool, out: []f32, x: []const f32, y: anytype) void {
+    const y_is_scalar = @TypeOf(y) == f32;
+    var j: usize = 0;
+    while (j + elementwise_vector_len <= out.len) : (j += elementwise_vector_len) {
+        const xv: ElementwiseVec = x[j..][0..elementwise_vector_len].*;
+        const yv: ElementwiseVec = if (y_is_scalar) @splat(y) else y[j..][0..elementwise_vector_len].*;
+        out[j..][0..elementwise_vector_len].* = if (y_is_left) opVec(op, yv, xv) else opVec(op, xv, yv);
     }
-    while (i < out.len) : (i += 1) {
-        out[i] = if (broadcast_is_left)
-            applyElementwise(op, scalar, contiguous[i])
-        else
-            applyElementwise(op, contiguous[i], scalar);
+    while (j < out.len) : (j += 1) {
+        const yj: f32 = if (y_is_scalar) y else y[j];
+        out[j] = if (y_is_left) applyElementwise(op, yj, x[j]) else applyElementwise(op, x[j], yj);
     }
+}
+
+inline fn opVec(comptime op: ElementwiseOp, a: ElementwiseVec, b: ElementwiseVec) ElementwiseVec {
+    return switch (op) {
+        .add => a + b,
+        .sub => a - b,
+        .mul => a * b,
+        .div => a / b,
+        .max, .min => maxMinVec(op, a, b),
+    };
 }
 
 pub fn tryTailBroadcastElementwiseInPlace(comptime op: ElementwiseOp, target: *Tensor, other: *const Tensor) bool {
     const broadcast = tailBroadcastInfo(other) orelse return false;
-    elementwiseTailBroadcastInPlace(op, target.data(), broadcast);
+    const data = target.data();
+    tailBroadcastRows(op, false, data, data, broadcast);
     return true;
-}
-
-fn elementwiseTailBroadcastInPlace(comptime op: ElementwiseOp, target: []f32, broadcast: TailBroadcastInfo) void {
-    if (broadcast.inner == 1) {
-        elementwiseScalarBroadcastInPlace(op, target, broadcast.values[0]);
-        return;
-    }
-    var base: usize = 0;
-    while (base < target.len) : (base += broadcast.inner) {
-        var j: usize = 0;
-        switch (op) {
-            .add => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const tv: ElementwiseVec = target[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    target[base + j ..][0..elementwise_vector_len].* = tv + bv;
-                }
-                while (j < broadcast.inner) : (j += 1) {
-                    target[base + j] += broadcast.values[j];
-                }
-            },
-            .sub => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const tv: ElementwiseVec = target[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    target[base + j ..][0..elementwise_vector_len].* = tv - bv;
-                }
-                while (j < broadcast.inner) : (j += 1) {
-                    target[base + j] -= broadcast.values[j];
-                }
-            },
-            .mul => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const tv: ElementwiseVec = target[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    target[base + j ..][0..elementwise_vector_len].* = tv * bv;
-                }
-                while (j < broadcast.inner) : (j += 1) {
-                    target[base + j] *= broadcast.values[j];
-                }
-            },
-            .div => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const tv: ElementwiseVec = target[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    target[base + j ..][0..elementwise_vector_len].* = tv / bv;
-                }
-                while (j < broadcast.inner) : (j += 1) {
-                    target[base + j] /= broadcast.values[j];
-                }
-            },
-            .max, .min => {
-                while (j + elementwise_vector_len <= broadcast.inner) : (j += elementwise_vector_len) {
-                    const tv: ElementwiseVec = target[base + j ..][0..elementwise_vector_len].*;
-                    const bv: ElementwiseVec = broadcast.values[j..][0..elementwise_vector_len].*;
-                    target[base + j ..][0..elementwise_vector_len].* = maxMinVec(op, tv, bv);
-                }
-                while (j < broadcast.inner) : (j += 1) {
-                    target[base + j] = applyElementwise(op, target[base + j], broadcast.values[j]);
-                }
-            },
-        }
-    }
-}
-
-fn elementwiseScalarBroadcastInPlace(comptime op: ElementwiseOp, target: []f32, scalar: f32) void {
-    const sv: ElementwiseVec = @splat(scalar);
-    var i: usize = 0;
-    switch (op) {
-        .add => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv + sv;
-            }
-            while (i < target.len) : (i += 1) target[i] += scalar;
-        },
-        .sub => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv - sv;
-            }
-            while (i < target.len) : (i += 1) target[i] -= scalar;
-        },
-        .mul => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv * sv;
-            }
-            while (i < target.len) : (i += 1) target[i] *= scalar;
-        },
-        .div => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv / sv;
-            }
-            while (i < target.len) : (i += 1) target[i] /= scalar;
-        },
-        .max, .min => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = maxMinVec(op, tv, sv);
-            }
-            while (i < target.len) : (i += 1) target[i] = applyElementwise(op, target[i], scalar);
-        },
-    }
-}
-
-pub fn elementwiseContiguousInPlace(comptime op: ElementwiseOp, target: []f32, other: []const f32) void {
-    var i: usize = 0;
-    switch (op) {
-        .add => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                const ov: ElementwiseVec = other[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv + ov;
-            }
-            while (i < target.len) : (i += 1) target[i] += other[i];
-        },
-        .sub => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                const ov: ElementwiseVec = other[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv - ov;
-            }
-            while (i < target.len) : (i += 1) target[i] -= other[i];
-        },
-        .mul => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                const ov: ElementwiseVec = other[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv * ov;
-            }
-            while (i < target.len) : (i += 1) target[i] *= other[i];
-        },
-        .div => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                const ov: ElementwiseVec = other[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = tv / ov;
-            }
-            while (i < target.len) : (i += 1) target[i] /= other[i];
-        },
-        .max, .min => {
-            while (i + elementwise_vector_len <= target.len) : (i += elementwise_vector_len) {
-                const tv: ElementwiseVec = target[i..][0..elementwise_vector_len].*;
-                const ov: ElementwiseVec = other[i..][0..elementwise_vector_len].*;
-                target[i..][0..elementwise_vector_len].* = maxMinVec(op, tv, ov);
-            }
-            while (i < target.len) : (i += 1) target[i] = applyElementwise(op, target[i], other[i]);
-        },
-    }
-}
-
-pub fn elementwiseContiguousInto(comptime op: ElementwiseOp, out: []f32, a: []const f32, b: []const f32) void {
-    var i: usize = 0;
-    switch (op) {
-        .add => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const av: ElementwiseVec = a[i..][0..elementwise_vector_len].*;
-                const bv: ElementwiseVec = b[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = av + bv;
-            }
-        },
-        .sub => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const av: ElementwiseVec = a[i..][0..elementwise_vector_len].*;
-                const bv: ElementwiseVec = b[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = av - bv;
-            }
-        },
-        .mul => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const av: ElementwiseVec = a[i..][0..elementwise_vector_len].*;
-                const bv: ElementwiseVec = b[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = av * bv;
-            }
-        },
-        .div => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const av: ElementwiseVec = a[i..][0..elementwise_vector_len].*;
-                const bv: ElementwiseVec = b[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = av / bv;
-            }
-        },
-        .max, .min => {
-            while (i + elementwise_vector_len <= out.len) : (i += elementwise_vector_len) {
-                const av: ElementwiseVec = a[i..][0..elementwise_vector_len].*;
-                const bv: ElementwiseVec = b[i..][0..elementwise_vector_len].*;
-                out[i..][0..elementwise_vector_len].* = maxMinVec(op, av, bv);
-            }
-        },
-    }
-    while (i < out.len) : (i += 1) {
-        out[i] = applyElementwise(op, a[i], b[i]);
-    }
 }
 
 /// torch.maximum/minimum on a vector: NaN in either lane propagates NaN
@@ -1650,30 +1385,6 @@ fn elementwiseRankInto(
     return backendElementwiseContiguousUnchecked(ctx, op, out, aa.tensor(), bb.tensor(), len);
 }
 
-fn elementwiseInto(
-    ctx: *ExecContext,
-    comptime op: ElementwiseOp,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-) !void {
-    try tensor.requireSameShape(out, a);
-
-    if (a.isContiguous() and b.isContiguous()) {
-        return backendElementwiseContiguousUnchecked(ctx, op, out, a, b, out.len());
-    }
-
-    if (try tryTailBroadcastElementwise(op, out, a, b)) {
-        return;
-    }
-
-    var aa = try ctx.prepareContiguous(.f32, a);
-    defer aa.deinit();
-    var bb = try ctx.prepareContiguous(.f32, b);
-    defer bb.deinit();
-    return backendElementwiseContiguousUnchecked(ctx, op, out, aa.tensor(), bb.tensor(), out.len());
-}
-
 /// `target = op(target, other)` in `target`'s storage. `target` must be
 /// contiguous; `other` is the same shape, or a tail-broadcast row of it.
 pub fn elementwiseInPlace(
@@ -1687,7 +1398,8 @@ pub fn elementwiseInPlace(
 
     if (other.isContiguous()) {
         if (target.len() <= small_in_place_elementwise_len) {
-            return elementwiseContiguousInPlace(op, target.data(), other.dataConst());
+            const data = target.data();
+            return opRow(op, false, data, data, other.dataConst());
         }
         return backendElementwiseContiguousUnchecked(ctx, op, target, target, other, target.len());
     }

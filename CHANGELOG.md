@@ -45,7 +45,9 @@ this point; earlier history is `git log`.
   residual and one backward-input body, the split-gated backward pair is
   one body, argmax is the extremum core, and the plain hand-rolled pool
   splits in exec and ag ride the runtime helper. `LogRowsTask`,
-  `SplitGluTask` and `SplitGluBackwardTask` are aliases of their twins.
+  `SplitGluTask` and `SplitGluBackwardTask` are aliases of their twins. The
+  exec tail-broadcast and in-place elementwise paths are one row body
+  (`opRow`) under one row driver (`tailBroadcastRows`).
 - Quantized matmul routing decisions are made once: the rowwise pin is
   the context scope alone (`exec.QuantMatmul.numerics` and its `Numerics`
   enum are gone; the field was never set by a caller, open
