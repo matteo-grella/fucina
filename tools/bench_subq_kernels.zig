@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const fucina = @import("fucina");
+const subq_kernels = @import("fucina_models").research.subq_kernels;
 const simd = fucina.internal.backend_mod.vector_impl;
 
 const d = 128;
@@ -111,8 +112,8 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
                 const sc = scores[0..64];
-                simd.primitives.scoreRows4F16(sc, &query, rows[off * d ..], d);
-                const m = 0.088 * simd.primitives.vecMaxReduce(sc);
+                subq_kernels.scoreRows4F16(sc, &query, rows[off * d ..], d);
+                const m = 0.088 * subq_kernels.vecMaxReduce(sc);
                 if (m > gauge) {
                     if (gauge != -std.math.inf(f32)) {
                         const rescale: f32 = @exp(gauge - m);
@@ -121,8 +122,8 @@ pub fn main(init: std.process.Init) !void {
                     }
                     gauge = m;
                 }
-                exact_w += simd.primitives.vecExpAffineSumInPlace(sc, 0.088, -gauge);
-                simd.primitives.weightedAccumRows4F16(numer, sc, vrows[off * d ..], d);
+                exact_w += subq_kernels.vecExpAffineSumInPlace(sc, 0.088, -gauge);
+                subq_kernels.weightedAccumRows4F16(numer, sc, vrows[off * d ..], d);
             }
             checksum += exact_w;
         }
@@ -141,9 +142,9 @@ pub fn main(init: std.process.Init) !void {
         const t0 = std.Io.Clock.awake.now(io).nanoseconds;
         for (0..reps) |_| {
             switch (which) {
-                0 => simd.primitives.scoreRows4F16(scores, &query, rows, d),
+                0 => subq_kernels.scoreRows4F16(scores, &query, rows, d),
                 1 => scoreRows4F16Comptime(d, scores, &query, rows),
-                2 => simd.primitives.weightedAccumRows4F16(numer, scores, rows, d),
+                2 => subq_kernels.weightedAccumRows4F16(numer, scores, rows, d),
                 else => unreachable,
             }
             checksum += scores[rows_n - 1] + numer[0];

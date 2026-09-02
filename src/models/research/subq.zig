@@ -32,6 +32,7 @@ const std = @import("std");
 const fucina = @import("fucina");
 const runner_mod = @import("../qwen3/runner.zig");
 const kv_cache_mod = @import("../text/kv_cache.zig");
+const subq_kernels = @import("subq_kernels.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
@@ -1802,7 +1803,7 @@ fn exactBatchQ8(
         scores[i + 1] = pair[1];
     }
     if (i < m) scores[i] = qkern.q8_0.vecDotQ8_0Q8_0(q_q8, k_blocks[i * bpr ..][0..bpr]);
-    const mx = beta * simd.primitives.vecMaxReduce(scores);
+    const mx = beta * subq_kernels.vecMaxReduce(scores);
     if (mx > gauge.*) {
         if (gauge.* != -std.math.inf(f32)) {
             const rescale: f32 = @exp(gauge.* - mx);
@@ -1811,7 +1812,7 @@ fn exactBatchQ8(
         }
         gauge.* = mx;
     }
-    exact_w.* += simd.primitives.vecExpAffineSumInPlace(scores, beta, -gauge.*);
+    exact_w.* += subq_kernels.vecExpAffineSumInPlace(scores, beta, -gauge.*);
     i = 0;
     while (i + 2 <= m) : (i += 2) {
         qkern.q8_0.weightedQ8_0Row2(true, numer, v_blocks[i * bpr ..][0..bpr], scores[i], v_blocks[(i + 1) * bpr ..][0..bpr], scores[i + 1]);
@@ -1833,8 +1834,8 @@ fn exactBatch(
 ) void {
     if (scores.len == 0) return;
     const simd = fucina.internal.backend_mod.vector_impl;
-    simd.primitives.scoreRows4F16(scores, query[0..d], k_rows, stride);
-    const m = beta * simd.primitives.vecMaxReduce(scores);
+    subq_kernels.scoreRows4F16(scores, query[0..d], k_rows, stride);
+    const m = beta * subq_kernels.vecMaxReduce(scores);
     if (m > gauge.*) {
         if (gauge.* != -std.math.inf(f32)) {
             const rescale: f32 = @exp(gauge.* - m);
@@ -1843,8 +1844,8 @@ fn exactBatch(
         }
         gauge.* = m;
     }
-    exact_w.* += simd.primitives.vecExpAffineSumInPlace(scores, beta, -gauge.*);
-    simd.primitives.weightedAccumRows4F16(numer[0..d], scores, v_rows, stride);
+    exact_w.* += subq_kernels.vecExpAffineSumInPlace(scores, beta, -gauge.*);
+    subq_kernels.weightedAccumRows4F16(numer[0..d], scores, v_rows, stride);
 }
 
 fn accumulateF32(acc: []f32, row: []const f32, scale: f32) void {

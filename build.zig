@@ -185,7 +185,7 @@ pub fn build(b: *std.Build) void {
     // bench-check so the research surface cannot silently rot out of the
     // compile gate.
     _ = addTarget(b, tool_ctx, .{ .step = "bench-subq", .desc = "Dense vs SubQ decode benchmark on a Qwen3 GGUF (research attention evaluator)", .exe = "fucina-bench-subq", .root = "tools/bench_subq_decode.zig", .models = true, .check = bench_check_step });
-    _ = addTarget(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .models = false, .check = bench_check_step });
+    _ = addTarget(b, tool_ctx, .{ .step = "bench-subq-kernels", .desc = "Microbenchmark for the f16 row-block attention primitives", .exe = "fucina-bench-subq-kernels", .root = "tools/bench_subq_kernels.zig", .models = true, .check = bench_check_step });
     _ = addTarget(b, tool_ctx, .{ .step = "bench-subq-scaling", .desc = "Selection-scaling probe: flat vs hierarchical frontier on synthetic clustered KV", .exe = "fucina-bench-subq-scaling", .root = "tools/bench_subq_scaling.zig", .models = true, .check = bench_check_step });
     _ = addTarget(b, tool_ctx, .{ .step = "eval-subq-freerun", .desc = "Gate C stage 2: free-running SubQ vs dense generation, loop metrics, dense-judged NLL", .exe = "fucina-eval-subq-freerun", .root = "tools/eval_subq_freerun.zig", .models = true, .check = bench_check_step });
     _ = addTarget(b, tool_ctx, .{ .step = "smoke", .desc = "Run the smoke example", .exe = "fucina-smoke", .root = "examples/smoke/main.zig", .models = false });

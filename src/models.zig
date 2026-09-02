@@ -54,6 +54,8 @@ pub const research = struct {
     /// SubQ attention: decode-path evaluator (docs/SUBQUADRATIC-ATTENTION.md);
     /// installs through `qwen3.runner.AttentionOverride`.
     pub const subq = @import("models/research/subq.zig");
+    /// The f16 row-block attention kernels `subq` runs on.
+    pub const subq_kernels = @import("models/research/subq_kernels.zig");
     /// Engram conditional n-gram memory (docs/ENGRAM.md); grafts through
     /// the qwen3 trainer's `residual_hook` seam (`ResidualGraft`).
     pub const engram = @import("models/research/engram.zig");

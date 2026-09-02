@@ -28,7 +28,7 @@ family-agnostic helpers stay flat:
 | `models.glm4moe` | `model` — GLM-4.5 MoE with native MTP (`nextn`) self-speculation | `models/glm4moe/` |
 | `models.deepseek4` | `model`, `serving` — DeepSeek V4 Flash (hyper-connections, compressed-KV MQA, streamed experts, MTP) | `models/deepseek4/` |
 | `models.inkling` | `model`, `mmproj`, `chat`, `serving` — Inkling (hybrid SWA/global rel-bias attention, shortconv sites, sink-shared MoE; hMLP vision + dMel audio towers) | `models/inkling/` |
-| `models.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `models.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `models/research/subq.zig`, `models/research/engram.zig`, `models/research/shine/`, `models/research/kimi3/` |
+| `models.research` | the research tier under one namespace: `subq` (decode-path attention evaluator; installs through `runner.AttentionOverride`), `engram` (conditional n-gram memory; grafts through the qwen3 trainer's `residual_hook`), `shine`/`shine_train` (context-to-LoRA adapters; served by `models.qwen3.shine_serving`), `kimi3.model` (Kimi-K3: KDA + gated-MLA-NoPE hybrid, latent MoE, attention residuals, SiTU) | `models/research/subq.zig` (+ `subq_kernels.zig`), `models/research/engram.zig`, `models/research/shine/`, `models/research/kimi3/` |
 
 | Flat helper | Purpose | Section |
 |---|---|---|

@@ -25,6 +25,11 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The subquadratic evaluator's f16 row-block attention kernels
+  (`scoreRows4F16`, `weightedAccumRows4F16`, `vecExpAffineSumInPlace`,
+  `vecMaxReduce`) live beside their one consumer as
+  `models.research.subq_kernels`; `backend/vector/primitives.zig` keeps
+  `dotF32F16` (still `fucina.simd`-adjacent) and the f16 lane widener.
 - Shape and stride arithmetic lives in one core leaf, `src/shape.zig`:
   the `Shape` value (with `Shape.from` normalizing array, tuple, pointer
   and slice spellings), `elementCount`/`storageElementCount` over slices,
