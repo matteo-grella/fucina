@@ -149,8 +149,7 @@ pub const ExecContext = struct {
     quant_dot_gpu_disabled: std.atomic.Value(u32) = .init(0),
     /// Open `pinRowwiseNumerics` scopes on this context (the
     /// speculative-verify kernel pin). While nonzero, every batched
-    /// quant-matmul entry runs `.rowwise` numerics
-    /// (`QuantMatmul.numerics`) and reproduces the m == 1 kernel numerics
+    /// quant-matmul entry reproduces the m == 1 kernel numerics
     /// exactly: the packed/plain entries run as independent single-row
     /// calls of themselves, the fused K-quant entries keep their per-row
     /// tail kernels for every row, and the batched MoE op skips the

@@ -38,6 +38,7 @@
 //!               *Scalar = portable fallback, *Dual = two row-groups for sdot ILP
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
+const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 pub const types = @import("quant/types.zig");
@@ -405,6 +406,23 @@ pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
     // blocks. `dtype_mod.blockSize` compile-errors on non-block dtypes,
     // preserving the old switch's `else` behavior.
     return types.blockCountExact(comptime dtype_mod.blockSize(tensor_dtype), len);
+}
+
+/// How many leading rows of an m-row batch the x4-lane-packed LHS kernels
+/// take, per K-quant weight: the padded Q4_K kernel takes every batch of at
+/// least `parallel.q4_k_x4_min_rows` rows in one pass (a partial last
+/// group is masked); Q5_K has no padded kernel, so its remainder rows cost
+/// a second pass over the packed weights and the x4 arm only pays from
+/// `parallel.q5_k_x4_prefix_min_rows` rows (or an exact multiple of 4);
+/// Q6_K has no x4 LHS kernel. One rule for the exec fused engine and the
+/// native dispatch tier.
+pub fn x4PrefixRows(comptime weight: DType, m: usize) usize {
+    return switch (weight) {
+        .q4_k => if (m % 4 == 0 or m >= parallel.q4_k_x4_min_rows) m else 0,
+        .q5_k => if (m % 4 == 0 or m >= parallel.q5_k_x4_prefix_min_rows) m - m % 4 else 0,
+        .q6_k => 0,
+        else => @compileError("x4PrefixRows: no x4-packed LHS arm for ." ++ @tagName(weight)),
+    };
 }
 
 /// The one quantized GEMM entry over a request `g` (`backend/ops.zig`

@@ -46,6 +46,20 @@ this point; earlier history is `git log`.
   one body, argmax is the extremum core, and the plain hand-rolled pool
   splits in exec and ag ride the runtime helper. `LogRowsTask`,
   `SplitGluTask` and `SplitGluBackwardTask` are aliases of their twins.
+- Quantized matmul routing decisions are made once: the rowwise pin is
+  the context scope alone (`exec.QuantMatmul.numerics` and its `Numerics`
+  enum are gone; the field was never set by a caller, open
+  `ctx.pinRowwiseNumerics()` instead); the x4 prefix policy of the K-quant
+  lane packs is `backend.quantized_matmul.x4PrefixRows`, shared by the
+  exec fused engine and the native tier (the exec engine now takes every
+  Q4_K batch of 4 or more rows through the padded x4 kernel, as the native
+  tier already did); a lane-packed container carries the loader's raw
+  blocks as `raw: ?RawRhs`, so `ExecContext.matmulQuant` makes the
+  accelerator attempt on every route and `weights.dense` no longer tries
+  the GPU before the dot. `RhsLifetime` is defined beside the containers
+  (`backend.quantized_matmul.types.RhsLifetime`; `exec.RhsLifetime` and
+  `fucina.RhsLifetime` still name it); the packed weight's lifetime is
+  read through `rhsLifetime()`/`setRhsLifetime()`.
 
 ## 0.4.0 - 2026-08-27
 

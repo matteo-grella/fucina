@@ -43,6 +43,36 @@ pub const QuantizedFormatError = error{
 /// re-exports the enum beside `QuantGemm`.
 pub const RhsPack = enum { rows, x4, x8, x2mmla };
 
+/// Caller promise about an RHS pointer's lifetime, the gate of the
+/// address-keyed accelerator caches.
+pub const RhsLifetime = enum {
+    /// Ordinary tensor/temporary storage. The backend may still use the GPU,
+    /// but it must not cache an address-keyed wrap beyond this dispatch.
+    transient,
+    /// Caller guarantees the RHS bytes stay mapped at the same address for the
+    /// process lifetime, or are registered device-resident storage
+    /// (`internal.gpu.allocResidentBytes`) whose owner evicts cached wraps via
+    /// `freeResidentBytes` before freeing. A backend may cache address-keyed
+    /// wraps.
+    stable_process,
+
+    pub fn isCacheable(self: RhsLifetime) bool {
+        return self == .stable_process;
+    }
+};
+
+/// The raw GGUF row blocks behind a lane-packed container, when its
+/// loader still holds them: the accelerator's dequant-in-kernel GEMM reads
+/// these bytes (`nb01` per RHS row) instead of the CPU lane pack, so the
+/// offload decision is made once, in `ExecContext.matmulQuant`, whatever
+/// container the caller holds. `lifetime` is the caller's promise about
+/// the bytes' address.
+pub const RawRhs = struct {
+    bytes: []const u8,
+    nb01: usize,
+    lifetime: RhsLifetime,
+};
+
 pub fn checkedProduct(a: usize, b: usize) QuantizedFormatError!usize {
     return std.math.mul(usize, a, b) catch QuantizedFormatError.InvalidQuantizedLength;
 }
@@ -271,6 +301,8 @@ pub const QuantizedMatmulRhsQ8_0x4 = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q8_0;
@@ -380,6 +412,8 @@ pub const QuantizedMatmulRhsQ4_Kx4 = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
@@ -401,6 +435,8 @@ pub const QuantizedMatmulRhsQ4_Kx8 = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
@@ -422,6 +458,8 @@ pub const QuantizedMatmulRhsQ4_Kx2Mmla = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q4_k;
@@ -466,6 +504,8 @@ pub const QuantizedMatmulRhsQ5_Kx8 = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q5_k;
@@ -510,6 +550,8 @@ pub const QuantizedMatmulRhsQ6_Kx4 = struct {
     k: usize,
     n: usize,
     blocks_per_group: usize,
+    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+    raw: ?RawRhs = null,
 
     const Self = @This();
     pub const dtype: DType = .q6_k;

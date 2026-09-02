@@ -314,8 +314,8 @@ pub const RowwiseNumericsScope = struct {
     }
 };
 
-/// Pin every quant-matmul entry on this context to `.rowwise` numerics
-/// (`QuantMatmul.numerics`) while the returned scope is open: batched
+/// Pin every quant-matmul entry on this context to the m == 1 kernel
+/// numerics while the returned scope is open: batched
 /// entries reproduce the m == 1 kernel numerics bitwise, so a
 /// speculative-verify batch's logits — and the KV rows it leaves behind —
 /// equal sequential decode's (the lossless-speculation requirement at any
@@ -328,7 +328,7 @@ pub fn pinRowwiseNumerics(self: *ExecContext) RowwiseNumericsScope {
 }
 
 /// True while a `pinRowwiseNumerics` scope is open: the quant matmuls
-/// then run `.rowwise` numerics regardless of the per-call request.
+/// then run one row at a time on the m == 1 kernels.
 pub fn rowwiseNumericsPinned(self: *const ExecContext) bool {
     return self.rowwise_numerics_pinned > 0;
 }

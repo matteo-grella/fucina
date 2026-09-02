@@ -36,8 +36,8 @@ fn restoreGpuResidencyAfterDeclinedFusion(ctx: *ExecContext, parts: []const *Lin
             .bf16 => {},
         },
         .packed_quant => |*pq| switch (pq.*) {
-            inline else => |*weight| if (!weight.rhs_lifetime.isCacheable() and try gpu.makeGpuResidentQuantWeight(@TypeOf(weight.*).dtype, ctx, &weight.value)) {
-                weight.rhs_lifetime = .stable_process;
+            inline else => |*weight| if (!weight.rhsLifetime().isCacheable() and try gpu.makeGpuResidentQuantWeight(@TypeOf(weight.*).dtype, ctx, &weight.value)) {
+                weight.setRhsLifetime(.stable_process);
             },
         },
         // loadForFusion skipped the fold residency; a declined fx4 part

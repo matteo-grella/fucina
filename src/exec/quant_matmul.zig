@@ -38,21 +38,7 @@ fn checkedTensorProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
 }
 
-pub const RhsLifetime = enum {
-    /// Ordinary tensor/temporary storage. The backend may still use the GPU,
-    /// but it must not cache an address-keyed wrap beyond this dispatch.
-    transient,
-    /// Caller guarantees the RHS bytes stay mapped at the same address for the
-    /// process lifetime, or are registered device-resident storage
-    /// (`internal.gpu.allocResidentBytes`) whose owner evicts cached wraps via
-    /// `freeResidentBytes` before freeing. A backend may cache address-keyed
-    /// wraps.
-    stable_process,
-
-    pub fn isCacheable(self: RhsLifetime) bool {
-        return self == .stable_process;
-    }
-};
+pub const RhsLifetime = backend_mod.quantized_matmul.types.RhsLifetime;
 
 pub fn dequantizeTensor(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
     comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("dequantizeTensor requires a block-quantized dtype");
@@ -74,23 +60,21 @@ pub fn getRowsQuantized(self: *ExecContext, comptime dtype: DType, table: *const
 }
 
 pub const Placement = enum { auto, cpu };
-pub const Numerics = enum { batched, rowwise };
 
 /// One quantized matmul request at the exec seam: `prologue` names the
 /// fused activation applied to the LHS rows before quantization (null =
 /// plain activations), `placement` whether the accelerator may be
-/// consulted (`.auto` asks `offload`, exactly as the dedicated entries
-/// did; a decline falls through to the CPU kernels), `rhs_lifetime` the
-/// RHS storage guarantee for address-keyed GPU caches, and `numerics` the
-/// batch policy: `.rowwise` pins every row to the m == 1 kernels, also
-/// forced context-wide by an open `pinRowwiseNumerics` scope (the K-quant
-/// fused engine pins by forcing its per-row tail kernel instead of
+/// consulted (`.auto` asks `offload`; a decline falls through to the CPU
+/// kernels), and `rhs_lifetime` the storage guarantee of a compact RHS
+/// for the address-keyed GPU caches (a lane-packed container states it in
+/// its own `raw`). The batch numerics are the context's: an open
+/// `pinRowwiseNumerics` scope pins every row to the m == 1 kernels (the
+/// K-quant fused engine pins by forcing its per-row tail kernel instead of
 /// looping).
 pub const QuantMatmul = struct {
     prologue: ?exec_row_ops.FusedActKind = null,
     placement: Placement = .auto,
     rhs_lifetime: RhsLifetime = .transient,
-    numerics: Numerics = .batched,
 };
 
 /// The activation operand of `matmulQuant`: plain rows, or the operands
@@ -193,7 +177,8 @@ fn lhsGeometry(lhs: Lhs, comptime opts: QuantMatmul, rhs_k: usize) !struct { m: 
 /// The one quantized matmul entry: `lhs` (with `opts.prologue`'s fused
 /// activation) x a packed or compact RHS container -> f32 [m, rhs.n]. The
 /// body is one row-pinned fallback, one fused prologue (prepare + fused
-/// activate+quantize), one accelerator attempt, and one backend call.
+/// activate+quantize), one accelerator attempt (over the compact blocks,
+/// or a lane pack's `raw` blocks), and one backend call.
 pub fn matmulQuant(self: *ExecContext, lhs: Lhs, rhs: anytype, comptime opts: QuantMatmul) !Tensor {
     const geo = try lhsGeometry(lhs, opts, rhs.k);
     var out = try self.empty(.f32, .{ geo.m, rhs.n });
@@ -225,14 +210,15 @@ fn matmulQuantImpl(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     const Rhs = @typeInfo(@TypeOf(rhs)).pointer.child;
     comptime if (opts.prologue != null and rhsClass(Rhs) != .lane_packed)
         @compileError("matmulQuant: the fused prologues serve the lane-packed containers, not " ++ @typeName(Rhs));
-    // The one row-pinned fallback (see `QuantMatmul.numerics` and
-    // `ExecContext.pinRowwiseNumerics`). The dense panel never pins; the K-quant
-    // fused engine pins inside its body.
+    // The one rowwise-pin decision (`ExecContext.pinRowwiseNumerics`): the
+    // dense panel never pins; the K-quant fused engine pins inside its body
+    // by forcing its per-row tail kernel; everything else runs the body one
+    // row at a time.
+    const pinned = self.rowwiseNumericsPinned();
     if (comptime rhsClass(Rhs) != .dense and !pinsViaTailKernel(Rhs, opts)) {
-        if ((self.rowwiseNumericsPinned() or opts.numerics == .rowwise) and m > 1)
-            return rowwisePinned(self, out, lhs, rhs, opts, m, k);
+        if (pinned and m > 1) return rowwisePinned(self, out, lhs, rhs, opts, m, k);
     }
-    return matmulQuantBody(self, out, lhs, rhs, opts, m, k);
+    return matmulQuantBody(self, out, lhs, rhs, opts, m, k, pinned);
 }
 
 /// Kernel-pinned batch fallback: prepare each input once, then feed the
@@ -256,7 +242,7 @@ fn rowwisePinned(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, compt
             defer row.deinit();
             for (0..m) |r| {
                 @memcpy(row.data(), input[r * width ..][0..width]);
-                try matmulQuantBody(self, &row_out, .{ .plain = &row }, rhs, opts, 1, k);
+                try matmulQuantBody(self, &row_out, .{ .plain = &row }, rhs, opts, 1, k, true);
                 @memcpy(out_data[r * n ..][0..n], row_out.dataConst());
             }
         },
@@ -268,7 +254,7 @@ fn rowwisePinned(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, compt
             defer row.deinit();
             for (0..m) |r| {
                 @memcpy(row.data(), input[r * k ..][0..k]);
-                try matmulQuantBody(self, &row_out, .{ .rms_norm = .{ .x = &row, .weight = rn.weight, .eps = rn.eps } }, rhs, opts, 1, k);
+                try matmulQuantBody(self, &row_out, .{ .rms_norm = .{ .x = &row, .weight = rn.weight, .eps = rn.eps } }, rhs, opts, 1, k, true);
                 @memcpy(out_data[r * n ..][0..n], row_out.dataConst());
             }
         },
@@ -286,7 +272,7 @@ fn rowwisePinned(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, compt
             for (0..m) |r| {
                 @memcpy(g_row.data(), g_in[r * k ..][0..k]);
                 @memcpy(u_row.data(), u_in[r * k ..][0..k]);
-                try matmulQuantBody(self, &row_out, .{ .gate_up = .{ .gate = &g_row, .up = &u_row } }, rhs, opts, 1, k);
+                try matmulQuantBody(self, &row_out, .{ .gate_up = .{ .gate = &g_row, .up = &u_row } }, rhs, opts, 1, k, true);
                 @memcpy(out_data[r * n ..][0..n], row_out.dataConst());
             }
         },
@@ -310,7 +296,7 @@ fn quantGemmAttempt(comptime fmt: offload.QuantFormat, out: *Tensor, rhs_bytes: 
     return offload.gemmQuant(fmt, rhs_bytes, rhs_lifetime.isCacheable(), nb01, input, out, m, n, k);
 }
 
-fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, comptime opts: QuantMatmul, m: usize, k: usize) !void {
+fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, comptime opts: QuantMatmul, m: usize, k: usize, pinned: bool) !void {
     const Rhs = @typeInfo(@TypeOf(rhs)).pointer.child;
     const n = rhs.n;
     if (comptime opts.prologue) |act| {
@@ -323,7 +309,6 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
             .q6_kx4 => .q6_kx4,
             else => unreachable,
         };
-        const pinned = self.rowwiseNumericsPinned() or opts.numerics == .rowwise;
         switch (comptime act) {
             .split_swiglu => {
                 const gate_up = switch (lhs) {
@@ -359,25 +344,28 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     };
     var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    switch (comptime rhsClass(Rhs)) {
-        .compact => {
-            if (comptime opts.placement == .auto and compactGpuFormat(Rhs.dtype) != null) {
+    // The one accelerator attempt: the compact blocks themselves, or the
+    // raw blocks a lane pack still carries (`RawRhs`); a decline runs the
+    // CPU kernel below.
+    if (comptime opts.placement == .auto and rhsClass(Rhs) != .dense and compactGpuFormat(Rhs.dtype) != null) {
+        const fmt = comptime compactGpuFormat(Rhs.dtype).?;
+        switch (comptime rhsClass(Rhs)) {
+            .compact => {
                 const bytes = compactBlocksBytes(rhs);
                 if (std.math.divExact(usize, bytes.len, @max(n, 1)) catch null) |nb01| {
-                    if (n != 0 and quantGemmAttempt(compactGpuFormat(Rhs.dtype).?, out, bytes, opts.rhs_lifetime, nb01, aa.tensor(), m, n, k, .blocks)) return;
+                    if (n != 0 and quantGemmAttempt(fmt, out, bytes, opts.rhs_lifetime, nb01, aa.tensor(), m, n, k, .blocks)) return;
                 }
-            }
-            self.enableNativeMatmulPoolForWork(Rhs.dtype, m, n, k);
-            try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator(), out, aa.tensor(), @unionInit(backend_mod.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), rhs), m, n, k);
-        },
-        .dense => {
-            self.enableNativeMatmulPoolForWork(.f32, m, n, k);
-            try kernels.matmulPacked(self.pc(), self.allocator(), out, aa.tensor(), rhs, m, n, k);
-        },
-        .lane_packed => {
-            self.enableNativeMatmulPoolForWork(Rhs.dtype, m, n, k);
-            try kernels.matmulPacked(self.pc(), self.allocator(), out, aa.tensor(), rhs, m, n, k);
-        },
+            },
+            .lane_packed => if (rhs.raw) |raw| {
+                if (n != 0 and quantGemmAttempt(fmt, out, raw.bytes, raw.lifetime, raw.nb01, aa.tensor(), m, n, k, .panels)) return;
+            },
+            .dense => comptime unreachable,
+        }
+    }
+    self.enableNativeMatmulPoolForWork(comptime if (rhsClass(Rhs) == .dense) .f32 else Rhs.dtype, m, n, k);
+    switch (comptime rhsClass(Rhs)) {
+        .compact => try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator(), out, aa.tensor(), @unionInit(backend_mod.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), rhs), m, n, k),
+        .dense, .lane_packed => try kernels.matmulPacked(self.pc(), self.allocator(), out, aa.tensor(), rhs, m, n, k),
     }
 }
 
@@ -506,14 +494,15 @@ fn fusedKQuantGemm(
 
     // Pinned mode forces the per-row tail kernels for every row: they are
     // the m == 1 dispatch, so the batch stays bit-identical to sequential
-    // decode (see QuantMatmul.numerics / ExecContext.pinRowwiseNumerics).
-    const use_x4 = !pinned and switch (kind) {
-        .q4_kx8 => m % 4 == 0 or m >= 64 or (m >= 4 and m < 32),
-        .q5_kx8 => m % 4 == 0 or m >= 128,
-        .q6_kx4 => false,
-    };
+    // decode (`ExecContext.pinRowwiseNumerics`). Otherwise the x4 prefix
+    // follows the one policy the native tier applies (`x4PrefixRows`).
     const pad_x4 = kind == .q4_kx8;
-    const prefix_rows = if (!use_x4) 0 else if (pad_x4) m else m - m % 4;
+    const weight_dtype: DType = switch (kind) {
+        .q4_kx8 => .q4_k,
+        .q5_kx8 => .q5_k,
+        .q6_kx4 => .q6_k,
+    };
+    const prefix_rows = if (pinned) 0 else qm.x4PrefixRows(weight_dtype, m);
 
     const scratch_storage = try self.rt.buffers.acquire(parallel.vector_max_threads * 4 * k);
     defer scratch_storage.release();

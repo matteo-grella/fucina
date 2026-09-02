@@ -125,8 +125,7 @@ returns a zero-copy view (a refcounted alias, [§6.2](06-the-execution-runtime-e
 contexts in one process can run different route policy (first consumer: the
 CPU f32 weight-shadow route).
 `pinRowwiseNumerics()` opens a scope that pins every batched quant-matmul
-entry on the context to the `m == 1` kernel numerics
-(`QuantMatmul.numerics = .rowwise`, forced context-wide) — the
+entry on the context to the `m == 1` kernel numerics — the
 packed/plain entries run as independent single-row calls of themselves,
 the fused K-quant entries keep their per-row tail kernels for every row,
 and the batched MoE op skips the lane-packed Q8_Kx4 kernels — so a

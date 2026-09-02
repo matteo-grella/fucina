@@ -23,6 +23,7 @@ const PackedRhs = ag_mod.PackedRhs;
 const DType = dtype_mod.DType;
 const ExecContext = exec_mod.ExecContext;
 const RhsLifetime = exec_mod.RhsLifetime;
+const RawRhs = backend_mod.quantized_matmul.types.RawRhs;
 const Error = common.Error;
 const QuantWeight = common.QuantWeight;
 const LoadOptions = common.LoadOptions;
@@ -38,11 +39,12 @@ pub const WeightBf16 = Tensor(.{ .dtype = .bf16, .tags = .{ .out, .in } });
 /// serves every packed format — the four public names below are distinct
 /// instantiations, so `LinearWeight`'s union arms stay nominal and every
 /// change to the ownership/residency contract lands in all four at once.
+/// The pack carries the raw blocks and their lifetime (`RawRhs`), which is
+/// how `ExecContext.matmulQuant` makes the accelerator attempt itself.
 fn PackedQuantWeight(comptime dt: DType) type {
     return struct {
         value: QuantWeight(dt),
         packed_rhs: PackedRhs(dt),
-        rhs_lifetime: RhsLifetime = .transient,
 
         const Self = @This();
 
@@ -59,7 +61,19 @@ fn PackedQuantWeight(comptime dt: DType) type {
             errdefer owned.deinit();
             var packed_rhs = try owned.packRhs(ctx);
             errdefer packed_rhs.deinit();
-            return .{ .value = owned, .packed_rhs = packed_rhs, .rhs_lifetime = rhs_lifetime };
+            packed_rhs.raw = rawRhsOf(dt, &owned, rhs_lifetime);
+            return .{ .value = owned, .packed_rhs = packed_rhs };
+        }
+
+        /// The lifetime promise the pack carries for its raw blocks.
+        pub fn rhsLifetime(self: *const Self) RhsLifetime {
+            return if (self.packed_rhs.raw) |raw| raw.lifetime else .transient;
+        }
+
+        /// Restate the raw blocks and their lifetime after the value moved
+        /// (device residency taken after init).
+        pub fn setRhsLifetime(self: *Self, rhs_lifetime: RhsLifetime) void {
+            self.packed_rhs.raw = rawRhsOf(dt, &self.value, rhs_lifetime);
         }
 
         pub fn deinit(self: *Self) void {
@@ -70,7 +84,7 @@ fn PackedQuantWeight(comptime dt: DType) type {
 
         pub fn cloneView(self: *const Self, ctx: *ExecContext) !Self {
             const value = try self.value.withTags(ctx, .{ .out, .in });
-            return initWithRhsLifetime(ctx, value, self.rhs_lifetime);
+            return initWithRhsLifetime(ctx, value, self.rhsLifetime());
         }
 
         pub fn concat(self: *const Self, ctx: *ExecContext, comptime tag: Tag, others: []const *const Self) !Self {
@@ -90,38 +104,20 @@ fn PackedQuantWeight(comptime dt: DType) type {
     };
 }
 
+/// The raw `[out, in]` block bytes of a contiguous quantized weight with
+/// their row stride, or null when the value is not contiguous.
+fn rawRhsOf(comptime dt: DType, value: *const QuantWeight(dt), rhs_lifetime: RhsLifetime) ?RawRhs {
+    const wraw = value.asRawTensor();
+    if (!wraw.isContiguous()) return null;
+    const bytes = std.mem.sliceAsBytes(wraw.dataConst());
+    const nb01 = std.math.divExact(usize, bytes.len, value.dim(.out)) catch return null;
+    return .{ .bytes = bytes, .nb01 = nb01, .lifetime = rhs_lifetime };
+}
+
 pub const WeightQ4_K = PackedQuantWeight(.q4_k);
 pub const WeightQ5_K = PackedQuantWeight(.q5_k);
 pub const WeightQ6_K = PackedQuantWeight(.q6_k);
 pub const WeightQ8_0 = PackedQuantWeight(.q8_0);
-
-/// Try the dense quantized GPU matmul: `out = in · dequant(W)ᵀ` over the raw
-/// GGUF blocks (`weight.value`), via the provider's dequant-in-kernel
-/// GEMM. Returns null — caller falls back to the CPU packed path — when the GPU
-/// is off, the input needs gradients (training), or the exec gate declines
-/// (shape/work threshold). Comptime-elided on non-gpu builds.
-fn denseQuantGpuTry(
-    comptime dtype: DType,
-    weight: anytype,
-    ctx: *ExecContext,
-    input: anytype,
-    comptime in_tag: Tag,
-    comptime out_tag: Tag,
-) !?Tensor(.{ .seq, out_tag }) {
-    if (comptime !offload.supportsQuantDType(dtype)) return null;
-    if (input.requiresGrad()) return null;
-    const m = input.dim(.seq);
-    const k = input.dim(in_tag);
-    const n = weight.value.dim(.out);
-    if (weight.value.dim(.in) != k) return null;
-    const wraw = weight.value.asRawTensor();
-    if (!wraw.isContiguous()) return null;
-    const wbytes = std.mem.sliceAsBytes(wraw.dataConst());
-    const nb01 = std.math.divExact(usize, wbytes.len, n) catch return null;
-    var out = (try ctx.tryMatmulQuantRhs(dtype, wbytes, weight.rhs_lifetime, nb01, input.asRawTensor(), m, n, k)) orelse return null;
-    errdefer out.deinit();
-    return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out);
-}
 
 /// Programmatic override for the decode-route gate
 /// (`tuning.Table.decode_compact`, where the bandwidth argument lives):
@@ -144,10 +140,10 @@ fn hasCompactDecodeRoute(comptime dt: DType) bool {
 }
 
 /// Packed quantized linear forward, one body for every
-/// `PackedQuantWeight` format: the GPU offload try first, then (where the
-/// format has one) the decode-shape compact route, then the packed CPU
-/// dot. Grad inputs keep the packed path's explicit
-/// GradientQuantizedMatmulUnsupported error.
+/// `PackedQuantWeight` format: (where the format has one) the
+/// decode-shape compact route, else the packed dot; the accelerator
+/// attempt happens inside `matmulQuant` on either route. Grad inputs keep
+/// the packed path's explicit GradientQuantizedMatmulUnsupported error.
 pub fn linearSeq(
     weight: anytype,
     ctx: *ExecContext,
@@ -156,12 +152,10 @@ pub fn linearSeq(
     comptime out_tag: Tag,
 ) !Tensor(.{ .seq, out_tag }) {
     const dt = @TypeOf(weight.*).dtype;
-    if (try denseQuantGpuTry(dt, weight, ctx, input, in_tag, out_tag)) |r| return r;
     // Decode shapes: contract against the resident GGUF-native compact
     // blocks (`weight.value`) through the public quantized-RHS `dot` —
     // bitwise-equal outputs, fewer weight bytes streamed (see the
-    // `tuning.Table.decode_compact` doc). The GPU try stays first so `-Dgpu`
-    // builds keep their offload policy ahead of the CPU route choice.
+    // `tuning.Table.decode_compact` doc).
     if (comptime hasCompactDecodeRoute(dt)) {
         if (input.dim(.seq) < 4 and !input.requiresGrad() and tuning.get().decode_compact) {
             var tagged = try weight.value.withTags(ctx, .{ out_tag, in_tag });
