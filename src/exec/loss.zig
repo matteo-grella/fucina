@@ -13,14 +13,14 @@ const tensor = @import("../tensor.zig");
 const exec_matmul = @import("matmul.zig");
 const backend_mod = @import("../backend.zig");
 const exec_row_ops = backend_mod.rows;
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 
-const productAfterAxis = exec_shape.productAfterAxis;
-const productBeforeAxis = exec_shape.productBeforeAxis;
-const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
+const productAfterAxis = shape_mod.productAfterAxis;
+const productBeforeAxis = shape_mod.productBeforeAxis;
+const shapeWithoutAxis = shape_mod.withoutAxis;
 
 const CrossEntropyLossRowsTask = exec_row_ops.CrossEntropyLossRowsTask;
 const CrossEntropyBackwardRowsTask = exec_row_ops.CrossEntropyBackwardRowsTask;
@@ -166,7 +166,6 @@ pub fn crossEntropyLoss(
     labels: []const usize,
     options: CrossEntropyOptions,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const row_stats = options.row_stats;
 
@@ -326,7 +325,6 @@ fn crossEntropyBackwardScaled(
     scale_value: f32,
     per_row_scale: ?[]const f32,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const row_stats: ?[]const f32 = options.row_stats;
 

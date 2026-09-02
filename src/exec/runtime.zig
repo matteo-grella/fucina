@@ -13,6 +13,7 @@ const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const fpenv = @import("../fpenv.zig");
 const parallel = @import("../parallel.zig");
+const shape_mod = @import("../shape.zig");
 const storage = @import("../storage.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
@@ -23,6 +24,7 @@ const ExecContext = @import("../exec.zig").ExecContext;
 
 const Allocator = std.mem.Allocator;
 const DType = tensor.DType;
+const Shape = shape_mod.Shape;
 const Tensor = tensor.Tensor;
 
 /// Reusable transient-buffer pool. Defined in the `buffer_pool.zig` leaf.
@@ -502,92 +504,22 @@ pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker {
 // storage dtype).
 // ------------------------------------------------------------------
 
-/// Comptime rank carried by a shape argument: `[n]usize` arrays, pointers
-/// to arrays (`&.{...}`), and integer tuples report their rank through the
-/// type; a `[]const usize` slice reports null and takes the runtime-rank
-/// path.
-pub fn shapeComptimeRank(comptime Shape: type) ?usize {
-    const invalid = "shape must be a [n]usize array, a tuple of sizes, or a []const usize slice";
-    return switch (@typeInfo(Shape)) {
-        .array => |info| info.len,
-        .pointer => |info| switch (info.size) {
-            .one => shapeComptimeRank(info.child),
-            .slice => null,
-            else => @compileError(invalid),
-        },
-        .@"struct" => |info| if (info.is_tuple) info.fields.len else @compileError(invalid),
-        else => @compileError(invalid),
-    };
-}
-
-pub fn shapeArray(comptime rank: usize, shape: anytype) [rank]usize {
-    var out: [rank]usize = undefined;
-    if (comptime @typeInfo(@TypeOf(shape)) == .pointer) {
-        inline for (shape.*, 0..) |dim, i| out[i] = dim;
-    } else {
-        inline for (shape, 0..) |dim, i| out[i] = dim;
-    }
-    return out;
-}
-
-fn shapeElementCount(shape: anytype) !usize {
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        return tensor.elementCountArray(rank, shapeArray(rank, shape));
-    }
-    return tensor.elementCount(shape);
-}
-
-fn shapeStorageElementCount(comptime dtype: DType, shape: anytype) !usize {
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        return tensor.storageElementCountArray(dtype, rank, shapeArray(rank, shape));
-    }
-    return tensor.storageElementCount(dtype, shape);
-}
-
-/// Uninitialized tensor of `dtype` with `shape`: a `[n]usize` array or a
-/// tuple of sizes takes the comptime-rank arm, a `[]const usize` slice the
-/// runtime-rank arm.
+/// Uninitialized tensor of `dtype` with `shape`: a `[n]usize` array, a
+/// tuple of sizes, or a `[]const usize` slice (`shape.Shape.from` is the
+/// one normalization).
 pub fn empty(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.TensorOf(dtype) {
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        const shape_array = shapeArray(rank, shape);
-        if (comptime dtype == .f32) {
-            const len = try tensor.elementCountArray(rank, shape_array);
-            const buffer = try self.rt.buffers.acquire(len);
-            errdefer buffer.release();
-            return Tensor.fromOwnedBuffer(buffer, shape_array[0..]);
-        }
-        const len = try tensor.storageElementCountArray(dtype, rank, shape_array);
-        const buffer = try self.rt.buffers.acquireTyped(dtype, len);
-        errdefer buffer.release();
-        return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape_array[0..]);
-    }
-    if (comptime dtype == .f32) {
-        const len = try tensor.elementCount(shape);
-        const buffer = try self.rt.buffers.acquire(len);
-        errdefer buffer.release();
-        return Tensor.fromOwnedBuffer(buffer, shape);
-    }
-    const len = try tensor.storageElementCount(dtype, shape);
+    const dims = try Shape.from(shape);
+    const len = try shape_mod.storageElementCount(dtype, dims.slice());
     const buffer = try self.rt.buffers.acquireTyped(dtype, len);
     errdefer buffer.release();
-    return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, shape);
+    return tensor.TensorOf(dtype).fromOwnedBuffer(buffer, dims.slice());
 }
 
 /// Zero-copy broadcast view of `x` with `shape` (array/tuple or slice).
 pub fn broadcastTo(self: *ExecContext, x: *const Tensor, shape: anytype) !Tensor {
     _ = self;
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        return x.broadcastToRank(rank, shapeArray(rank, shape));
-    }
-    return x.broadcastTo(shape);
+    const dims = try Shape.from(shape);
+    return x.broadcastTo(dims.slice());
 }
 
 pub fn zeros(self: *ExecContext, comptime dtype: DType, shape: anytype) !tensor.TensorOf(dtype) {
@@ -615,39 +547,29 @@ pub fn scalar(self: *ExecContext, comptime dtype: DType, value: dtype_mod.Scalar
 }
 
 pub fn fromSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    const len = try shapeElementCount(shape);
-    if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.empty(dtype, shape);
+    const dims = try Shape.from(shape);
+    if (try shape_mod.elementCount(dims.slice()) != values.len) return tensor.TensorError.InvalidDataLength;
+    var out = try self.empty(dtype, dims.slice());
     @memcpy(out.data(), values);
     return out;
 }
 
 pub fn fromBorrowedSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        const shape_array = shapeArray(rank, shape);
-        return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, shape_array[0..], values);
-    }
-    return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, shape, values);
+    const dims = try Shape.from(shape);
+    return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, dims.slice(), values);
 }
 
 pub fn fromStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
-    const len = try shapeStorageElementCount(dtype, shape);
-    if (len != values.len) return tensor.TensorError.InvalidDataLength;
-    var out = try self.empty(dtype, shape);
+    const dims = try Shape.from(shape);
+    if (try shape_mod.storageElementCount(dtype, dims.slice()) != values.len) return tensor.TensorError.InvalidDataLength;
+    var out = try self.empty(dtype, dims.slice());
     @memcpy(out.data(), values);
     return out;
 }
 
 pub fn fromBorrowedStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
-    const maybe_rank = comptime shapeComptimeRank(@TypeOf(shape));
-    if (comptime maybe_rank != null) {
-        const rank = comptime maybe_rank.?;
-        const shape_array = shapeArray(rank, shape);
-        return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.rt.allocator, shape_array[0..], values);
-    }
-    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.rt.allocator, shape, values);
+    const dims = try Shape.from(shape);
+    return tensor.TensorOf(dtype).fromBorrowedStorageSlice(self.rt.allocator, dims.slice(), values);
 }
 
 pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {

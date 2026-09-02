@@ -276,7 +276,7 @@ sched.apply(optim.warmupCosineFactor(macro_step, ...)); // keyed by MACRO step
 
 `x.crossEntropy(ctx, .class, labels, .{})` is plain mean CE; the trailing
 `options` argument adds the PyTorch-parity knobs
-(`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:41`):
+(`exec.CrossEntropyOptions`, comptime — `src/exec/loss.zig:42`):
 
 - `ignore_index` — sentinel label: those positions contribute zero loss and
   zero gradient and are excluded from the `.mean` denominator (PyTorch

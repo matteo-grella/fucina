@@ -149,6 +149,7 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/tuning.zig", .band = .primitives },
 
     .{ .path = "src/dtype.zig", .band = .core },
+    .{ .path = "src/shape.zig", .band = .core },
     .{ .path = "src/storage.zig", .band = .core },
     .{ .path = "src/accelerator.zig", .band = .core },
     .{ .path = "src/rng.zig", .band = .core },

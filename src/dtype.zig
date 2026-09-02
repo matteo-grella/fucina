@@ -456,6 +456,14 @@ pub fn supportsForwardFloatMath(comptime dtype: DType) bool {
     };
 }
 
+/// Comptime guard of the forward float ops: the dtype must be one the
+/// float kernels serve.
+pub fn requireForwardFloatMath(comptime dtype: DType) void {
+    if (!supportsForwardFloatMath(dtype)) {
+        @compileError("forward math is currently supported only for floating dtypes");
+    }
+}
+
 pub fn supportsToFloat(comptime dtype: DType) bool {
     return supportsForwardFloatMath(dtype) or isF8(dtype) or isBlockQuantized(dtype);
 }

@@ -22,13 +22,13 @@ const std = @import("std");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-const contiguousStridesArray = exec_shape.contiguousStridesArray;
+const contiguousStridesArray = shape_mod.contiguousStrides;
 
 pub const RopeMode = enum {
     interleaved,
@@ -413,7 +413,6 @@ fn ropeWithTableDirection(
     comptime mode: RopeMode,
     comptime inverse: bool,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (position_axis >= rank or feature_axis >= rank) @compileError("axis out of bounds");
     if (position_axis == feature_axis) @compileError("position and feature axes must differ");
 

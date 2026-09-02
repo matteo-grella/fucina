@@ -6,6 +6,7 @@
 //! a neutral tensor-only format with mmap-friendly contiguous data. GGUF
 //! remains a separate LLM interop/export codec.
 const std = @import("std");
+const shape_mod = @import("shape.zig");
 const tensor_mod = @import("tensor.zig");
 const dtype_mod = @import("dtype.zig");
 const safetensors = @import("safetensors.zig");
@@ -197,7 +198,7 @@ fn stateDictDtype(comptime P: type) DType {
 }
 
 fn stateDictByteLen(dtype: DType, dims: []const usize) !usize {
-    const elems = try tensor_mod.elementCount(dims);
+    const elems = try shape_mod.elementCount(dims);
     const elem_size: usize = switch (dtype) {
         .f32 => 4,
         .f16, .bf16 => 2,

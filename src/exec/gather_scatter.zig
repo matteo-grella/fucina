@@ -14,16 +14,16 @@ const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
 
 const exec_row_ops = backend_mod.rows;
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
-const productAfterAxis = exec_shape.productAfterAxis;
-const productBeforeAxis = exec_shape.productBeforeAxis;
-const contiguousStridesArray = exec_shape.contiguousStridesArray;
-const coordinateForLinear = exec_shape.coordinateForLinear;
+const productAfterAxis = shape_mod.productAfterAxis;
+const productBeforeAxis = shape_mod.productBeforeAxis;
+const contiguousStridesArray = shape_mod.contiguousStrides;
+const coordinateForLinear = backend_mod.rows.coordinateForLinear;
 
 const ScatterAddRowsTask = exec_row_ops.ScatterAddRowsTask;
 const runScatterAddRowsTask = exec_row_ops.runScatterAddRowsTask;
@@ -73,7 +73,6 @@ pub fn narrowAxis(
     length: usize,
 ) !tensor.TensorOf(dtype) {
     _ = ctx;
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (length == 0) return tensor.TensorError.InvalidShape;
 
@@ -93,7 +92,6 @@ pub fn concatAxis(
     inputs: []const *const tensor.TensorOf(dtype),
     comptime axis: usize,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (inputs.len == 0) return tensor.TensorError.InvalidShape;
 
@@ -209,7 +207,6 @@ pub fn pad(
     after: usize,
     fill: f32,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (comptime !dtype_mod.supportsForwardFloatMath(dtype)) @compileError("pad: float dtypes only");
 
@@ -245,7 +242,6 @@ pub fn gatherAxis(
     comptime axis: usize,
     indices: []const usize,
 ) !tensor.TensorOf(dtype) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
 
@@ -382,13 +378,12 @@ pub fn takeAlong(
     indices: []const usize,
     out_axis_len: usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (out_axis_len == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
     var out_shape = source.shape;
     out_shape[axis] = out_axis_len;
-    const out_len = try tensor.elementCountArray(rank, out_shape);
+    const out_len = try shape_mod.elementCount(&out_shape);
     if (indices.len != out_len) return tensor.TensorError.InvalidShape;
 
     const axis_dim = source.shape[axis];
@@ -464,14 +459,13 @@ fn scatterAlongImpl(
     indices: []const usize,
     comptime mode: ScatterMode,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const dest = try base.rankView(rank);
     const sv = try src.rankView(rank);
     inline for (0..rank) |dim| {
         if (dim != axis and sv.shape[dim] != dest.shape[dim]) return tensor.TensorError.ShapeMismatch;
     }
-    const src_len = try tensor.elementCountArray(rank, sv.shape);
+    const src_len = try shape_mod.elementCount(&sv.shape);
     if (indices.len != src_len) return tensor.TensorError.InvalidShape;
 
     const axis_dim = dest.shape[axis];
@@ -549,7 +543,6 @@ fn runScatterAlongTask(comptime mode: ScatterMode) fn (*const ScatterAlongTask(m
 }
 
 pub fn zeroSlice(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, start: usize, length: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (length == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
@@ -569,7 +562,6 @@ pub fn zeroSlice(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comp
 }
 
 pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, indices: []const usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
     const source = try x.rankView(rank);
@@ -610,9 +602,8 @@ pub fn zeroRows(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
 }
 
 pub fn sliceGradient(ctx: *ExecContext, comptime rank: usize, grad: *const Tensor, source_shape: [rank]usize, comptime axis: usize, start: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
-    _ = try tensor.elementCountArray(rank, source_shape);
+    _ = try shape_mod.elementCount(&source_shape);
     const gv = try grad.rankView(rank);
     if (start > source_shape[axis] or gv.shape[axis] > source_shape[axis] - start) return tensor.TensorError.IndexOutOfBounds;
     inline for (0..rank) |dim| {
@@ -690,10 +681,9 @@ pub fn scatterAdd(
     comptime axis: usize,
     indices: []const usize,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (indices.len == 0) return tensor.TensorError.InvalidShape;
-    const source_len = try tensor.elementCountArray(rank, source_shape);
+    const source_len = try shape_mod.elementCount(&source_shape);
 
     var expected_grad_shape = source_shape;
     expected_grad_shape[axis] = indices.len;

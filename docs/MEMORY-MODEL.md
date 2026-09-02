@@ -68,12 +68,12 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty(.f32, ...)`
-  acquires from it (`src/exec/runtime.zig:479-505`). In an LLM forward
+  acquires from it (`src/exec/runtime.zig:510-516`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
   slabs (`[]align(64) u8`). `empty` routes every
-  non-f32 dtype through `BufferPool.acquireTyped` (`src/exec/runtime.zig:491/:502`), which
+  non-f32 dtype through `BufferPool.acquireTyped` (`src/exec/runtime.zig:513`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no
@@ -104,7 +104,7 @@ slot (`src/models/text/kv_cache.zig:286-298`).
   values as views the op takes when it builds the record
   (`saved_input = try self.asRawTensor().cloneView()` and friends in
   `src/ag/tensor/elementwise.zig` and `src/ag/tensor/float/matmul.zig`), and
-  `cloneView` bumps the refcount (`src/tensor.zig:224-228`).
+  `cloneView` bumps the refcount (`src/tensor.zig:185-189`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -117,10 +117,10 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:224-228`), `viewWithStrides(Offset)`
-(`src/tensor.zig:230/:234`), `reshape` (`src/tensor.zig:258`), `broadcastTo`
-(`src/tensor.zig:272`); `narrow` goes through `viewWithStridesOffset`
-(`src/exec/gather_scatter.zig:66-87`). A view's lifetime is independent of its parent's.
+`cloneView` (`src/tensor.zig:185-189`), `viewWithStrides(Offset)`
+(`src/tensor.zig:191/:195`), `reshape` (`src/tensor.zig:219`), `broadcastTo`
+(`src/tensor.zig:233`); `narrow` goes through `viewWithStridesOffset`
+(`src/exec/gather_scatter.zig:66-86`). A view's lifetime is independent of its parent's.
 
 The most important instance: per-step attention reads the KV cache via a
 **zero-copy `narrow`** (`src/models/gemma/model.zig:1023-1025`) that aliases a
@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:964/:1059`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec/runtime.zig:765`). An arena frees
+   (which frees the old buffer each layer, `src/exec/runtime.zig:762`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set

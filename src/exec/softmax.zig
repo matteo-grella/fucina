@@ -12,17 +12,15 @@ const dtype_mod = @import("../dtype.zig");
 
 const backend_mod = @import("../backend.zig");
 const exec_row_ops = backend_mod.rows;
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 const DType = dtype_mod.DType;
 
-const productAfterAxis = exec_shape.productAfterAxis;
-const productBeforeAxis = exec_shape.productBeforeAxis;
-const contiguousStridesArray = exec_shape.contiguousStridesArray;
-const floorPowerOfTwo = exec_shape.floorPowerOfTwo;
-const alibiSlope = exec_shape.alibiSlope;
+const productAfterAxis = shape_mod.productAfterAxis;
+const productBeforeAxis = shape_mod.productBeforeAxis;
+const contiguousStridesArray = shape_mod.contiguousStrides;
 
 const SoftmaxRowsTask = exec_row_ops.SoftmaxRowsTask;
 const LogRowsTask = exec_row_ops.LogRowsTask;
@@ -30,7 +28,7 @@ const runLogsumexpRowsTask = exec_row_ops.runLogsumexpRowsTask;
 const runLogSoftmaxRowsTask = exec_row_ops.runLogSoftmaxRowsTask;
 const logsumexpRows = backend_mod.kernels.logsumexpRows;
 const logSoftmaxRows = backend_mod.kernels.logSoftmaxRows;
-const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
+const shapeWithoutAxis = shape_mod.withoutAxis;
 const SoftmaxExtRowsTask = exec_row_ops.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = exec_row_ops.SoftmaxBackwardRowsTask;
 const SoftmaxInnerTask = exec_row_ops.SoftmaxInnerTask;
@@ -74,7 +72,6 @@ pub fn logsumexp(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize,
 }
 
 fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -139,7 +136,6 @@ pub fn logSoftmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize
 }
 
 fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -197,7 +193,6 @@ pub fn softmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
 }
 
 fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -246,7 +241,6 @@ fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
 }
 
 pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, options: SoftmaxExtOptions) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -292,7 +286,7 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     const source_strides = contiguousStridesArray(rank, source.shape);
-    const head_log2 = floorPowerOfTwo(head_count);
+    const head_log2 = std.math.floorPowerOfTwo(usize, head_count);
     var slopes: ?[]f32 = null;
     defer if (slopes) |values| ctx.allocator().free(values);
     if (options.max_bias > 0) {
@@ -340,7 +334,6 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
 /// Softmax VJP along `axis`: `scale_value` folds the forward's logit
 /// scaling into the same pass (`1` for the plain softmax).
 pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize, scale_value: f32) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     try tensor.requireSameShape(y, gy);
 
@@ -394,4 +387,19 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
         .inner_end = inner,
     }, source.len(), inner, runSoftmaxBackwardInnerTask);
     return out;
+}
+
+/// The ggml ALiBi slope schedule: head `i` of `head_log2` (the head count
+/// rounded down to a power of two) takes `2^(-max_bias/head_log2)` powers,
+/// the overflow heads the half-step schedule.
+fn alibiSlope(head_i: usize, head_log2: usize, max_bias: f32) f32 {
+    const head_log2_f: f32 = @floatFromInt(head_log2);
+    const m0 = std.math.pow(f32, 2, -max_bias / head_log2_f);
+    const m1 = std.math.pow(f32, 2, -(max_bias / 2) / head_log2_f);
+    if (head_i < head_log2) {
+        const exponent: f32 = @floatFromInt(head_i + 1);
+        return std.math.pow(f32, m0, exponent);
+    }
+    const exponent: f32 = @floatFromInt(2 * (head_i - head_log2) + 1);
+    return std.math.pow(f32, m1, exponent);
 }

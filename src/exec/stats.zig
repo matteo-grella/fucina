@@ -16,15 +16,15 @@ const tensor = @import("../tensor.zig");
 
 const backend_mod = @import("../backend.zig");
 const exec_row_ops = backend_mod.rows;
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
 
-const shapeWithoutAxis = exec_shape.shapeWithoutAxis;
-const productAfterAxis = exec_shape.productAfterAxis;
-const productBeforeAxis = exec_shape.productBeforeAxis;
+const shapeWithoutAxis = shape_mod.withoutAxis;
+const productAfterAxis = shape_mod.productAfterAxis;
+const productBeforeAxis = shape_mod.productBeforeAxis;
 
 pub const TopKResult = struct {
     values: Tensor,
@@ -77,7 +77,6 @@ pub fn argmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x:
 }
 
 fn argmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !tensor.TensorOf(.i64) {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -161,7 +160,6 @@ fn extremumWidened(ctx: *ExecContext, comptime dtype: DType, comptime rank: usiz
 }
 
 fn extremumAxis(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, comptime op: ExtremumOp) !TopKResult {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -290,7 +288,6 @@ fn extremumMasked(
     comptime op: ExtremumOp,
     empty_value: ?f32,
 ) !TopKResult {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -387,7 +384,6 @@ pub fn varAxis(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
 }
 
 fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, ddof: u1) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -488,7 +484,6 @@ fn standardizeAccum(
     valid_len: ?usize,
     options: StandardizeOptions,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (!(options.eps >= 0)) return tensor.TensorError.InvalidArgument;
 
@@ -598,7 +593,6 @@ fn standardizeBackwardAccum(
     valid_len: ?usize,
     options: StandardizeOptions,
 ) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (!(options.eps >= 0)) return tensor.TensorError.InvalidArgument;
 
@@ -713,7 +707,6 @@ fn standardizeBackwardAccum(
 /// all-NaN row under maxAxis. This DIVERGES from torch.topk,
 /// which treats NaN as greater than every number.
 pub fn topK(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, k: usize) !TopKResult {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     if (k == 0) return tensor.TensorError.InvalidArgument;
 
@@ -798,7 +791,6 @@ fn sortPairBefore(descending: bool, a: SortPair, b: SortPair) bool {
 /// Indices are i64 (the repo-wide index convention, shared with
 /// argmax/topK): exact for any axis length.
 pub fn sort(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize, descending: bool) !TopKResult {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);

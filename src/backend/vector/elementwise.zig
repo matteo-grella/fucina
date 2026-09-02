@@ -548,7 +548,7 @@ pub fn dotIntoTyped(
     b: *const tensor.TensorOf(dtype),
 ) !void {
     if (comptime isa.reference) return scalar.dot(dtype, out, a, b);
-    try tensor.requireSameShapeOf(dtype, a, b);
+    try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
     out.data()[0] = if (comptime dtype == .f64)
         parallelVecDotF64(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotF64(a.dataConst(), b.dataConst())
@@ -1558,7 +1558,7 @@ pub const scalar = struct {
         a: *const tensor.TensorOf(dtype),
         b: *const tensor.TensorOf(dtype),
     ) !void {
-        try tensor.requireSameShapeOf(dtype, a, b);
+        try tensor.requireSameShape(a, b);
         if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
         out.data()[0] = dotSliceTypedScalar(dtype, a.dataConst(), b.dataConst());
     }

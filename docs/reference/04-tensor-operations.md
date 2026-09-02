@@ -1146,7 +1146,7 @@ pre-softmax logit is `x·scale + slope·mask`:
   mask must not require grad (`error.UnsupportedGradient`).
 - `.max_bias = b` with `.head_tag` — ALiBi: a per-head slope multiplies the
   mask, following the ggml slope schedule (powers of `2^(−b/h)` with `h` the
-  head count rounded down to a power of two; `src/exec/shape.zig`
+  head count rounded down to a power of two; `src/exec/softmax.zig`
   `alibiSlope`). Requires `.mask` and `.head_tag` (`InvalidArgument`
   otherwise).
 - `.sinks = slice` — per-head attention sinks: one extra logit per head that

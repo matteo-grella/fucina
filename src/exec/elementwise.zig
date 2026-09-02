@@ -12,7 +12,7 @@ const tensor = @import("../tensor.zig");
 const parallel = @import("../parallel.zig");
 const dtype_mod = @import("../dtype.zig");
 const exec_row_ops = backend_mod.rows;
-const exec_shape = @import("shape.zig");
+const shape_mod = @import("../shape.zig");
 const exec_runtime = @import("runtime.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 const backend_ops = backend_mod.ops;
@@ -20,16 +20,15 @@ const DType = tensor.DType;
 const GatedOp = backend_mod.ops.GatedOp;
 const UnaryOp = backend_mod.ops.UnaryOp;
 
-const dispatchRank = exec_shape.dispatchRank;
-const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
-const requireSameRankShape = exec_shape.requireSameRankShape;
-const requireSameRankShapeOf = exec_shape.requireSameRankShapeOf;
-const shapeArrayFromSlice = exec_shape.shapeArrayFromSlice;
-const validateBroadcastRank = exec_shape.validateBroadcastRank;
-const isExactSuffixRank = exec_shape.isExactSuffixRank;
-const productAfterAxis = exec_shape.productAfterAxis;
-const productBeforeAxis = exec_shape.productBeforeAxis;
-const contiguousStridesArray = exec_shape.contiguousStridesArray;
+const dispatchRank = shape_mod.dispatchRank;
+const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
+const requireSameRankShape = shape_mod.requireSameRankShape;
+const shapeArrayFromSlice = shape_mod.arrayFromSlice;
+const validateBroadcastRank = shape_mod.validateBroadcastRank;
+const isExactSuffixRank = shape_mod.isExactSuffixRank;
+const productAfterAxis = shape_mod.productAfterAxis;
+const productBeforeAxis = shape_mod.productBeforeAxis;
+const contiguousStridesArray = shape_mod.contiguousStrides;
 
 const SplitSwiGluTask = exec_row_ops.SplitSwiGluTask;
 const SplitGluTask = exec_row_ops.SplitGluTask;
@@ -494,7 +493,7 @@ pub fn gated(
     b: *const tensor.TensorOf(dtype),
 ) !tensor.TensorOf(dtype) {
     const compute = comptime ExecContext.widenedCompute(dtype, "gated");
-    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    const shape = try requireSameRankShape(rank, a, b);
     var aa = try ctx.prepareAs(dtype, compute, a);
     defer aa.deinit();
     var bb = try ctx.prepareAs(dtype, compute, b);
@@ -531,7 +530,6 @@ pub fn splitGated(
 }
 
 fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
     const Task = switch (op) {
         .swiglu => SplitSwiGluTask,
@@ -603,7 +601,6 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
 }
 
 pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -671,7 +668,6 @@ pub fn splitSwiGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Te
 }
 
 pub fn splitGluBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const source = try x.rankView(rank);
@@ -836,7 +832,7 @@ pub fn where(
 ) !tensor.TensorOf(dtype) {
     const compute = comptime ExecContext.widenedCompute(dtype, "where");
     if (!std.mem.eql(usize, x.shape.slice(), cond.shape.slice())) return tensor.TensorError.ShapeMismatch;
-    try tensor.requireSameShapeOf(dtype, x, y);
+    try tensor.requireSameShape(x, y);
     var xx = try ctx.prepareAs(dtype, compute, x);
     defer xx.deinit();
     var cc = try ctx.prepareContiguous(cond_dtype, cond);
@@ -890,7 +886,7 @@ pub fn compare(
     if (comptime dtype_mod.isScalarIntegerOrBool(dtype)) return compareInt(ctx, dtype, op, a, b);
     // Floats: the f32 comparison; 16-bit inputs widen (`.widened` policy).
     const compute = comptime ExecContext.widenedCompute(dtype, "compare");
-    try tensor.requireSameShapeOf(dtype, a, b);
+    try tensor.requireSameShape(a, b);
     var aa = try ctx.prepareAs(dtype, compute, a);
     defer aa.deinit();
     var bb = try ctx.prepareAs(dtype, compute, b);
@@ -1048,7 +1044,6 @@ pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tenso
 /// `target[..., i] += row_vector[i]` along the last axis `axis`, then `op`
 /// when given (a fused bias + activation), in `target`'s storage.
 pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, comptime op: ?UnaryOp, target: *Tensor, row_vector: []const f32, comptime axis: usize) !void {
-    if (rank == 0 or rank > tensor.max_rank) @compileError(tensor.invalid_rank_msg);
     if (axis >= rank) @compileError("axis out of bounds");
 
     const view = try target.rankView(rank);
@@ -1369,16 +1364,10 @@ pub fn clamp(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf
 }
 
 /// Sum-reduce `x` down to `target_shape` (array/tuple or slice), the
-/// broadcast VJP. An array or tuple shape carries its rank at comptime and
-/// skips the target-rank dispatch.
+/// broadcast VJP.
 pub fn reduceBroadcast(ctx: *ExecContext, x: *const Tensor, target_shape: anytype) !Tensor {
-    const maybe_rank = comptime exec_runtime.shapeComptimeRank(@TypeOf(target_shape));
-    if (comptime maybe_rank != null) {
-        const target_rank = comptime maybe_rank.?;
-        const shape_array = exec_runtime.shapeArray(target_rank, target_shape);
-        return dispatchRank(reduceBroadcastSourceDispatched, x.shape.len, .{ ctx, target_rank, x, shape_array });
-    }
-    return dispatchRank(reduceBroadcastTargetDispatched, target_shape.len, .{ ctx, x, target_shape });
+    const dims = try tensor.Shape.from(target_shape);
+    return dispatchRank(reduceBroadcastTargetDispatched, dims.len, .{ ctx, x, dims.slice() });
 }
 
 fn reduceBroadcastTargetDispatched(
@@ -1433,7 +1422,7 @@ fn reduceBroadcastFromRankToRank(
     }
 
     if (isExactSuffixRank(target_rank, source_rank, target_shape, source.shape)) {
-        const inner = tensor.elementCountArrayAssumeValid(target_rank, target_shape);
+        const inner = shape_mod.product(&target_shape);
         var base: usize = 0;
         while (base < xd.len) : (base += inner) {
             for (0..inner) |j| {
@@ -1515,7 +1504,7 @@ fn elementwiseRankTyped(
         // no backend kernel; integers are never the hot path). Wrapping
         // two's-complement arithmetic; `div` is a compile error (integer
         // division is explicit: intDiv).
-        const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+        const shape = try requireSameRankShape(rank, a, b);
         var aa = try ctx.prepareContiguous(dtype, a);
         defer aa.deinit();
         var bb = try ctx.prepareContiguous(dtype, b);
@@ -1548,7 +1537,7 @@ fn elementwiseRankTyped(
     }
     const output_dtype = comptime dtype_mod.outputDType(.pointwise, dtype);
 
-    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    const shape = try requireSameRankShape(rank, a, b);
     var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
     var bb = try ctx.prepareContiguous(dtype, b);
@@ -1579,7 +1568,7 @@ pub fn intDiv(
     comptime {
         if (!dtype_mod.supportsIntMath(dtype)) @compileError("intDiv requires an integer dtype");
     }
-    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    const shape = try requireSameRankShape(rank, a, b);
     var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
     var bb = try ctx.prepareContiguous(dtype, b);
@@ -1633,7 +1622,7 @@ pub fn intMod(
     comptime {
         if (!dtype_mod.supportsIntMath(dtype)) @compileError("intMod requires an integer dtype");
     }
-    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    const shape = try requireSameRankShape(rank, a, b);
     var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
     var bb = try ctx.prepareContiguous(dtype, b);
@@ -1685,7 +1674,7 @@ pub fn bitwise(
     comptime {
         if (!dtype_mod.supportsIntMath(dtype)) @compileError("bitwise requires an integer dtype");
     }
-    const shape = try requireSameRankShapeOf(dtype, rank, a, b);
+    const shape = try requireSameRankShape(rank, a, b);
     var aa = try ctx.prepareContiguous(dtype, a);
     defer aa.deinit();
     var bb = try ctx.prepareContiguous(dtype, b);
@@ -1716,7 +1705,7 @@ fn elementwiseRankInto(
     const ov = try out.rankView(rank);
     if (!std.mem.eql(usize, ov.shape[0..], shape[0..])) return tensor.TensorError.ShapeMismatch;
 
-    const len = tensor.elementCountArrayAssumeValid(rank, shape);
+    const len = shape_mod.product(&shape);
     if (ov.isContiguous() and av.isContiguous() and bv.isContiguous()) {
         return backendElementwiseContiguousUnchecked(ctx, op, out, a, b, len);
     }

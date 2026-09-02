@@ -48,7 +48,7 @@ Top-down; a band may depend only on bands at or below it:
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
 | primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (the tuning table over `parallel`'s env readers) |
-| core | `src/dtype.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig` |
+| core | `src/dtype.zig`, `src/shape.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig` |
 
 ## Public Surface
 
@@ -131,8 +131,13 @@ Core value types and substrate:
 - `src/accelerator.zig`: backend-neutral lifetime tokens for
   already-submitted eager GPU work (`Work`) and per-storage mapping caches
   (`Resource`). They contain no operation description or compute graph.
-- `src/tensor.zig`: raw tensor value (`TensorOf(dtype)`), shape/stride
-  metadata, views, broadcast, reshape, materialization, fixed-rank views.
+- `src/shape.zig`: shape and stride arithmetic, the one home for it: the
+  `Shape` inline-dims value and its `from` normalization of every shape
+  spelling, element counting (logical and block-storage), contiguous
+  strides, `dispatchRank`, and the `(outer, axis_dim, inner)` axis
+  geometry the axis-wise kernels share.
+- `src/tensor.zig`: raw tensor value (`TensorOf(dtype)`) over `shape.zig`'s
+  metadata: views, broadcast, reshape, materialization, fixed-rank views.
 - `src/tags.zig`: comptime tag/rank algebra (no runtime representation).
 - `src/rng.zig`: repo-owned deterministic RNG; the (seed → values) mapping is
   a checkpoint contract (APOLLO projections, dropout masks).
@@ -163,7 +168,7 @@ Execution runtime:
   `fakequant.zig` (FP8/FP4/f16 grid round-trips), `elementwise.zig`,
   `norm.zig`, `softmax.zig`, `loss.zig`, `reduce.zig`,
   `topk.zig`, `stats.zig`, `gather_scatter.zig`, `rope.zig`, `convert.zig`,
-  `conv.zig`, `pool.zig`, `shape.zig`. These are not public API; `src/exec.zig` remains
+  `conv.zig`, `pool.zig`. These are not public API; `src/exec.zig` remains
   the runtime boundary.
 - `src/exec/moe_chain.zig`: shared batched-MoE scheduling scaffolding
   (expert-grouped route plan, gather → gate/up → act → down phase-chain
@@ -333,14 +338,14 @@ ag/backward/*.zig
      tensor.zig, dtype.zig, parallel.zig
 
 tag_ops.zig
-  -> exec.zig, tags.zig, tensor.zig
+  -> exec.zig, tags.zig, tensor.zig, shape.zig
 
 exec.zig
   -> exec/*.zig, backend.zig, tensor.zig, thread.zig, tuning.zig, fpenv.zig
 
 exec/runtime.zig, exec/<domain>.zig
   -> exec.zig (the `ExecContext` type), exec/buffer_pool.zig, backend.zig,
-     dtype.zig, parallel.zig, storage.zig, tensor.zig, thread.zig
+     dtype.zig, parallel.zig, shape.zig, storage.zig, tensor.zig, thread.zig
      (the root-anchored cycle with exec.zig: struct body in the root,
      function bodies in the children)
 
@@ -354,7 +359,8 @@ backend/gpu.zig (comptime -Dgpu selector, a leaf so native.zig can reach it)
      arithmetic over the tuning table, and the trace counter shell)
 
 tags.zig -> tensor.zig
-tensor.zig -> storage.zig, dtype.zig
+tensor.zig -> shape.zig, storage.zig, dtype.zig
+shape.zig -> dtype.zig
 storage.zig -> accelerator.zig, dtype.zig
 ```
 

@@ -12,8 +12,7 @@ const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
-const exec_shape = @import("shape.zig");
-const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
+const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
 
 const ExecContext = @import("../exec.zig").ExecContext;
 

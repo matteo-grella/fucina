@@ -26,7 +26,7 @@ const DType = dtype_mod.DType;
 
 /// Coordinate along `axis` of the contiguous linear index `linear` under
 /// `shape`/`strides` (row-major contiguous strides). Shared index math of
-/// the strided row kernels; `exec/shape.zig` re-exports it for the exec
+/// the strided row kernels; `exec/gather_scatter.zig` reaches it for the exec
 /// band's own strided walks.
 pub fn coordinateForLinear(comptime rank: usize, shape: [rank]usize, strides: [rank]usize, linear: usize, axis: usize) usize {
     return (linear / strides[axis]) % shape[axis];

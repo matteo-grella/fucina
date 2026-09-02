@@ -12,6 +12,7 @@
 //! tensor (`tensor.zig`), which every heterogeneous container (autograd tape,
 //! ExecContext ops, weight unions) is built on.
 const std = @import("std");
+const shape_mod = @import("shape.zig");
 const tensor_mod = @import("tensor.zig");
 const backend_ops = @import("backend.zig").ops;
 const dtype_mod = @import("dtype.zig");
@@ -469,7 +470,7 @@ pub fn splitAxisView(
     const axis_index = tagIndexOrCompileError(source_tags, tag);
     _ = splitTags(source_tags, tag, split_tags);
     try validateTensorRank(tensor_dtype, source_tags, source);
-    const split_count = try elementCountArray(split_tags.len, split_shape);
+    const split_count = try shape_mod.elementCount(&split_shape);
     if (split_count != source.shape.at(axis_index)) return TensorError.InvalidShape;
 
     var shape: [source_tags.len + split_tags.len - 1]usize = undefined;
@@ -479,7 +480,7 @@ pub fn splitAxisView(
         if (source_i == axis_index) {
             inline for (0..split_tags.len) |split_i| {
                 shape[out_i] = split_shape[split_i];
-                strides[out_i] = source.strides.at(axis_index) * productArraySuffix(split_tags.len, split_shape, split_i + 1);
+                strides[out_i] = source.strides.at(axis_index) * shape_mod.product(split_shape[split_i + 1 ..]);
                 out_i += 1;
             }
         } else {
@@ -619,26 +620,8 @@ pub fn pointwiseShape(
     comptime right_tags: anytype,
     right: *const tensor_mod.TensorOf(tensor_dtype),
 ) ![rawRank(result_tags.len)]usize {
-    var shape: [rawRank(result_tags.len)]usize = undefined;
-    if (comptime result_tags.len == 0) {
-        shape[0] = 1;
-        return shape;
-    }
-
-    inline for (result_tags, 0..) |tag, i| {
-        const left_dim = dimForTag(tensor_dtype, left_tags, left, tag);
-        const right_dim = dimForTag(tensor_dtype, right_tags, right, tag);
-        if (left_dim == right_dim) {
-            shape[i] = left_dim;
-        } else if (left_dim == 1) {
-            shape[i] = right_dim;
-        } else if (right_dim == 1) {
-            shape[i] = left_dim;
-        } else {
-            return TensorError.ShapeMismatch;
-        }
-    }
-    return shape;
+    if (comptime result_tags.len == 0) return .{1};
+    return broadcastResultShape(tensor_dtype, result_tags, left_tags, left, right_tags, right);
 }
 
 /// Raw-rank dot result shape (scalar results report `{1}`); validates the
@@ -662,20 +645,7 @@ pub fn dotResultShape(
         if (left.shape.at(left_axis) != right.shape.at(right_axis)) return TensorError.ShapeMismatch;
     }
 
-    const result_tags = dotResultTags(left_tags, right_tags, contract_tag);
-    var shape: [rawRank(result_tags.len)]usize = undefined;
-    if (comptime result_tags.len == 0) {
-        shape[0] = 1;
-        return shape;
-    }
-
-    inline for (result_tags, 0..) |tag, i| {
-        shape[i] = if (comptime tagIndex(left_tags, tag)) |left_i|
-            left.shape.at(left_i)
-        else
-            right.shape.at(tagIndexOrCompileError(right_tags, tag));
-    }
-    return shape;
+    return resultShapeFromTags(left_dtype, right_dtype, dotResultTags(left_tags, right_tags, contract_tag), left_tags, left, right_tags, right);
 }
 
 /// Raw-rank einsum result shape (scalar results report `{1}`); validates every
@@ -696,12 +666,26 @@ pub fn einsumResultShape(
         }
     }
 
-    var shape: [rawRank(out_tags.len)]usize = undefined;
-    if (comptime out_tags.len == 0) {
+    return resultShapeFromTags(left_dtype, right_dtype, out_tags, left_tags, left, right_tags, right);
+}
+
+/// The raw-rank result shape of a contraction: each output tag's dim from
+/// whichever operand carries it (scalar results report `{1}`).
+fn resultShapeFromTags(
+    comptime left_dtype: DType,
+    comptime right_dtype: DType,
+    comptime result_tags: anytype,
+    comptime left_tags: anytype,
+    left: *const tensor_mod.TensorOf(left_dtype),
+    comptime right_tags: anytype,
+    right: *const tensor_mod.TensorOf(right_dtype),
+) [rawRank(result_tags.len)]usize {
+    var shape: [rawRank(result_tags.len)]usize = undefined;
+    if (comptime result_tags.len == 0) {
         shape[0] = 1;
         return shape;
     }
-    inline for (out_tags, 0..) |tag, i| {
+    inline for (result_tags, 0..) |tag, i| {
         shape[i] = if (comptime tagIndex(left_tags, tag)) |left_i|
             left.shape.at(left_i)
         else
@@ -720,9 +704,7 @@ pub fn contiguousForReshape(
 }
 
 pub fn productRange(comptime tensor_dtype: DType, value: *const tensor_mod.TensorOf(tensor_dtype), comptime start: usize, comptime count: usize) usize {
-    var out: usize = 1;
-    inline for (start..start + count) |i| out *= value.shape.at(i);
-    return out;
+    return shape_mod.product(value.shape.slice()[start .. start + count]);
 }
 
 pub fn validateTensorRank(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype)) !void {
@@ -967,22 +949,6 @@ fn broadcastResultShape(
 fn dimForTag(comptime tensor_dtype: DType, comptime tags: anytype, value: *const tensor_mod.TensorOf(tensor_dtype), comptime tag: Tag) usize {
     if (comptime tagIndex(tags, tag)) |i| return value.shape.at(i);
     return 1;
-}
-
-fn elementCountArray(comptime rank: usize, shape: [rank]usize) !usize {
-    if (rank == 0 or rank > tensor_mod.max_rank) return TensorError.InvalidShape;
-    var n: usize = 1;
-    inline for (shape) |dim| {
-        if (dim == 0) return TensorError.InvalidShape;
-        n = try std.math.mul(usize, n, dim);
-    }
-    return n;
-}
-
-fn productArraySuffix(comptime rank: usize, shape: [rank]usize, comptime start: usize) usize {
-    var n: usize = 1;
-    inline for (start..rank) |i| n *= shape[i];
-    return n;
 }
 
 test {

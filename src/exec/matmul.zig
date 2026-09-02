@@ -15,8 +15,7 @@ const tensor = @import("../tensor.zig");
 const thread = @import("../thread.zig");
 
 const exec_convert = @import("convert.zig");
-const exec_shape = @import("shape.zig");
-const ensureForwardFloatMath = exec_shape.ensureForwardFloatMath;
+const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const DType = tensor.DType;
@@ -272,7 +271,7 @@ pub fn dot(
 
     const ap = aa.tensor();
     const bp = bb.tensor();
-    try tensor.requireSameShapeOf(dtype, ap, bp);
+    try tensor.requireSameShape(ap, bp);
 
     var out = try self.scalar(output_dtype, dtype_mod.zero(output_dtype));
     errdefer out.deinit();

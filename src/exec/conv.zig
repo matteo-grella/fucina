@@ -12,18 +12,12 @@ const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
 
-const exec_shape = @import("shape.zig");
 const exec_matmul = @import("matmul.zig");
 const exec_elementwise = @import("elementwise.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 const PreparedTensor = ExecContext.PreparedTensor;
-
-const validateCausalDepthwiseState = exec_shape.validateCausalDepthwiseState;
-const validateCausalConvState = exec_shape.validateCausalConvState;
-const validateGroupedCausalConv = exec_shape.validateGroupedCausalConv;
-const causalConvWork = exec_shape.causalConvWork;
 
 pub fn causalDepthwiseConv1d(
     ctx: *ExecContext,
@@ -48,7 +42,7 @@ pub fn causalDepthwiseConv1d(
     const channels = source.shape[channel_axis];
     const taps = kernel_view.shape[1];
     if (kernel_view.shape[0] != channels) return tensor.TensorError.ShapeMismatch;
-    try validateCausalDepthwiseState(state, channels, taps, dilation);
+    try validateCausalState(state, channels, taps, dilation);
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -122,7 +116,7 @@ pub fn causalDepthwiseConv1dBackwardKernel(
     const seq = source.shape[time_axis];
     const channels = source.shape[channel_axis];
     if (taps == 0) return tensor.TensorError.InvalidShape;
-    try validateCausalDepthwiseState(state, channels, taps, dilation);
+    try validateCausalState(state, channels, taps, dilation);
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -164,7 +158,7 @@ pub fn causalConv1d(
     const taps = weight_view.shape[0];
     const out_channels = weight_view.shape[2];
     if (weight_view.shape[1] != in_channels) return tensor.TensorError.ShapeMismatch;
-    try validateCausalConvState(state, in_channels, taps, dilation);
+    try validateCausalState(state, in_channels, taps, dilation);
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -1116,7 +1110,7 @@ pub fn causalConv1dBackwardInput(
     const taps = weight_view.shape[0];
     const in_channels = weight_view.shape[1];
     if (weight_view.shape[2] != out_channels) return tensor.TensorError.ShapeMismatch;
-    try validateCausalConvState(null, in_channels, taps, dilation);
+    try validateCausalState(null, in_channels, taps, dilation);
 
     var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
@@ -1154,7 +1148,7 @@ pub fn causalConv1dBackwardWeight(
     const in_channels = source.shape[channel_axis];
     const out_channels = grad_view.shape[channel_axis];
     if (grad_view.shape[time_axis] != seq) return tensor.TensorError.ShapeMismatch;
-    try validateCausalConvState(state, in_channels, taps, dilation);
+    try validateCausalState(state, in_channels, taps, dilation);
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -1286,4 +1280,37 @@ pub fn groupedCausalConv1dBackwardWeight(
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
     kernels.groupedCausalConv1dBackwardWeightInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
     return out;
+}
+
+/// A causal conv's carried state (`taps - 1` dilated positions per
+/// channel) must be sized for its geometry; `taps`/`dilation` must be
+/// positive.
+fn validateCausalState(state: ?[]const f32, channels: usize, taps: usize, dilation: usize) !void {
+    if (taps == 0 or dilation == 0) return tensor.TensorError.InvalidShape;
+    const pad = try std.math.mul(usize, dilation, taps - 1);
+    const expected = try std.math.mul(usize, pad, channels);
+    if (state) |values| {
+        if (values.len != expected) return tensor.TensorError.InvalidDataLength;
+    }
+}
+
+/// Grouped causal conv geometry: channels divide into `groups`; returns the
+/// input channels per group.
+fn validateGroupedCausalConv(
+    state: ?[]const f32,
+    in_channels: usize,
+    out_channels: usize,
+    taps: usize,
+    dilation: usize,
+    groups: usize,
+) !usize {
+    if (groups == 0) return tensor.TensorError.InvalidShape;
+    if (in_channels % groups != 0 or out_channels % groups != 0) return tensor.TensorError.ShapeMismatch;
+    try validateCausalState(state, in_channels, taps, dilation);
+    return in_channels / groups;
+}
+
+/// Saturating work estimate of a causal conv (the pool gate's unit).
+fn causalConvWork(seq: usize, in_channels: usize, out_channels: usize, taps: usize) usize {
+    return std.math.mul(usize, parallel.saturatedMul3(seq, in_channels, out_channels), taps) catch std.math.maxInt(usize);
 }

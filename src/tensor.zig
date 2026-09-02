@@ -2,26 +2,27 @@
 //! buffer with strides — the single runtime currency every band below the
 //! public facade trades in. In-tree code names it `fucina.internal.RawTensor`;
 //! the public API is the tagged autograd `Tensor` (`ag.zig`). Views alias
-//! their parent's storage with independent lifetimes.
+//! their parent's storage with independent lifetimes. Shape and stride
+//! arithmetic is `shape.zig`'s; this file owns the buffer binding.
 //! Layer stack: docs/ARCHITECTURE.md.
 const std = @import("std");
 const dtype_mod = @import("dtype.zig");
+const shape_mod = @import("shape.zig");
 const storage = @import("storage.zig");
 
 const Allocator = std.mem.Allocator;
 pub const DType = dtype_mod.DType;
 pub const Scalar = dtype_mod.Scalar;
 pub const Storage = dtype_mod.Storage;
-pub const max_rank = 8;
+pub const Shape = shape_mod.Shape;
+pub const max_rank = shape_mod.max_rank;
+pub const invalid_rank_msg = shape_mod.invalid_rank_msg;
+pub const too_many_tags_msg = shape_mod.too_many_tags_msg;
+pub const requireSameShape = shape_mod.requireSameShape;
 
-/// Shared comptime-guard texts: the messages name the limit so the compile
-/// error carries it to the call site.
-pub const invalid_rank_msg = std.fmt.comptimePrint("invalid tensor rank (1..{d})", .{max_rank});
-pub const too_many_tags_msg = std.fmt.comptimePrint("too many tensor tags (max {d})", .{max_rank});
-
-pub const TensorError = error{
-    ShapeMismatch,
-    InvalidShape,
+/// The shape/data error domain: `shape.ShapeError` plus the data and view
+/// errors a tensor adds.
+pub const TensorError = shape_mod.ShapeError || error{
     /// A non-shape argument fails its own validity check: a probability
     /// outside its interval, a non-positive cap, `min > max`, a zero step,
     /// duplicate scatter indices, an option combination that names no
@@ -32,40 +33,6 @@ pub const TensorError = error{
     UnsupportedView,
     EmptySelection,
     DivisionByZero,
-};
-
-pub const Shape = struct {
-    len: u8,
-    dims: [max_rank]usize = undefined,
-
-    pub fn init(values: []const usize) !Shape {
-        if (values.len == 0 or values.len > max_rank) return TensorError.InvalidShape;
-
-        var out = Shape{ .len = @intCast(values.len) };
-        for (values, 0..) |value, i| {
-            if (value == 0) return TensorError.InvalidShape;
-            out.dims[i] = value;
-        }
-        return out;
-    }
-
-    pub fn initStrides(values: []const usize) !Shape {
-        if (values.len == 0 or values.len > max_rank) return TensorError.InvalidShape;
-
-        var out = Shape{ .len = @intCast(values.len) };
-        for (values, 0..) |value, i| {
-            out.dims[i] = value;
-        }
-        return out;
-    }
-
-    pub fn slice(self: *const Shape) []const usize {
-        return self.dims[0..self.len];
-    }
-
-    pub fn at(self: *const Shape, i: usize) usize {
-        return self.dims[i];
-    }
 };
 
 /// Type-erased releaser for a heap-retained `*TensorOf(dtype)` handle
@@ -95,17 +62,11 @@ pub fn RankedTensorOf(comptime tensor_dtype: DType, comptime rank: usize) type {
         }
 
         pub fn len(self: @This()) usize {
-            return elementCountArrayAssumeValid(rank, self.shape);
+            return shape_mod.product(&self.shape);
         }
 
         pub fn isContiguous(self: @This()) bool {
-            var expected: usize = 1;
-            comptime var i = rank;
-            inline while (i > 0) : (i -= 1) {
-                if (self.strides[i - 1] != expected) return false;
-                expected *= self.shape[i - 1];
-            }
-            return true;
+            return shape_mod.isContiguous(&self.shape, &self.strides);
         }
     };
 }
@@ -137,7 +98,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn zeros(allocator: Allocator, shape: []const usize) !Self {
             comptime if (!is_scalar_dtype) @compileError("zeros is only defined for scalar tensor dtypes");
-            const size = try storageElementCount(tensor_dtype, shape);
+            const size = try shape_mod.storageElementCount(tensor_dtype, shape);
             const buffer = try Buffer.create(allocator, size);
             @memset(buffer.data, dtype_mod.zero(tensor_dtype));
             errdefer buffer.release();
@@ -154,7 +115,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn fromSlice(allocator: Allocator, shape: []const usize, values: []const ScalarElem) !Self {
             comptime if (!is_scalar_dtype) @compileError("fromSlice is only defined for scalar tensor dtypes; use fromStorageSlice for block-quantized tensors");
-            const size = try elementCount(shape);
+            const size = try shape_mod.elementCount(shape);
             if (size != values.len) return TensorError.InvalidDataLength;
 
             const buffer = try Buffer.fromSlice(allocator, values);
@@ -165,7 +126,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn fromBorrowedSlice(allocator: Allocator, shape: []const usize, values: []ScalarElem) !Self {
             comptime if (!is_scalar_dtype) @compileError("fromBorrowedSlice is only defined for scalar tensor dtypes");
-            const size = try elementCount(shape);
+            const size = try shape_mod.elementCount(shape);
             if (size != values.len) return TensorError.InvalidDataLength;
 
             const buffer = try Buffer.fromBorrowedSlice(allocator, values);
@@ -175,7 +136,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn fromStorageSlice(allocator: Allocator, shape: []const usize, values: []const Elem) !Self {
-            const size = try storageElementCount(tensor_dtype, shape);
+            const size = try shape_mod.storageElementCount(tensor_dtype, shape);
             if (size != values.len) return TensorError.InvalidDataLength;
 
             const buffer = try Buffer.fromSlice(allocator, values);
@@ -185,7 +146,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn fromBorrowedStorageSlice(allocator: Allocator, shape: []const usize, values: []Elem) !Self {
-            const size = try storageElementCount(tensor_dtype, shape);
+            const size = try shape_mod.storageElementCount(tensor_dtype, shape);
             if (size != values.len) return TensorError.InvalidDataLength;
 
             const buffer = try Buffer.fromBorrowedSlice(allocator, values);
@@ -197,7 +158,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         // Takes ownership of one reference to buffer. Callers must not release that
         // reference after this succeeds; Tensor.deinit releases it.
         pub fn fromOwnedBuffer(buffer: *Buffer, shape: []const usize) !Self {
-            const size = try storageElementCount(tensor_dtype, shape);
+            const size = try shape_mod.storageElementCount(tensor_dtype, shape);
             if (buffer.data.len < size) return TensorError.InvalidDataLength;
             return initFromBuffer(tensor_dtype, buffer, shape, 0);
         }
@@ -239,7 +200,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
                 return self.cloneView();
             }
 
-            _ = try elementCount(shape);
+            _ = try shape_mod.elementCount(shape);
             if (strides.len != shape.len) return TensorError.InvalidShape;
 
             const view_offset = try std.math.add(usize, self.offset, offset_delta);
@@ -262,7 +223,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             }
 
             if (!self.isContiguous()) return TensorError.UnsupportedView;
-            if (try elementCount(new_shape) != self.len()) return TensorError.InvalidShape;
+            if (try shape_mod.elementCount(new_shape) != self.len()) return TensorError.InvalidShape;
 
             self.buffer.retain();
             errdefer self.buffer.release();
@@ -270,11 +231,11 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn broadcastTo(self: *const Self, target_shape: []const usize) !Self {
-            return dispatchRank(tensor_dtype, broadcastToDispatched, target_shape.len, .{ self, target_shape });
+            return shape_mod.dispatchRank(broadcastToDispatched, target_shape.len, .{ self, target_shape });
         }
 
         pub fn broadcastToRank(self: *const Self, comptime target_rank: usize, target_shape: [target_rank]usize) !Self {
-            return dispatchRank(tensor_dtype, broadcastFromRankDispatched, self.shape.len, .{ self, target_rank, target_shape });
+            return shape_mod.dispatchRank(broadcastFromRankDispatched, self.shape.len, .{ self, target_rank, target_shape });
         }
 
         pub fn rank(self: *const Self) usize {
@@ -299,25 +260,11 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn len(self: *const Self) usize {
-            return elementCountAssumeValid(self.shape.slice());
+            return shape_mod.elementCountAssumeValid(self.shape.slice());
         }
 
         pub fn storageLen(self: *const Self) usize {
-            return storageElementCountAssumeValid(tensor_dtype, self.shape.slice());
-        }
-
-        /// Deprecated rank-2 sugar (no in-tree callers): read
-        /// `shape.at(0)` at the call site instead.
-        pub fn rows(self: *const Self) !usize {
-            if (self.shape.len != 2) return TensorError.InvalidShape;
-            return self.shape.at(0);
-        }
-
-        /// Deprecated rank-2 sugar (no in-tree callers): read
-        /// `shape.at(1)` at the call site instead.
-        pub fn cols(self: *const Self) !usize {
-            if (self.shape.len != 2) return TensorError.InvalidShape;
-            return self.shape.at(1);
+            return shape_mod.storageElementCountAssumeValid(tensor_dtype, self.shape.slice());
         }
 
         pub fn isScalar(self: *const Self) bool {
@@ -325,14 +272,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn isContiguous(self: *const Self) bool {
-            var expected: usize = 1;
-            var i = self.shape.len;
-            while (i > 0) {
-                i -= 1;
-                if (self.strides.at(i) != expected) return false;
-                expected *= self.shape.at(i);
-            }
-            return true;
+            return shape_mod.isContiguous(self.shape.slice(), self.strides.slice());
         }
 
         // Safe only when the caller owns exclusive access to this Tensor value.
@@ -476,7 +416,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
         pub fn addInPlace(self: *Self, other: *const Self) !void {
             comptime if (!is_scalar_dtype) @compileError("addInPlace is only defined for scalar tensor dtypes");
-            try requireSameShapeOf(tensor_dtype, self, other);
+            try requireSameShape(self, other);
             const x = self.data();
             const y = other.dataConst();
             for (x, y) |*a, b| a.* += b;
@@ -502,7 +442,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             comptime target_rank: usize,
             target_shape: [target_rank]usize,
         ) !Self {
-            _ = try elementCountArray(target_rank, target_shape);
+            _ = try shape_mod.elementCount(&target_shape);
             if (source_rank > target_rank) return TensorError.ShapeMismatch;
 
             const source = try self.rankView(source_rank);
@@ -532,7 +472,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         fn broadcastToDispatched(comptime target_rank: usize, self: *const Self, target_shape: []const usize) !Self {
-            return self.broadcastToRank(target_rank, try shapeArrayFromSlice(target_rank, target_shape));
+            return self.broadcastToRank(target_rank, try shape_mod.arrayFromSlice(target_rank, target_shape));
         }
 
         fn broadcastFromRankDispatched(
@@ -548,113 +488,10 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
 
 pub const Tensor = TensorOf(.f32);
 
-fn dispatchRank(comptime tensor_dtype: DType, comptime F: anytype, rank: usize, args: anytype) !TensorOf(tensor_dtype) {
-    return switch (rank) {
-        1 => @call(.auto, F, .{1} ++ args),
-        2 => @call(.auto, F, .{2} ++ args),
-        3 => @call(.auto, F, .{3} ++ args),
-        4 => @call(.auto, F, .{4} ++ args),
-        5 => @call(.auto, F, .{5} ++ args),
-        6 => @call(.auto, F, .{6} ++ args),
-        7 => @call(.auto, F, .{7} ++ args),
-        8 => @call(.auto, F, .{8} ++ args),
-        else => TensorError.InvalidShape,
-    };
-}
-
-pub fn requireSameShape(a: *const Tensor, b: *const Tensor) !void {
-    return requireSameShapeOf(.f32, a, b);
-}
-
-pub fn requireSameShapeOf(comptime tensor_dtype: DType, a: *const TensorOf(tensor_dtype), b: *const TensorOf(tensor_dtype)) !void {
-    if (!std.mem.eql(usize, a.shape.slice(), b.shape.slice())) return TensorError.ShapeMismatch;
-}
-
-pub fn elementCount(shape: []const usize) !usize {
-    if (shape.len == 0 or shape.len > max_rank) return TensorError.InvalidShape;
-    var n: usize = 1;
-    for (shape) |dim| {
-        if (dim == 0) return TensorError.InvalidShape;
-        n = try std.math.mul(usize, n, dim);
-    }
-    return n;
-}
-
-pub fn storageElementCount(comptime tensor_dtype: DType, shape: []const usize) !usize {
-    if (comptime dtype_mod.isScalar(tensor_dtype)) return elementCount(shape);
-    if (shape.len == 0 or shape.len > max_rank) return TensorError.InvalidShape;
-
-    var prefix: usize = 1;
-    for (shape[0 .. shape.len - 1]) |dim| {
-        if (dim == 0) return TensorError.InvalidShape;
-        prefix = try std.math.mul(usize, prefix, dim);
-    }
-
-    const last_dim = shape[shape.len - 1];
-    if (last_dim == 0 or last_dim % dtype_mod.blockSize(tensor_dtype) != 0) return TensorError.InvalidShape;
-    return try std.math.mul(usize, prefix, last_dim / dtype_mod.blockSize(tensor_dtype));
-}
-
-pub fn elementCountArray(comptime rank: usize, shape: [rank]usize) !usize {
-    if (rank == 0 or rank > max_rank) return TensorError.InvalidShape;
-    var n: usize = 1;
-    inline for (shape) |dim| {
-        if (dim == 0) return TensorError.InvalidShape;
-        n = try std.math.mul(usize, n, dim);
-    }
-    return n;
-}
-
-pub fn storageElementCountArray(comptime tensor_dtype: DType, comptime rank: usize, shape: [rank]usize) !usize {
-    if (comptime dtype_mod.isScalar(tensor_dtype)) return elementCountArray(rank, shape);
-    if (rank == 0 or rank > max_rank) return TensorError.InvalidShape;
-
-    var prefix: usize = 1;
-    inline for (0..rank - 1) |i| {
-        if (shape[i] == 0) return TensorError.InvalidShape;
-        prefix = try std.math.mul(usize, prefix, shape[i]);
-    }
-
-    const last_dim = shape[rank - 1];
-    if (last_dim == 0 or last_dim % dtype_mod.blockSize(tensor_dtype) != 0) return TensorError.InvalidShape;
-    return try std.math.mul(usize, prefix, last_dim / dtype_mod.blockSize(tensor_dtype));
-}
-
-fn elementCountAssumeValid(shape: []const usize) usize {
-    var n: usize = 1;
-    for (shape) |dim| n *= dim;
-    return n;
-}
-
-fn storageElementCountAssumeValid(comptime tensor_dtype: DType, shape: []const usize) usize {
-    if (comptime dtype_mod.isScalar(tensor_dtype)) return elementCountAssumeValid(shape);
-    var n: usize = 1;
-    for (shape[0 .. shape.len - 1]) |dim| n *= dim;
-    n *= shape[shape.len - 1] / dtype_mod.blockSize(tensor_dtype);
-    return n;
-}
-
-pub fn elementCountArrayAssumeValid(comptime rank: usize, shape: [rank]usize) usize {
-    var n: usize = 1;
-    inline for (shape) |dim| n *= dim;
-    return n;
-}
-
-fn shapeArrayFromSlice(comptime rank: usize, shape: []const usize) ![rank]usize {
-    if (shape.len != rank) return TensorError.InvalidShape;
-
-    var out: [rank]usize = undefined;
-    inline for (0..rank) |i| {
-        out[i] = shape[i];
-    }
-    _ = try elementCountArray(rank, out);
-    return out;
-}
-
 fn initFromBuffer(comptime tensor_dtype: DType, buffer: *storage.BufferOf(tensor_dtype), shape: []const usize, offset: usize) !TensorOf(tensor_dtype) {
     const tensor_shape = try Shape.init(shape);
-    var tensor_strides = try Shape.init(shape);
-    writeContiguousStrides(tensor_strides.dims[0..tensor_strides.len], tensor_shape.slice());
+    var tensor_strides = tensor_shape;
+    shape_mod.contiguousStridesInto(tensor_strides.dims[0..tensor_strides.len], tensor_shape.slice());
 
     return .{
         .buffer = buffer,
@@ -682,16 +519,6 @@ fn initFromBufferWithStrides(
         .strides = tensor_strides,
         .offset = offset,
     };
-}
-
-fn writeContiguousStrides(out: []usize, shape: []const usize) void {
-    var stride: usize = 1;
-    var i = shape.len;
-    while (i > 0) {
-        i -= 1;
-        out[i] = stride;
-        stride *= shape[i];
-    }
 }
 
 test {

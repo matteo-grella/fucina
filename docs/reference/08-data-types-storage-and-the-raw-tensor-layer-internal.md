@@ -652,19 +652,33 @@ hand, loops unroll at comptime (`inline while`/`inline for`), which is how
 the exec layer's `*Rank` entry points ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)) and backend kernels ([§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)) are
 written.
 
-### 8.5.7 Shape arithmetic (free functions)
+### 8.5.7 Shape arithmetic (`src/shape.zig`)
 
-`pub` helpers in `src/tensor.zig`, shared by the exec and tagged layers:
+The arithmetic every layer shares lives in the core leaf `src/shape.zig`
+(the raw tensor re-exports `Shape`, `max_rank`, and `requireSameShape`):
 
-- `requireSameShape(a, b)` / `requireSameShapeOf(dtype, a, b)` —
-  `ShapeMismatch` unless shapes are equal.
-- `elementCount(shape)` / `elementCountArray(rank, shape)` — logical element
-  count; `InvalidShape` for rank 0/>8 or zero dims; overflow-checked.
-- `storageElementCount(dtype, shape)` / `storageElementCountArray(...)` —
-  storage element count; for block dtypes the last axis must be a nonzero
-  multiple of `blockSize(dtype)` (`InvalidShape` otherwise).
-- `elementCountArrayAssumeValid(rank, shape)` — unchecked product for
+- `Shape` — the inline `{len, dims}` value the raw tensor stores twice;
+  `Shape.init(slice)` validates (every dim >= 1, rank 1..8),
+  `Shape.from(anytype)` accepts a `[n]usize` array, a pointer to one, a
+  tuple of sizes, or a slice — the one normalization behind
+  `ctx.empty(dtype, shape)` and its siblings.
+- `requireSameShape(a, b)` — `ShapeMismatch` unless shapes are equal
+  (dtype-generic: anything with `shape.slice()`);
+  `requireSameRankShape(rank, a, b)` returns the shared `[rank]usize`.
+- `elementCount(shape)` — logical element count over a slice
+  (`&array` coerces); `InvalidShape` for rank 0/>8 or zero dims;
+  overflow-checked. `storageElementCount(dtype, shape)` — storage element
+  count; for block dtypes the last axis must be a nonzero multiple of
+  `blockSize(dtype)`. `product(dims)` — unchecked product for
   already-validated shapes.
+- `contiguousStrides(rank, shape)` / `contiguousStridesInto`,
+  `isContiguous(shape, strides)`, `arrayFromSlice(rank, slice)`.
+- `dispatchRank(F, rank, args)` — calls `F(rank, args...)` with the
+  runtime rank made comptime (`InvalidShape` past `max_rank`).
+- `AxisGeometry.of(rank, shape, axis)` — the `(outer, axis_dim, inner)`
+  decomposition every axis-wise kernel walks; `withoutAxis`,
+  `productBeforeAxis`/`productAfterAxis`, and the trailing-broadcast
+  checks `validateBroadcastRank`/`isExactSuffixRank`.
 
 **Thread-safety.** Raw tensors have no interior locking. The only atomic
 state is the buffer refcount; concurrent readers of one buffer are safe,

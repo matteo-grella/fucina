@@ -23,6 +23,20 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+### Changed
+
+- Shape and stride arithmetic lives in one core leaf, `src/shape.zig`:
+  the `Shape` value (with `Shape.from` normalizing array, tuple, pointer
+  and slice spellings), `elementCount`/`storageElementCount` over slices,
+  `contiguousStrides`, `dispatchRank`, and the `AxisGeometry` decomposition.
+  `src/exec/shape.zig` is gone (its conv validators moved into
+  `exec/conv.zig`, the ALiBi slope into `exec/softmax.zig`). Internal raw
+  tensor decls removed with it: `tensor.elementCountArray`,
+  `storageElementCountArray`, `elementCountArrayAssumeValid`
+  (`shape.elementCount(&array)` / `shape.product`), `requireSameShapeOf`
+  (`tensor.requireSameShape` is dtype-generic), and the deprecated
+  `rows`/`cols` accessors.
+
 ## 0.4.0 - 2026-08-27
 
 ### Added
