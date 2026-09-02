@@ -46,8 +46,6 @@ const quantizedLhsQ8_K = vector.matmul_quant.quantizedLhsQ8_K;
 // The numeric dispatch gates live in src/parallel.zig's policy table
 // (values and measurement rationale there); aliased file-locally so the
 // kernels below read bare names.
-const q4_k_x4_min_rows = parallel.q4_k_x4_min_rows;
-const q5_k_x4_prefix_min_rows = parallel.q5_k_x4_prefix_min_rows;
 
 pub const ParallelConfig = vector.ParallelConfig;
 
@@ -884,9 +882,10 @@ fn matmulPackedQ4_Kx2Mmla(
 
 /// The x8-pack dispatch: the `.q8_kx4` prefix (lane-packed LHS groups)
 /// plus the `.q8_k` per-row remainder, over the request `g` (the
-/// `.q8_kx4` form). Policy per weight: Q4_K pads every row through the
-/// padded group quantizer above `q4_k_x4_min_rows`; Q5_K keeps the
-/// unpadded bulk + per-row tail split above `q5_k_x4_prefix_min_rows`.
+/// `.q8_kx4` form). The prefix is `quant.x4PrefixRows`'s, the one policy
+/// the exec fused engine applies too: Q4_K pads every row through the
+/// padded group quantizer, Q5_K keeps the unpadded bulk + per-row tail
+/// split.
 fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     pc: ParallelConfig,
     comptime g: ops.QuantGemm,
@@ -899,20 +898,12 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     k: usize,
 ) !void {
     const pad_x4_rows = comptime g.weight == .q4_k;
-    const prefix_min_rows = if (pad_x4_rows) q4_k_x4_min_rows else q5_k_x4_prefix_min_rows;
     const rows_g = comptime ops.QuantGemm{ .weight = g.weight, .rhs = g.rhs, .lhs = .q8_k };
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
     const cd = contiguousData(out, try checkedTensorProduct(m, n));
     const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_k, k);
-    // Padded formats (pad_x4_rows) run every m >= prefix_min_rows through the
-    // padded x4 kernel in one pass (the old gate had an all-rows-per-row hole
-    // for m % 4 != 0 in [32, 64)). Unpadded formats run the multiple-of-4 bulk
-    // through the x4 kernel and the 1-3 remainder rows through the row kernel;
-    // that remainder costs an extra pass over the packed weights, so their
-    // prefix_min_rows stays high. m % 4 == 0 dispatch is unchanged.
-    const use_x4 = m % 4 == 0 or m >= prefix_min_rows;
-    const prefix_rows = if (!use_x4) 0 else if (pad_x4_rows) m else m - m % 4;
+    const prefix_rows = quantized_matmul.x4PrefixRows(g.weight, m);
 
     if (prefix_rows == 0) {
         return matmulQuantRows(pc, rows_g, allocator, out, a, rhs, m, n, k);
