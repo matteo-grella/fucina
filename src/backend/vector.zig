@@ -58,6 +58,7 @@ test {
     _ = @import("vector/elementwise.zig");
     _ = @import("vector/gemm.zig");
     _ = @import("vector/gemm_blocked.zig");
+    _ = @import("vector/gemm_packed.zig");
     _ = @import("vector/matmul_quant.zig");
     _ = @import("vector/batched.zig");
     _ = @import("vector/conv.zig");
