@@ -498,27 +498,10 @@ pub fn RhsOf(comptime g: QuantGemm) type {
         .rows => switch (g.weight) {
             .q4_0 => *const quant_types.QuantizedMatmulRhsQ4_0,
             .q8_0 => *const quant_types.QuantizedMatmulRhsQ8_0,
-            .q2_k => *const quant_types.QuantizedMatmulRhsQ2_K,
-            .q3_k => *const quant_types.QuantizedMatmulRhsQ3_K,
-            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_K,
-            .q5_k => *const quant_types.QuantizedMatmulRhsQ5_K,
-            .q6_k => *const quant_types.QuantizedMatmulRhsQ6_K,
+            .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => *const quant_types.CompactRhs(g.weight),
             else => *const quant_types.QuantizedMatmulRhsRowsFor(g.weight),
         },
-        .x4 => switch (g.weight) {
-            .q8_0 => *const quant_types.QuantizedMatmulRhsQ8_0x4,
-            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx4,
-            .q6_k => *const quant_types.QuantizedMatmulRhsQ6_Kx4,
-            else => @compileError("RhsOf: no x4 pack for weight ." ++ @tagName(g.weight)),
-        },
-        .x8 => switch (g.weight) {
-            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx8,
-            .q5_k => *const quant_types.QuantizedMatmulRhsQ5_Kx8,
-            else => @compileError("RhsOf: no x8 pack for weight ." ++ @tagName(g.weight)),
-        },
-        .x2mmla => switch (g.weight) {
-            .q4_k => *const quant_types.QuantizedMatmulRhsQ4_Kx2Mmla,
-            else => @compileError("RhsOf: no x2mmla pack for weight ." ++ @tagName(g.weight)),
-        },
+        // `PackedBlock` names the combinations that exist.
+        .x4, .x8, .x2mmla => *const quant_types.LanePackedRhs(g.weight, g.rhs),
     };
 }

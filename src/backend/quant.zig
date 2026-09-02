@@ -442,22 +442,12 @@ pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.R
     }
 }
 
-/// The compact (GGUF-native block layout) matmul RHS view for the K-quant
-/// formats: the same five fields per format ({allocator, blocks, k, n,
-/// blocks_per_column}), one view type per block struct. This is the
-/// comptime map that lets format-generic dispatch (the MoE expert tile)
-/// construct views and pick kernels without one hand-written arm per
-/// format.
-pub fn CompactRhs(comptime dt: DType) type {
-    return switch (dt) {
-        .q2_k => types.QuantizedMatmulRhsQ2_K,
-        .q3_k => types.QuantizedMatmulRhsQ3_K,
-        .q4_k => types.QuantizedMatmulRhsQ4_K,
-        .q5_k => types.QuantizedMatmulRhsQ5_K,
-        .q6_k => types.QuantizedMatmulRhsQ6_K,
-        else => @compileError("no compact matmul RHS view for dtype ." ++ @tagName(dt)),
-    };
-}
+/// The compact (GGUF-native block layout) matmul RHS of one format
+/// (`types.CompactRhs`): the comptime map that lets format-generic dispatch
+/// (the MoE expert tile) construct views and pick kernels without one
+/// hand-written arm per format.
+pub const CompactRhs = types.CompactRhs;
+pub const LanePackedRhs = types.LanePackedRhs;
 
 /// True when `dt` has the batched column-outer compact kernel
 /// (`matmul*RhsCompactColOuter`); q2_k/q3_k stay on the row-outer tile.

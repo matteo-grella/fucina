@@ -167,6 +167,92 @@ pub const BlockTQ2_0Folded = extern struct {
     d: u16,
 };
 
+/// The lane-interleaved block of a packed RHS: which `(dtype, pack)`
+/// pairs have a layout is this table, and a pair outside it is a compile
+/// error naming it.
+pub fn PackedBlock(comptime dt: DType, comptime pack: RhsPack) type {
+    return switch (dt) {
+        .q8_0 => switch (pack) {
+            .x4 => BlockQ8_0x4,
+            else => @compileError("no ." ++ @tagName(pack) ++ " pack for q8_0"),
+        },
+        .q4_k => switch (pack) {
+            .x4 => BlockQ4_Kx4,
+            .x8 => BlockQ4_Kx8,
+            .x2mmla => BlockQ4_Kx2Mmla,
+            .rows => @compileError("the .rows layout is CompactRhs, not a lane pack"),
+        },
+        .q5_k => switch (pack) {
+            .x8 => BlockQ5_Kx8,
+            else => @compileError("no ." ++ @tagName(pack) ++ " pack for q5_k"),
+        },
+        .q6_k => switch (pack) {
+            .x4 => BlockQ6_Kx4,
+            else => @compileError("no ." ++ @tagName(pack) ++ " pack for q6_k"),
+        },
+        else => @compileError("no lane pack for dtype ." ++ @tagName(dt)),
+    };
+}
+
+/// The compact (GGUF-native block layout) matmul RHS of one block format:
+/// `[n, k]` blocks, `blocks_per_column` per output column. `blocks` may
+/// borrow external read-only memory (an mmap'd GGUF, an expert stack kept
+/// alive by the model): `allocator` is null then and `deinit` frees
+/// nothing. The one container behind every `.rows` kernel request.
+pub fn CompactRhs(comptime dt: DType) type {
+    return struct {
+        allocator: ?Allocator,
+        blocks: []const dtype_mod.Storage(dt),
+        k: usize,
+        n: usize,
+        blocks_per_column: usize,
+
+        const Self = @This();
+        pub const dtype: DType = dt;
+        pub const pack: RhsPack = .rows;
+
+        pub fn deinit(self: *Self) void {
+            if (self.allocator) |allocator| allocator.free(self.blocks);
+            self.* = undefined;
+        }
+
+        pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.Storage(dt) {
+            return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
+        }
+    };
+}
+
+/// A lane-packed matmul RHS: the `PackedBlock(dt, lane_pack)` groups of
+/// `n / lanes` output columns, `blocks_per_group` per group, built once at
+/// load by the format's packer (always owned). `raw` is the loader's
+/// statement of the raw GGUF blocks behind the pack, for the accelerator
+/// attempt.
+pub fn LanePackedRhs(comptime dt: DType, comptime lane_pack: RhsPack) type {
+    const Block = PackedBlock(dt, lane_pack);
+    return struct {
+        allocator: Allocator,
+        blocks: []Block,
+        k: usize,
+        n: usize,
+        blocks_per_group: usize,
+        /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
+        raw: ?RawRhs = null,
+
+        const Self = @This();
+        pub const dtype: DType = dt;
+        pub const pack: RhsPack = lane_pack;
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.blocks);
+            self.* = undefined;
+        }
+
+        pub fn groupBlocks(self: *const Self, column_group: usize) []const Block {
+            return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
+        }
+    };
+}
+
 pub fn QuantizedRowsFor(comptime block_dtype: DType) type {
     return struct {
         /// Owning allocator, or null when `blocks` borrows external storage
@@ -295,28 +381,7 @@ pub const QuantizedMatmulRhsQ8_0 = struct {
     }
 };
 
-pub const QuantizedMatmulRhsQ8_0x4 = struct {
-    allocator: Allocator,
-    blocks: []BlockQ8_0x4,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q8_0;
-    pub const pack: RhsPack = .x4;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ8_0x4 {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
+pub const QuantizedMatmulRhsQ8_0x4 = LanePackedRhs(.q8_0, .x4);
 
 pub const QuantizedMatmulRhsQ4_0 = struct {
     rows: QuantizedRowsQ4_0,
@@ -337,235 +402,16 @@ pub const QuantizedMatmulRhsQ4_0 = struct {
     }
 };
 
-pub const QuantizedMatmulRhsQ2_K = struct {
-    /// Owning allocator, or null when `blocks` borrows external read-only
-    /// memory (e.g. an mmap'd GGUF expert stack kept alive by the model).
-    allocator: ?Allocator,
-    blocks: []const dtype_mod.BlockQ2_K,
-    k: usize,
-    n: usize,
-    blocks_per_column: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q2_k;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        if (self.allocator) |allocator| allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ2_K {
-        return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
-    }
-};
-
-pub const QuantizedMatmulRhsQ3_K = struct {
-    /// Owning allocator, or null when `blocks` borrows external read-only
-    /// memory (e.g. an mmap'd GGUF expert stack kept alive by the model).
-    allocator: ?Allocator,
-    blocks: []const dtype_mod.BlockQ3_K,
-    k: usize,
-    n: usize,
-    blocks_per_column: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q3_k;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        if (self.allocator) |allocator| allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ3_K {
-        return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
-    }
-};
-
-pub const QuantizedMatmulRhsQ4_K = struct {
-    /// Owning allocator, or null when `blocks` borrows external read-only
-    /// memory (e.g. an mmap'd GGUF kept alive by the model).
-    allocator: ?Allocator,
-    blocks: []const dtype_mod.BlockQ4_K,
-    k: usize,
-    n: usize,
-    blocks_per_column: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q4_k;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        if (self.allocator) |allocator| allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ4_K {
-        return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
-    }
-};
-
-pub const QuantizedMatmulRhsQ4_Kx4 = struct {
-    allocator: Allocator,
-    blocks: []BlockQ4_Kx4,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q4_k;
-    pub const pack: RhsPack = .x4;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ4_Kx4 {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
-
-pub const QuantizedMatmulRhsQ4_Kx8 = struct {
-    allocator: Allocator,
-    blocks: []BlockQ4_Kx8,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q4_k;
-    pub const pack: RhsPack = .x8;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ4_Kx8 {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
-
-pub const QuantizedMatmulRhsQ4_Kx2Mmla = struct {
-    allocator: Allocator,
-    blocks: []BlockQ4_Kx2Mmla,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q4_k;
-    pub const pack: RhsPack = .x2mmla;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ4_Kx2Mmla {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
-
-pub const QuantizedMatmulRhsQ5_K = struct {
-    /// Owning allocator, or null when `blocks` borrows external read-only
-    /// memory (e.g. an mmap'd GGUF kept alive by the model).
-    allocator: ?Allocator,
-    blocks: []const dtype_mod.BlockQ5_K,
-    k: usize,
-    n: usize,
-    blocks_per_column: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q5_k;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        if (self.allocator) |allocator| allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ5_K {
-        return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
-    }
-};
-
-pub const QuantizedMatmulRhsQ5_Kx8 = struct {
-    allocator: Allocator,
-    blocks: []BlockQ5_Kx8,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q5_k;
-    pub const pack: RhsPack = .x8;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ5_Kx8 {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
-
-pub const QuantizedMatmulRhsQ6_K = struct {
-    /// Owning allocator, or null when `blocks` borrows external read-only
-    /// memory (e.g. an mmap'd GGUF kept alive by the model).
-    allocator: ?Allocator,
-    blocks: []const dtype_mod.BlockQ6_K,
-    k: usize,
-    n: usize,
-    blocks_per_column: usize,
-
-    const Self = @This();
-    pub const dtype: DType = .q6_k;
-    pub const pack: RhsPack = .rows;
-
-    pub fn deinit(self: *Self) void {
-        if (self.allocator) |allocator| allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn columnBlocks(self: *const Self, column: usize) []const dtype_mod.BlockQ6_K {
-        return self.blocks[column * self.blocks_per_column ..][0..self.blocks_per_column];
-    }
-};
-
-pub const QuantizedMatmulRhsQ6_Kx4 = struct {
-    allocator: Allocator,
-    blocks: []BlockQ6_Kx4,
-    k: usize,
-    n: usize,
-    blocks_per_group: usize,
-    /// The loader's raw row blocks for the accelerator attempt (`RawRhs`).
-    raw: ?RawRhs = null,
-
-    const Self = @This();
-    pub const dtype: DType = .q6_k;
-    pub const pack: RhsPack = .x4;
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.blocks);
-        self.* = undefined;
-    }
-
-    pub fn groupBlocks(self: *const Self, column_group: usize) []const BlockQ6_Kx4 {
-        return self.blocks[column_group * self.blocks_per_group ..][0..self.blocks_per_group];
-    }
-};
+pub const QuantizedMatmulRhsQ2_K = CompactRhs(.q2_k);
+pub const QuantizedMatmulRhsQ3_K = CompactRhs(.q3_k);
+pub const QuantizedMatmulRhsQ4_K = CompactRhs(.q4_k);
+pub const QuantizedMatmulRhsQ5_K = CompactRhs(.q5_k);
+pub const QuantizedMatmulRhsQ6_K = CompactRhs(.q6_k);
+pub const QuantizedMatmulRhsQ4_Kx4 = LanePackedRhs(.q4_k, .x4);
+pub const QuantizedMatmulRhsQ4_Kx8 = LanePackedRhs(.q4_k, .x8);
+pub const QuantizedMatmulRhsQ4_Kx2Mmla = LanePackedRhs(.q4_k, .x2mmla);
+pub const QuantizedMatmulRhsQ5_Kx8 = LanePackedRhs(.q5_k, .x8);
+pub const QuantizedMatmulRhsQ6_Kx4 = LanePackedRhs(.q6_k, .x4);
 
 pub const AnyQuantizedMatmulRhs = union(enum) {
     fucina_w8a8_rhs: *const QuantizedMatmulRhsI8,
