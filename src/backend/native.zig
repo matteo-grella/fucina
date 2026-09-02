@@ -4,7 +4,10 @@
 //! Winograd entries forward to the portable `@Vector` leaves in `vector/`;
 //! the dense and quantized GEMM family is defined in this file and routes
 //! each call across the GPU provider (`-Dgpu`), a CBLAS provider (`-Dblas`)
-//! and the vector kernels. Every pool-taking kernel takes `pc:
+//! and the vector kernels (the quantized row-form and W8A8 bodies are
+//! `vector/matmul_quant.zig`'s tensor-LHS entries; this file layers the
+//! BLAS crossovers and the lane-packed-LHS forms on them). Every
+//! pool-taking kernel takes `pc:
 //! ParallelConfig` first. On `-Dbackend=scalar` builds (`isa.reference`)
 //! the same entries select their scalar reference arms (the `scalar`
 //! namespaces inside the `vector/` files) and the GPU/BLAS/lane-pack
@@ -515,31 +518,8 @@ pub fn matmul2DQuantizedRhs(
     };
 }
 
-pub fn matmul2DQuantizedRhsI8(
-    pc: ParallelConfig,
-    allocator: std.mem.Allocator,
-    out: *Tensor,
-    a: *const Tensor,
-    rhs: *const quantized_matmul.QuantizedMatmulRhsI8,
-    m: usize,
-    n: usize,
-    k: usize,
-) !void {
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-    const a_len = try checkedTensorProduct(m, k);
-    const out_len = try checkedTensorProduct(m, n);
-    const ad = contiguousDataConst(a, a_len);
-    const cd = contiguousData(out, out_len);
-
-    const qa = try allocator.alloc(i8, a_len);
-    defer allocator.free(qa);
-    const a_scales = try allocator.alloc(f32, m);
-    defer allocator.free(a_scales);
-
-    quantized_matmul.quantizeActivationsPerRowI8(qa, a_scales, ad, m, k);
-    vector.matmul_quant.matmul2DI8BlockwiseInto(pc, cd, qa, a_scales, rhs.qw.dataConst(), rhs.scales.dataConst(), m, n, k, rhs.group_size, rhs.num_groups);
-}
+/// The int8 W8A8 entry (`vector.matmul_quant`'s; the pool split is there).
+pub const matmul2DQuantizedRhsI8 = vector.matmul_quant.matmul2DQuantizedRhsI8;
 
 /// The Q8_0x4 GEMM request family (`ops.QuantGemm`): the exact packed
 /// form, the padded (`.col_outer`, masked-writes) form, and the per-row
@@ -557,11 +537,11 @@ fn tableBlasFormat(comptime dt: DType) bool {
     };
 }
 
-/// f32 [m, k] x a quantized RHS container -> f32 [m, n], over the request
-/// `g`: the table families' BLAS crossover first, then one LHS row
-/// quantization into `g.lhs`'s block form (Q8_0 rows on the stack below
-/// `q8_0_lhs_stack_blocks`), then the one parallel vector entry
-/// (`vector.matmul_quant.gemm2D`).
+/// f32 [m, k] x a quantized RHS container -> f32 [m, n] over the request
+/// `g`: the table families' BLAS crossover first, then the one row-form
+/// body (`vector.matmul_quant.matmulQuantRows`: one LHS row quantization
+/// into `g.lhs`'s block form, then `gemm2D`; serial on the reference
+/// build).
 fn matmulQuantRows(
     pc: ParallelConfig,
     comptime g: ops.QuantGemm,
@@ -573,35 +553,12 @@ fn matmulQuantRows(
     n: usize,
     k: usize,
 ) !void {
-    if (comptime isa.reference) return vector.matmul_quant.scalar.matmulQuantRows(g, allocator, out, a, rhs, m, n, k);
-    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    if (comptime build_options.use_blas and tableBlasFormat(g.weight)) {
+    if (comptime build_options.use_blas and !isa.reference and tableBlasFormat(g.weight)) {
         if (m >= table_blas_min_m and blas.fitsCblas(m, n, k)) {
             return matmul2DQuantizedRhsTableBlas(pc, g.weight, allocator, out, a, rhs, m, n, k);
         }
     }
-    const cd = contiguousData(out, m * n);
-    switch (comptime g.lhs) {
-        .q8_0 => {
-            const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-            var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
-            const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
-            defer scratch.release(allocator, qlhs_blocks);
-            quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
-            vector.matmul_quant.gemm2D(pc, g, cd, qlhs_blocks, rhs, m, n, k);
-        },
-        .q8_1 => {
-            var qlhs = try quantized_matmul.cold.quantizeRowsQ8_1(allocator, a);
-            defer qlhs.deinit();
-            vector.matmul_quant.gemm2D(pc, g, cd, qlhs.blocks, rhs, m, n, k);
-        },
-        .q8_k => {
-            const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
-            defer allocator.free(qlhs);
-            vector.matmul_quant.gemm2D(pc, g, cd, qlhs, rhs, m, n, k);
-        },
-        else => @compileError("matmulQuantRows: LHS form ." ++ @tagName(g.lhs) ++ " is quantized by the caller, not this entry"),
-    }
+    return vector.matmul_quant.matmulQuantRows(pc, g, allocator, out, a, rhs, m, n, k);
 }
 
 /// Q2_0 BLAS crossover and panel budget: src/parallel.zig's policy table.

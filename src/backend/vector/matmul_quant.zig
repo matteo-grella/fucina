@@ -8,9 +8,10 @@
 //! `q4_k`, `q5_k`, `q6_k`, `ternary`, `cold`) and the W8A8 kernel in
 //! `quant.zig`; the shared parallel gates (ParallelConfig,
 //! i8ColumnThreadCount / matmulThreadCount) come from `common.zig`.
-//! The LHS quantization band (`lhsRows`, `LhsBlocks`, `quantizeLhsUnits`,
-//! `quantizedLhsQ8_K`) is the one the native tensor-LHS entries and the
-//! reference `scalar` namespace quantize activations through.
+//! The tensor-LHS entries (`matmulQuantRows`, `matmul2DQuantizedRhsI8`)
+//! and their LHS quantization band (`lhsRows`, `LhsBlocks`,
+//! `quantizeLhsUnits`, `quantizedLhsQ8_K`) are the one dispatch body the
+//! native provider and the reference `scalar` namespace share.
 
 const std = @import("std");
 const isa = @import("../isa.zig");
@@ -27,6 +28,7 @@ const tile = @import("tile.zig");
 
 const ParallelConfig = common.ParallelConfig;
 const Tensor = tensor.Tensor;
+const matmul_quant = @This();
 
 // ---------------- Quantized MatMul (2-D) ----------------
 
@@ -375,9 +377,12 @@ fn maybeParallelQ8_0x4PackedPaddedRhs(
     return true;
 }
 
-// ---------------- The LHS quantization band ----------------
-// Shared by the native provider's tensor-LHS entries (`backend/native.zig`)
-// and the reference `scalar` namespace below.
+// ---------------- The tensor-LHS entries ----------------
+// The LHS quantization band (`lhsRows`, `LhsBlocks`, `quantizeLhsUnits`,
+// `quantizedLhsQ8_K`) and the two dispatch bodies over it, shared by the
+// native provider (`backend/native.zig`, which layers its BLAS crossovers
+// and lane-packed-LHS forms above them) and the reference `scalar`
+// namespace below (which passes no pool).
 
 pub fn checkedTensorProduct(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
@@ -465,15 +470,86 @@ pub fn quantizedLhsQ8_K(pc: ParallelConfig, allocator: std.mem.Allocator, data: 
     return blocks;
 }
 
+/// f32 [m, k] x a quantized RHS container -> f32 [m, n] over the request
+/// `g`: one LHS row quantization into `g.lhs`'s block form (Q8_0 rows on
+/// the stack below `q8_0_lhs_stack_blocks`; over the pool when `pc`
+/// carries one), then `gemm2D`. Without a pool this is the serial
+/// reference walk (`scalar.matmulQuantRows`).
+pub fn matmulQuantRows(
+    pc: ParallelConfig,
+    comptime g: ops.QuantGemm,
+    allocator: std.mem.Allocator,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: ops.RhsOf(g),
+    m: usize,
+    n: usize,
+    k: usize,
+) !void {
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+    const cd = common.contiguousData(out, m * n);
+    switch (comptime g.lhs) {
+        .q8_0 => {
+            const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
+            var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
+            const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
+            defer scratch.release(allocator, qlhs_blocks);
+            quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quant.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
+            gemm2D(pc, g, cd, qlhs_blocks, rhs, m, n, k);
+        },
+        .q8_1 => {
+            var qlhs = try quant.cold.quantizeRowsQ8_1(allocator, a);
+            defer qlhs.deinit();
+            gemm2D(pc, g, cd, qlhs.blocks, rhs, m, n, k);
+        },
+        .q8_k => {
+            const qlhs = try quantizedLhsQ8_K(pc, allocator, try lhsRows(a, m, k), m, k);
+            defer allocator.free(qlhs);
+            gemm2D(pc, g, cd, qlhs, rhs, m, n, k);
+        },
+        else => @compileError("matmulQuantRows: LHS form ." ++ @tagName(g.lhs) ++ " is quantized by the caller, not this entry"),
+    }
+}
+
+/// The int8 W8A8 entry: per-row activation quantization, then the
+/// blockwise kernel (`matmul2DI8BlockwiseInto`: the row/column split over
+/// the pool, the serial range otherwise).
+pub fn matmul2DQuantizedRhsI8(
+    pc: ParallelConfig,
+    allocator: std.mem.Allocator,
+    out: *Tensor,
+    a: *const Tensor,
+    rhs: *const quant.QuantizedMatmulRhsI8,
+    m: usize,
+    n: usize,
+    k: usize,
+) !void {
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
+
+    const a_len = try checkedTensorProduct(m, k);
+    const out_len = try checkedTensorProduct(m, n);
+    const ad = common.contiguousDataConst(a, a_len);
+    const cd = common.contiguousData(out, out_len);
+
+    const qa = try allocator.alloc(i8, a_len);
+    defer allocator.free(qa);
+    const a_scales = try allocator.alloc(f32, m);
+    defer allocator.free(a_scales);
+
+    quant.quantizeActivationsPerRowI8(qa, a_scales, ad, m, k);
+    matmul2DI8BlockwiseInto(pc, cd, qa, a_scales, rhs.qw.dataConst(), rhs.scales.dataConst(), m, n, k, rhs.group_size, rhs.num_groups);
+}
+
 test {
     _ = @import("matmul_quant_tests.zig");
 }
 
 // ---------------- The scalar reference arms ----------------
 
-/// The reference dispatch of the quantized GEMM entries: the plain row-form
-/// requests, serial, no BLAS crossover, no x4-LHS lane packing, plus the two
-/// bespoke reference kernels (the Q2_0 reference row twin and the TQ2_0
+/// The reference dispatch of the quantized GEMM entries: the row-form and
+/// W8A8 requests are the tensor-LHS entries above without a pool (serial,
+/// no BLAS crossover, no x4-LHS lane packing), plus the two bespoke
+/// reference kernels (the Q2_0 reference row twin and the TQ2_0
 /// table-decoded Q8_K row). On `-Dbackend=scalar` builds the `native.zig`
 /// entries dispatch here, so `-Dbackend=scalar` keeps meaning the serial
 /// reference path end to end (the accumulate bodies inside `quant.gemm` are
@@ -482,10 +558,8 @@ test {
 /// then run the native tier's tile bodies under the serial reference
 /// dispatch.
 pub const scalar = struct {
-    /// f32 [m, k] x a quantized RHS container -> f32 [m, n] over the request
-    /// `g`: one serial LHS row quantization into `g.lhs`'s block form (Q8_0
-    /// rows on the stack below `q8_0_lhs_stack_blocks`), then the one serial
-    /// reference tile (`quant.gemm` over the full range).
+    /// The row-form request without a pool: the serial LHS quantization,
+    /// then the one serial reference tile.
     pub fn matmulQuantRows(
         comptime g: ops.QuantGemm,
         allocator: std.mem.Allocator,
@@ -496,29 +570,7 @@ pub const scalar = struct {
         n: usize,
         k: usize,
     ) !void {
-        if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-        const cd = (try out.dataChecked())[0 .. m * n];
-        switch (comptime g.lhs) {
-            .q8_0 => {
-                const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
-                var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
-                const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
-                defer scratch.release(allocator, qlhs_blocks);
-                try quant.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
-                quant.gemm(g, cd, qlhs_blocks, rhs, ops.Tile.rows(m, n));
-            },
-            .q8_1 => {
-                var qlhs = try quant.cold.quantizeRowsQ8_1(allocator, a);
-                defer qlhs.deinit();
-                quant.gemm(g, cd, qlhs.blocks, rhs, ops.Tile.rows(m, n));
-            },
-            .q8_k => {
-                const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, a);
-                defer allocator.free(qlhs);
-                quant.gemm(g, cd, qlhs, rhs, ops.Tile.rows(m, n));
-            },
-            else => @compileError("matmulQuantRows: LHS form ." ++ @tagName(g.lhs) ++ " is quantized by the caller, not this entry"),
-        }
+        return matmul_quant.matmulQuantRows(.{}, g, allocator, out, a, rhs, m, n, k);
     }
 
     /// The reference dispatch over `AnyQuantizedMatmulRhs`: Q2_0 takes the
@@ -535,15 +587,15 @@ pub const scalar = struct {
     ) !void {
         const DType = dtype_mod.DType;
         return switch (rhs) {
-            .fucina_w8a8_rhs => |qrhs| matmul2DQuantizedRhsI8(allocator, out, a, qrhs, m, n, k),
+            .fucina_w8a8_rhs => |qrhs| scalar.matmul2DQuantizedRhsI8(allocator, out, a, qrhs, m, n, k),
             .q2_0 => |qrhs| matmul2DQuantizedRhsQ2_0(allocator, out, a, qrhs, m, n, k),
             .tq2_0 => |qrhs| matmulTQ2_0TableRef(allocator, out, a, qrhs, m, n, k),
-            inline else => |qrhs, tag| matmulQuantRows(comptime ops.QuantGemm.rowsFor(@field(DType, @tagName(tag))), allocator, out, a, qrhs, m, n, k),
+            inline else => |qrhs, tag| scalar.matmulQuantRows(comptime ops.QuantGemm.rowsFor(@field(DType, @tagName(tag))), allocator, out, a, qrhs, m, n, k),
         };
     }
 
-    /// The serial int8 W8A8 arm: per-row activation quantization, then the
-    /// blockwise kernel over the full range.
+    /// The int8 W8A8 entry without a pool: the blockwise kernel over the
+    /// full range.
     pub fn matmul2DQuantizedRhsI8(
         allocator: std.mem.Allocator,
         out: *Tensor,
@@ -553,20 +605,7 @@ pub const scalar = struct {
         n: usize,
         k: usize,
     ) !void {
-        if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-
-        const a_len = try checkedTensorProduct(m, k);
-        const out_len = try checkedTensorProduct(m, n);
-        const ad = (try a.dataConstChecked())[0..a_len];
-        const cd = (try out.dataChecked())[0..out_len];
-
-        const qa = try allocator.alloc(i8, a_len);
-        defer allocator.free(qa);
-        const a_scales = try allocator.alloc(f32, m);
-        defer allocator.free(a_scales);
-
-        quant.quantizeActivationsPerRowI8(qa, a_scales, ad, m, k);
-        quant.matmulI8BlockwiseRange(cd, qa, a_scales, rhs.qw.dataConst(), rhs.scales.dataConst(), m, n, k, rhs.group_size, rhs.num_groups, 0, m);
+        return matmul_quant.matmul2DQuantizedRhsI8(.{}, allocator, out, a, rhs, m, n, k);
     }
 
     /// The TQ2_0 reference: the table-decoded Q8_K reference row
@@ -582,8 +621,8 @@ pub const scalar = struct {
         k: usize,
     ) !void {
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-        const cd = (try out.dataChecked())[0 .. m * n];
-        const qlhs = try quant.q8k.quantizeRowsQ8_K(allocator, a);
+        const cd = common.contiguousData(out, m * n);
+        const qlhs = try quantizedLhsQ8_K(.{}, allocator, try lhsRows(a, m, k), m, k);
         defer allocator.free(qlhs);
         quant.cold.matmulTableQ8_KRhsRange(.tq2_0, cd, qlhs, rhs, m, n, 0, m);
     }
@@ -600,12 +639,12 @@ pub const scalar = struct {
         k: usize,
     ) !void {
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-        const cd = (try out.dataChecked())[0 .. m * n];
+        const cd = common.contiguousData(out, m * n);
         const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
         var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
         const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
         defer scratch.release(allocator, qlhs_blocks);
-        try quant.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
+        quantizeLhsUnits(.{}, dtype_mod.BlockQ8_0, quant.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
         quant.cold.matmulQ2_0RhsRefRange(cd, qlhs_blocks, rhs, m, n, 0, m);
     }
 
@@ -623,6 +662,6 @@ pub const scalar = struct {
         k: usize,
     ) !void {
         const Rhs = @TypeOf(rhs.*);
-        return matmulQuantRows(comptime .{ .weight = Rhs.dtype, .rhs = Rhs.pack, .lhs = if (Rhs.dtype == .q8_0) .q8_0 else .q8_k }, allocator, out, a, rhs, m, n, k);
+        return scalar.matmulQuantRows(comptime .{ .weight = Rhs.dtype, .rhs = Rhs.pack, .lhs = if (Rhs.dtype == .q8_0) .q8_0 else .q8_k }, allocator, out, a, rhs, m, n, k);
     }
 };
