@@ -25,8 +25,6 @@ const contiguousData = common.contiguousData;
 const Vf32 = common.Vf32;
 const vector_len = common.vector_len;
 
-// ---------------- Elementwise ----------------
-
 // ---------------- Dtype cast rows ----------------
 
 /// Vector twin of `dtype.f32ToBf16` — bit-identical lanes: round-to-nearest-
@@ -105,112 +103,66 @@ pub fn castF16ToF32(output: []f32, input: []const f16) void {
     while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
 }
 
-pub fn addInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    try tensor.requireSameShape(a, b);
-    try tensor.requireSameShape(out, a);
-    addContiguousIntoUnchecked(.{}, out, a, b, a.len());
-}
+// ---------------- Binary elementwise ----------------
 
-pub fn addContiguousIntoUnchecked(
+/// The f32 binary contiguous entry behind add/sub/mul/div/maximum/minimum:
+/// one `primitives.vecBinary` pass, split over the pool when the
+/// elementwise gate opens.
+pub fn binaryContiguousIntoUnchecked(
     pc: ParallelConfig,
+    comptime op: ops.ElementwiseOp,
     out: *Tensor,
     a: *const Tensor,
     b: *const Tensor,
     len: usize,
 ) void {
-    if (comptime isa.reference) return scalar.addContiguousIntoUnchecked(out, a, b, len);
+    if (comptime isa.reference) return scalar.binaryContiguousIntoUnchecked(op, out, a, b, len);
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecAdd, z, x, y)) return;
-    primitives.vecAdd(z, x, y);
+    mapContiguous(pc, .{ .z = z, .x = x, .y = y }, binaryRange(op));
 }
 
-pub fn subInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    try tensor.requireSameShape(a, b);
-    try tensor.requireSameShape(out, a);
-    subContiguousIntoUnchecked(.{}, out, a, b, a.len());
+/// `binaryContiguousIntoUnchecked` with `op` bound: the kernel-table
+/// spellings.
+fn binaryEntry(comptime op: ops.ElementwiseOp) fn (ParallelConfig, *Tensor, *const Tensor, *const Tensor, usize) void {
+    return struct {
+        fn entry(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+            binaryContiguousIntoUnchecked(pc, op, out, a, b, len);
+        }
+    }.entry;
 }
 
-pub fn subContiguousIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-) void {
-    if (comptime isa.reference) return scalar.subContiguousIntoUnchecked(out, a, b, len);
-    const x = contiguousDataConst(a, len);
-    const y = contiguousDataConst(b, len);
-    const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecSub, z, x, y)) return;
-    primitives.vecSub(z, x, y);
+pub const addContiguousIntoUnchecked = binaryEntry(.add);
+pub const subContiguousIntoUnchecked = binaryEntry(.sub);
+pub const mulContiguousIntoUnchecked = binaryEntry(.mul);
+pub const divContiguousIntoUnchecked = binaryEntry(.div);
+pub const maximumContiguousIntoUnchecked = binaryEntry(.max);
+pub const minimumContiguousIntoUnchecked = binaryEntry(.min);
+
+/// The shape-checked serial form of the binary entry.
+fn binaryInto(comptime op: ops.ElementwiseOp) fn (*Tensor, *const Tensor, *const Tensor) tensor.TensorError!void {
+    return struct {
+        fn entry(out: *Tensor, a: *const Tensor, b: *const Tensor) tensor.TensorError!void {
+            try tensor.requireSameShape(a, b);
+            try tensor.requireSameShape(out, a);
+            binaryContiguousIntoUnchecked(.{}, op, out, a, b, a.len());
+        }
+    }.entry;
 }
 
-pub fn mulInto(out: *Tensor, a: *const Tensor, b: *const Tensor) !void {
-    try tensor.requireSameShape(a, b);
-    try tensor.requireSameShape(out, a);
-    mulContiguousIntoUnchecked(.{}, out, a, b, a.len());
-}
+pub const addInto = binaryInto(.add);
+pub const subInto = binaryInto(.sub);
+pub const mulInto = binaryInto(.mul);
 
-pub fn mulContiguousIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-) void {
-    if (comptime isa.reference) return scalar.mulContiguousIntoUnchecked(out, a, b, len);
-    const x = contiguousDataConst(a, len);
-    const y = contiguousDataConst(b, len);
-    const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecMul, z, x, y)) return;
-    primitives.vecMul(z, x, y);
-}
-
-pub fn divContiguousIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-) void {
-    if (comptime isa.reference) return scalar.divContiguousIntoUnchecked(out, a, b, len);
-    const x = contiguousDataConst(a, len);
-    const y = contiguousDataConst(b, len);
-    const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecDiv, z, x, y)) return;
-    primitives.vecDiv(z, x, y);
-}
-
-pub fn maximumContiguousIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-) void {
-    if (comptime isa.reference) return scalar.maximumContiguousIntoUnchecked(out, a, b, len);
-    const x = contiguousDataConst(a, len);
-    const y = contiguousDataConst(b, len);
-    const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecMaximum, z, x, y)) return;
-    primitives.vecMaximum(z, x, y);
-}
-
-pub fn minimumContiguousIntoUnchecked(
-    pc: ParallelConfig,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    len: usize,
-) void {
-    if (comptime isa.reference) return scalar.minimumContiguousIntoUnchecked(out, a, b, len);
-    const x = contiguousDataConst(a, len);
-    const y = contiguousDataConst(b, len);
-    const z = contiguousData(out, len);
-    if (maybeParallelBinary(pc, primitives.vecMinimum, z, x, y)) return;
-    primitives.vecMinimum(z, x, y);
+/// Whether a dtype's typed entries take the vector kernels: f64/f16/bf16.
+/// The f32 typed entries keep the serial scalar loops (their vector path
+/// is the untyped f32 entry).
+fn typedVectorizes(comptime dtype: DType) bool {
+    return switch (dtype) {
+        .f64, .f16, .bf16 => true,
+        else => false,
+    };
 }
 
 pub fn elementwiseContiguousIntoTyped(
@@ -227,14 +179,7 @@ pub fn elementwiseContiguousIntoTyped(
     const x = common.contiguousDataConstOf(dtype, a, len);
     const y = common.contiguousDataConstOf(dtype, b, len);
     const z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
-
-    if (comptime dtype == .f64) {
-        return primitives.vecElementwiseF64(op, z, x, y);
-    } else if (comptime dtype == .f16) {
-        return primitives.vecElementwiseF16(op, z, x, y);
-    } else if (comptime dtype == .bf16) {
-        return primitives.vecElementwiseBf16(op, z, x, y);
-    }
+    if (comptime typedVectorizes(dtype)) return primitives.vecBinary(dtype, op, z, x, y);
     elementwiseSlicesTyped(dtype, op, z, x, y);
 }
 
@@ -243,8 +188,7 @@ pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_valu
     try tensor.requireSameShape(out, a);
     const x = a.dataConst();
     const z = out.data();
-    if (maybeParallelScale(pc, z, x, scalar_value)) return;
-    primitives.vecScale(z, x, scalar_value);
+    mapContiguous(pc, .{ .z = z, .x = x, .p0 = scalar_value }, scaleRange);
 }
 
 pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
@@ -263,7 +207,7 @@ pub fn addRowVectorSlice(comptime op: ?ops.UnaryOp, z: []f32, row_vector: []cons
         if (comptime op) |actual_op| {
             primitives.vecAddUnary(actual_op, row, row, row_vector);
         } else {
-            primitives.vecAdd(row, row, row_vector);
+            primitives.vecBinary(.f32, .add, row, row, row_vector);
         }
     }
 }
@@ -431,8 +375,7 @@ pub fn unaryContiguousIntoUnchecked(
     if (comptime isa.reference) return scalar.unaryContiguousIntoUnchecked(op, out, a, len);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelUnary(pc, op, z, x)) return;
-    primitives.vecUnary(op, z, x);
+    mapContiguous(pc, .{ .z = z, .x = x }, unaryRange(op));
 }
 
 pub fn leakyReluContiguousIntoUnchecked(
@@ -445,8 +388,7 @@ pub fn leakyReluContiguousIntoUnchecked(
     if (comptime isa.reference) return scalar.leakyReluContiguousIntoUnchecked(out, a, len, negative_slope);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelLeakyRelu(pc, z, x, negative_slope)) return;
-    primitives.vecLeakyRelu(z, x, negative_slope);
+    mapContiguous(pc, .{ .z = z, .x = x, .p0 = negative_slope }, leakyReluRange);
 }
 
 pub fn softcapContiguousIntoUnchecked(
@@ -459,8 +401,7 @@ pub fn softcapContiguousIntoUnchecked(
     if (comptime isa.reference) return scalar.softcapContiguousIntoUnchecked(out, a, len, cap);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelSoftcap(pc, z, x, cap)) return;
-    primitives.vecSoftcap(z, x, cap);
+    mapContiguous(pc, .{ .z = z, .x = x, .p0 = cap }, softcapRange);
 }
 
 pub fn clampContiguousIntoUnchecked(
@@ -474,8 +415,7 @@ pub fn clampContiguousIntoUnchecked(
     if (comptime isa.reference) return scalar.clampContiguousIntoUnchecked(out, a, len, min_value, max_value);
     const x = contiguousDataConst(a, len);
     const z = contiguousData(out, len);
-    if (maybeParallelClamp(pc, z, x, min_value, max_value)) return;
-    primitives.vecClamp(z, x, min_value, max_value);
+    mapContiguous(pc, .{ .z = z, .x = x, .p0 = min_value, .p1 = max_value }, clampRange);
 }
 
 pub fn gatedContiguousIntoUnchecked(
@@ -490,14 +430,15 @@ pub fn gatedContiguousIntoUnchecked(
     const x = contiguousDataConst(a, len);
     const y = contiguousDataConst(b, len);
     const z = contiguousData(out, len);
-    if (maybeParallelGated(pc, op, z, x, y)) return;
-    primitives.vecGated(op, z, x, y);
+    mapContiguous(pc, .{ .z = z, .x = x, .y = y }, gatedRange(op));
 }
+
+// ---------------- Reductions ----------------
 
 pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     if (comptime isa.reference) return scalar.sumInto(out, a);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecSum(pc, a.dataConst()) orelse primitives.vecSum(a.dataConst());
+    out.data()[0] = reduceContiguous(pc, .f32, .sum, a.dataConst(), a.dataConst());
 }
 
 pub fn sumSlice(values: []const f32) f32 {
@@ -508,7 +449,7 @@ pub fn sumSlice(values: []const f32) f32 {
 pub fn prodInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     if (comptime isa.reference) return scalar.prodInto(out, a);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecProd(pc, a.dataConst()) orelse primitives.vecProd(a.dataConst());
+    out.data()[0] = reduceContiguous(pc, .f32, .prod, a.dataConst(), a.dataConst());
 }
 
 pub fn prodSlice(values: []const f32) f32 {
@@ -523,13 +464,7 @@ pub fn sumSliceTyped(
 ) dtype_mod.Scalar(dtype_mod.outputDType(.reduction, dtype)) {
     _ = pc;
     if (comptime isa.reference) return sumSliceTypedScalar(dtype, values);
-    if (comptime dtype == .f64) {
-        return primitives.vecSumF64(values);
-    } else if (comptime dtype == .f16) {
-        return primitives.vecSumF16ToF32(values);
-    } else if (comptime dtype == .bf16) {
-        return primitives.vecSumBf16ToF32(values);
-    }
+    if (comptime typedVectorizes(dtype)) return primitives.vecReduce(dtype, .sum, values, values);
     return sumSliceTypedScalar(dtype, values);
 }
 
@@ -537,7 +472,7 @@ pub fn dotInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, b: *const Ten
     if (comptime isa.reference) return scalar.dot(.f32, out, a, b);
     try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = parallelVecDot(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDot(a.dataConst(), b.dataConst());
+    out.data()[0] = reduceContiguous(pc, .f32, .dot, a.dataConst(), b.dataConst());
 }
 
 pub fn dotIntoTyped(
@@ -550,198 +485,102 @@ pub fn dotIntoTyped(
     if (comptime isa.reference) return scalar.dot(dtype, out, a, b);
     try tensor.requireSameShape(a, b);
     if (!out.isScalar()) return tensor.TensorError.ShapeMismatch;
-    out.data()[0] = if (comptime dtype == .f64)
-        parallelVecDotF64(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotF64(a.dataConst(), b.dataConst())
-    else if (comptime dtype == .f16)
-        dtype_mod.castFloat(.f32, .f16, parallelVecDotF16ToF32(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotF16ToF32(a.dataConst(), b.dataConst()))
-    else if (comptime dtype == .bf16)
-        dtype_mod.f32ToBf16(parallelVecDotBf16ToF32(pc, a.dataConst(), b.dataConst()) orelse primitives.vecDotBf16ToF32(a.dataConst(), b.dataConst()))
+    out.data()[0] = if (comptime typedVectorizes(dtype))
+        dtype_mod.castFloat(
+            dtype_mod.computeDType(.matmul, dtype),
+            dtype_mod.outputDType(.matmul, dtype),
+            reduceContiguous(pc, dtype, .dot, a.dataConst(), b.dataConst()),
+        )
     else
         dotSliceTypedScalar(dtype, a.dataConst(), b.dataConst());
 }
 
-// ---------------- Inner kernels ----------------
+// ---------------- Contiguous dispatch ----------------
 
-fn maybeParallelBinary(
-    pc: ParallelConfig,
-    // `anytype`: the binary primitives are `inline fn`s.
-    comptime vecFn: anytype,
-    z: []f32,
-    x: []const f32,
-    y: []const f32,
-) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, y: []const f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .y = y }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
-            vecFn(c.z[start..end], c.x[start..end], c.y[start..end]);
-        }
-    }.go);
-    return true;
+/// Payload of the contiguous map kernels: the output, up to two inputs and
+/// up to two scalar parameters (a scale, a slope, a cap, the clamp bounds).
+const MapCtx = struct { z: []f32, x: []const f32, y: []const f32 = &.{}, p0: f32 = 0, p1: f32 = 0 };
+
+/// `rangeFn(ctx, start, end)` over `[0, z.len)`: proportional chunks on the
+/// pool when the elementwise gate opens, one serial call otherwise.
+fn mapContiguous(pc: ParallelConfig, ctx: MapCtx, comptime rangeFn: fn (MapCtx, usize, usize) void) void {
+    if (pc.pool) |pool| {
+        const thread_count = elementwiseThreadCount(ctx.z.len);
+        if (thread_count > 1) return tile.forRange(pool, MapCtx, ctx, ctx.z.len, thread_count, rangeFn);
+    }
+    rangeFn(ctx, 0, ctx.z.len);
 }
 
-fn maybeParallelScale(pc: ParallelConfig, z: []f32, x: []const f32, scalar_value: f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, scalar: f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .scalar = scalar_value }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
-            primitives.vecScale(c.z[start..end], c.x[start..end], c.scalar);
+fn binaryRange(comptime op: ops.ElementwiseOp) fn (MapCtx, usize, usize) void {
+    return struct {
+        fn go(c: MapCtx, start: usize, end: usize) void {
+            primitives.vecBinary(.f32, op, c.z[start..end], c.x[start..end], c.y[start..end]);
         }
-    }.go);
-    return true;
+    }.go;
 }
 
-fn maybeParallelUnary(pc: ParallelConfig, comptime op: ops.UnaryOp, z: []f32, x: []const f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
+fn unaryRange(comptime op: ops.UnaryOp) fn (MapCtx, usize, usize) void {
+    return struct {
+        fn go(c: MapCtx, start: usize, end: usize) void {
             primitives.vecUnary(op, c.z[start..end], c.x[start..end]);
         }
-    }.go);
-    return true;
+    }.go;
 }
 
-fn maybeParallelLeakyRelu(pc: ParallelConfig, z: []f32, x: []const f32, negative_slope: f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, negative_slope: f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .negative_slope = negative_slope }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
-            primitives.vecLeakyRelu(c.z[start..end], c.x[start..end], c.negative_slope);
-        }
-    }.go);
-    return true;
-}
-
-fn maybeParallelSoftcap(pc: ParallelConfig, z: []f32, x: []const f32, cap: f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, cap: f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .cap = cap }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
-            primitives.vecSoftcap(c.z[start..end], c.x[start..end], c.cap);
-        }
-    }.go);
-    return true;
-}
-
-fn maybeParallelClamp(pc: ParallelConfig, z: []f32, x: []const f32, min_value: f32, max_value: f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, min_value: f32, max_value: f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .min_value = min_value, .max_value = max_value }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
-            primitives.vecClamp(c.z[start..end], c.x[start..end], c.min_value, c.max_value);
-        }
-    }.go);
-    return true;
-}
-
-fn maybeParallelGated(pc: ParallelConfig, comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []const f32) bool {
-    const pool = pc.pool orelse return false;
-    const thread_count = elementwiseThreadCount(z.len);
-    if (thread_count == 1) return false;
-    const Ctx = struct { z: []f32, x: []const f32, y: []const f32 };
-    tile.forRange(pool, Ctx, .{ .z = z, .x = x, .y = y }, z.len, thread_count, struct {
-        fn go(c: Ctx, start: usize, end: usize) void {
+fn gatedRange(comptime op: ops.GatedOp) fn (MapCtx, usize, usize) void {
+    return struct {
+        fn go(c: MapCtx, start: usize, end: usize) void {
             primitives.vecGated(op, c.z[start..end], c.x[start..end], c.y[start..end]);
         }
-    }.go);
-    return true;
+    }.go;
 }
 
-const SliceCtx = struct { x: []const f32 };
-
-fn addF32(a: f32, b: f32) f32 {
-    return a + b;
+fn scaleRange(c: MapCtx, start: usize, end: usize) void {
+    primitives.vecScale(c.z[start..end], c.x[start..end], c.p0);
 }
 
-fn mulF32(a: f32, b: f32) f32 {
-    return a * b;
+fn leakyReluRange(c: MapCtx, start: usize, end: usize) void {
+    primitives.vecLeakyRelu(c.z[start..end], c.x[start..end], c.p0);
 }
 
-fn addF64(a: f64, b: f64) f64 {
-    return a + b;
+fn softcapRange(c: MapCtx, start: usize, end: usize) void {
+    primitives.vecSoftcap(c.z[start..end], c.x[start..end], c.p0);
 }
 
-fn parallelVecSum(pc: ParallelConfig, x: []const f32) ?f32 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    return tile.reduceRange(pool, f32, SliceCtx, .{ .x = x }, x.len, thread_count, 0, struct {
-        fn go(c: SliceCtx, start: usize, end: usize) f32 {
-            return primitives.vecSum(c.x[start..end]);
+fn clampRange(c: MapCtx, start: usize, end: usize) void {
+    primitives.vecClamp(c.z[start..end], c.x[start..end], c.p0, c.p1);
+}
+
+/// One contiguous reduction: `primitives.vecReduce` over the whole slice,
+/// or over proportional chunks on the pool with the per-chunk partials
+/// folded in task order (`tile.reduceRange`) when the elementwise gate
+/// opens. `y` is read by `.dot` only.
+fn reduceContiguous(
+    pc: ParallelConfig,
+    comptime dtype: DType,
+    comptime term: primitives.ReduceTerm,
+    x: []const dtype_mod.Scalar(dtype),
+    y: []const dtype_mod.Scalar(dtype),
+) primitives.ReduceAcc(dtype) {
+    const Acc = primitives.ReduceAcc(dtype);
+    const Ctx = struct { x: []const dtype_mod.Scalar(dtype), y: []const dtype_mod.Scalar(dtype) };
+    const chunk = struct {
+        fn reduce(c: Ctx, start: usize, end: usize) Acc {
+            return primitives.vecReduce(dtype, term, c.x[start..end], c.y[start..end]);
         }
-    }.go, addF32);
-}
-
-fn parallelVecProd(pc: ParallelConfig, x: []const f32) ?f32 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    return tile.reduceRange(pool, f32, SliceCtx, .{ .x = x }, x.len, thread_count, 1, struct {
-        fn go(c: SliceCtx, start: usize, end: usize) f32 {
-            return primitives.vecProd(c.x[start..end]);
+        fn fold(acc: Acc, part: Acc) Acc {
+            return if (term == .prod) acc * part else acc + part;
         }
-    }.go, mulF32);
-}
-
-fn parallelVecDot(pc: ParallelConfig, x: []const f32, y: []const f32) ?f32 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    const Ctx = struct { x: []const f32, y: []const f32 };
-    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
-        fn go(c: Ctx, start: usize, end: usize) f32 {
-            return primitives.vecDot(c.x[start..end], c.y[start..end]);
+    };
+    const ctx: Ctx = .{ .x = x, .y = y };
+    if (pc.pool) |pool| {
+        const thread_count = elementwiseThreadCount(x.len);
+        if (thread_count > 1) {
+            const identity: Acc = if (term == .prod) 1 else 0;
+            return tile.reduceRange(pool, Acc, Ctx, ctx, x.len, thread_count, identity, chunk.reduce, chunk.fold);
         }
-    }.go, addF32);
-}
-
-fn parallelVecDotF64(pc: ParallelConfig, x: []const f64, y: []const f64) ?f64 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    const Ctx = struct { x: []const f64, y: []const f64 };
-    return tile.reduceRange(pool, f64, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
-        fn go(c: Ctx, start: usize, end: usize) f64 {
-            return primitives.vecDotF64(c.x[start..end], c.y[start..end]);
-        }
-    }.go, addF64);
-}
-
-fn parallelVecDotF16ToF32(pc: ParallelConfig, x: []const f16, y: []const f16) ?f32 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    const Ctx = struct { x: []const f16, y: []const f16 };
-    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
-        fn go(c: Ctx, start: usize, end: usize) f32 {
-            return primitives.vecDotF16ToF32(c.x[start..end], c.y[start..end]);
-        }
-    }.go, addF32);
-}
-
-fn parallelVecDotBf16ToF32(pc: ParallelConfig, x: []const u16, y: []const u16) ?f32 {
-    const pool = pc.pool orelse return null;
-    const thread_count = elementwiseThreadCount(x.len);
-    if (thread_count == 1) return null;
-    const Ctx = struct { x: []const u16, y: []const u16 };
-    return tile.reduceRange(pool, f32, Ctx, .{ .x = x, .y = y }, x.len, thread_count, 0, struct {
-        fn go(c: Ctx, start: usize, end: usize) f32 {
-            return primitives.vecDotBf16ToF32(c.x[start..end], c.y[start..end]);
-        }
-    }.go, addF32);
+    }
+    return chunk.reduce(ctx, 0, x.len);
 }
 
 fn elementwiseSlicesTyped(
@@ -793,7 +632,7 @@ pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
 
 pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
     if (comptime isa.reference) return scalar.mulRowSlice(z, x, y);
-    primitives.vecMul(z, x, y);
+    primitives.vecBinary(.f32, .mul, z, x, y);
 }
 
 // ---------------- Snake activation (per-channel, DAC) ----------------
@@ -1369,47 +1208,26 @@ pub const scalar = struct {
     pub fn castF16ToF32(output: []f32, input: []const f16) void {
         for (output, input) |*dst, value| dst.* = @floatCast(value);
     }
-    pub fn addContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = xv + yv;
+    /// The f32 binary loop of the reference arm (`applyElementwiseTyped`
+    /// per element: add/sub/mul/div, NaN-propagating max/min).
+    pub fn binaryContiguousIntoUnchecked(comptime op: ops.ElementwiseOp, out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+        scalar.elementwiseContiguousIntoTyped(.f32, op, out, a, b, len);
     }
 
-    pub fn subContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = xv - yv;
+    fn binaryTwin(comptime op: ops.ElementwiseOp) fn (*Tensor, *const Tensor, *const Tensor, usize) void {
+        return struct {
+            fn entry(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
+                scalar.binaryContiguousIntoUnchecked(op, out, a, b, len);
+            }
+        }.entry;
     }
 
-    pub fn mulContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = xv * yv;
-    }
-
-    pub fn divContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = xv / yv;
-    }
-
-    pub fn maximumContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @max(xv, yv);
-    }
-
-    pub fn minimumContiguousIntoUnchecked(out: *Tensor, a: *const Tensor, b: *const Tensor, len: usize) void {
-        const x = contiguousDataConst(a, len);
-        const y = contiguousDataConst(b, len);
-        const z = contiguousData(out, len);
-        for (z, x, y) |*dst, xv, yv| dst.* = if (xv != xv or yv != yv) std.math.nan(f32) else @min(xv, yv);
-    }
+    pub const addContiguousIntoUnchecked = binaryTwin(.add);
+    pub const subContiguousIntoUnchecked = binaryTwin(.sub);
+    pub const mulContiguousIntoUnchecked = binaryTwin(.mul);
+    pub const divContiguousIntoUnchecked = binaryTwin(.div);
+    pub const maximumContiguousIntoUnchecked = binaryTwin(.max);
+    pub const minimumContiguousIntoUnchecked = binaryTwin(.min);
 
     pub fn elementwiseContiguousIntoTyped(
         comptime dtype: DType,

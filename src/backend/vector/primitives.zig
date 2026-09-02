@@ -118,42 +118,6 @@ pub inline fn vecBinary(
     while (i < z.len) : (i += 1) z[i] = applyElementwiseTyped(dtype, op, x[i], y[i]);
 }
 
-pub inline fn vecAdd(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .add, z, x, y);
-}
-
-pub inline fn vecSub(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .sub, z, x, y);
-}
-
-pub inline fn vecMul(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .mul, z, x, y);
-}
-
-pub inline fn vecDiv(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .div, z, x, y);
-}
-
-pub inline fn vecMaximum(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .max, z, x, y);
-}
-
-pub inline fn vecMinimum(z: []f32, x: []const f32, y: []const f32) void {
-    vecBinary(.f32, .min, z, x, y);
-}
-
-pub inline fn vecElementwiseF64(comptime op: ops.ElementwiseOp, z: []f64, x: []const f64, y: []const f64) void {
-    vecBinary(.f64, op, z, x, y);
-}
-
-pub inline fn vecElementwiseF16(comptime op: ops.ElementwiseOp, z: []f16, x: []const f16, y: []const f16) void {
-    vecBinary(.f16, op, z, x, y);
-}
-
-pub inline fn vecElementwiseBf16(comptime op: ops.ElementwiseOp, z: []u16, x: []const u16, y: []const u16) void {
-    vecBinary(.bf16, op, z, x, y);
-}
-
 pub inline fn vecScale(z: []f32, x: []const f32, s: f32) void {
     const sv: Vf32 = @splat(s);
     var i: usize = 0;
@@ -868,28 +832,8 @@ pub inline fn vecDot(x: []const f32, y: []const f32) f32 {
     return vecReduce(.f32, .dot, x, y);
 }
 
-pub inline fn vecSumF64(x: []const f64) f64 {
-    return vecReduce(.f64, .sum, x, x);
-}
-
-pub inline fn vecDotF64(x: []const f64, y: []const f64) f64 {
-    return vecReduce(.f64, .dot, x, y);
-}
-
-pub inline fn vecSumF16ToF32(x: []const f16) f32 {
-    return vecReduce(.f16, .sum, x, x);
-}
-
 pub inline fn vecDotF16ToF32(x: []const f16, y: []const f16) f32 {
     return vecReduce(.f16, .dot, x, y);
-}
-
-pub inline fn vecSumBf16ToF32(x: []const u16) f32 {
-    return vecReduce(.bf16, .sum, x, x);
-}
-
-pub inline fn vecDotBf16ToF32(x: []const u16, y: []const u16) f32 {
-    return vecReduce(.bf16, .dot, x, y);
 }
 
 /// bf16 bits to f32 lanes, exact (bits << 16).
