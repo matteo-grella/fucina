@@ -686,23 +686,72 @@ fn matmulQuantRows(
 const q2_0_blas_min_m = parallel.q2_0_blas_min_m;
 const q2_0_blas_panel_floats = parallel.q2_0_blas_panel_floats;
 
-const Q2_0DequantSliceTask = struct {
-    rhs: *const quantized_matmul.QuantizedMatmulRhsQ2_0,
-    dst: []f32, // kp floats of weight row `row`, from block bi0
-    row: usize,
-    bi0: usize,
-};
+/// C[m, n] = A[m, k] · dequant(RHS)ᵀ through BLAS, k-sliced in whole
+/// `block_size`-element blocks (`q2_0_blas_panel_floats` is the panel
+/// budget) so each GEMM is full output width with a contiguous C: every
+/// slice dequantizes its n weight columns into the f32 panel over the pool
+/// (`dequantColumn(rhs, dst, col, bi0)` writes `dst.len` floats of column
+/// `col` from block `bi0`), then GEMMs it in.
+fn matmulDequantPanelBlas(
+    pc: ParallelConfig,
+    comptime block_size: usize,
+    comptime Rhs: type,
+    comptime dequantColumn: fn (Rhs, []f32, usize, usize) void,
+    allocator: std.mem.Allocator,
+    cd: []f32,
+    ad: []const f32,
+    rhs: Rhs,
+    m: usize,
+    n: usize,
+    k: usize,
+) !void {
+    const Task = struct {
+        rhs: Rhs,
+        dst: []f32,
+        col: usize,
+        bi0: usize,
 
-fn runQ2_0DequantSlice(task: *const Q2_0DequantSliceTask) void {
-    const blocks = task.rhs.columnBlocks(task.row);
-    // Lengths are exact by construction (dst covers whole blocks), so the
-    // only representable error cannot occur.
-    quantized_matmul.ternary.dequantizeRowQ2_0FastInto(
-        task.dst,
-        blocks[task.bi0 .. task.bi0 + task.dst.len / quantized_matmul.types.q2_0_block_size],
-    ) catch unreachable;
+        fn run(task: *const @This()) void {
+            dequantColumn(task.rhs, task.dst, task.col, task.bi0);
+        }
+    };
+    // k-slice width: whole blocks, full k when it fits the budget.
+    const kp_max = @max(block_size, (q2_0_blas_panel_floats / n) & ~(block_size - 1));
+    const kp = @min(k, kp_max);
+    const panel = try allocator.alloc(f32, n * kp);
+    defer allocator.free(panel);
+    const tasks = try allocator.alloc(Task, n);
+    defer allocator.free(tasks);
+
+    var k0: usize = 0;
+    while (k0 < k) : (k0 += kp) {
+        const kc = @min(kp, k - k0);
+        const bi0 = k0 / block_size;
+        for (0..n) |col| tasks[col] = .{ .rhs = rhs, .dst = panel[col * kc ..][0..kc], .col = col, .bi0 = bi0 };
+        if (pc.pool) |pool| {
+            pool.parallelChunks(Task, tasks, Task.run);
+        } else {
+            for (tasks) |*t| Task.run(t);
+        }
+        // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
+        blas.gemmStrided(false, true, m, n, kc, 1.0, ad[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, cd, n);
+    }
 }
 
+/// The `dequantColumn` of a `columnBlocks(col)` row container over a
+/// whole-block row decoder `dequantRow(dst, blocks) !void`.
+fn columnDequant(comptime Rhs: type, comptime block_size: usize, comptime dequantRow: anytype) fn (Rhs, []f32, usize, usize) void {
+    return struct {
+        fn run(rhs: Rhs, dst: []f32, col: usize, bi0: usize) void {
+            // Lengths are exact by construction (dst covers whole blocks),
+            // so the only representable error cannot occur.
+            dequantRow(dst, rhs.columnBlocks(col)[bi0 .. bi0 + dst.len / block_size]) catch unreachable;
+        }
+    }.run;
+}
+
+/// Q2_0 dequantizes through the vectorized row decoder (the scalar one
+/// would dominate the GEMM).
 fn matmul2DQuantizedRhsQ2_0Blas(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
@@ -714,30 +763,9 @@ fn matmul2DQuantizedRhsQ2_0Blas(
     k: usize,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const ad = contiguousDataConst(a, m * k);
-    const cd = contiguousData(out, m * n);
-
-    // k-slice width: whole 128-blocks, full k when it fits the budget.
-    const kp_max = @max(quantized_matmul.types.q2_0_block_size, (q2_0_blas_panel_floats / n) & ~(quantized_matmul.types.q2_0_block_size - 1));
-    const kp = @min(k, kp_max);
-    const panel = try allocator.alloc(f32, n * kp);
-    defer allocator.free(panel);
-    const tasks = try allocator.alloc(Q2_0DequantSliceTask, n);
-    defer allocator.free(tasks);
-
-    var k0: usize = 0;
-    while (k0 < k) : (k0 += kp) {
-        const kc = @min(kp, k - k0);
-        const bi0 = k0 / quantized_matmul.types.q2_0_block_size;
-        for (0..n) |row| tasks[row] = .{ .rhs = rhs, .dst = panel[row * kc ..][0..kc], .row = row, .bi0 = bi0 };
-        if (pc.pool) |pool| {
-            pool.parallelChunks(Q2_0DequantSliceTask, tasks, runQ2_0DequantSlice);
-        } else {
-            for (tasks) |*t| runQ2_0DequantSlice(t);
-        }
-        // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
-        blas.gemmStrided(false, true, m, n, kc, 1.0, ad[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, cd, n);
-    }
+    const bs = quantized_matmul.types.q2_0_block_size;
+    const Rhs = *const quantized_matmul.QuantizedMatmulRhsQ2_0;
+    return matmulDequantPanelBlas(pc, bs, Rhs, columnDequant(Rhs, bs, quantized_matmul.ternary.dequantizeRowQ2_0FastInto), allocator, contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m, n, k);
 }
 
 pub fn matmul2DQuantizedRhsQ2_0(
@@ -1051,27 +1079,6 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
 /// Table-format BLAS crossover: src/parallel.zig's policy table.
 const table_blas_min_m = parallel.table_blas_min_m;
 
-fn TableDequantSliceTask(comptime rhs_dtype: DType) type {
-    return struct {
-        rhs: *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype),
-        dst: []f32, // kc floats of weight row `row`, from block bi0
-        row: usize,
-        bi0: usize,
-
-        fn run(task: *const @This()) void {
-            const bs = comptime dtype_mod.blockSize(rhs_dtype);
-            const blocks = task.rhs.columnBlocks(task.row);
-            // Lengths are exact by construction (dst covers whole blocks),
-            // so the only representable error cannot occur.
-            quantized_matmul.dequantizeRowForDType(
-                rhs_dtype,
-                task.dst,
-                blocks[task.bi0 .. task.bi0 + task.dst.len / bs],
-            ) catch unreachable;
-        }
-    };
-}
-
 fn matmul2DQuantizedRhsTableBlas(
     pc: ParallelConfig,
     comptime rhs_dtype: DType,
@@ -1083,41 +1090,23 @@ fn matmul2DQuantizedRhsTableBlas(
     n: usize,
     k: usize,
 ) !void {
-    const Task = TableDequantSliceTask(rhs_dtype);
+    if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     const bs = comptime dtype_mod.blockSize(rhs_dtype);
-    const ad = contiguousDataConst(a, m * k);
-    const cd = contiguousData(out, m * n);
-
-    // k-slice width: whole blocks, full k when it fits the Q2_0 panel budget.
-    const kp_max = @max(bs, (q2_0_blas_panel_floats / n) & ~(bs - 1));
-    const kp = @min(k, kp_max);
-    const panel = try allocator.alloc(f32, n * kp);
-    defer allocator.free(panel);
-    const tasks = try allocator.alloc(Task, n);
-    defer allocator.free(tasks);
-
-    var k0: usize = 0;
-    while (k0 < k) : (k0 += kp) {
-        const kc = @min(kp, k - k0);
-        const bi0 = k0 / bs;
-        for (0..n) |row| tasks[row] = .{ .rhs = rhs, .dst = panel[row * kc ..][0..kc], .row = row, .bi0 = bi0 };
-        if (pc.pool) |pool| {
-            pool.parallelChunks(Task, tasks, Task.run);
-        } else {
-            for (tasks) |*t| Task.run(t);
+    const Rhs = *const quantized_matmul.QuantizedMatmulRhsRowsFor(rhs_dtype);
+    const dequantRow = struct {
+        fn run(dst: []f32, blocks: []const dtype_mod.Storage(rhs_dtype)) !void {
+            return quantized_matmul.dequantizeRowForDType(rhs_dtype, dst, blocks);
         }
-        // C (m x n, full width) += A[:, k0..k0+kc] x panel^T (kc x n).
-        blas.gemmStrided(false, true, m, n, kc, 1.0, ad[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, cd, n);
-    }
+    }.run;
+    return matmulDequantPanelBlas(pc, bs, Rhs, columnDequant(Rhs, bs, dequantRow), allocator, contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m, n, k);
 }
 
 /// Folded-PTQTP BLAS crossover: src/parallel.zig's policy table.
 const folded_blas_min_m = parallel.folded_blas_min_m;
 
-/// C[m, n] = A[m, k] · dequant(folded)ᵀ through BLAS, k-sliced so each
-/// GEMM is full output width with a contiguous C (the Q2_0 arm's panel
-/// discipline). Returns false when the caller must keep the integer path:
-/// non-BLAS builds, m below the gate, or dimensions cblas cannot take.
+/// C[m, n] = A[m, k] · dequant(folded)ᵀ through the BLAS dequant panel.
+/// Returns false when the caller must keep the integer path: non-BLAS
+/// builds, m below the gate, or dimensions cblas cannot take.
 pub fn matmulFoldedx4Blas(
     pc: ParallelConfig,
     allocator: std.mem.Allocator,
@@ -1132,37 +1121,15 @@ pub fn matmulFoldedx4Blas(
     if (comptime !build_options.use_blas) return false;
     if (m < folded_blas_min_m or !blas.fitsCblas(m, n, k)) return false;
 
-    const Task = struct {
-        folded: []const quantized_matmul.BlockTQ2_0Foldedx4,
+    const Folded = struct {
+        blocks: []const quantized_matmul.BlockTQ2_0Foldedx4,
         blocks_per_row: usize,
-        dst: []f32,
-        col: usize,
-        bi0: usize,
 
-        fn run(task: *const @This()) void {
-            quantized_matmul.ternary.dequantizeFoldedx4ColumnInto(task.dst, task.folded, task.blocks_per_row, task.col, task.bi0);
+        fn dequantColumn(rhs: @This(), dst: []f32, col: usize, bi0: usize) void {
+            quantized_matmul.ternary.dequantizeFoldedx4ColumnInto(dst, rhs.blocks, rhs.blocks_per_row, col, bi0);
         }
     };
-
-    const kp_max = @max(@as(usize, 256), (q2_0_blas_panel_floats / n) & ~@as(usize, 255));
-    const kp = @min(k, kp_max);
-    const panel = try allocator.alloc(f32, n * kp);
-    defer allocator.free(panel);
-    const tasks = try allocator.alloc(Task, n);
-    defer allocator.free(tasks);
-
-    var k0: usize = 0;
-    while (k0 < k) : (k0 += kp) {
-        const kc = @min(kp, k - k0);
-        const bi0 = k0 / 256;
-        for (0..n) |col| tasks[col] = .{ .folded = folded, .blocks_per_row = blocks_per_row, .dst = panel[col * kc ..][0..kc], .col = col, .bi0 = bi0 };
-        if (pc.pool) |pool| {
-            pool.parallelChunks(Task, tasks, Task.run);
-        } else {
-            for (tasks) |*t| Task.run(t);
-        }
-        blas.gemmStrided(false, true, m, n, kc, 1.0, a[k0..], k, panel, kc, if (k0 == 0) 0.0 else 1.0, out, n);
-    }
+    try matmulDequantPanelBlas(pc, comptime dtype_mod.blockSize(.tq2_0), Folded, Folded.dequantColumn, allocator, out, a, .{ .blocks = folded, .blocks_per_row = blocks_per_row }, m, n, k);
     return true;
 }
 
