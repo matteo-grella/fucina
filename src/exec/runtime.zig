@@ -391,7 +391,8 @@ pub fn pc(self: *const ExecContext) backend_mod.ParallelConfig {
 /// single task. Work GATES stay at the call sites: whether a shape is
 /// worth dispatching is per-op knowledge; how a range splits is not.
 /// Sub-ranges own disjoint output rows, so the pooled result is
-/// bitwise identical to the serial call for any task count.
+/// bitwise identical to the serial call for any task count. The
+/// boundaries are `backend.tile.bound`'s, the one split formula.
 pub fn dispatchRange(
     self: *ExecContext,
     comptime Task: type,
@@ -470,8 +471,8 @@ pub fn dispatchRangeCapped(
     var tasks: [parallel.vector_max_threads]Task = undefined;
     for (0..task_count) |task_i| {
         tasks[task_i] = base_task;
-        @field(tasks[task_i], start_field) = task_i * count / task_count;
-        @field(tasks[task_i], end_field) = (task_i + 1) * count / task_count;
+        @field(tasks[task_i], start_field) = backend_mod.tile.bound(task_i, count, task_count);
+        @field(tasks[task_i], end_field) = backend_mod.tile.bound(task_i + 1, count, task_count);
     }
     pool.parallelChunks(Task, tasks[0..task_count], run);
     return true;

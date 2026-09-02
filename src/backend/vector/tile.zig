@@ -10,6 +10,15 @@
 const parallel = @import("../../parallel.zig");
 const thread = @import("../../thread.zig");
 
+/// The one proportional split boundary: part `i` of `parts` over
+/// `[0, total)` starts at `i * total / parts`. Every range split in the
+/// tree (this file, `ExecContext.dispatchRange`) draws its boundaries
+/// here, so a range moves from one splitter to another with no chunk
+/// reordered.
+pub fn bound(i: usize, total: usize, parts: usize) usize {
+    return i * total / parts;
+}
+
 fn RangeTask(comptime Ctx: type) type {
     return struct {
         ctx: Ctx,
@@ -40,8 +49,8 @@ pub fn forRange(
     for (0..thread_count) |ti| {
         tasks[ti] = .{
             .ctx = ctx,
-            .start = ti * total / thread_count,
-            .end = (ti + 1) * total / thread_count,
+            .start = bound(ti, total, thread_count),
+            .end = bound(ti + 1, total, thread_count),
         };
     }
     pool.parallelChunks(Task, tasks[0..thread_count], runner.run);
@@ -81,8 +90,8 @@ pub fn reduceRange(
         tasks[ti] = .{
             .ctx = ctx,
             .partial = &partials[ti],
-            .start = ti * total / thread_count,
-            .end = (ti + 1) * total / thread_count,
+            .start = bound(ti, total, thread_count),
+            .end = bound(ti + 1, total, thread_count),
         };
     }
     pool.parallelChunks(Slot, tasks[0..thread_count], runner.run);
