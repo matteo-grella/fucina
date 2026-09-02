@@ -27,98 +27,24 @@ const gpu = @import("gpu.zig").impl;
 const native = @This();
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
+const contiguousDataConst = vector_common.contiguousDataConst;
+const contiguousData = vector_common.contiguousData;
+const checkedTensorProduct = vector.matmul_quant.checkedTensorProduct;
+const checkedQuantizedProduct = quantized_matmul.types.checkedProduct;
+
+// The LHS quantization band (vector/matmul_quant.zig): the validated
+// activation view, the Q8_0-family stack-or-heap block scratch, the
+// pool-split row-range quantizer and the Q8_K row form.
+const lhsRows = vector.matmul_quant.lhsRows;
+const LhsBlocks = vector.matmul_quant.LhsBlocks;
+const quantizeLhsUnits = vector.matmul_quant.quantizeLhsUnits;
+const quantizedLhsQ8_K = vector.matmul_quant.quantizedLhsQ8_K;
 
 // The numeric dispatch gates live in src/parallel.zig's policy table
 // (values and measurement rationale there); aliased file-locally so the
 // kernels below read bare names.
-const q8_0_lhs_stack_blocks = parallel.q8_0_lhs_stack_blocks;
 const q4_k_x4_min_rows = parallel.q4_k_x4_min_rows;
 const q5_k_x4_prefix_min_rows = parallel.q5_k_x4_prefix_min_rows;
-
-/// The `[rows, cols]` f32 activation behind an LHS tensor, validated once
-/// at the dispatch tier (rank 2, the declared dims, contiguous) so the
-/// allocation-free range quantizers run unchecked below it.
-fn lhsRows(a: *const Tensor, rows: usize, cols: usize) ![]const f32 {
-    const view = try a.rankView(2);
-    if (view.dim(0) != rows or view.dim(1) != cols) return tensor.TensorError.ShapeMismatch;
-    return try a.dataConstChecked();
-}
-
-/// Row-range LHS quantization over the pool. `quantizeRange(blocks, data,
-/// rows, cols, blocks_per_row, unit_start, unit_end)` quantizes units
-/// `[unit_start, unit_end)` (rows, or the lane-packed formats' row groups)
-/// of the `[rows, cols]` activation into `blocks`; units own disjoint
-/// blocks, so any split produces the serial call's bytes. Gate: the fused
-/// activation+quantization tasks' (`exec/quant_matmul.zig`) element
-/// threshold, `rows * cols >= vector_elementwise_len_threshold / 8`; a
-/// decode row never touches the pool, and a call without a team (or from
-/// inside one, where `parallelChunks` degrades to the caller) runs the
-/// serial walk.
-fn quantizeLhsUnits(
-    pc: ParallelConfig,
-    comptime Block: type,
-    comptime quantizeRange: fn ([]Block, []const f32, usize, usize, usize, usize, usize) void,
-    blocks: []Block,
-    data: []const f32,
-    rows: usize,
-    cols: usize,
-    blocks_per_row: usize,
-    unit_count: usize,
-) void {
-    const Task = struct {
-        blocks: []Block,
-        data: []const f32,
-        rows: usize,
-        cols: usize,
-        blocks_per_row: usize,
-        unit_start: usize,
-        unit_end: usize,
-
-        fn run(task: *const @This()) void {
-            quantizeRange(task.blocks, task.data, task.rows, task.cols, task.blocks_per_row, task.unit_start, task.unit_end);
-        }
-    };
-    if (pc.pool) |pool| {
-        if (unit_count > 1 and rows * cols >= parallel.vector_elementwise_len_threshold / 8) {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), unit_count);
-            if (task_count > 1) {
-                var tasks: [parallel.vector_max_threads]Task = undefined;
-                for (0..task_count) |task_i| {
-                    tasks[task_i] = .{
-                        .blocks = blocks,
-                        .data = data,
-                        .rows = rows,
-                        .cols = cols,
-                        .blocks_per_row = blocks_per_row,
-                        .unit_start = task_i * unit_count / task_count,
-                        .unit_end = (task_i + 1) * unit_count / task_count,
-                    };
-                }
-                pool.parallelChunks(Task, tasks[0..task_count], Task.run);
-                return;
-            }
-        }
-    }
-    quantizeRange(blocks, data, rows, cols, blocks_per_row, 0, unit_count);
-}
-
-/// Q8_K row blocks of the `[rows, k]` activation `data`, allocated for the
-/// caller (who frees them) and quantized through `quantizeLhsUnits`.
-fn quantizedLhsQ8_K(pc: ParallelConfig, allocator: std.mem.Allocator, data: []const f32, rows: usize, k: usize) ![]dtype_mod.BlockQ8_K {
-    const blocks_per_row = try quantized_matmul.q8k.qkBlockCount(k);
-    const blocks = try allocator.alloc(dtype_mod.BlockQ8_K, try checkedQuantizedProduct(rows, blocks_per_row));
-    errdefer allocator.free(blocks);
-    quantizeLhsUnits(pc, dtype_mod.BlockQ8_K, quantized_matmul.q8k.quantizeRowsQ8_KRangeInto, blocks, data, rows, k, blocks_per_row, rows);
-    return blocks;
-}
-
-fn checkedTensorProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
-}
-
-fn checkedQuantizedProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
-}
 
 pub const ParallelConfig = vector.ParallelConfig;
 
@@ -658,13 +584,9 @@ fn matmulQuantRows(
     switch (comptime g.lhs) {
         .q8_0 => {
             const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-            const block_count = m * blocks_per_row;
-            var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
-            const qlhs_blocks = if (block_count <= stack_blocks.len)
-                stack_blocks[0..block_count]
-            else
-                try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
-            defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+            var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
+            const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
+            defer scratch.release(allocator, qlhs_blocks);
             quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m);
             vector.matmul_quant.gemm2D(pc, g, cd, qlhs_blocks, rhs, m, n, k);
         },
@@ -804,13 +726,9 @@ fn matmulPackedQ8_0x4(
             const cd = contiguousData(out, m * n);
             const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
             const row_groups = (m + 3) / 4;
-            var stack_blocks: [q8_0_lhs_stack_blocks]quantized_matmul.BlockQ8_0x4 = undefined;
-            const block_count = row_groups * blocks_per_row;
-            const qlhs_blocks = if (block_count <= stack_blocks.len)
-                stack_blocks[0..block_count]
-            else
-                try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
-            defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+            var scratch: LhsBlocks(quantized_matmul.BlockQ8_0x4) = undefined;
+            const qlhs_blocks = try scratch.acquire(allocator, row_groups * blocks_per_row);
+            defer scratch.release(allocator, qlhs_blocks);
 
             quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4PaddedGroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, row_groups);
             vector.matmul_quant.gemm2D(pc, q8_0x4_padded_gemm, cd, qlhs_blocks, rhs, m, n, k);
@@ -824,13 +742,9 @@ fn matmulPackedQ8_0x4(
 
     const cd = contiguousData(out, m * n);
     const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
-    const block_count = (m / 4) * blocks_per_row;
-    var stack_blocks: [q8_0_lhs_stack_blocks]quantized_matmul.BlockQ8_0x4 = undefined;
-    const qlhs_blocks = if (block_count <= stack_blocks.len)
-        stack_blocks[0..block_count]
-    else
-        try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
-    defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+    var scratch: LhsBlocks(quantized_matmul.BlockQ8_0x4) = undefined;
+    const qlhs_blocks = try scratch.acquire(allocator, (m / 4) * blocks_per_row);
+    defer scratch.release(allocator, qlhs_blocks);
 
     quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, try lhsRows(a, m, k), m, k, blocks_per_row, m / 4);
     vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd, qlhs_blocks, rhs, m, n, k);
@@ -858,26 +772,18 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
     const bulk_rows = m - m % 4;
 
     {
-        const block_count = try checkedQuantizedProduct(bulk_rows / 4, blocks_per_row);
-        var stack_blocks: [q8_0_lhs_stack_blocks]quantized_matmul.BlockQ8_0x4 = undefined;
-        const qlhs_blocks = if (block_count <= stack_blocks.len)
-            stack_blocks[0..block_count]
-        else
-            try allocator.alloc(quantized_matmul.BlockQ8_0x4, block_count);
-        defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+        var scratch: LhsBlocks(quantized_matmul.BlockQ8_0x4) = undefined;
+        const qlhs_blocks = try scratch.acquire(allocator, try checkedQuantizedProduct(bulk_rows / 4, blocks_per_row));
+        defer scratch.release(allocator, qlhs_blocks);
 
         quantizeLhsUnits(pc, quantized_matmul.BlockQ8_0x4, quantized_matmul.q8_0.quantizeRowsQ8_0x4GroupsInto, qlhs_blocks, ad[0 .. bulk_rows * k], bulk_rows, k, blocks_per_row, bulk_rows / 4);
         vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd[0 .. bulk_rows * n], qlhs_blocks, rhs, bulk_rows, n, k);
     }
 
     const tail_rows = m - bulk_rows;
-    const tail_count = try checkedQuantizedProduct(tail_rows, blocks_per_row);
-    var tail_stack: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
-    const tail_blocks = if (tail_count <= tail_stack.len)
-        tail_stack[0..tail_count]
-    else
-        try allocator.alloc(dtype_mod.BlockQ8_0, tail_count);
-    defer if (tail_count > tail_stack.len) allocator.free(tail_blocks);
+    var tail_scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
+    const tail_blocks = try tail_scratch.acquire(allocator, try checkedQuantizedProduct(tail_rows, blocks_per_row));
+    defer tail_scratch.release(allocator, tail_blocks);
 
     quantizeLhsUnits(pc, dtype_mod.BlockQ8_0, quantized_matmul.q8k.quantizeRowsQ8_0RangeInto, tail_blocks, ad[bulk_rows * k .. m * k], tail_rows, k, blocks_per_row, tail_rows);
     // The <=3-row remainder runs after the bulk kernel completes; the caller's
@@ -1151,8 +1057,10 @@ pub fn gemmBatched(
 ) void {
     if (batch_count == 0) return;
     if (comptime build_options.use_gpu and !isa.reference) {
+        // One GPU dispatch covering all batch_count matrices (grid depth =
+        // batch); false when the GPU did not run.
         if (gpu.shouldUseGpuBatchedForRhs(b, m, n, k, batch_count)) {
-            if (gpuBatched(kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
+            if (gpu.gemmBatchedF32Async(kind, a, b, out, m, n, k, batch_count, stride_a, stride_b, stride_c)) return;
         }
     }
     if (comptime build_options.use_blas and !isa.reference) {
@@ -1167,36 +1075,6 @@ pub fn gemmBatched(
         contiguousData(out, out.buffer.data.len - out.offset),
         contiguousDataConst(a, a.buffer.data.len - a.offset),
         contiguousDataConst(b, b.buffer.data.len - b.offset),
-        m,
-        n,
-        k,
-        batch_count,
-        stride_a,
-        stride_b,
-        stride_c,
-    );
-}
-
-/// One GPU dispatch covering all `batch_count` matrices (grid depth = batch);
-/// returns false when the GPU did not run and the caller falls through.
-fn gpuBatched(
-    orient: gpu.Orient,
-    out: *Tensor,
-    a: *const Tensor,
-    b: *const Tensor,
-    m: usize,
-    n: usize,
-    k: usize,
-    batch_count: usize,
-    stride_a: usize,
-    stride_b: usize,
-    stride_c: usize,
-) bool {
-    return gpu.gemmBatchedF32Async(
-        orient,
-        a,
-        b,
-        out,
         m,
         n,
         k,
@@ -1249,14 +1127,4 @@ fn shouldUseBlas(m: usize, n: usize, k: usize) bool {
 
 fn shouldUseBatchedBlas(m: usize, n: usize, k: usize, batch_count: usize) bool {
     return batch_count > 1 and shouldUseBlas(m, n, k);
-}
-
-fn contiguousDataConst(x: *const Tensor, len: usize) []const f32 {
-    x.buffer.waitReady();
-    return x.buffer.data[x.offset .. x.offset + len];
-}
-
-fn contiguousData(x: *Tensor, len: usize) []f32 {
-    x.buffer.waitMutable();
-    return x.buffer.data[x.offset .. x.offset + len];
 }

@@ -8,6 +8,9 @@
 //! `q4_k`, `q5_k`, `q6_k`, `ternary`, `cold`) and the W8A8 kernel in
 //! `quant.zig`; the shared parallel gates (ParallelConfig,
 //! i8ColumnThreadCount / matmulThreadCount) come from `common.zig`.
+//! The LHS quantization band (`lhsRows`, `LhsBlocks`, `quantizeLhsUnits`,
+//! `quantizedLhsQ8_K`) is the one the native tensor-LHS entries and the
+//! reference `scalar` namespace quantize activations through.
 
 const std = @import("std");
 const isa = @import("../isa.zig");
@@ -20,8 +23,10 @@ const types = @import("../quant/types.zig");
 const q8_0 = @import("../quant/q8_0.zig");
 const thread = @import("../../thread.zig");
 const common = @import("common.zig");
+const tile = @import("tile.zig");
 
 const ParallelConfig = common.ParallelConfig;
+const Tensor = tensor.Tensor;
 
 // ---------------- Quantized MatMul (2-D) ----------------
 
@@ -370,6 +375,96 @@ fn maybeParallelQ8_0x4PackedPaddedRhs(
     return true;
 }
 
+// ---------------- The LHS quantization band ----------------
+// Shared by the native provider's tensor-LHS entries (`backend/native.zig`)
+// and the reference `scalar` namespace below.
+
+pub fn checkedTensorProduct(a: usize, b: usize) !usize {
+    return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
+}
+
+/// The `[rows, cols]` f32 activation behind an LHS tensor, validated once
+/// at the dispatch tier (rank 2, the declared dims, contiguous) so the
+/// allocation-free range quantizers run unchecked below it.
+pub fn lhsRows(a: *const Tensor, rows: usize, cols: usize) ![]const f32 {
+    const view = try a.rankView(2);
+    if (view.dim(0) != rows or view.dim(1) != cols) return tensor.TensorError.ShapeMismatch;
+    return try a.dataConstChecked();
+}
+
+/// Q8_0-family LHS block scratch: `count` blocks on the stack while they
+/// fit below `q8_0_lhs_stack_blocks` (decode-sized activations), on the
+/// heap past it. `var scratch: LhsBlocks(Block) = undefined;`, then
+/// `acquire`/`release` around the use.
+pub fn LhsBlocks(comptime Block: type) type {
+    return struct {
+        const Self = @This();
+        stack: [parallel.q8_0_lhs_stack_blocks]Block,
+
+        pub fn acquire(self: *Self, allocator: std.mem.Allocator, count: usize) ![]Block {
+            return if (count <= self.stack.len) self.stack[0..count] else try allocator.alloc(Block, count);
+        }
+
+        pub fn release(self: *const Self, allocator: std.mem.Allocator, blocks: []Block) void {
+            if (blocks.len > self.stack.len) allocator.free(blocks);
+        }
+    };
+}
+
+/// Row-range LHS quantization over the pool (`tile.forRange`'s
+/// proportional split). `quantizeRange(blocks, data, rows, cols,
+/// blocks_per_row, unit_start, unit_end)` quantizes units `[unit_start,
+/// unit_end)` (rows, or the lane-packed formats' row groups) of the
+/// `[rows, cols]` activation into `blocks`; units own disjoint blocks, so
+/// any split produces the serial call's bytes. Gate: the fused
+/// activation+quantization tasks' (`exec/quant_matmul.zig`) element
+/// threshold, `rows * cols >= vector_elementwise_len_threshold / 8`; a
+/// decode row never touches the pool, and a call without a team (or from
+/// inside one, where `parallelChunks` degrades to the caller) runs the
+/// serial walk. The reference build runs the serial walk (`refSerial`).
+pub fn quantizeLhsUnits(
+    pc: ParallelConfig,
+    comptime Block: type,
+    comptime quantizeRange: fn ([]Block, []const f32, usize, usize, usize, usize, usize) void,
+    blocks: []Block,
+    data: []const f32,
+    rows: usize,
+    cols: usize,
+    blocks_per_row: usize,
+    unit_count: usize,
+) void {
+    const Ctx = struct {
+        blocks: []Block,
+        data: []const f32,
+        rows: usize,
+        cols: usize,
+        blocks_per_row: usize,
+
+        fn run(c: @This(), unit_start: usize, unit_end: usize) void {
+            quantizeRange(c.blocks, c.data, c.rows, c.cols, c.blocks_per_row, unit_start, unit_end);
+        }
+    };
+    if (common.refSerial(pc).pool) |pool| {
+        if (unit_count > 1 and rows * cols >= parallel.vector_elementwise_len_threshold / 8) {
+            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), unit_count);
+            if (task_count > 1) {
+                return tile.forRange(pool, Ctx, .{ .blocks = blocks, .data = data, .rows = rows, .cols = cols, .blocks_per_row = blocks_per_row }, unit_count, task_count, Ctx.run);
+            }
+        }
+    }
+    quantizeRange(blocks, data, rows, cols, blocks_per_row, 0, unit_count);
+}
+
+/// Q8_K row blocks of the `[rows, k]` activation `data`, allocated for the
+/// caller (who frees them) and quantized through `quantizeLhsUnits`.
+pub fn quantizedLhsQ8_K(pc: ParallelConfig, allocator: std.mem.Allocator, data: []const f32, rows: usize, k: usize) ![]dtype_mod.BlockQ8_K {
+    const blocks_per_row = try quant.q8k.qkBlockCount(k);
+    const blocks = try allocator.alloc(dtype_mod.BlockQ8_K, try types.checkedProduct(rows, blocks_per_row));
+    errdefer allocator.free(blocks);
+    quantizeLhsUnits(pc, dtype_mod.BlockQ8_K, quant.q8k.quantizeRowsQ8_KRangeInto, blocks, data, rows, k, blocks_per_row, rows);
+    return blocks;
+}
+
 test {
     _ = @import("matmul_quant_tests.zig");
 }
@@ -387,13 +482,6 @@ test {
 /// then run the native tier's tile bodies under the serial reference
 /// dispatch.
 pub const scalar = struct {
-    const Tensor = tensor.Tensor;
-    const q8_0_lhs_stack_blocks = parallel.q8_0_lhs_stack_blocks;
-
-    fn checkedTensorProduct(a: usize, b: usize) !usize {
-        return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
-    }
-
     /// f32 [m, k] x a quantized RHS container -> f32 [m, n] over the request
     /// `g`: one serial LHS row quantization into `g.lhs`'s block form (Q8_0
     /// rows on the stack below `q8_0_lhs_stack_blocks`), then the one serial
@@ -413,13 +501,9 @@ pub const scalar = struct {
         switch (comptime g.lhs) {
             .q8_0 => {
                 const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
-                const block_count = m * blocks_per_row;
-                var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
-                const qlhs_blocks = if (block_count <= stack_blocks.len)
-                    stack_blocks[0..block_count]
-                else
-                    try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
-                defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+                var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
+                const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
+                defer scratch.release(allocator, qlhs_blocks);
                 try quant.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
                 quant.gemm(g, cd, qlhs_blocks, rhs, ops.Tile.rows(m, n));
             },
@@ -518,13 +602,9 @@ pub const scalar = struct {
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
         const cd = (try out.dataChecked())[0 .. m * n];
         const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
-        const block_count = m * blocks_per_row;
-        var stack_blocks: [q8_0_lhs_stack_blocks]dtype_mod.BlockQ8_0 = undefined;
-        const qlhs_blocks = if (block_count <= stack_blocks.len)
-            stack_blocks[0..block_count]
-        else
-            try allocator.alloc(dtype_mod.BlockQ8_0, block_count);
-        defer if (block_count > stack_blocks.len) allocator.free(qlhs_blocks);
+        var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
+        const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
+        defer scratch.release(allocator, qlhs_blocks);
         try quant.q8k.quantizeRowsQ8_0Into(qlhs_blocks, a);
         quant.cold.matmulQ2_0RhsRefRange(cd, qlhs_blocks, rhs, m, n, 0, m);
     }
