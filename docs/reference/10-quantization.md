@@ -616,8 +616,8 @@ and are cross-ISA bitwise identical to the cold reference. The f32 path
 (`dotTQ2_0F32`, `matmulTQ2_0F32RhsTile`/`Range`) is exact in IEEE f32 via
 the sign-plane/zero-plane identity `w·x = (x XOR s) AND m` with a fixed
 4-lane accumulation order — bitwise reproducible on every target, used for
-STE training forwards. RHS constructors: `quantizedMatmulRhsTQ2_0FromBlocks`
-(copies), `quantizedMatmulRhsTQ2_0FromBorrowedBlocks` (borrows, `deinit`
+STE training forwards. RHS constructors:
+`quantizedMatmulRhsTQ2_0FromBorrowedBlocks` (borrows, `deinit`
 frees nothing), `quantizedMatmulRhsTQ2_0FromF32` (absmax) and
 `quantizedMatmulRhsTQ2_0FromF32Absmean` (b1.58). Measured: ~4.2x the cold
 path and ~2.1x Q4_K per byte-ratio on M1 Max; ~5.1x cold and ~4.8x Q4_K on
