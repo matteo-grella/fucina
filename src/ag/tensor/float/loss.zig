@@ -148,7 +148,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.mseLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-            const Record = MseLossBackward(tags, options);
+            const Record = MseLossBackward(options);
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_target = try target.asRawTensor().cloneView();
@@ -173,7 +173,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.huberLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-            const Record = HuberLossBackward(tags, options);
+            const Record = HuberLossBackward(options);
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_target = try target.asRawTensor().cloneView();
@@ -202,7 +202,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.bceLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-            const Record = BceLossBackward(tags, options);
+            const Record = BceLossBackward(options);
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_target = try target.asRawTensor().cloneView();
@@ -231,7 +231,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.klDivLoss(self.asRawTensor(), target.asRawTensor(), options);
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or target.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-            const Record = KlDivLossBackward(tags, options);
+            const Record = KlDivLossBackward(options);
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_target = try target.asRawTensor().cloneView();

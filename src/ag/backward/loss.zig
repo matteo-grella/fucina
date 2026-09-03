@@ -149,22 +149,18 @@ fn ElementwiseLossBackward(comptime Options: type, comptime options: Options, co
     };
 }
 
-pub fn MseLossBackward(comptime tags: anytype, comptime options: exec_mod.MseOptions) type {
-    _ = tags;
+pub fn MseLossBackward(comptime options: exec_mod.MseOptions) type {
     return ElementwiseLossBackward(exec_mod.MseOptions, options, ExecContext.mseBackwardUpstream);
 }
 
-pub fn HuberLossBackward(comptime tags: anytype, comptime options: exec_mod.HuberOptions) type {
-    _ = tags;
+pub fn HuberLossBackward(comptime options: exec_mod.HuberOptions) type {
     return ElementwiseLossBackward(exec_mod.HuberOptions, options, ExecContext.huberBackwardUpstream);
 }
 
-pub fn BceLossBackward(comptime tags: anytype, comptime options: exec_mod.BceOptions) type {
-    _ = tags;
+pub fn BceLossBackward(comptime options: exec_mod.BceOptions) type {
     return ElementwiseLossBackward(exec_mod.BceOptions, options, ExecContext.bceBackwardUpstream);
 }
 
-pub fn KlDivLossBackward(comptime tags: anytype, comptime options: exec_mod.KlDivOptions) type {
-    _ = tags;
+pub fn KlDivLossBackward(comptime options: exec_mod.KlDivOptions) type {
     return ElementwiseLossBackward(exec_mod.KlDivOptions, options, ExecContext.klDivBackwardUpstream);
 }

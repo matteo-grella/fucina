@@ -52,7 +52,7 @@ pub fn Ops(comptime Self: type) type {
             if (comptime target_dtype == .f32) {
                 if (comptime plumbing.hasGradSlot(Self)) {
                     if (!plumbing.recordsGrad(self.requiresGrad())) return plumbing.finishNoGrad(tags, ctx, value);
-                    const Record = CastBackward(tags);
+                    const Record = CastBackward;
                     return plumbing.finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
                 }
                 // Integer/bool sources are grad-free: a plain f32 constant.

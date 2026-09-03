@@ -192,35 +192,32 @@ pub fn RmsNormMulRopeBackward(
 /// when present because it feeds dx (ĝ = gy⊙weight); statistics are
 /// recomputed from the input inside the exec backward (the layerNorm VJP
 /// convention).
-pub fn GroupNormBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [3]?*GradState,
-        groups: usize,
-        eps: f32,
-        input_value: RawTensor,
-        weight_value: ?RawTensor = null,
+pub const GroupNormBackward = struct {
+    parents: [3]?*GradState,
+    groups: usize,
+    eps: f32,
+    input_value: RawTensor,
+    weight_value: ?RawTensor = null,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            const need_input = core.needs(self, 0);
-            const need_weight = core.needs(self, 1);
-            const need_bias = core.needs(self, 2);
-            if (!need_input and !need_weight and !need_bias) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        const need_input = core.needs(self, 0);
+        const need_weight = core.needs(self, 1);
+        const need_bias = core.needs(self, 2);
+        if (!need_input and !need_weight and !need_bias) return;
 
-            const result = try ctx.groupNormBackward(&self.input_value, gy, self.groups, self.eps, .{ .weight = if (self.weight_value) |*w| w else null, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });
-            if (need_input) out[0] = result.input.?;
-            if (need_weight) out[1] = result.weight.?;
-            if (need_bias) out[2] = result.bias.?;
-        }
+        const result = try ctx.groupNormBackward(&self.input_value, gy, self.groups, self.eps, .{ .weight = if (self.weight_value) |*w| w else null, .need_input = need_input, .need_weight = need_weight, .need_bias = need_bias });
+        if (need_input) out[0] = result.input.?;
+        if (need_weight) out[1] = result.weight.?;
+        if (need_bias) out[2] = result.bias.?;
+    }
 
-        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
-            _ = allocator;
-            self.input_value.deinit();
-            if (self.weight_value) |*w| w.deinit();
-        }
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        self.input_value.deinit();
+        if (self.weight_value) |*w| w.deinit();
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};

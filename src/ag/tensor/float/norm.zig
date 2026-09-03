@@ -97,7 +97,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.groupNorm(self.asRawTensor(), groups, eps, .{ .weight = weight_raw, .bias = bias_raw });
             errdefer value.deinit();
             if (!recordsGrad(any_grad)) return finishNoGrad(tags, ctx, value);
-            const Record = GroupNormBackward(tags);
+            const Record = GroupNormBackward;
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_weight: ?RawTensor = if (weight_raw) |p| try p.cloneView() else null;

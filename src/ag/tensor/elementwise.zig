@@ -108,7 +108,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             try ctx.addAxisVectorInPlace(tensor_rank, null, &value, bias, comptime Self.axis(axis_tag));
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = IdentityBackward(tags);
+            const Record = IdentityBackward;
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
@@ -126,7 +126,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad() or other.requiresGrad());
             if (!recordsGrad(self.requiresGrad() or other.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = WhereBackward(tags, Cond.dtype);
+            const Record = WhereBackward(Cond.dtype);
             var saved_cond = try cond.asRawTensor().cloneView();
             errdefer saved_cond.deinit();
             return finishOp(tags, ctx, value, Record{ .parents = .{ self.grad_state, other.grad_state }, .cond = saved_cond });
@@ -146,7 +146,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer v.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, v, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, v);
-            const Record = MaskedFillBackward(tags, Mask.dtype);
+            const Record = MaskedFillBackward(Mask.dtype);
             var saved_mask = try mask.asRawTensor().cloneView();
             errdefer saved_mask.deinit();
             return finishOp(tags, ctx, v, Record{ .parents = .{self.grad_state}, .mask = saved_mask });
@@ -299,7 +299,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime target_dtype == .f32) {
                 if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-                const Record = CastBackward(tags);
+                const Record = CastBackward;
                 return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
             }
             if (comptime (target_dtype == .f16 or target_dtype == .bf16)) {
@@ -307,7 +307,7 @@ pub fn Ops(comptime Self: type) type {
                 // backward is the identity in f32 gradient space — the
                 // upstream f32 gradient passes through unrounded.
                 if (!recordsGrad(self.requiresGrad())) return finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
-                const Record = CastBackward(tags);
+                const Record = CastBackward;
                 return typedFinishOp(target_dtype, tags, ctx, value, Record{ .parents = .{self.grad_state} });
             }
             return finishTyped(Tensor(.{ .dtype = target_dtype, .tags = tags }), ctx, value);
@@ -336,7 +336,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = ScaleBackward(tags);
+            const Record = ScaleBackward;
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .scalar_value = scalar_value });
         }
 
@@ -371,7 +371,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = AddScalarBackward(tags);
+            const Record = AddScalarBackward;
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state} });
         }
 
@@ -392,7 +392,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = PowScalarBackward(tags);
+            const Record = PowScalarBackward;
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             return finishOp(tags, ctx, value, Record{
@@ -424,7 +424,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.dropoutForward(self.asRawTensor(), p, seed);
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = DropoutBackward(tags);
+            const Record = DropoutBackward;
             return finishOp(tags, ctx, value, Record{
                 .parents = .{self.grad_state},
                 .p = p,
@@ -456,7 +456,7 @@ pub fn Ops(comptime Self: type) type {
             var value = try ctx.snakeRows(self.asRawTensor(), alpha.asRawTensor(), inv_b.asRawTensor());
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or alpha.requiresGrad() or inv_b.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = SnakeBackward(tags);
+            const Record = SnakeBackward;
             var saved_input = try self.asRawTensor().cloneView();
             errdefer saved_input.deinit();
             var saved_alpha = try alpha.asRawTensor().cloneView();
@@ -760,7 +760,7 @@ pub fn Ops(comptime Self: type) type {
             const saved: *const RawT = if (comptime unaryUsesOutput(op)) &value else &self.value;
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = UnaryBackward(op, tags);
+            const Record = UnaryBackward(op);
             var saved_input = try saved.cloneView();
             errdefer saved_input.deinit();
             return finishOp(tags, ctx, value, Record{ .parents = .{self.grad_state}, .input = saved_input });

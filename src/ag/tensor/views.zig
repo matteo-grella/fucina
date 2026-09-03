@@ -123,7 +123,7 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (comptime !differentiable) return finishTypedNoGrad(Out(tags), ctx, value, self.requiresGrad());
             if (!recordsGrad(self.requiresGrad())) return finishNoGrad(tags, ctx, value);
-            const Record = IdentityBackward(tags);
+            const Record = IdentityBackward;
             return finishOp(tags, ctx, value, Record{ .parents = .{gradStateOf(self)} });
         }
 

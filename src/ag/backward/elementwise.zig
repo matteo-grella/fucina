@@ -114,21 +114,18 @@ pub fn PointwiseBackward(
 /// Cast's VJP is the identity: pass the gradient through contiguously.
 pub const CastBackward = IdentityBackward;
 
-pub fn IdentityBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
+pub const IdentityBackward = struct {
+    parents: [1]?*GradState,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            if (!core.needs(self, 0)) return;
-            out[0] = try contiguousForRead(ctx, gy);
-        }
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
+        out[0] = try contiguousForRead(ctx, gy);
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};
 
 /// Shared pool-split for the elementwise VJP map loops: `dst[i] =
 /// env.apply(a[i], gy[i])` per chunk (or a whole-slice `env.runSlice` when
@@ -307,8 +304,7 @@ pub fn unaryUsesOutput(comptime op: exec_mod.UnaryOp) bool {
     };
 }
 
-pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type {
-    _ = tags;
+pub fn UnaryBackward(comptime op: exec_mod.UnaryOp) type {
     return struct {
         parents: [1]?*GradState,
         /// The forward input — or the forward OUTPUT for unaryUsesOutput ops.
@@ -360,44 +356,38 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp, comptime tags: anytype) type
     };
 }
 
-pub fn ScaleBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
-        scalar_value: f32,
+pub const ScaleBackward = struct {
+    parents: [1]?*GradState,
+    scalar_value: f32,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            if (!core.needs(self, 0)) return;
-            out[0] = try ctx.scale(.f32, gy, self.scalar_value);
-        }
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
+        out[0] = try ctx.scale(.f32, gy, self.scalar_value);
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};
 
 /// Dropout VJP: stores only {p, seed} — the mask is NEVER materialized. The
 /// exec backward kernel regenerates the identical counter-based (seed, i)
 /// mask, so the node is as cheap as ScaleBackward and recompute-safe under
 /// activation checkpointing.
-pub fn DropoutBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
-        p: f32,
-        seed: u64,
+pub const DropoutBackward = struct {
+    parents: [1]?*GradState,
+    p: f32,
+    seed: u64,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            if (!core.needs(self, 0)) return;
-            out[0] = try ctx.dropoutBackward(gy, self.p, self.seed);
-        }
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
+        out[0] = try ctx.dropoutBackward(gy, self.p, self.seed);
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};
 
 pub const ClampBackward = struct {
     const Self = @This();
@@ -551,63 +541,56 @@ pub fn SplitGluBackward(comptime tags: anytype, comptime axis: usize) type {
 
 /// VJP for `addScalar` (and `subScalar`): `d/dx (x + c) = 1`, so grad passes
 /// through unchanged.
-pub fn AddScalarBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
+pub const AddScalarBackward = struct {
+    parents: [1]?*GradState,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            _ = ctx;
-            if (!core.needs(self, 0)) return;
-            // Identity passthrough: an owned view of gy (refcounted, no
-            // copy) — the same spelling PointwiseBackward uses for add.
-            out[0] = try gy.cloneView();
-        }
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        _ = ctx;
+        if (!core.needs(self, 0)) return;
+        // Identity passthrough: an owned view of gy (refcounted, no
+        // copy) — the same spelling PointwiseBackward uses for add.
+        out[0] = try gy.cloneView();
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};
 
 /// VJP for `powScalar`: `d/dx (x^c) = c·x^(c-1)`, so `grad_x = gy · c · x^(c-1)`.
-pub fn PowScalarBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [1]?*GradState,
-        input: RawTensor,
-        exponent: f32,
+pub const PowScalarBackward = struct {
+    parents: [1]?*GradState,
+    input: RawTensor,
+    exponent: f32,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            if (!core.needs(self, 0)) return;
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (!core.needs(self, 0)) return;
 
-            var x = try contiguousForRead(ctx, &self.input);
-            defer x.deinit();
-            var gy_ready = try contiguousForRead(ctx, gy);
-            defer gy_ready.deinit();
+        var x = try contiguousForRead(ctx, &self.input);
+        defer x.deinit();
+        var gy_ready = try contiguousForRead(ctx, gy);
+        defer gy_ready.deinit();
 
-            var gx = try ctx.empty(.f32, x.shape.slice());
-            errdefer gx.deinit();
-            const c = self.exponent;
-            for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
-                dst.* = grad * c * std.math.pow(f32, value, c - 1);
-            }
-            out[0] = gx;
+        var gx = try ctx.empty(.f32, x.shape.slice());
+        errdefer gx.deinit();
+        const c = self.exponent;
+        for (x.dataConst(), gy_ready.dataConst(), gx.data()) |value, grad, *dst| {
+            dst.* = grad * c * std.math.pow(f32, value, c - 1);
         }
+        out[0] = gx;
+    }
 
-        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
-            _ = allocator;
-            self.input.deinit();
-        }
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        self.input.deinit();
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub const vtable = core.recordVTable(Self);
+};
 
-pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mod.DType) type {
-    _ = tags;
+pub fn MaskedFillBackward(comptime mask_dtype: tensor_mod.DType) type {
     return struct {
         parents: [1]?*GradState,
         mask: tensor_mod.TensorOf(mask_dtype),
@@ -643,8 +626,7 @@ pub fn MaskedFillBackward(comptime tags: anytype, comptime mask_dtype: tensor_mo
 
 /// VJP for `where(x, cond, y)` = `cond ? x : y`: `grad_x = cond ? gy : 0` and
 /// `grad_y = cond ? 0 : gy` (`cond` is a non-grad mask).
-pub fn WhereBackward(comptime tags: anytype, comptime cond_dtype: tensor_mod.DType) type {
-    _ = tags;
+pub fn WhereBackward(comptime cond_dtype: tensor_mod.DType) type {
     return struct {
         parents: [2]?*GradState,
         cond: tensor_mod.TensorOf(cond_dtype),
@@ -920,36 +902,33 @@ pub const ChannelAffineBackward = struct {
 /// single alpha parameter must chain through that relation itself). The two
 /// per-channel parameter gradients come from one fused kernel pass; the one
 /// that was not requested is dropped.
-pub fn SnakeBackward(comptime tags: anytype) type {
-    _ = tags;
-    return struct {
-        parents: [3]?*GradState,
-        input_value: RawTensor,
-        alpha_value: RawTensor,
-        inv_b_value: RawTensor,
+pub const SnakeBackward = struct {
+    parents: [3]?*GradState,
+    input_value: RawTensor,
+    alpha_value: RawTensor,
+    inv_b_value: RawTensor,
 
-        const Self = @This();
+    const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            if (core.needs(self, 0)) {
-                out[0] = try ctx.snakeRowsBackwardInput(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
-            }
-            const need_alpha = core.needs(self, 1);
-            const need_inv_b = core.needs(self, 2);
-            if (need_alpha or need_inv_b) {
-                var params = try ctx.snakeRowsBackwardParams(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
-                if (need_alpha) out[1] = params.alpha else params.alpha.deinit();
-                if (need_inv_b) out[2] = params.inv_b else params.inv_b.deinit();
-            }
+    pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        if (core.needs(self, 0)) {
+            out[0] = try ctx.snakeRowsBackwardInput(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
         }
-
-        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
-            _ = allocator;
-            self.input_value.deinit();
-            self.alpha_value.deinit();
-            self.inv_b_value.deinit();
+        const need_alpha = core.needs(self, 1);
+        const need_inv_b = core.needs(self, 2);
+        if (need_alpha or need_inv_b) {
+            var params = try ctx.snakeRowsBackwardParams(&self.input_value, gy, &self.alpha_value, &self.inv_b_value);
+            if (need_alpha) out[1] = params.alpha else params.alpha.deinit();
+            if (need_inv_b) out[2] = params.inv_b else params.inv_b.deinit();
         }
+    }
 
-        pub const vtable = core.recordVTable(Self);
-    };
-}
+    pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        self.input_value.deinit();
+        self.alpha_value.deinit();
+        self.inv_b_value.deinit();
+    }
+
+    pub const vtable = core.recordVTable(Self);
+};
