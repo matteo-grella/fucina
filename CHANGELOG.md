@@ -25,6 +25,10 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Muon's Newton-Schulz fixups (the Frobenius scale, `b·G + c·Q`, `a·X + BX`)
+  are `parallelMap` maps between the GEMMs instead of serial loops; the same
+  expression per element, so bitwise the old step for any part count. One
+  0.6B-class block: 400 ms -> 318 ms per step (bf16 state 402 -> 303 ms).
 - Reducing a broadcast is summing over the broadcast axes. `reduceBroadcast`
   (the tail of every broadcast VJP and of the dot/einsum VJPs) folds the
   leading axes as one block and each axis the target holds at 1 through a

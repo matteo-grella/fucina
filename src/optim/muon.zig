@@ -211,6 +211,37 @@ const ns_coeff_c: f32 = 2.0315;
 /// the small dimension. The reference runs in bf16 on GPU; f32 here is strictly
 /// more accurate. The result approximates U*V^T with singular values in roughly
 /// (0.5, 1.5) — by design, not a bug. `u` must be rank-2 and is never mutated.
+/// The Newton-Schulz elementwise fixups as pool maps (`parallelMap`:
+/// element-independent, so bitwise the serial loop for any part count).
+const Scale = struct {
+    z: []f32,
+    s: f32,
+    fn run(c: @This(), start: usize, end: usize) void {
+        for (c.z[start..end]) |*value| value.* *= c.s;
+    }
+};
+
+/// z = a·x + b·z
+const Axpby = struct {
+    z: []f32,
+    x: []const f32,
+    a: f32,
+    b: f32,
+    fn run(c: @This(), start: usize, end: usize) void {
+        for (c.z[start..end], c.x[start..end]) |*zi, xi| zi.* = c.a * xi + c.b * zi.*;
+    }
+};
+
+/// z += a·x
+const Axpy = struct {
+    z: []f32,
+    x: []const f32,
+    a: f32,
+    fn run(c: @This(), start: usize, end: usize) void {
+        for (c.z[start..end], c.x[start..end]) |*zi, xi| zi.* = c.a * xi + zi.*;
+    }
+};
+
 pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTensor {
     const rows = u.shape.at(0);
     const cols = u.shape.at(1);
@@ -220,17 +251,17 @@ pub fn newtonSchulz5(ctx: *ExecContext, u: *const RawTensor, steps: u32) !RawTen
 
     const sumsq = try sumSquares(ctx, x.dataConst());
     const inv_norm: f32 = @floatCast(1.0 / (@sqrt(sumsq) + 1e-7));
-    for (x.data()) |*value| value.* *= inv_norm;
+    parallelMap(ctx, x.len(), Scale{ .z = x.data(), .s = inv_norm }, Scale.run);
 
     for (0..steps) |_| {
         var gram = try ctx.matmul(.f32, .trans_b, &x, &x);
         defer gram.deinit();
         var quad = try ctx.matmul(.f32, .plain, &gram, &gram);
         defer quad.deinit();
-        for (quad.data(), gram.dataConst()) |*qi, gi| qi.* = ns_coeff_b * gi + ns_coeff_c * qi.*;
+        parallelMap(ctx, quad.len(), Axpby{ .z = quad.data(), .x = gram.dataConst(), .a = ns_coeff_b, .b = ns_coeff_c }, Axpby.run);
         var bx = try ctx.matmul(.f32, .plain, &quad, &x);
         errdefer bx.deinit();
-        for (bx.data(), x.dataConst()) |*oi, xi| oi.* = ns_coeff_a * xi + oi.*;
+        parallelMap(ctx, bx.len(), Axpy{ .z = bx.data(), .x = x.dataConst(), .a = ns_coeff_a }, Axpy.run);
         x.deinit();
         x = bx;
     }
