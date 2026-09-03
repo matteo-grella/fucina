@@ -6,7 +6,9 @@
 //! each call across the GPU provider (`-Dgpu`), a CBLAS provider (`-Dblas`)
 //! and the vector kernels (the quantized row-form and W8A8 bodies are
 //! `vector/matmul_quant.zig`'s tensor-LHS entries; this file layers the
-//! BLAS crossovers and the lane-packed-LHS forms on them). Every
+//! BLAS crossovers and the lane-packed-LHS forms on them). One kernel calls
+//! BLAS from its own leaf instead: the attention backward's BLAS-strip
+//! variant (`vector/attention.zig`), whose strips are the GEMMs. Every
 //! pool-taking kernel takes `pc:
 //! ParallelConfig` first. On `-Dbackend=scalar` builds (`isa.reference`)
 //! the same entries select their scalar reference arms (the `scalar`

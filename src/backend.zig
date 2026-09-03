@@ -302,8 +302,8 @@ pub const native_blas_threads = build_options.blas_threads;
 
 pub const ParallelConfig = native_impl.ParallelConfig;
 
-/// The provider's kernel set; see `backend/interface.zig` for the names
-/// and the `pc`-first signature rule.
+/// The provider's kernel set: the declaration list of `native.kernels` is
+/// the interface (`conformKernels` below states the `pc`-first rule).
 pub const kernels = native_impl.kernels;
 
 comptime {
