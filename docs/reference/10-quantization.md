@@ -697,7 +697,7 @@ under exec scopes.
 
 Comptime requirements: f32 latent weight, storage order `[free, contract]`
 on the weight and `[..., contract]` on the LHS, one weight free axis, no
-shared batch tags. Runtime: `error.TernaryContractDimNotBlockAligned` when
+shared batch tags. Runtime: `error.InvalidShape` when
 `k` is 0 or not a multiple of 256. The latent weight is re-encoded every
 forward (inherent to STE).
 

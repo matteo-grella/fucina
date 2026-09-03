@@ -1051,7 +1051,7 @@ latent `weight` (tags `{.out, .in}`, per-tensor absmean scale, round-clip to
 {−1, 0, +1}) to TQ2_0 and contracts with the mul-free kernel. Backward: `dx`
 flows through the **quantized** weight; `dW` is the straight-through
 estimate (plain matmul VJP against the latent weight). The contract dim must
-be a multiple of 256 (`error.TernaryContractDimNotBlockAligned` otherwise);
+be a multiple of 256 (`error.InvalidShape` otherwise);
 no shared batch tags, one weight free axis, weight storage
 `[free, contract]`, and lhs storage `[..., contract]` (contract tag last) —
 all four are compile errors. See `TERNARY.md` and [§10](10-quantization.md)/[§11](11-training-optimizers-evolution-strategies-lora-and-checkpoints.md).

@@ -683,7 +683,7 @@ test "multi-stream attention rejects bad shapes" {
     );
     // Span shorter than its declared len.
     try std.testing.expectError(
-        error.InvalidShape,
+        error.InvalidDataLength,
         ctx.groupedAttention(&q, .{ .multi_f16 = .{ .k = &ks, .v = &ks, .lens = &.{ 3, 4 }, .kv_heads = 1 } }, &map, 0.25, .{}),
     );
     // lens count != stream count.

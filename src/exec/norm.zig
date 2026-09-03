@@ -662,8 +662,8 @@ pub fn layerNormRows(
     affine: AffineSlices,
 ) !Tensor {
     if (input.len != rows * cols) return tensor.TensorError.InvalidDataLength;
-    if (affine.weight) |w| if (w.len != cols) return tensor.TensorError.ShapeMismatch;
-    if (affine.bias) |b| if (b.len != cols) return tensor.TensorError.ShapeMismatch;
+    if (affine.weight) |w| if (w.len != cols) return tensor.TensorError.InvalidDataLength;
+    if (affine.bias) |b| if (b.len != cols) return tensor.TensorError.InvalidDataLength;
 
     var out = try ctx.empty(.f32, .{ rows, cols });
     errdefer out.deinit();

@@ -28,6 +28,11 @@ pub const TensorError = shape_mod.ShapeError || error{
     /// duplicate scatter indices, an option combination that names no
     /// target. Shape and layout problems stay `InvalidShape`/`ShapeMismatch`.
     InvalidArgument,
+    /// A slice's length disagrees with the count its shape prescribes: a
+    /// data buffer against the element count, a block slice against the
+    /// block count, a per-axis value vector (a bias, a norm weight, rope
+    /// factors, softmax sinks) against its axis. Index and mapping lists
+    /// are structure, not data: their length problems are `InvalidShape`.
     InvalidDataLength,
     IndexOutOfBounds,
     UnsupportedView,

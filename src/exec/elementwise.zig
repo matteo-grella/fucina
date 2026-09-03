@@ -719,7 +719,7 @@ pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, comptime op
     const view = try target.rankView(rank);
     if (!target.isContiguous()) return tensor.TensorError.UnsupportedView;
     const axis_dim = view.shape[axis];
-    if (row_vector.len != axis_dim) return tensor.TensorError.ShapeMismatch;
+    if (row_vector.len != axis_dim) return tensor.TensorError.InvalidDataLength;
     if (productAfterAxis(rank, view.shape, axis) != 1) return tensor.TensorError.UnsupportedView;
 
     const rows = productBeforeAxis(rank, view.shape, axis);

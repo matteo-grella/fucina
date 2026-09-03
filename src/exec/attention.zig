@@ -525,8 +525,8 @@ fn groupedCausalAttentionQ8KvImpl(
     if (q_seq == 0 or q_seq > kv_seq) return tensor.TensorError.InvalidShape;
     if (d == 0 or d % q8_0_block_size != 0 or d > attention_q8_max_d) return tensor.TensorError.InvalidShape;
     const row_blocks = kv_heads * (d / q8_0_block_size);
-    if (k_blocks.len != kv_seq * row_blocks) return tensor.TensorError.InvalidShape;
-    if (v_blocks.len != k_blocks.len) return tensor.TensorError.InvalidShape;
+    if (k_blocks.len != kv_seq * row_blocks) return tensor.TensorError.InvalidDataLength;
+    if (v_blocks.len != k_blocks.len) return tensor.TensorError.InvalidDataLength;
     for (kv_head_for_head) |kv_head_i| {
         if (kv_head_i >= kv_heads) return tensor.TensorError.IndexOutOfBounds;
     }
@@ -571,7 +571,7 @@ fn groupedCausalAttentionMultiImpl(
     var lens_sum: usize = 0;
     for (ks, vs, lens) |k_s, v_s, len_s| {
         if (len_s == 0) return tensor.TensorError.InvalidShape;
-        if (k_s.len < len_s * row or v_s.len < len_s * row) return tensor.TensorError.InvalidShape;
+        if (k_s.len < len_s * row or v_s.len < len_s * row) return tensor.TensorError.InvalidDataLength;
         max_len = @max(max_len, len_s);
         lens_sum +|= len_s;
     }

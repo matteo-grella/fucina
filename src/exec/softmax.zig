@@ -162,7 +162,7 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
         if ((options.max_bias > 0 or options.sinks != null) and head_axis == axis) return tensor.TensorError.InvalidShape;
         if ((options.max_bias > 0 or options.sinks != null) and source.shape[head_axis] == 0) return tensor.TensorError.InvalidShape;
     } else if (options.sinks) |sinks| {
-        if (sinks.len != 1) return tensor.TensorError.InvalidShape;
+        if (sinks.len != 1) return tensor.TensorError.InvalidDataLength;
     }
     if (options.causal_query_axis) |query_axis| {
         if (query_axis >= rank or query_axis == axis) return tensor.TensorError.InvalidShape;
@@ -176,7 +176,7 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
 
     const head_count = if (options.head_axis) |head_axis| source.shape[head_axis] else 1;
     if (options.sinks) |sinks| {
-        if (sinks.len != head_count) return tensor.TensorError.InvalidShape;
+        if (sinks.len != head_count) return tensor.TensorError.InvalidDataLength;
     }
 
     var mask_value: ?Tensor = null;

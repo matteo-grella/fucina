@@ -319,7 +319,7 @@ pub fn Ops(comptime Self: type) type {
         /// the plain matmul VJP as if the forward had been `x @ Wᵀ` with the
         /// latent weight (identity through the quantizer, no clip/mask).
         /// The contract dim must be a multiple of 256 (the TQ2_0 block size);
-        /// anything else fails with `error.TernaryContractDimNotBlockAligned`.
+        /// anything else fails with `TensorError.InvalidShape`.
         pub fn dotTernarySte(self: *const Self, ctx: *ExecContext, weight: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(weight)).axis_tags, contract_tag)) {
             const Weight = TensorObject(@TypeOf(weight));
             const weight_tags = Weight.axis_tags;
@@ -340,7 +340,7 @@ pub fn Ops(comptime Self: type) type {
             const n = weight_raw.shape.at(0);
             const k = weight_raw.shape.at(1);
             if (self.asRawTensor().shape.at(tag_rank - 1) != k) return TensorError.ShapeMismatch;
-            if (k == 0 or k % dtype_mod.qk_k_block_size != 0) return error.TernaryContractDimNotBlockAligned;
+            if (k == 0 or k % dtype_mod.qk_k_block_size != 0) return TensorError.InvalidShape;
 
             const left_free_rank = comptime dotLeftFreeTags(tags, weight_tags, contract_tag).len;
             var left_aligned = try alignTensorTo(.f32, tags, self.asRawTensor(), dotLeftOrder(tags, weight_tags, contract_tag));

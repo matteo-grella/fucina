@@ -47,6 +47,15 @@ this point; earlier history is `git log`.
   `error.GradientQuantizedMatmulUnsupported`,
   `error.GradientPreparedConv2dUnsupported`, `error.GradientCastUnsupported`
   and `weights.Error.GradUnsupported` → `UnsupportedGradient`.
+- One rule per shape-domain name, stated on `ShapeError` and `TensorError`.
+  A value slice whose length disagrees with the count its shape prescribes
+  is `InvalidDataLength` everywhere: softmax sinks, the q8 attention block
+  slices and multi-stream KV slices, `addAxisVectorInPlace`'s vector, rope
+  factors and `inv_freq`, `layerNormRows`' affine slices (were
+  `InvalidShape` or `ShapeMismatch` by file). A dimension not aligned to
+  its block size is `InvalidShape` (rewrite: `dotTernarySte`'s
+  `error.TernaryContractDimNotBlockAligned` → `error.InvalidShape`), and so
+  is a shape whose element count overflows `usize` (was `error.Overflow`).
 - The row and attention seams are curated namespaces: `backend.rows` and
   `backend.attention` list the Task payloads, the `run*Task` inner-lane
   adapters, the task factories, the tile constants and the shared helpers

@@ -20,6 +20,13 @@ pub const too_many_tags_msg = std.fmt.comptimePrint("too many tensor tags (max {
 /// representable (zero rank, rank past `max_rank`, a zero dimension, an
 /// element count that overflows), `ShapeMismatch` for two shapes that
 /// were required to agree. `tensor.TensorError` extends it.
+/// The shape domain, one rule per name. `InvalidShape`: a shape, rank,
+/// axis or index-structure argument is malformed on its own (rank 0 or
+/// beyond `max_rank`, a zero dimension, an element count that overflows
+/// `usize`, an axis beyond the rank, an empty index list, offsets that
+/// disagree with their section count, a dimension not aligned to its
+/// block size). `ShapeMismatch`: two tensors, or a tensor and a table
+/// carrying a shape, disagree.
 pub const ShapeError = error{
     InvalidShape,
     ShapeMismatch,
@@ -95,7 +102,7 @@ pub fn elementCount(shape: []const usize) !usize {
     var n: usize = 1;
     for (shape) |dim| {
         if (dim == 0) return ShapeError.InvalidShape;
-        n = try std.math.mul(usize, n, dim);
+        n = std.math.mul(usize, n, dim) catch return ShapeError.InvalidShape;
     }
     return n;
 }
@@ -113,7 +120,7 @@ pub fn storageElementCount(comptime dtype: dtype_mod.DType, shape: []const usize
     var n: usize = last_dim / block;
     for (shape[0 .. shape.len - 1]) |dim| {
         if (dim == 0) return ShapeError.InvalidShape;
-        n = try std.math.mul(usize, n, dim);
+        n = std.math.mul(usize, n, dim) catch return ShapeError.InvalidShape;
     }
     return n;
 }
@@ -308,7 +315,7 @@ test "element counts validate and overflow-check" {
     try std.testing.expectEqual(@as(usize, 24), try elementCount(&.{ 2, 3, 4 }));
     try std.testing.expectError(ShapeError.InvalidShape, elementCount(&.{ 2, 0 }));
     try std.testing.expectError(ShapeError.InvalidShape, elementCount(&.{}));
-    try std.testing.expectError(error.Overflow, elementCount(&.{ std.math.maxInt(usize), 2 }));
+    try std.testing.expectError(ShapeError.InvalidShape, elementCount(&.{ std.math.maxInt(usize), 2 }));
     try std.testing.expectEqual(@as(usize, 2), try storageElementCount(.q8_0, &.{ 2, 32 }));
     try std.testing.expectError(ShapeError.InvalidShape, storageElementCount(.q8_0, &.{ 2, 33 }));
 }

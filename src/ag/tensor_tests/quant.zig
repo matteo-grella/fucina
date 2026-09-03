@@ -1185,5 +1185,5 @@ test "public f32 Tensor dotTernarySte rejects a contract dim that is not a 256 m
     var w = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ 2, k }, &w_values);
     defer w.deinit();
 
-    try std.testing.expectError(error.TernaryContractDimNotBlockAligned, x.dotTernarySte(&ctx, &w, .in));
+    try std.testing.expectError(error.InvalidShape, x.dotTernarySte(&ctx, &w, .in));
 }

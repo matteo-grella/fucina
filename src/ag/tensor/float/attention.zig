@@ -254,8 +254,9 @@ pub fn Ops(comptime Self: type) type {
             window: usize,
         ) !Tensor(.{ .seq, out_tag }) {
             const block_size = dtype_mod.q8_0_block_size;
-            if (kv_seq * kv_heads == 0 or k_blocks.len % (kv_seq * kv_heads) != 0) return TensorError.InvalidShape;
-            if (v_blocks.len != k_blocks.len) return TensorError.InvalidShape;
+            if (kv_seq * kv_heads == 0) return TensorError.InvalidShape;
+            if (k_blocks.len % (kv_seq * kv_heads) != 0) return TensorError.InvalidDataLength;
+            if (v_blocks.len != k_blocks.len) return TensorError.InvalidDataLength;
             const d = (k_blocks.len / (kv_seq * kv_heads)) * block_size;
             var k32 = try ctx.empty(.f32, .{ kv_seq, kv_heads, d });
             defer k32.deinit();

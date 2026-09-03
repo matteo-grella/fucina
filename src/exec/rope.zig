@@ -240,9 +240,9 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
     const pair_count = spec.feature_dim / 2;
     switch (spec.freqs) {
         .theta => |t| if (t.factors) |ff| {
-            if (ff.len != pair_count) return tensor.TensorError.ShapeMismatch;
+            if (ff.len != pair_count) return tensor.TensorError.InvalidDataLength;
         },
-        .inv_freq_f64 => |f| if (f.len != pair_count) return tensor.TensorError.ShapeMismatch,
+        .inv_freq_f64 => |f| if (f.len != pair_count) return tensor.TensorError.InvalidDataLength,
     }
     const position_count = spec.positions.len();
     const angle_count = try std.math.mul(usize, position_count, pair_count);
