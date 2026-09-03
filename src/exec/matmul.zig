@@ -319,7 +319,6 @@ pub fn matmulAdd(self: *ExecContext, a: *const Tensor, b: *const Tensor, base: *
     return out;
 }
 
-/// Strict 2-D `a[m,k] @ b[k,n]`.
 /// Rank-2 matmul over `kind` (`.plain` a·b, `.trans_a` aᵀ·b, `.trans_b`
 /// a·bᵀ). f32 runs the dense GEMM; a typed `.plain` runs the typed GEMM
 /// (f32 accumulation, `outputDType(.matmul, dtype)` store); every other
