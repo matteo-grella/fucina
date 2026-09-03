@@ -25,6 +25,11 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The two-operand contraction backward split (left branch on the calling
+  thread, right branch on the dot-backward worker) is one helper,
+  `ag/backward/common.zig` `runContractionBranches`, used by the einsum/dot
+  and addDot records. Its gate moved from `exec.parallel_dot_backward_branches`
+  to `ag.core.parallel_dot_backward_branches`, beside its only readers.
 - MoE is its own band, `fucina.moe` (`src/moe.zig`, `src/moe/`), above
   exec: `moe.MoeRhs`, `moe.MoeBatchProfile`, `moe.expertFfn(ctx, ...)`,
   `moe.expertFfnBatch(ctx, ...)`, `moe.chain` (the shared phase-chain

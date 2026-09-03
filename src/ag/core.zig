@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend_mod = @import("../backend.zig");
 const exec_mod = @import("../exec.zig");
 const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
@@ -201,6 +202,15 @@ pub fn recordVTable(comptime Record: type) BackwardFunction.VTable {
         .estimated_work = if (@hasField(Record, "estimated_work")) Shim.estimatedWork else null,
     };
 }
+
+/// Whether the backward pass spends threads on branch parallelism: the
+/// engine's node-level spawning (`GradEngine.canRunAsync`) and the
+/// contraction records' two-operand split (`backward/common.zig`
+/// `runContractionBranches`). Only a native build with BLAS: there the
+/// contraction branches run inside BLAS and overlap; without it both would
+/// dispatch on the one barrier team, whose second concurrent dispatch runs
+/// serially, so the extra thread buys nothing.
+pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 
 pub const GradState = struct {
     allocator: Allocator,
@@ -567,7 +577,7 @@ pub const GradEngine = struct {
     }
 
     fn canRunAsync(_: *const GradEngine, function: BackwardFunction) bool {
-        if (comptime !exec_mod.parallel_dot_backward_branches) return false;
+        if (comptime !parallel_dot_backward_branches) return false;
         if (function.preferAsyncBackward()) return true;
         const work = function.estimatedWork() orelse return false;
         return work >= parallel.backward_async_work_threshold;

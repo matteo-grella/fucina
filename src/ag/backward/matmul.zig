@@ -28,6 +28,7 @@ const rawShapeArrayOf = common.rawShapeArrayOf;
 const tagsDifference = common.tagsDifference;
 const contiguousForRead = common.contiguousForRead;
 const expandGradientToTags = common.expandGradientToTags;
+const runContractionBranches = common.runContractionBranches;
 
 pub fn Matmul2DBackward(comptime trans_b: bool) type {
     return struct {
@@ -131,65 +132,20 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
 
         const Self = @This();
 
-        const BranchTask = struct {
-            self: *const Self,
-            ctx: *ExecContext,
-            gy: *const RawTensor,
-            out: *?RawTensor,
-            err: ?anyerror = null,
-        };
-
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            const need_left = core.needs(self, 0);
-            const need_right = core.needs(self, 1);
-
-            if (comptime exec_mod.parallel_dot_backward_branches) {
-                if (need_left and need_right) {
-                    if (ctx.dotBackwardWorker()) |worker| {
-                        var right_task = BranchTask{
-                            .self = self,
-                            .ctx = ctx,
-                            .gy = gy,
-                            .out = &out[1],
-                        };
-                        if (worker.start(runEinsumBackwardRightBranch, &right_task)) {
-                            self.backwardLeft(ctx, gy, &out[0]) catch |err| {
-                                worker.wait();
-                                return err;
-                            };
-                            worker.wait();
-                            if (right_task.err) |err| return err;
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if (need_left) {
-                try self.backwardLeft(ctx, gy, &out[0]);
-            }
-            if (need_right) {
-                try self.backwardRight(ctx, gy, &out[1]);
-            }
+            return runContractionBranches(self, ctx, gy, &out[0], &out[1], core.needs(self, 0), core.needs(self, 1));
         }
 
-        fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+        pub fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &self.right_value, left_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
         }
 
-        fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+        pub fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value, right_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
-        }
-
-        fn runEinsumBackwardRightBranch(ptr: *anyopaque) void {
-            const task: *BranchTask = @ptrCast(@alignCast(ptr));
-            task.self.backwardRight(task.ctx, task.gy, task.out) catch |err| {
-                task.err = err;
-            };
         }
 
         pub fn einsumBackwardWorkEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
@@ -244,14 +200,6 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
 
         const Self = @This();
 
-        const BranchTask = struct {
-            self: *const Self,
-            ctx: *ExecContext,
-            gy: *const RawTensor,
-            out: *?RawTensor,
-            err: ?anyerror = null,
-        };
-
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             const need_base = core.needs(self, 0);
             const need_left = core.needs(self, 1);
@@ -261,49 +209,15 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
                 out[0] = try gy.cloneView();
             }
 
-            if (comptime exec_mod.parallel_dot_backward_branches) {
-                if (need_left and need_right) {
-                    if (ctx.dotBackwardWorker()) |worker| {
-                        var right_task = BranchTask{
-                            .self = self,
-                            .ctx = ctx,
-                            .gy = gy,
-                            .out = &out[2],
-                        };
-                        if (worker.start(runAddDotBackwardRightBranch, &right_task)) {
-                            self.backwardLeft(ctx, gy, &out[1]) catch |err| {
-                                worker.wait();
-                                return err;
-                            };
-                            worker.wait();
-                            if (right_task.err) |err| return err;
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if (need_left) {
-                try self.backwardLeft(ctx, gy, &out[1]);
-            }
-            if (need_right) {
-                try self.backwardRight(ctx, gy, &out[2]);
-            }
+            return runContractionBranches(self, ctx, gy, &out[1], &out[2], need_left, need_right);
         }
 
-        fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+        pub fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, right_tags, &self.right_value, left_tags);
         }
 
-        fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
+        pub fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, left_tags, &self.left_value, right_tags);
-        }
-
-        fn runAddDotBackwardRightBranch(ptr: *anyopaque) void {
-            const task: *BranchTask = @ptrCast(@alignCast(ptr));
-            task.self.backwardRight(task.ctx, task.gy, task.out) catch |err| {
-                task.err = err;
-            };
         }
 
         pub fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {

@@ -251,13 +251,14 @@ but only for records that opt in through the vtable: `prefer_async_backward
 = true` (no in-tree record currently sets it) or an `estimated_work()` at or
 above `parallel.backward_async_work_threshold` (`256 * 1024 * 1024` work
 units; provided by the attention, causal-conv1d-family, gather,
-linear-cross-entropy, linear-distill, `Conv1d`/`Conv2d`, `Dot`, `AddDot`,
+linear-cross-entropy, `Conv1d`/`Conv2d`, `Dot`, `AddDot`,
 and ternary-STE-dot records). Node-level spawning is
-additionally gated at comptime by `exec.parallel_dot_backward_branches`
+additionally gated at comptime by the engine's `parallel_dot_backward_branches` (`src/ag/core.zig`)
 (native backend with BLAS, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)) — on scalar or no-BLAS builds every node runs
 inline on the calling thread. (`DotBackward` and `AddDotBackward`
 additionally parallelize their two contraction branches internally, via
-the context's dot-backward worker.)
+the context's dot-backward worker: one split, `runContractionBranches` in
+`src/ag/backward/common.zig`.)
 `backwardGradSerial` forces `pool = null` so the whole pass is node-serial
 regardless; kernel-level `parallelChunks` parallelism *inside* a VJP is
 unaffected. Serial mode is required whenever a threadlocal guard must

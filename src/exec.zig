@@ -36,7 +36,6 @@ const exec_pool = @import("exec/pool.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
-pub const parallel_dot_backward_branches = backend_mod.active_kind == .native and backend_mod.native_uses_blas;
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
 pub const UnaryOp = backend_ops.UnaryOp;

@@ -816,13 +816,13 @@ Node-level spawning is deliberately conservative, and the details matter
   the vtable: an `estimated_work()` at or above
   `parallel.backward_async_work_threshold` (`256 * 1024 * 1024` work units,
   `src/parallel.zig:70`). The providers are the heavyweights: attention, the
-  causal-conv1d family, gather, linear-cross-entropy, linear-distill,
+  causal-conv1d family, gather, linear-cross-entropy,
   `Conv1d`/`Conv2d`, `Dot`, `AddDot`, and the ternary-STE-dot records. The `prefer_async_backward` flag
   exists as a second opt-in, but no in-tree record currently sets it — a
   seam, not an active mechanism.
 - The whole feature is gated at comptime by
-  `exec.parallel_dot_backward_branches` (`src/exec.zig:44`: native backend
-  with BLAS). On the scalar backend, or a no-BLAS native build, every node
+  the engine's `parallel_dot_backward_branches` (`src/ag/core.zig:213`: native
+  backend with BLAS). On the scalar backend, or a no-BLAS native build, every node
   runs inline on the calling thread.
 - `backwardGradSerial` forces the pool off for a whole pass regardless;
   kernel-level `parallelChunks` parallelism *inside* a VJP is unaffected
