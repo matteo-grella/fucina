@@ -29,8 +29,8 @@ const vector_len = common.vector_len;
 
 /// Vector twin of `dtype.f32ToBf16` — bit-identical lanes: round-to-nearest-
 /// even via the (bits + 0x7fff + lsb) trick, NaN quieted with bit 6 set.
-pub fn castF32ToBf16(output: []u16, input: []const f32) void {
-    if (comptime isa.reference) return scalar.castF32ToBf16(output, input);
+pub const castF32ToBf16 = if (isa.reference) scalar.castF32ToBf16 else nativeCastF32ToBf16;
+fn nativeCastF32ToBf16(output: []u16, input: []const f32) void {
     const width = std.simd.suggestVectorLength(f32) orelse 8;
     var i: usize = 0;
     while (i + width <= input.len) : (i += width) {
@@ -54,8 +54,8 @@ fn f32ToBf16Lanes(comptime width: usize, values: @Vector(width, f32)) @Vector(wi
 }
 
 /// Vector twin of `dtype.bf16ToF32` — exact (bits << 16).
-pub fn castBf16ToF32(output: []f32, input: []const u16) void {
-    if (comptime isa.reference) return scalar.castBf16ToF32(output, input);
+pub const castBf16ToF32 = if (isa.reference) scalar.castBf16ToF32 else nativeCastBf16ToF32;
+fn nativeCastBf16ToF32(output: []f32, input: []const u16) void {
     const width = std.simd.suggestVectorLength(f32) orelse 8;
     const U32 = @Vector(width, u32);
     var i: usize = 0;
@@ -67,8 +67,8 @@ pub fn castBf16ToF32(output: []f32, input: []const u16) void {
     while (i < input.len) : (i += 1) output[i] = dtype_mod.bf16ToF32(input[i]);
 }
 
-pub fn castF32ToF16(output: []f16, input: []const f32) void {
-    if (comptime isa.reference) return scalar.castF32ToF16(output, input);
+pub const castF32ToF16 = if (isa.reference) scalar.castF32ToF16 else nativeCastF32ToF16;
+fn nativeCastF32ToF16(output: []f16, input: []const f32) void {
     const width = std.simd.suggestVectorLength(f16) orelse 8;
     const F32 = @Vector(width, f32);
     const F16 = @Vector(width, f16);
@@ -85,8 +85,8 @@ pub fn castF32ToF16(output: []f16, input: []const f32) void {
     while (i < input.len) : (i += 1) output[i] = @floatCast(input[i]);
 }
 
-pub fn castF16ToF32(output: []f32, input: []const f16) void {
-    if (comptime isa.reference) return scalar.castF16ToF32(output, input);
+pub const castF16ToF32 = if (isa.reference) scalar.castF16ToF32 else nativeCastF16ToF32;
+fn nativeCastF16ToF32(output: []f32, input: []const f16) void {
     const width = std.simd.suggestVectorLength(f16) orelse 8;
     const F16 = @Vector(width, f16);
     const F32 = @Vector(width, f32);
@@ -189,8 +189,8 @@ pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_valu
     mapContiguous(pc, .{ .z = z, .x = x, .p0 = scalar_value }, scaleRange);
 }
 
-pub fn addScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
-    if (comptime isa.reference) return scalar.addScaledSlice(z, x, scalar_value);
+pub const addScaledSlice = if (isa.reference) scalar.addScaledSlice else nativeAddScaledSlice;
+fn nativeAddScaledSlice(z: []f32, x: []const f32, scalar_value: f32) void {
     primitives.vecAddScaled(z, x, scalar_value);
 }
 
@@ -321,8 +321,8 @@ fn channelAffineRows(z: []f32, x: []const f32, scale: []const f32, shift: ?[]con
 
 /// PReLU input-VJP: `gx[r,c] = x > 0 ? gy : α[c]·gy` (subgradient 0 at the
 /// kink follows the forward's `>` test, matching the composed relu VJP).
-pub fn preluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
-    if (comptime isa.reference) return scalar.preluChannelsBackwardInputInto(gx, gy, x, alpha, rows, cols);
+pub const preluChannelsBackwardInputInto = if (isa.reference) scalar.preluChannelsBackwardInputInto else nativePreluChannelsBackwardInputInto;
+fn nativePreluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(gx.len >= rows * cols and gy.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
     const vzero: Vf32 = @splat(0);
@@ -346,8 +346,8 @@ pub fn preluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32
 
 /// PReLU slope-VJP: `gα[c] = Σ_rows gy·min(x, 0)` — serial row accumulation
 /// (deterministic order; the slope vector is small).
-pub fn preluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
-    if (comptime isa.reference) return scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
+pub const preluChannelsBackwardAlphaInto = if (isa.reference) scalar.preluChannelsBackwardAlphaInto else nativePreluChannelsBackwardAlphaInto;
+fn nativePreluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
     std.debug.assert(galpha.len == cols);
     std.debug.assert(gy.len >= rows * cols and x.len >= rows * cols);
     @memset(galpha, 0);
@@ -437,8 +437,8 @@ pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     out.data()[0] = reduceContiguous(pc, .f32, .sum, a.dataConst(), a.dataConst());
 }
 
-pub fn sumSlice(values: []const f32) f32 {
-    if (comptime isa.reference) return scalar.sumSlice(values);
+pub const sumSlice = if (isa.reference) scalar.sumSlice else nativeSumSlice;
+fn nativeSumSlice(values: []const f32) f32 {
     return primitives.vecSum(values);
 }
 
@@ -448,8 +448,8 @@ pub fn prodInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
     out.data()[0] = reduceContiguous(pc, .f32, .prod, a.dataConst(), a.dataConst());
 }
 
-pub fn prodSlice(values: []const f32) f32 {
-    if (comptime isa.reference) return scalar.prodSlice(values);
+pub const prodSlice = if (isa.reference) scalar.prodSlice else nativeProdSlice;
+fn nativeProdSlice(values: []const f32) f32 {
     return primitives.vecProd(values);
 }
 
@@ -624,8 +624,8 @@ pub fn unaryRowSlice(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void {
     primitives.vecUnary(op, z, x);
 }
 
-pub fn mulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
-    if (comptime isa.reference) return scalar.mulRowSlice(z, x, y);
+pub const mulRowSlice = if (isa.reference) scalar.mulRowSlice else nativeMulRowSlice;
+fn nativeMulRowSlice(z: []f32, x: []const f32, y: []const f32) void {
     primitives.vecBinary(.f32, .mul, z, x, y);
 }
 

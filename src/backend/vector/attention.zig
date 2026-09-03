@@ -852,8 +852,8 @@ pub fn attentionTileKeyCount(q_tile: usize, q_seq: usize, kv_seq: usize, source_
     return active_last - lo_first;
 }
 
-pub fn groupedCausalAttentionBackwardKvHeads(task: GroupedCausalAttentionBackwardTask) void {
-    if (comptime isa.reference) return scalar.groupedCausalAttentionBackwardKvHeads(task);
+pub const groupedCausalAttentionBackwardKvHeads = if (isa.reference) scalar.groupedCausalAttentionBackwardKvHeads else nativeGroupedCausalAttentionBackwardKvHeads;
+fn nativeGroupedCausalAttentionBackwardKvHeads(task: GroupedCausalAttentionBackwardTask) void {
     const q_head_stride = task.d;
     const q_seq_stride = task.heads * task.d;
     const kv_head_stride = task.d;
@@ -1112,8 +1112,8 @@ inline fn attentionBackwardSoftmaxTileRows(
 /// whole query heads: dQ rows have a single writer, and dK/dV go to
 /// per-head planes (or straight to the gradient in direct mode), so the
 /// result is bitwise identical for any task count.
-pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardTiledTask) void {
-    if (comptime isa.reference) return scalar.groupedCausalAttentionBackwardTiles(task);
+pub const groupedCausalAttentionBackwardTiles = if (isa.reference) scalar.groupedCausalAttentionBackwardTiles else nativeGroupedCausalAttentionBackwardTiles;
+fn nativeGroupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardTiledTask) void {
     const tile_rows = attention_bwd_tile_rows;
     const kb = attention_key_block;
     const qr_block = 4;
