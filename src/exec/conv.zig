@@ -18,6 +18,13 @@ const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 const PreparedTensor = ExecContext.PreparedTensor;
+/// The one rank/storage-order guard of the 1-D convolution entries: rank 2
+/// with time on axis 0 and channels on axis 1, spelled once; `order` is
+/// the entry's own wording of the layout for its compile error.
+fn requireTimeMajor(comptime name: []const u8, comptime order: []const u8, comptime rank: usize, comptime time_axis: usize, comptime channel_axis: usize) void {
+    if (rank != 2) @compileError(name ++ " currently requires rank 2");
+    if (time_axis != 0 or channel_axis != 1) @compileError(name ++ " requires storage order " ++ order);
+}
 
 pub fn causalDepthwiseConv1d(
     ctx: *ExecContext,
@@ -29,12 +36,7 @@ pub fn causalDepthwiseConv1d(
     dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalDepthwiseConv1d currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalDepthwiseConv1d requires storage order [time, channel]");
-        }
-    }
+    comptime requireTimeMajor("causalDepthwiseConv1d", "[time, channel]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const kernel_view = try kernel.rankView(2);
@@ -65,12 +67,7 @@ pub fn causalDepthwiseConv1dBackwardInput(
     comptime channel_axis: usize,
     dilation: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalDepthwiseConv1dBackwardInput currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalDepthwiseConv1dBackwardInput requires storage order [time, channel]");
-        }
-    }
+    comptime requireTimeMajor("causalDepthwiseConv1dBackwardInput", "[time, channel]", rank, time_axis, channel_axis);
 
     const grad_view = try gy.rankView(rank);
     const kernel_view = try kernel.rankView(2);
@@ -103,12 +100,7 @@ pub fn causalDepthwiseConv1dBackwardKernel(
     dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalDepthwiseConv1dBackwardKernel currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalDepthwiseConv1dBackwardKernel requires storage order [time, channel]");
-        }
-    }
+    comptime requireTimeMajor("causalDepthwiseConv1dBackwardKernel", "[time, channel]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const grad_view = try gy.rankView(rank);
@@ -144,12 +136,7 @@ pub fn causalConv1d(
     dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalConv1d currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalConv1d requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("causalConv1d", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -801,12 +788,7 @@ pub fn conv1d(
     dilation: usize,
     groups: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("conv1d currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("conv1d requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("conv1d", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -950,12 +932,7 @@ pub fn conv1dBackwardInput(
     dilation: usize,
     groups: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("conv1dBackwardInput currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("conv1dBackwardInput requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("conv1dBackwardInput", "[time, in]", rank, time_axis, channel_axis);
 
     const grad_view = try gy.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -1010,12 +987,7 @@ pub fn conv1dBackwardWeight(
     dilation: usize,
     groups: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("conv1dBackwardWeight currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("conv1dBackwardWeight requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("conv1dBackwardWeight", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const grad_view = try gy.rankView(rank);
@@ -1096,12 +1068,7 @@ pub fn causalConv1dBackwardInput(
     comptime channel_axis: usize,
     dilation: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalConv1dBackwardInput currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalConv1dBackwardInput requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("causalConv1dBackwardInput", "[time, in]", rank, time_axis, channel_axis);
 
     const grad_view = try gy.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -1135,12 +1102,7 @@ pub fn causalConv1dBackwardWeight(
     dilation: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("causalConv1dBackwardWeight currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("causalConv1dBackwardWeight requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("causalConv1dBackwardWeight", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const grad_view = try gy.rankView(rank);
@@ -1176,12 +1138,7 @@ pub fn groupedCausalConv1d(
     groups: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("groupedCausalConv1d currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("groupedCausalConv1d requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("groupedCausalConv1d", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -1214,12 +1171,7 @@ pub fn groupedCausalConv1dBackwardInput(
     dilation: usize,
     groups: usize,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("groupedCausalConv1dBackwardInput currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("groupedCausalConv1dBackwardInput requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("groupedCausalConv1dBackwardInput", "[time, in]", rank, time_axis, channel_axis);
 
     const grad_view = try gy.rankView(rank);
     const weight_view = try weight.rankView(3);
@@ -1255,12 +1207,7 @@ pub fn groupedCausalConv1dBackwardWeight(
     groups: usize,
     state: ?[]const f32,
 ) !Tensor {
-    comptime {
-        if (rank != 2) @compileError("groupedCausalConv1dBackwardWeight currently requires rank 2");
-        if (time_axis != 0 or channel_axis != 1) {
-            @compileError("groupedCausalConv1dBackwardWeight requires storage order [time, in]");
-        }
-    }
+    comptime requireTimeMajor("groupedCausalConv1dBackwardWeight", "[time, in]", rank, time_axis, channel_axis);
 
     const source = try input.rankView(rank);
     const grad_view = try gy.rankView(rank);
