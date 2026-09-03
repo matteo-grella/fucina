@@ -709,12 +709,12 @@ fn unaryDerivative(comptime op: exec_mod.UnaryOp, value: f32) f32 {
         .sqrt => 0.5 / @sqrt(value),
         .rsqrt => -0.5 / (value * @sqrt(value)),
         .sigmoid => blk: {
-            const s = sigmoid(value);
+            const s = backend_ops.sigmoidStableScalar(value);
             break :blk s * (1 - s);
         },
-        .softplus => sigmoid(value),
+        .softplus => backend_ops.sigmoidStableScalar(value),
         .silu => blk: {
-            const s = sigmoid(value);
+            const s = backend_ops.sigmoidStableScalar(value);
             break :blk s * (1 + value * (1 - s));
         },
         .log => 1 / value,
@@ -777,15 +777,6 @@ fn fastTanhDerivative(value: f32) f32 {
     return (dnumerator * denominator - numerator * ddenominator) / (denominator * denominator);
 }
 
-fn sigmoid(value: f32) f32 {
-    if (value >= 0) {
-        const z = @exp(-value);
-        return 1 / (1 + z);
-    }
-    const z = @exp(value);
-    return z / (1 + z);
-}
-
 fn geluDerivative(value: f32) f32 {
     const sqrt_2_over_pi: f32 = 0.7978845608028654;
     const x2 = value * value;
@@ -796,28 +787,28 @@ fn geluDerivative(value: f32) f32 {
 }
 
 fn quickGeluDerivative(value: f32) f32 {
-    const s = sigmoid(1.702 * value);
+    const s = backend_ops.sigmoidStableScalar(1.702 * value);
     return s + value * 1.702 * s * (1 - s);
 }
 
 fn gatedActivation(comptime op: exec_mod.GatedOp, value: f32) f32 {
     return switch (op) {
-        .glu => sigmoid(value),
-        .swiglu => value * sigmoid(value),
+        .glu => backend_ops.sigmoidStableScalar(value),
+        .swiglu => value * backend_ops.sigmoidStableScalar(value),
         .geglu => 0.5 * value * (1 + std.math.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
         // Inference-only op (DeepSeek V4); no training/backward path.
-        .situ => 4.0 * std.math.tanh(value * 0.25) * sigmoid(value),
+        .situ => 4.0 * std.math.tanh(value * 0.25) * backend_ops.sigmoidStableScalar(value),
     };
 }
 
 fn gatedActivationDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
     return switch (op) {
         .glu => blk: {
-            const s = sigmoid(value);
+            const s = backend_ops.sigmoidStableScalar(value);
             break :blk s * (1 - s);
         },
         .swiglu => blk: {
-            const s = sigmoid(value);
+            const s = backend_ops.sigmoidStableScalar(value);
             break :blk s * (1 + value * (1 - s));
         },
         .geglu => geluDerivative(value),
@@ -825,7 +816,7 @@ fn gatedActivationDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
             // d/dg [4·tanh(g/4)·σ(g)] = (1 − tanh²(g/4))·σ(g)
             //                          + 4·tanh(g/4)·σ(g)·(1 − σ(g))
             const t = std.math.tanh(value * 0.25);
-            const s = sigmoid(value);
+            const s = backend_ops.sigmoidStableScalar(value);
             break :blk (1 - t * t) * s + 4.0 * t * s * (1 - s);
         },
     };

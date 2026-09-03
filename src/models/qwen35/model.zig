@@ -1148,7 +1148,7 @@ fn attnForward(
     defer attn.deinit();
     profileAdd(profile, io, sdpa_start, .attn_sdpa);
 
-    // Output gate: attn * sigmoid(gate), then output projection. sigmoid first
+    // Output gate: attn * fucina.internal.backend_mod.ops.sigmoidScalar(gate), then output projection. sigmoid first
     // (its output is contiguous) so the per-head [query|gate] strided `gate3`
     // can be merged head-major to match the attention output's [seq, attn].
     const out_start = profileStart(profile, io);
@@ -1171,11 +1171,8 @@ fn attnForward(
 fn softplus(x: f32) f32 {
     return if (x > 20.0) x else @log(1.0 + @exp(x));
 }
-fn sigmoid(x: f32) f32 {
-    return 1.0 / (1.0 + @exp(-x));
-}
 fn siluScalar(x: f32) f32 {
-    return x * sigmoid(x);
+    return x * fucina.internal.backend_mod.ops.sigmoidScalar(x);
 }
 
 /// One v-head's recurrent DeltaNet scan over the whole sequence. Heads are
@@ -1237,7 +1234,7 @@ fn runHeadScan(task: *const HeadScanTask) void {
 
         // Gates.
         const g = @exp(softplus(task.ad[t * task.alpha_stride + h] + task.ssm_dt[h]) * task.ssm_a[h]);
-        const beta = sigmoid(task.bd[t * task.beta_stride + h]);
+        const beta = fucina.internal.backend_mod.ops.sigmoidScalar(task.bd[t * task.beta_stride + h]);
 
         // S *= g
         for (state) |*s| s.* *= g;
@@ -1508,7 +1505,7 @@ fn scanRepack(t: *const HeadTask) void {
         }
         acc += softplus(cx.ad[tt * cx.alpha_stride + h] + cx.ssm_dt[h]) * cx.ssm_a[h];
         cx.gcs[h * C + ti] = acc;
-        cx.betac[h * C + ti] = sigmoid(cx.bd[tt * cx.beta_stride + h]);
+        cx.betac[h * C + ti] = fucina.internal.backend_mod.ops.sigmoidScalar(cx.bd[tt * cx.beta_stride + h]);
     }
     // Kw_s = exp(G_{C−1}−G_s)·k_s (needs this head's full cumsum).
     const glast = cx.gcs[h * C + C - 1];
@@ -1756,7 +1753,7 @@ fn deltaNetScanBatched(ctx: *ExecContext, p: BatchedScan) !void {
 /// Per head `h`, per token `t` (S = head dim, state `S[i,j]`, i=key j=value):
 ///   S *= exp(softplus(αₜ+dt_bias)·ssm_a)            (gated decay)
 ///   u[j] = Σᵢ S[i,j]·k̂[i]                           (k̂ = L2-normed key)
-///   d[j] = (v[j] − u[j])·sigmoid(βₜ)
+///   d[j] = (v[j] − u[j])·fucina.internal.backend_mod.ops.sigmoidScalar(βₜ)
 ///   S[i,j] += k̂[i]·d[j]                             (rank-1 update)
 ///   o[j] = Σᵢ S[i,j]·(q̂[i]/√S)                       (q̂ = L2-normed query)
 ///   out[t,h,j] = rmsnorm(o)·ssm_norm[j]·silu(z[t,h,j])
@@ -2052,7 +2049,7 @@ fn ffnForward(
 /// MoE FFN contribution (pre-residual): softmax router → renormalized top-k
 /// (llama.cpp qwen35moe `build_moe_ffn` with `norm_w = true` and softmax
 /// gating, no expert scale) SwiGLU expert mixture, plus the shared expert
-/// gated by `sigmoid(shexp_gate · x)` per token. Decode (seq == 1) uses the
+/// gated by `fucina.internal.backend_mod.ops.sigmoidScalar(shexp_gate · x)` per token. Decode (seq == 1) uses the
 /// fused expert-parallel GEMV; prefill groups tokens by expert (weights read
 /// once per expert per chunk).
 fn moeContribution(

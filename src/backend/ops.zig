@@ -191,6 +191,17 @@ pub inline fn sigmoidScalar(value: f32) f32 {
     return 1 / (1 + @exp(-value));
 }
 
+/// The two-branch sigmoid that never forms exp of a large positive value:
+/// the VJPs and the router paths that must not overflow at |x| > 88.
+pub inline fn sigmoidStableScalar(value: f32) f32 {
+    if (value >= 0) {
+        const z = @exp(-value);
+        return 1 / (1 + z);
+    }
+    const z = @exp(value);
+    return z / (1 + z);
+}
+
 pub inline fn geluScalar(value: f32) f32 {
     return 0.5 * value * (1 + std.math.tanh(geluTanhArg(value)));
 }
