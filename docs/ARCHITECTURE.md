@@ -186,9 +186,14 @@ Backends:
   provider swap: it sets `backend/isa.zig`'s `reference` flag and the
   entries select their scalar arms internally.
 - The kernel interface is the declaration list of `native.zig`'s
-  `kernels` namespace itself; `backend.zig`'s `conformKernels` derives the
-  `pc`-first/pool-free contract from the signatures and the
-  `pool_free_<name>` markers beside the pool-free kernels.
+  `kernels` namespace itself; `backend.zig`'s `conformKernels` reads the
+  `pc`-first/pool-free contract from the signatures alone.
+- `src/backend/vector/rows.zig` and `src/backend/vector/attention.zig`
+  are the two kernel seams: each is the root file of a directory holding
+  the Task payloads, factories, adapters and helpers the exec domain
+  modules take as `backend.rows`/`backend.attention`, over a
+  `<seam>/kernels.zig` child that holds the bodies (imported privately by
+  the root, reached by everyone else through `kernels`).
 - `src/backend/offload.zig`: the accelerator seam, the one module above
   the providers that names `gpu_impl`. Capability queries, resident
   storage, tracing, and the offload entries with their decisions built in
@@ -529,9 +534,9 @@ The kernel set declares its own interface: the declaration list of
 `native.zig`'s `pub const kernels` is the inventory (a comptime-checked
 namespace, not a struct of function pointers, because many kernels are
 generic over a `comptime` dtype or op), and `backend.zig` runs
-`conformKernels` on it at comptime: every declaration is a kernel function
-or a `pool_free_<name>` marker naming one, `ParallelConfig` appears first
-or not at all, and a kernel without `pc` must carry the marker beside it.
+`conformKernels` on it at comptime: every declaration is a kernel function,
+and `ParallelConfig` appears first or not at all (a kernel whose first
+parameter is anything else is pool-free).
 `backend.kernels` is that set. The signature rule: a kernel that
 needs the worker pool takes `pc: ParallelConfig` as its first parameter;
 one that does not use the pool does not take it; the scalar reference arms

@@ -26,14 +26,15 @@
 //!   conv         - causal, depthwise, grouped and channel-last 2-D convolution.
 //!   pool         - channel-last 2-D pooling and nearest upsampling.
 //!   winograd     - the Winograd F(2x2,3x3) and F(4x4,3x3) transforms.
-//!   rows         - the fused row kernels (softmax/logsumexp, layer/RMS
-//!                  norm, cross-entropy, dropout, scatter-add, gated
-//!                  activations, the inner-lane strided-axis family) with
-//!                  their Task payloads and run adapters.
-//!   attention    - the grouped-causal attention kernels (per-query units,
+//!   rows         - the row-kernel seam: the Task payloads, the fused
+//!                  activation+quantize factory and the shared helpers;
+//!                  the bodies (softmax/logsumexp, layer/RMS norm,
+//!                  cross-entropy, dropout, scatter-add, gated activations,
+//!                  the inner-lane strided-axis family) are rows/kernels.zig.
+//!   attention    - the attention seam: Task payloads, run adapters, tile
+//!                  constants and KV helpers; the bodies (per-query units,
 //!                  query-tiled online-softmax prefill, tiled backward +
-//!                  BLAS strips, multi-stream decode) with their Task
-//!                  payloads and run adapters.
+//!                  BLAS strips, multi-stream decode) are attention/kernels.zig.
 pub const common = @import("vector/common.zig");
 pub const tile = @import("vector/tile.zig");
 

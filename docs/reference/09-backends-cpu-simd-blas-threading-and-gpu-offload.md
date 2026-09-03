@@ -105,8 +105,7 @@ test "backend build facts" {
 ```zig
 // src/backend/native.zig
 pub const kernels = struct {
-    pub const addInto = vector.elementwise.addInto;
-    pub const pool_free_addInto = true; // marker: takes no `pc`
+    pub const addInto = vector.elementwise.addInto; // no `pc` first: pool-free
     pub const addContiguousIntoUnchecked = vector.elementwise.addContiguousIntoUnchecked;
     ...
 };
@@ -121,16 +120,14 @@ comptime {
 The declaration list of `native.kernels` IS the interface: there is no
 parallel name list to keep in sync. It is a comptime-checked namespace
 rather than a struct of function pointers because many kernels are generic
-over a `comptime` dtype or op. `conformKernels` derives its checks from
-the declarations: every declaration is a kernel function or a
-`pool_free_<name>` marker naming one; a kernel that takes
-`pc: ParallelConfig` takes it FIRST and nowhere else; and a kernel that
-takes no `pc` must carry the marker beside it, so going pool-free is an
-explicit decision rather than a signature accident.
+over a `comptime` dtype or op. `conformKernels` reads its checks from
+the signatures: every declaration is a kernel function, and a kernel that
+takes `pc: ParallelConfig` takes it FIRST and nowhere else; a kernel whose
+first parameter is anything else is pool-free.
 
 The signature rule: a kernel that needs the worker pool takes
 `pc: ParallelConfig` as its FIRST parameter; a kernel that does not use the
-pool does not take it (the `pool_free_` markers). The scalar reference arms
+pool does not take it. The scalar reference arms
 ignore `pc` wherever the native arms thread on it. `ParallelConfig` is `struct { pool: ?*thread.Pool = null }`; `.{}` runs
 the kernel serially.
 
@@ -170,8 +167,7 @@ Kernel naming encodes the checking tier — with one caveat:
   `gemmBatched` takes `comptime kind: ops.MatmulKind` plus batch strides.
 
 The full kernel inventory, grouped (every name is a declaration of
-`backend.kernels`; entries marked `*` take no `pc` and carry the
-`pool_free_` marker, entries marked `†` are generic over a comptime dtype,
+`backend.kernels`; entries marked `*` take no `pc`, entries marked `†` are generic over a comptime dtype,
 op, request, or container type):
 
 | Family | Kernels |
@@ -183,10 +179,10 @@ op, request, or container type):
 | 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`*, `maxPool2dBackwardInto`*, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
-| fused row kernels (`vector/rows.zig`; task-carrying, all pool-free — the exec domain modules split the task ranges themselves) | `softmaxRows`*, `softmaxExtRows`*†, `softmaxBackwardRows`*, `logsumexpRows`*, `logSoftmaxRows`*, `softmaxInner`*, `logsumexpInner`*, `logSoftmaxInner`*, `softmaxBackwardInner`*, `splitSwiGluRows`*, `splitGluRows`*, `splitSwiGluBackwardRows`*, `splitGluBackwardRows`*, `rmsNormMulRopeHalfVectors`*, `rmsNormMulRows`*, `rmsNormMulAddRows`*, `rmsNormMulBackwardInputRows`*, `rmsNormMulBackwardWeightRows`*, `rmsNormWeightGradBlocks`*, `rmsNormWeightGradReduce`*, `rmsNormInner`*, `rmsNormBackwardInputInner`*, `rmsNormBackwardWeightInner`*, `layerNormRows`*, `layerNormBackwardInputRows`*, `layerNormAffineParamGradRows`*, `layerNormRowStats`*, `layerNormParamGradColumns`*, `layerNormInner`*, `layerNormBackwardInner`*, `varianceInner`*, `standardizeInner`*†, `standardizeBackwardInner`*†, `crossEntropyLossRows`*, `crossEntropyBackwardRows`*, `dropoutRange`*, `scatterAddRows`* (Task payloads: the `backend.rows` seam; each kernel takes its row or lane range as two trailing parameters and exec splits the range through `ExecContext.forRange`) |
+| fused row kernels (`vector/rows/kernels.zig`; task-carrying, all pool-free — the exec domain modules split the task ranges themselves) | `softmaxRows`*, `softmaxExtRows`*†, `softmaxBackwardRows`*, `logsumexpRows`*, `logSoftmaxRows`*, `softmaxInner`*, `logsumexpInner`*, `logSoftmaxInner`*, `softmaxBackwardInner`*, `splitSwiGluRows`*, `splitGluRows`*, `splitSwiGluBackwardRows`*, `splitGluBackwardRows`*, `rmsNormMulRopeHalfVectors`*, `rmsNormMulRows`*, `rmsNormMulAddRows`*, `rmsNormMulBackwardInputRows`*, `rmsNormMulBackwardWeightRows`*, `rmsNormWeightGradBlocks`*, `rmsNormWeightGradReduce`*, `rmsNormInner`*, `rmsNormBackwardInputInner`*, `rmsNormBackwardWeightInner`*, `layerNormRows`*, `layerNormBackwardInputRows`*, `layerNormAffineParamGradRows`*, `layerNormRowStats`*, `layerNormParamGradColumns`*, `layerNormInner`*, `layerNormBackwardInner`*, `varianceInner`*, `standardizeInner`*†, `standardizeBackwardInner`*†, `crossEntropyLossRows`*, `crossEntropyBackwardRows`*, `dropoutRange`*, `scatterAddRows`* (Task payloads: the `backend.rows` seam; each kernel takes its row or lane range as two trailing parameters and exec splits the range through `ExecContext.forRange`) |
 | dtype cast rows (`vector/elementwise.zig`) | `castF32ToF16`*, `castF16ToF32`*, `castF32ToBf16`*, `castBf16ToF32`* (bit-exact lane twins of the `dtype` scalar converters) |
-| straggler row kernels (`vector/rows.zig`) | `extremumRowValue`*†, `varianceRowsInto`*, `ropeHalfPairsInto`*, `scanRows`*† and `scanColumns`*† (the directed inclusive scans; the `-Dvector-scan` gate lives inside them), `selectRow`*† (the masked-reduce select row) |
-| attention kernels (`vector/attention.zig`; task-carrying, pool-free) | `groupedCausalAttentionHeads`*†, `groupedCausalAttentionHeadPairs`*†, `groupedCausalAttentionQueryTiles`*†, `groupedCausalAttentionMultiUnits`*†, `groupedCausalAttentionBackwardKvHeads`*, `groupedCausalAttentionBackwardTiles`*, `groupedCausalAttentionBackwardBlasTiles`*, `attentionBackwardReduceRows`* (Task payloads, adapters and tile constants: the `backend.attention` seam) |
+| straggler row kernels (`vector/rows/kernels.zig`) | `extremumRowValue`*†, `varianceRowsInto`*, `ropeHalfPairsInto`*, `scanRows`*† and `scanColumns`*† (the directed inclusive scans; the `-Dvector-scan` gate lives inside them), `selectRow`*† (the masked-reduce select row) |
+| attention kernels (`vector/attention/kernels.zig`; task-carrying, pool-free) | `groupedCausalAttentionHeads`*†, `groupedCausalAttentionHeadPairs`*†, `groupedCausalAttentionQueryTiles`*†, `groupedCausalAttentionMultiUnits`*†, `groupedCausalAttentionBackwardKvHeads`*, `groupedCausalAttentionBackwardTiles`*, `groupedCausalAttentionBackwardBlasTiles`*, `attentionBackwardReduceRows`* (Task payloads, adapters and tile constants: the `backend.attention` seam) |
 | per-format quantized row/pack/tile kernels | the `quant/<fmt>` leaves the MoE streams, the gemma fused-MoE skeleton, the PTQTP/borrowed containers, the expert store and the ternary-LoRA backward consume by name: `quantizeRowQ8_0Into`*, `quantizeRowQ8_0IntoUnchecked`*, `quantizeRowQ8_KInto`*, `quantizeRowQ8_KIntoUnchecked`*, `packRowsQ8_Kx4PaddedInto`*, `dequantizeRowQ8_0Into`*, `matmulQ8_0x4RhsTile`*, `matmulQ8_0RhsTile`*, `splitSwiGluRowInto`*, `quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto`*, `packMatmulRhsQ8_0x4`*, `matmulQ6_Kx4RhsTile`*, `matmulQ6_Kx4RhsPairTile`*, `matmulQ6_KRhsTile`*, `matmulQ6_KRhsCompactColOuter`*, `matmulQ4_KRhsTile`*, `matmulQ4_KRhsCompactColOuter`*, `matmulMXFP4RhsTile`*, `quantizedMatmulRhsTQ2_0FromBorrowedBlocks`*, `quantizedMatmulRhsTQ2_0FromF32Absmean`*, `matmulTQ2_0RhsTile`*, `matmulTQ2_0FoldedX4RhsTile`*, `matmulTQ2_0X4RhsTile`*, `matmulTQ2_0X4RhsTileAcc`*, `packMatmulRhsTQ2_0x4`*, `packMatmulRhsTQ2_0Foldedx4`*, `packMatmulRhsTQ2_0Foldedx4Into`*, `packMatmulRhsTQ2_0FoldedRows`*, `packMatmulRhsTQ2_0FoldedRowsFromX4`*, `matmulTableQ8_KRhsTile`*†, `dequantizeRowTQ2_0Into`*, `gemm2D` (the parallel `ops.QuantGemm` request entry; the autograd ternary-STE fallback states `.{ .weight = .tq2_0, .lhs = .f32 }` through it; the parity/quant tests pin these per format; block counts go through `quantized_matmul.blockCountForDType`) |
 | dense GEMM | `gemm`† (comptime `ops.Gemm` request), `gemmBatched`† (comptime `ops.MatmulKind`) |
 | packed dense RHS | `packDenseRhs`*† (f32/f16/bf16 `[n, k]` weight to the f32 output-row panel `PackedDenseRhs`, widened exactly once; consumed by `matmulPacked`) |
@@ -203,15 +199,11 @@ test "kernel interface inventory" {
     comptime var generic_count: usize = 0;
     @setEvalBranchQuota(10_000);
     inline for (@typeInfo(backend.kernels).@"struct".decls) |d| {
-        if (comptime std.mem.startsWith(u8, d.name, "pool_free_")) {
-            // Marker beside its kernel; `conformKernels` pins the pairing.
-            try std.testing.expect(@hasDecl(backend.kernels, d.name["pool_free_".len..]));
-            pool_free_count += 1;
-        } else {
-            kernel_count += 1;
-            if (@typeInfo(@TypeOf(@field(backend.kernels, d.name))).@"fn".is_generic)
-                generic_count += 1;
-        }
+        // Pool-free is read from the signature: no `pc: ParallelConfig` first.
+        const info = @typeInfo(@TypeOf(@field(backend.kernels, d.name))).@"fn";
+        kernel_count += 1;
+        if (info.params.len == 0 or info.params[0].type != backend.ParallelConfig) pool_free_count += 1;
+        if (info.is_generic) generic_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 162), kernel_count);
     try std.testing.expectEqual(@as(usize, 105), pool_free_count);

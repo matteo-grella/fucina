@@ -966,7 +966,7 @@ const Impl = struct {
     // shared), so tolerances scale with the reduced length; the inner-lane
     // kernels keep per-output accumulation order, so those comparisons are
     // bitwise.
-    const rows_impl = @import("vector/rows.zig");
+    const rows_impl = @import("vector/rows/kernels.zig");
 
     fn expectBitwise(expected: []const f32, actual: []const f32) !void {
         try std.testing.expectEqualSlices(u32, @ptrCast(expected), @ptrCast(actual));
@@ -1358,7 +1358,8 @@ const Impl = struct {
     // the serial three-pass twins. The per-query entries differ from the
     // twins in reduction order only; the query-tiled entry additionally
     // carries its documented online-softmax summation-order class.
-    const attn_impl = @import("vector/attention.zig");
+    const attn_impl = @import("vector/attention/kernels.zig");
+    const attn_seam = @import("vector/attention.zig");
 
     fn attnParityCase(comptime KvElem: type, causal: bool, window: usize) !void {
         const allocator = std.testing.allocator;
@@ -1401,7 +1402,7 @@ const Impl = struct {
         defer allocator.free(stats_b);
         const tol: f32 = 1e-5;
 
-        const base = attn_impl.GroupedCausalAttentionTask(KvElem){
+        const base = attn_seam.GroupedCausalAttentionTask(KvElem){
             .q_data = q,
             .k_data = k,
             .v_data = v,
@@ -1430,7 +1431,7 @@ const Impl = struct {
         try expectClose(stats_b, stats_a, tol * @as(f32, @floatFromInt(kv_seq)));
 
         // Adjacent-pair form on the same data.
-        const pair = attn_impl.GroupedCausalAttentionPairTask(KvElem){
+        const pair = attn_seam.GroupedCausalAttentionPairTask(KvElem){
             .q_data = q,
             .k_data = k,
             .v_data = v,
@@ -1455,9 +1456,9 @@ const Impl = struct {
         try expectClose(out_b, out_a, tol);
 
         // Query-tiled entry (head_group 1) over the full flattened work.
-        const q_tile = attn_impl.attention_tile_rows;
+        const q_tile = attn_seam.attention_tile_rows;
         const n_tiles = (q_seq + q_tile - 1) / q_tile;
-        const tiled = attn_impl.GroupedCausalAttentionTiledTask(KvElem){
+        const tiled = attn_seam.GroupedCausalAttentionTiledTask(KvElem){
             .q_data = q,
             .k_data = k,
             .v_data = v,
@@ -1485,13 +1486,13 @@ const Impl = struct {
 
     // Thin comptime shims so the case body above stays readable.
     const attn_twins = struct {
-        fn attnHeadsTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionTask(KvElem)) void {
+        fn attnHeadsTwin(comptime KvElem: type, task: attn_seam.GroupedCausalAttentionTask(KvElem)) void {
             attn_impl.scalar.groupedCausalAttentionHeads(KvElem, task);
         }
-        fn attnPairsTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionPairTask(KvElem)) void {
+        fn attnPairsTwin(comptime KvElem: type, task: attn_seam.GroupedCausalAttentionPairTask(KvElem)) void {
             attn_impl.scalar.groupedCausalAttentionHeadPairs(KvElem, task);
         }
-        fn attnTilesTwin(comptime KvElem: type, task: attn_impl.GroupedCausalAttentionTiledTask(KvElem)) void {
+        fn attnTilesTwin(comptime KvElem: type, task: attn_seam.GroupedCausalAttentionTiledTask(KvElem)) void {
             attn_impl.scalar.groupedCausalAttentionQueryTiles(KvElem, 1, task);
         }
     };
@@ -1556,7 +1557,7 @@ const Impl = struct {
             @memset(dk_b, 0);
             @memset(dv_a, 0);
             @memset(dv_b, 0);
-            const base = attn_impl.GroupedCausalAttentionBackwardTask{
+            const base = attn_seam.GroupedCausalAttentionBackwardTask{
                 .q_data = q,
                 .k_data = k,
                 .v_data = v,
@@ -1597,7 +1598,7 @@ const Impl = struct {
             const dlen_q = q_seq * d_heads * d;
             const qd = q[0..dlen_q];
             const gyd = gy[0..dlen_q];
-            const scratch = try allocator.alloc(f32, 2 * attn_impl.attention_bwd_tile_rows * kv_seq);
+            const scratch = try allocator.alloc(f32, 2 * attn_seam.attention_bwd_tile_rows * kv_seq);
             defer allocator.free(scratch);
             const dq_a = try allocator.alloc(f32, dlen_q);
             defer allocator.free(dq_a);
@@ -1617,7 +1618,7 @@ const Impl = struct {
             @memset(dk_b, 0);
             @memset(dv_a, 0);
             @memset(dv_b, 0);
-            const base = attn_impl.GroupedCausalAttentionBackwardTiledTask{
+            const base = attn_seam.GroupedCausalAttentionBackwardTiledTask{
                 .q_data = qd,
                 .k_data = k,
                 .v_data = v,

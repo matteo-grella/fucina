@@ -9,16 +9,17 @@ const std = @import("std");
 
 const exec_mod = @import("../exec.zig");
 const exec_attention = @import("attention.zig");
-const backend_attn = @import("../backend/vector/attention.zig"); // the kernel bodies: tests are exempt from the door
+const backend_attn = @import("../backend/vector/attention/kernels.zig"); // the kernel bodies: tests are exempt from the door
+const attn_seam = @import("../backend/vector/attention.zig");
 
 const ExecContext = exec_mod.ExecContext;
 
-const attention_tiled_min_q_seq = backend_attn.attention_tiled_min_q_seq;
-const attention_tile_rows = backend_attn.attention_tile_rows;
-const GroupedCausalAttentionTiledTask = backend_attn.GroupedCausalAttentionTiledTask;
-const runGroupedCausalAttentionTiledTask = backend_attn.runGroupedCausalAttentionTiledTask;
+const attention_tiled_min_q_seq = attn_seam.attention_tiled_min_q_seq;
+const attention_tile_rows = attn_seam.attention_tile_rows;
+const GroupedCausalAttentionTiledTask = attn_seam.GroupedCausalAttentionTiledTask;
+const runGroupedCausalAttentionTiledTask = attn_seam.runGroupedCausalAttentionTiledTask;
 const groupedCausalAttentionHeadPairs = backend_attn.groupedCausalAttentionHeadPairs;
-const hasAdjacentKvHeadPairs = backend_attn.hasAdjacentKvHeadPairs;
+const hasAdjacentKvHeadPairs = attn_seam.hasAdjacentKvHeadPairs;
 
 // Tiled-vs-per-query parity is relative (1e-5), not bitwise: the online
 // softmax visits keys in the same order but groups the summation differently
@@ -203,13 +204,13 @@ test "BLAS-strip attention backward matches the register-tiled route" {
             @memset(dk, 0);
             @memset(dv, 0);
             const tile_rows = if (route_i == 0)
-                backend_attn.attention_bwd_tile_rows
+                attn_seam.attention_bwd_tile_rows
             else
-                backend_attn.attention_bwd_blas_tile_rows;
+                attn_seam.attention_bwd_blas_tile_rows;
             const scratch = try allocator.alloc(f32, 2 * tile_rows * case.kv_seq);
             defer allocator.free(scratch);
 
-            const task = backend_attn.GroupedCausalAttentionBackwardTiledTask{
+            const task = attn_seam.GroupedCausalAttentionBackwardTiledTask{
                 .q_data = q_data,
                 .k_data = k_data,
                 .v_data = v_data,
@@ -556,7 +557,7 @@ fn checkMultiKvAttentionParity(
     seed: u64,
 ) !void {
     const allocator = std.testing.allocator;
-    const BlockQ8_0 = backend_attn.BlockQ8_0;
+    const BlockQ8_0 = attn_seam.BlockQ8_0;
     const n = lens.len;
     const scale_value: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(d)));
 
@@ -570,7 +571,7 @@ fn checkMultiKvAttentionParity(
     defer q.deinit();
 
     const KvElem = if (q8) BlockQ8_0 else f16;
-    const row_elems = if (q8) kv_heads * (d / backend_attn.q8_0_block_size) else kv_heads * d;
+    const row_elems = if (q8) kv_heads * (d / attn_seam.q8_0_block_size) else kv_heads * d;
 
     const k_owned = try allocator.alloc([]KvElem, n);
     defer allocator.free(k_owned);

@@ -25,6 +25,19 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The row and attention seams are files, not lists. `backend.rows` is
+  `backend/vector/rows.zig` and `backend.attention` is
+  `backend/vector/attention.zig`: each is the root of a directory holding
+  the Task payloads, the factories and adapters, the tile constants and the
+  shared helpers, over a `<seam>/kernels.zig` child that holds the kernel
+  bodies and their scalar twins (imported privately by the root, reached by
+  every other band through `backend.kernels`). The curated alias lists and
+  `conformSeam` are gone; the property they checked holds by construction.
+  The `pool_free_<name>` markers of `native.kernels` are gone too:
+  `conformKernels` reads pool-free from the signature (no
+  `pc: ParallelConfig` first). Rewrites: a test that imported
+  `backend/vector/rows.zig` or `attention.zig` for the bodies imports
+  `<seam>/kernels.zig`; the payloads stay on the seam file.
 - One range dispatch in the runtime: `ExecContext.forRange(total, max_parts,
   ctx, run)` runs `run(ctx, start, end)` over `[0, total)` in at most
   `max_parts` proportional parts across the worker team (`backend.tile.bound`
