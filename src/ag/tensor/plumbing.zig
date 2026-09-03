@@ -9,6 +9,7 @@ const exec_mod = @import("../../exec.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../../tags.zig");
 const backward_common = @import("../backward/common.zig");
 const backward_elementwise = @import("../backward/elementwise.zig");
@@ -64,7 +65,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// the value is a no-grad constant. Consumes `value` on success; on
         /// error it stays with the caller.
         pub fn finishTypedNoGrad(comptime OutT: type, ctx: *ExecContext, value: tensor_mod.TensorOf(OutT.dtype), wants_grad: bool) !OutT {
-            if (wants_grad) return error.UnsupportedGradient;
+            if (wants_grad) return AgError.UnsupportedGradient;
             return finishTyped(OutT, ctx, value);
         }
 
@@ -325,7 +326,7 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// path; the differentiable typed entries are `to` and the mixed-RHS
         /// `dot`/`einsum`).
         pub fn typedRequireNoGrad(operand: anytype) !void {
-            if (operand.requiresGrad()) return error.UnsupportedGradient;
+            if (operand.requiresGrad()) return AgError.UnsupportedGradient;
         }
 
         /// `finishOp` for a differentiable op whose RESULT is 16-bit (today: the

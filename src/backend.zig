@@ -31,6 +31,8 @@ pub const PackedDenseRhs = packed_matmul.PackedDenseRhs;
 /// models band and the apps band may still take it through `fucina.internal`
 /// as the documented escape hatch. `arch-check` enforces the split.
 pub const quant = struct {
+    /// The block-length check every quantized row/pack entry shares.
+    pub const QuantizedFormatError = quantized_matmul.types.QuantizedFormatError;
     pub const supports_q4_k_mmla = quantized_matmul.supports_q4_k_mmla;
     pub const QuantizedMatmulRhsI8 = quantized_matmul.QuantizedMatmulRhsI8;
     pub const QuantizedMatmulRhsQ1_0 = quantized_matmul.QuantizedMatmulRhsQ1_0;

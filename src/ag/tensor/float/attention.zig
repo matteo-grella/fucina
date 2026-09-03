@@ -7,6 +7,7 @@ const dtype_mod = @import("../../../dtype.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_attention = @import("../../backward/attention.zig");
+const AgError = @import("../../core.zig").AgError;
 
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const TensorError = tensor_mod.TensorError;
@@ -168,7 +169,7 @@ pub fn Ops(comptime Self: type) type {
                             @compileError("groupedAttention: .bias must be a rank-2 [q_seq, kv_seq] tensor");
                         };
                         if (self.requiresGrad() or k.requiresGrad() or v.requiresGrad() or bias_ptr.requiresGrad()) {
-                            return error.UnsupportedGradient;
+                            return AgError.UnsupportedGradient;
                         }
                         var value = try ctx.groupedAttention(self.asRawTensor(), .{ .f32 = .{ .k = k.asRawTensor(), .v = v.asRawTensor() } }, kv_head_for_head, scale_value, .{ .mask = .bidirectional, .bias = bias_ptr.asRawTensor() });
                         errdefer value.deinit();
@@ -223,13 +224,13 @@ pub fn Ops(comptime Self: type) type {
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
                 .multi_f16_kv => {
-                    if (self.requiresGrad()) return error.UnsupportedGradient;
+                    if (self.requiresGrad()) return AgError.UnsupportedGradient;
                     var value = try ctx.groupedAttention(self.asRawTensor(), .{ .multi_f16 = .{ .k = k, .v = v, .lens = opts.lens, .kv_heads = opts.kv_heads } }, kv_head_for_head, scale_value, .{});
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);
                 },
                 .multi_q8_kv => {
-                    if (self.requiresGrad()) return error.UnsupportedGradient;
+                    if (self.requiresGrad()) return AgError.UnsupportedGradient;
                     var value = try ctx.groupedAttention(self.asRawTensor(), .{ .multi_q8 = .{ .k = k, .v = v, .lens = opts.lens, .kv_heads = opts.kv_heads } }, kv_head_for_head, scale_value, .{});
                     errdefer value.deinit();
                     return finishNoGrad(.{ .seq, out_tag }, ctx, value);

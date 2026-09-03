@@ -36,6 +36,14 @@ const exec_pool = @import("exec/pool.zig");
 const Allocator = std.mem.Allocator;
 const Tensor = tensor.Tensor;
 
+/// The runtime's own error names (`exec/runtime.zig`).
+pub const ExecError = exec_runtime.ExecError;
+/// Everything an `ExecContext` op can raise: `TensorError` (shape, length
+/// and argument validity), the quantized block-length check, `ExecError`
+/// and `OutOfMemory`. Each method keeps its precise inferred set; this
+/// merge is what the bands above build on.
+pub const Error = tensor.TensorError || backend_mod.quant.QuantizedFormatError || ExecError || error{OutOfMemory};
+
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
 pub const UnaryOp = backend_ops.UnaryOp;

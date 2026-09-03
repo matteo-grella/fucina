@@ -310,10 +310,9 @@ and the backward overwrites them IN PLACE with the logit gradient before the
 two gradient GEMMs, so the full `[rows, classes]` gradient never costs a
 second buffer (−622 MB peak and ~4% faster than the composed dot +
 crossEntropy backward at 1024x151936x1024 on M1). The record is
-single-use: re-running its VJP errors with
-`LinearCrossEntropyBackwardConsumed` instead of computing garbage (a plain
-repeated `backward()` on the same graph is already rejected upstream with
-`error.BackwardAlreadyRun`) — rebuild the forward to backward again
+single-use: re-running its VJP errors with `error.BackwardAlreadyRun`
+instead of computing garbage (the same name a repeated `backward()` on the
+graph gets upstream) — rebuild the forward to backward again
 (accumulation loops already do).
 
 Normalization for non-RMSNorm architectures: `layerNorm(ctx, tag, eps, .{})` /

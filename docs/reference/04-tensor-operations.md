@@ -29,12 +29,18 @@ Every operation below shares one contract, implemented by the shared tails
   target) is `InvalidArgument`; the data-dependent no-match outcome of
   `maskedSelect`/`maskedScatter` gets the dedicated `EmptySelection` so it
   stays catchable apart from those. This is the whole recoverable
-  vocabulary of the op surface: `fucina.Error` names the merge
-  (`fucina.TensorError`, the graph-control names `UnsupportedGradient`,
-  `MutableDataRequiresNoGrad`, `NoGradientGraph`,
-  `ActiveExecScopeUnsupported`, the backward engine's
-  `MissingOutputGradient`/`MissingBackwardGradient`/`BackwardAlreadyRun`,
-  and `OutOfMemory`) for wrappers that thread any fucina error upward;
+  vocabulary of the op surface, and `fucina.Error` is derived from the
+  band sets rather than listed by hand: `exec.Error` merges `TensorError`,
+  `backend.quant.QuantizedFormatError` (`InvalidQuantizedLength`), the
+  runtime's `ExecError` (`WorkPoolUnavailable`, `FloatEnvironmentChanged`,
+  `UnsupportedAttentionVariant`) and `OutOfMemory`; `ag.Error` adds
+  `AgError`, the engine's state names plus the graph-control names
+  `UnsupportedGradient`, `MutableDataRequiresNoGrad`, `NoGradientGraph`
+  and `ActiveExecScopeUnsupported` ([§5](05-automatic-differentiation.md)).
+  The names follow one rule per class: `Invalid*` when the request is
+  wrong, `ShapeMismatch` when two operands disagree, `Unsupported*` when a
+  legitimate request has no implementation in this build, dtype or
+  variant. The merge is for wrappers that thread any fucina error upward;
   each method still exposes its precise inferred error set.
 - **Ownership.** Each op allocates and returns a **new owned tensor**; the
   caller `deinit`s it. Operands are borrowed via `*const` and never consumed

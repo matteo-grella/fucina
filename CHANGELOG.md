@@ -25,6 +25,22 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The error vocabulary is derived from the band sets. `exec.Error` merges
+  `TensorError`, `backend.quant.QuantizedFormatError`, the runtime's
+  `ExecError` and `OutOfMemory`; `ag.Error` merges `exec.Error` with
+  `AgError`, which now carries the facade's graph-control names
+  (`UnsupportedGradient`, `MutableDataRequiresNoGrad`, `NoGradientGraph`,
+  `ActiveExecScopeUnsupported`) beside the engine's three; `fucina.Error`
+  is `ag.Error`, and `fucina.ExecError`/`fucina.AgError` are exported.
+  Band code raises through its set, never as a bare `error.X`. Rewrites:
+  `exec.WorkPoolError` → `exec.ExecError` (which also names
+  `FloatEnvironmentChanged` and `UnsupportedAttentionVariant`);
+  `gradcheck`'s five conditions are the named `gradcheck.Error`.
+- The checkpoint recompute and the linear cross-entropy VJP report the
+  engine's names. Rewrites: `error.CheckpointOutputNotDifferentiable` →
+  `error.NoGradientGraph`, `error.CheckpointMissingInputGradient` →
+  `error.MissingBackwardGradient`,
+  `error.LinearCrossEntropyBackwardConsumed` → `error.BackwardAlreadyRun`.
 - The row and attention seams are curated namespaces: `backend.rows` and
   `backend.attention` list the Task payloads, the `run*Task` inner-lane
   adapters, the task factories, the tile constants and the shared helpers

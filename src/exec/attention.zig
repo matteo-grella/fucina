@@ -12,6 +12,7 @@ const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 const storage = @import("../storage.zig");
 const ExecContext = @import("../exec.zig").ExecContext;
+const ExecError = @import("runtime.zig").ExecError;
 
 const DType = tensor.DType;
 const Tensor = tensor.Tensor;
@@ -184,22 +185,22 @@ pub fn groupedAttention(
     scale_value: f32,
     opts: AttentionOptions,
 ) !Tensor {
-    if (opts.mask == .bidirectional and opts.window != 0) return error.UnsupportedAttentionVariant;
-    if (opts.bias != null and (opts.mask == .causal or kv != .f32)) return error.UnsupportedAttentionVariant;
-    if (opts.stats_out != null and kv != .f32) return error.UnsupportedAttentionVariant;
+    if (opts.mask == .bidirectional and opts.window != 0) return ExecError.UnsupportedAttentionVariant;
+    if (opts.bias != null and (opts.mask == .causal or kv != .f32)) return ExecError.UnsupportedAttentionVariant;
+    if (opts.stats_out != null and kv != .f32) return ExecError.UnsupportedAttentionVariant;
     switch (kv) {
         .f32 => |view| return groupedCausalAttentionImpl(self, f32, q, view.k, view.v, kv_head_for_head, scale_value, opts.window, opts.mask == .causal, opts.bias, opts.stats_out),
         .f16 => |view| return groupedCausalAttentionImpl(self, f16, q, view.k, view.v, kv_head_for_head, scale_value, opts.window, opts.mask == .causal, null, null),
         .q8 => |view| {
-            if (opts.mask != .causal) return error.UnsupportedAttentionVariant;
+            if (opts.mask != .causal) return ExecError.UnsupportedAttentionVariant;
             return groupedCausalAttentionQ8KvImpl(self, q, view.k, view.v, view.kv_seq, view.kv_heads, kv_head_for_head, scale_value, opts.window);
         },
         .multi_f16 => |view| {
-            if (opts.mask != .causal or opts.window != 0) return error.UnsupportedAttentionVariant;
+            if (opts.mask != .causal or opts.window != 0) return ExecError.UnsupportedAttentionVariant;
             return groupedCausalAttentionMultiImpl(self, f16, q, view.k, view.v, view.lens, view.kv_heads, kv_head_for_head, scale_value);
         },
         .multi_q8 => |view| {
-            if (opts.mask != .causal or opts.window != 0) return error.UnsupportedAttentionVariant;
+            if (opts.mask != .causal or opts.window != 0) return ExecError.UnsupportedAttentionVariant;
             return groupedCausalAttentionMultiImpl(self, BlockQ8_0, q, view.k, view.v, view.lens, view.kv_heads, kv_head_for_head, scale_value);
         },
     }

@@ -48,6 +48,7 @@ const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
 const core = @import("core.zig");
+const AgError = core.AgError;
 const reflect = @import("facade_reflect.zig");
 const input_pointer: reflect.Pointer = .{ .single_item = true };
 const plumbing = @import("tensor/plumbing.zig").Mod(@import("tensor.zig"));
@@ -319,7 +320,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             }
 
             const recomputed = try callBlock(block, ctx, self.extra, &rewrapped);
-            const out_state = recomputed.grad_state orelse return error.CheckpointOutputNotDifferentiable;
+            const out_state = recomputed.grad_state orelse return AgError.NoGradientGraph;
 
             // Seed the recomputed output with the incoming gradient and run
             // a full backward over the recomputed subgraph. The SERIAL
@@ -336,7 +337,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             inline for (0..n) |i| {
                 if (core.needs(self, i)) {
                     out[i] = (try rewrapped[i].grad_state.?.gradClone(ctx.allocator())) orelse
-                        return error.CheckpointMissingInputGradient;
+                        return AgError.MissingBackwardGradient;
                 }
             }
         }

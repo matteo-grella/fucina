@@ -5,6 +5,7 @@ const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_topk = @import("../../backward/topk.zig");
+const AgError = @import("../../core.zig").AgError;
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -114,7 +115,7 @@ pub fn Ops(comptime Self: type) type {
                 if (tag_rank != 2) @compileError("routerTopK currently requires rank-2 [row, expert] logits");
                 if (axis(expert_tag) != 1) @compileError("routerTopK requires the expert tag on the last axis");
             }
-            if (self.requiresGrad()) return error.UnsupportedGradient;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             return ctx.routerTopK(self.asRawTensor(), k, options, selected, weights);
         }
     };

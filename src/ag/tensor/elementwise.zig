@@ -19,6 +19,7 @@ const elemental = @import("../elemental.zig");
 const RawTensor = tensor_mod.Tensor;
 const DType = tensor_mod.DType;
 const GradState = @import("../core.zig").GradState;
+const AgError = @import("../core.zig").AgError;
 const ExecContext = exec_mod.ExecContext;
 const UnaryOp = exec_mod.UnaryOp;
 const GatedOp = exec_mod.GatedOp;
@@ -81,20 +82,20 @@ pub fn Ops(comptime Self: type) type {
         /// In-place: add the `[axis_dim]` `bias` to every row of `self` along the
         /// last axis `axis_tag`, mutating `self`.
         pub fn addAxisVectorInPlace(self: *Self, ctx: *ExecContext, bias: []const f32, comptime axis_tag: Tag) !void {
-            if (self.requiresGrad()) return error.UnsupportedGradient;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             try ctx.addAxisVectorInPlace(tensor_rank, null, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place fused bias-add + unary activation `op`, mutating `self`.
         pub fn addAxisVectorUnaryInPlace(self: *Self, ctx: *ExecContext, comptime op: UnaryOp, bias: []const f32, comptime axis_tag: Tag) !void {
-            if (self.requiresGrad()) return error.UnsupportedGradient;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             try ctx.addAxisVectorInPlace(tensor_rank, op, &self.value, bias, comptime Self.axis(axis_tag));
         }
 
         /// In-place scaled residual `self += alpha · other` (same shape).
         pub fn addScaledInPlace(self: *Self, ctx: *ExecContext, other: anytype, alpha: f32) !void {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            if (self.requiresGrad() or other_ptr.requiresGrad()) return error.UnsupportedGradient;
+            if (self.requiresGrad() or other_ptr.requiresGrad()) return AgError.UnsupportedGradient;
             try ctx.addScaledInPlace(&self.value, other_ptr.asRawTensor(), alpha);
         }
 
@@ -345,8 +346,8 @@ pub fn Ops(comptime Self: type) type {
         /// a graph value would invalidate autograd state.
         pub fn takeAddNoGrad(self: *Self, ctx: *ExecContext, other: anytype) !Self {
             const other_ptr = tensorObjectPtrFrom(@TypeOf(other), &other);
-            if (self.requiresGrad() or other_ptr.requiresGrad()) return error.UnsupportedGradient;
-            if (self.scope_owned) return error.ActiveExecScopeUnsupported;
+            if (self.requiresGrad() or other_ptr.requiresGrad()) return AgError.UnsupportedGradient;
+            if (self.scope_owned) return AgError.ActiveExecScopeUnsupported;
             var value = try ctx.takeElementwise(.add, &self.value, other_ptr.asRawTensor());
             errdefer value.deinit();
             self.* = undefined;
@@ -357,8 +358,8 @@ pub fn Ops(comptime Self: type) type {
         /// storage when possible. No-grad only, for the same ownership reason as
         /// `takeAddNoGrad`.
         pub fn takeScaleNoGrad(self: *Self, ctx: *ExecContext, scalar_value: f32) !Self {
-            if (self.requiresGrad()) return error.UnsupportedGradient;
-            if (self.scope_owned) return error.ActiveExecScopeUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
+            if (self.scope_owned) return AgError.ActiveExecScopeUnsupported;
             var value = try ctx.takeScale(&self.value, scalar_value);
             errdefer value.deinit();
             self.* = undefined;

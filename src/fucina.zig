@@ -136,29 +136,28 @@ pub const GradcheckResult = ag.GradcheckResult;
 /// validity), `InvalidDataLength`, `IndexOutOfBounds`, `UnsupportedView`,
 /// `EmptySelection`, `DivisionByZero`.
 pub const TensorError = tensor.TensorError;
-/// The public error vocabulary: the merge of the domain sets a facade call
-/// can surface. Every fallible `Tensor`/`ExecContext` method keeps its
-/// precise inferred error set (a call site handles only what its op can
-/// actually raise); this named merge is for wrappers that thread any
-/// fucina error upward. Three domains:
-///
-///   - `TensorError`: shape, layout, and argument validity;
-///   - graph control: `UnsupportedGradient` (a no-grad-only op touched a
-///     grad-requiring tensor; families with a more specific reason name it,
-///     see docs/reference/04 §4.1), `MutableDataRequiresNoGrad`,
-///     `NoGradientGraph` (backward without a recorded graph),
-///     `ActiveExecScopeUnsupported` (an op that must own its result was
-///     called under an exec scope), and the backward engine's `AgError`
-///     (`MissingOutputGradient`, `MissingBackwardGradient`,
-///     `BackwardAlreadyRun`);
-///   - `OutOfMemory`: allocation failure anywhere.
-pub const Error = TensorError || ag.AgError || error{
-    UnsupportedGradient,
-    MutableDataRequiresNoGrad,
-    NoGradientGraph,
-    ActiveExecScopeUnsupported,
-    OutOfMemory,
-};
+/// The public error vocabulary, derived from the band sets: `ag.Error` =
+/// `exec.Error` (`TensorError`, `backend.quant.QuantizedFormatError`,
+/// `ExecError`, `OutOfMemory`) merged with `AgError`. Every fallible
+/// `Tensor`/`ExecContext` method keeps its precise inferred error set (a
+/// call site handles only what its op can actually raise); this named
+/// merge is for wrappers that thread any fucina error upward. One naming
+/// rule per class: `Invalid*` when the request is wrong (`InvalidShape`,
+/// `InvalidDataLength`, `InvalidArgument`, `InvalidQuantizedLength`),
+/// `ShapeMismatch` when two operands disagree, `Unsupported*` when a
+/// legitimate request has no implementation in this build, dtype or
+/// variant (`UnsupportedView`, `UnsupportedGradient`,
+/// `UnsupportedAttentionVariant`, `ActiveExecScopeUnsupported`), and the
+/// engine's state names (`AgError`). `gradcheck` and the model-file bands
+/// (`gguf`, `safetensors`, `weights`, `state_dict`, ...) keep their own
+/// sets.
+pub const Error = ag.Error;
+/// The runtime's own error names: `WorkPoolUnavailable`,
+/// `FloatEnvironmentChanged`, `UnsupportedAttentionVariant`.
+pub const ExecError = exec.ExecError;
+/// The autograd band's error domain: the engine's state names and the
+/// facade's graph-control names.
+pub const AgError = ag.AgError;
 /// Element dtype enum (f32/f16/bf16/int/bool + every quantized block
 /// format); the block-format registry lives in `quant`/`dtype`.
 pub const DType = dtype.DType;

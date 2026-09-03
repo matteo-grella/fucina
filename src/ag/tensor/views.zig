@@ -16,6 +16,7 @@ const exec_mod = @import("../../exec.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const control = @import("../control.zig");
 const core = @import("../core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../../tags.zig");
 const backward_elementwise = @import("../backward/elementwise.zig");
 const backward_gather_scatter = @import("../backward/gather_scatter.zig");
@@ -421,7 +422,7 @@ pub fn Ops(comptime Self: type) type {
             if (step == 0 or length == 0) return TensorError.InvalidShape;
             if (start >= axis_dim or start + (length - 1) * step >= axis_dim) return TensorError.InvalidShape;
             if (self.requiresGrad()) {
-                if (comptime !differentiable) return error.UnsupportedGradient;
+                if (comptime !differentiable) return AgError.UnsupportedGradient;
                 const indices = try ctx.allocator().alloc(usize, length);
                 defer ctx.allocator().free(indices);
                 for (indices, 0..) |*index, i| index.* = start + i * step;

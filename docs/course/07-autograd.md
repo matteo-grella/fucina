@@ -1011,7 +1011,7 @@ subgraph — the engine is reentrant enough to be its own building block
 
 ```zig
             const recomputed = try callBlock(block, ctx, self.extra, &rewrapped);
-            const out_state = recomputed.grad_state orelse return error.CheckpointOutputNotDifferentiable;
+            const out_state = recomputed.grad_state orelse return AgError.NoGradientGraph;
 
             // Seed the recomputed output with the incoming gradient and run
             // a full backward over the recomputed subgraph. The SERIAL

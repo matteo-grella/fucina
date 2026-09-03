@@ -194,7 +194,7 @@ pub fn init(self: *ExecContext, allocator: Allocator) void {
 pub fn checkFloatEnvironment(self: *const ExecContext) !void {
     const recorded = self.rt.fp_env_at_init orelse return;
     const current = fpenv.get() orelse return;
-    if (!std.meta.eql(recorded, current)) return error.FloatEnvironmentChanged;
+    if (!std.meta.eql(recorded, current)) return ExecError.FloatEnvironmentChanged;
 }
 
 /// The IEEE floating-point environment recorded at context creation, or
@@ -331,8 +331,17 @@ pub fn rowwiseNumericsPinned(self: *const ExecContext) bool {
 // Worker team.
 // ------------------------------------------------------------------
 
-/// The error a latched pool-init failure reports on every later request.
-pub const WorkPoolError = error{WorkPoolUnavailable};
+/// The runtime's own error names, beyond `TensorError` and the quantized
+/// block-length check; `exec.Error` merges the three domains.
+pub const ExecError = error{
+    /// A latched pool-init failure, reported by every later `tryWorkPool`.
+    WorkPoolUnavailable,
+    /// `checkFloatEnvironment`: the calling thread's rounding or denormal
+    /// mode differs from the one recorded at `init`.
+    FloatEnvironmentChanged,
+    /// `groupedAttention` has no kernel for this option combination.
+    UnsupportedAttentionVariant,
+};
 
 /// The worker team, created on the first call. A failed `Pool.init` is
 /// latched in `work_pool_failed`: one warning, then every later call
@@ -343,7 +352,7 @@ pub fn tryWorkPool(self: *ExecContext) !*thread.Pool {
     self.rt.work_pool_mutex.lock();
     defer self.rt.work_pool_mutex.unlock();
 
-    if (self.rt.work_pool_failed) return WorkPoolError.WorkPoolUnavailable;
+    if (self.rt.work_pool_failed) return ExecError.WorkPoolUnavailable;
     if (!self.rt.work_pool_ready) {
         const worker_threads = parallel.cpuThreadCount(parallel.vector_max_threads) - 1;
         self.rt.work_pool.init(.{

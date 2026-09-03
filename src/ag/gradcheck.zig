@@ -19,6 +19,22 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 
+/// The checker's own error domain (`gradcheck` returns `Result` for a
+/// tolerance failure that was measured; these are the cases it cannot
+/// measure).
+pub const Error = error{
+    /// `eps`, `abs_tol` or `rel_tol` is not finite, or `eps` is not positive.
+    InvalidGradcheckOptions,
+    /// A checked input received no analytical gradient.
+    MissingAnalyticalGradient,
+    /// No input is a variable.
+    NoVariableInputs,
+    /// An analytical gradient's length differs from its parameter's.
+    GradientShapeMismatch,
+    /// A non-finite analytical or numerical gradient.
+    GradientMismatch,
+};
+
 pub const Options = struct {
     eps: f64 = 1e-3,
     abs_tol: f64 = 1e-3,
@@ -33,9 +49,9 @@ pub const Result = struct {
 };
 
 pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, options: Options) !Result {
-    if (!std.math.isFinite(options.eps) or options.eps <= 0) return error.InvalidGradcheckOptions;
-    if (!std.math.isFinite(options.abs_tol) or options.abs_tol < 0) return error.InvalidGradcheckOptions;
-    if (!std.math.isFinite(options.rel_tol) or options.rel_tol < 0) return error.InvalidGradcheckOptions;
+    if (!std.math.isFinite(options.eps) or options.eps <= 0) return Error.InvalidGradcheckOptions;
+    if (!std.math.isFinite(options.abs_tol) or options.abs_tol < 0) return Error.InvalidGradcheckOptions;
+    if (!std.math.isFinite(options.rel_tol) or options.rel_tol < 0) return Error.InvalidGradcheckOptions;
 
     const Inputs = @TypeOf(inputs);
     const facade_types = comptime reflect.facadeTypes(Inputs, "gradcheck", .{ .mutable = true });
@@ -59,18 +75,18 @@ pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, 
     inline for (0..n) |input_i| {
         if (inputs[input_i].requiresGrad()) {
             analytical[input_i] = (try inputs[input_i].grad_state.?.gradClone(ctx.allocator())) orelse
-                return error.MissingAnalyticalGradient;
+                return Error.MissingAnalyticalGradient;
             checked_any = true;
         }
     }
-    if (!checked_any) return error.NoVariableInputs;
+    if (!checked_any) return Error.NoVariableInputs;
 
     var result: Result = .{};
     inline for (0..n) |input_i| {
         if (inputs[input_i].requiresGrad()) {
             const grad_data = try analytical[input_i].?.dataConstChecked();
             const param_data = try inputs[input_i].value.dataChecked();
-            if (grad_data.len != param_data.len) return error.GradientShapeMismatch;
+            if (grad_data.len != param_data.len) return Error.GradientShapeMismatch;
 
             for (param_data, grad_data, 0..) |*param, g_ana_f32, elem_i| {
                 const original = param.*;
@@ -99,7 +115,7 @@ pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, 
                                 .{ input_i, elem_i, g_ana, g_num, abs_error, tol },
                             );
                         }
-                        return error.GradientMismatch;
+                        return Error.GradientMismatch;
                     }
                 }
             }

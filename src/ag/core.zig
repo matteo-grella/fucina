@@ -9,10 +9,28 @@ const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
 const Tensor = tensor.Tensor;
 
+/// The autograd band's error domain: the engine's state names and the
+/// facade's graph-control names. Band code raises through this set, never
+/// as a bare `error.X`, so `ag.Error` (and `fucina.Error`) is derived from
+/// it rather than maintained beside it.
 pub const AgError = error{
+    /// `backwardGrad*` received fewer output gradients than outputs.
     MissingOutputGradient,
+    /// A VJP left a required input-gradient slot empty (a custom VJP or a
+    /// checkpoint recompute included).
     MissingBackwardGradient,
+    /// A second backward over a graph, or over a single-use VJP record,
+    /// that already ran.
     BackwardAlreadyRun,
+    /// A no-grad-only entry touched a grad-requiring tensor.
+    UnsupportedGradient,
+    /// `data()` on a tensor that requires gradients.
+    MutableDataRequiresNoGrad,
+    /// `backward` on a tensor with no recorded graph (a recomputed
+    /// checkpoint output without one included).
+    NoGradientGraph,
+    /// An op that must own its result was called on a scope-owned borrow.
+    ActiveExecScopeUnsupported,
 };
 
 const BackwardState = enum(u8) {

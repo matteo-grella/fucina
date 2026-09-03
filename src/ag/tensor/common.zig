@@ -10,6 +10,7 @@
 const tensor_mod = @import("../../tensor.zig");
 const dtype_mod = @import("../../dtype.zig");
 const tags_mod = @import("../../tags.zig");
+const AgError = @import("../core.zig").AgError;
 
 const TensorError = tensor_mod.TensorError;
 const Tag = tags_mod.Tag;
@@ -62,7 +63,7 @@ pub fn Ops(comptime Self: type) type {
         /// autograd tape assumes values are not mutated behind it.
         pub fn data(self: *Self) ![]Elem {
             if (comptime has_grad) {
-                if (self.requiresGrad()) return error.MutableDataRequiresNoGrad;
+                if (self.requiresGrad()) return AgError.MutableDataRequiresNoGrad;
             }
             return @ptrCast(try self.value.dataChecked());
         }

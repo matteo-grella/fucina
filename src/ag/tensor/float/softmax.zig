@@ -8,6 +8,7 @@ const dtype_mod = @import("../../../dtype.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_softmax = @import("../../backward/softmax.zig");
+const AgError = @import("../../core.zig").AgError;
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -133,7 +134,7 @@ pub fn Ops(comptime Self: type) type {
             defer if (mask_view) |*mask| mask.deinit();
             if (comptime @hasField(Options, "mask")) {
                 const mask_ptr = tensorObjectPtrFrom(@TypeOf(options.mask), &options.mask);
-                if (mask_ptr.requiresGrad()) return error.UnsupportedGradient;
+                if (mask_ptr.requiresGrad()) return AgError.UnsupportedGradient;
                 const Mask = TensorObject(@TypeOf(options.mask));
                 mask_view = try broadcastTensorTo(.f32, Mask.axis_tags, mask_ptr.asRawTensor(), tags, self.shape());
             }

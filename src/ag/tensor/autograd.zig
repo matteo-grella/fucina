@@ -11,6 +11,7 @@ const tensor_mod = @import("../../tensor.zig");
 const exec_mod = @import("../../exec.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const core = @import("../core.zig");
+const AgError = core.AgError;
 const dtype_mod = @import("../../dtype.zig");
 
 const TensorError = tensor_mod.TensorError;
@@ -87,7 +88,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn backward(self: *Self, ctx: *ExecContext) !void {
             comptime if (dtype != .f32) @compileError("backward runs from an f32 tensor (16-bit tensors are leaves, never losses)");
-            const state = self.grad_state orelse return error.NoGradientGraph;
+            const state = self.grad_state orelse return AgError.NoGradientGraph;
             return core.backwardGradOne(ctx, state, &self.value);
         }
 
@@ -100,7 +101,7 @@ pub fn Ops(comptime Self: type) type {
         /// accumulated on `self`.
         pub fn backwardWithGrad(self: *Self, ctx: *ExecContext, grad_output: *const Self) !void {
             comptime if (dtype != .f32) @compileError("backwardWithGrad runs from an f32 tensor (16-bit tensors are leaves, never losses)");
-            const state = self.grad_state orelse return error.NoGradientGraph;
+            const state = self.grad_state orelse return AgError.NoGradientGraph;
             // Checked here too so the error exit leaves `self`'s accumulated
             // gradient untouched (the engine re-checks after setGrad).
             if (state.backward_done) return core.AgError.BackwardAlreadyRun;

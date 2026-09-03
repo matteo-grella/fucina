@@ -68,12 +68,12 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty(.f32, ...)`
-  acquires from it (`src/exec/runtime.zig:513-519`). In an LLM forward
+  acquires from it (`src/exec/runtime.zig:522-528`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
   slabs (`[]align(64) u8`). `empty` routes every
-  non-f32 dtype through `BufferPool.acquireTyped` (`src/exec/runtime.zig:537`), which
+  non-f32 dtype through `BufferPool.acquireTyped` (`src/exec/runtime.zig:546`), which
   wraps a slab in a typed `storage.BufferOf(dtype)` header whose release hook
   returns the slab to the free list (cross-dtype reuse: an f16 LHS-cast slab
   can serve q8_k scratch next op). Hot consumers inherited pooling with no

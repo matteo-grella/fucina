@@ -153,7 +153,20 @@ pub fn backwardGradOne(ctx: *ExecContext, output: *GradState,
                        output_value: *const Tensor) !void
 ```
 
-`pub const AgError = error{ MissingOutputGradient, MissingBackwardGradient, BackwardAlreadyRun };`
+```zig
+pub const AgError = error{
+    MissingOutputGradient,      // backwardGrad* received fewer output gradients than outputs
+    MissingBackwardGradient,    // a VJP left a required input-gradient slot empty
+    BackwardAlreadyRun,         // a second backward over a graph or single-use record
+    UnsupportedGradient,        // a no-grad-only entry touched a grad-requiring tensor
+    MutableDataRequiresNoGrad,  // data() on a tensor that requires gradients
+    NoGradientGraph,            // backward on a tensor with no recorded graph
+    ActiveExecScopeUnsupported, // an owning op called on a scope-owned borrow
+};
+```
+
+The band raises through this set, never as a bare `error.X`, so `ag.Error`
+(`exec.Error || AgError`, what `fucina.Error` names) is derived from it.
 
 **Seeding rules.** Before any scheduling state exists, every output is
 validated and its implicit seed pre-allocated:
@@ -517,10 +530,10 @@ Runtime behavior and constraints:
 - Block runs (forward and recompute) pin the quantized-RHS dot to the CPU
   kernels for their duration (`ctx.disableQuantDotGpu()`, a per-context
   atomic depth count) so both runs take the same kernels.
-- The recompute errors with `error.CheckpointOutputNotDifferentiable` if the
-  re-run block's output carries no graph, and
-  `error.CheckpointMissingInputGradient` if a grad-requiring input received
-  none.
+- The recompute errors with `error.NoGradientGraph` if the re-run block's
+  output carries no graph, and `error.MissingBackwardGradient` if a
+  grad-requiring input received none: the engine's own names, not
+  checkpoint-specific ones.
 
 ```zig
 fn ckptLayer(

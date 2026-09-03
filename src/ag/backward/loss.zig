@@ -4,6 +4,7 @@ const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
 const exec_mod = @import("../../exec.zig");
 const core = @import("../core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../../tags.zig");
 
 const RawTensor = tensor_mod.Tensor;
@@ -45,7 +46,7 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
             const need_weight = core.needs(self, 1);
             // The record exclusively owns its saved logits and the VJP
             // consumes them in place (single-writer ownership).
-            if (self.consumed) return error.LinearCrossEntropyBackwardConsumed;
+            if (self.consumed) return AgError.BackwardAlreadyRun;
             self.consumed = true;
             var grads = try ctx.linearCrossEntropyBackwardUpstream(
                 &self.x,

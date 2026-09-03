@@ -10,14 +10,19 @@ const control_mod = @import("ag/control.zig");
 const custom_mod = @import("ag/custom.zig");
 const core = @import("ag/core.zig");
 const elemental_mod = @import("ag/elemental.zig");
+const exec_mod = @import("exec.zig");
 const gradcheck_mod = @import("ag/gradcheck.zig");
 const tags = @import("tags.zig");
 const tensor = @import("ag/tensor.zig");
 
 pub const Tensor = tensor.Tensor;
-/// The backward engine's error domain (`MissingOutputGradient`,
-/// `MissingBackwardGradient`, `BackwardAlreadyRun`).
+/// The autograd band's error domain (`ag/core.zig`): the engine's
+/// `MissingOutputGradient`/`MissingBackwardGradient`/`BackwardAlreadyRun`
+/// and the facade's graph-control names.
 pub const AgError = core.AgError;
+/// Everything a facade call can raise: `exec.Error` merged with `AgError`.
+/// Derived from the band sets, not maintained beside them.
+pub const Error = exec_mod.Error || AgError;
 pub const PackedRhs = tensor.PackedRhs;
 pub const SliceRange = tensor.SliceRange;
 pub const VarianceOptions = tensor.VarianceOptions;
