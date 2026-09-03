@@ -14,7 +14,7 @@ const fucina = @import("fucina");
 /// scalar reference kernels re-buys kernel coverage the scalar leg already
 /// owns, at model-forward cost.
 pub fn requireNative() error{SkipZigTest}!void {
-    if (comptime fucina.internal.backend_mod.active_kind != .native) return error.SkipZigTest;
+    if (comptime fucina.active_backend_kind != .native) return error.SkipZigTest;
 }
 
 fn requireModels() bool {

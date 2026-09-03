@@ -385,7 +385,7 @@ pub const MmProj = struct {
         r1: usize,
 
         fn run(t: *const NormGeluTask) void {
-            const erff = fucina.internal.backend_mod.ops.erff;
+            const erff = fucina.ops.erff;
             for (t.r0..t.r1) |r| {
                 const dst = t.out[r * t.d ..][0..t.d];
                 rmsNormInto(dst, t.lin[r * t.d ..][0..t.d], t.norm_w, t.eps);

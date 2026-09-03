@@ -304,16 +304,18 @@ pub const RopeTableSpec = exec.RopeTableSpec;
 pub const RopePositions = exec.RopePositions;
 pub const RopeFreqs = exec.RopeFreqs;
 
-/// SIMD vocabulary for user-defined elemental ops (`elementalUnary` /
-/// `elementalBinary` vector bodies): the machine vector type, its width,
-/// and the transcendental helpers the built-in kernels use.
-pub const simd = struct {
-    pub const Vf32 = backend.simd.Vf32;
-    pub const vector_len = backend.simd.vector_len;
-    pub const vexpf = backend.simd.vexpf;
-    pub const sigmoidVec = backend.simd.sigmoidVec;
-    pub const tanhVec = backend.simd.tanhVec;
-};
+/// The kernel op vocabulary, `src/backend/ops.zig` as a module: the op
+/// enums the facade takes by name (`UnaryOp`, `ElementwiseOp`, `GatedOp`,
+/// ...), their scalar reference bodies (`sigmoidScalar`, `geluScalar`,
+/// `erff`, ...) for code that evaluates one activation on the host, and
+/// the GEMM request types (`Gemm`, `QuantGemm`).
+pub const ops = backend.ops;
+/// The portable-SIMD vocabulary, `backend.simd` as a module: the machine
+/// vector type and its width, the transcendental helpers the built-in
+/// kernels use (`vexpf`, `sigmoidVec`, `tanhVec`), the unary-VJP vector
+/// twins and `dotF32F16`, for user-defined elemental ops (`elementalUnary`
+/// / `elementalBinary` vector bodies) and host-side inner loops.
+pub const simd = backend.simd;
 /// Fake-quantization round trips (FP8-E4M3 / FP4-E2M1 microscaling groups,
 /// Hadamard rotation, f16 round trip) over host slices (see docs/reference/10-quantization.md).
 pub const fakequant = exec.fakequant;

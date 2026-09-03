@@ -238,7 +238,7 @@ stride_h, stride_w, pad_h, pad_w`), `PoolKind = enum { avg, max, sum }`, and
   context controls thread-pool ownership — a kernel never creates threads
   and never assumes a pool exists (`.pool = null` runs serially).
 
-`src/backend/ops.zig` defines the shared op vocabulary the kernels compile
+`src/backend/ops.zig` (`fucina.ops`) defines the shared op vocabulary the kernels compile
 against: `ElementwiseOp` (`add, sub, mul, div, max, min`), `UnaryOp` (`relu,
 exp, sqrt, rsqrt, sigmoid, silu, log, log1p, softplus, neg, abs, sin, cos,
 tanh, fast_tanh, gelu, quick_gelu, gelu_quant, elu,
@@ -396,7 +396,8 @@ backward's dweight stay serial by design, their parameter-gradient
 accumulation crosses lanes.
 
 The primitive vocabulary is also re-exported on the public facade as
-`fucina.simd` (`Vf32`, `vector_len`, `vexpf`, `sigmoidVec`, `tanhVec`):
+`fucina.simd` (the module: `Vf32`, `vector_len`, `vexpf`, `sigmoidVec`,
+`tanhVec`, the unary-VJP twins `unaryVjpVectorizes`/`vecUnaryVjp`, `dotF32F16`):
 an elemental op ([§4.4](04-tensor-operations.md#44-unary-ops-srcagtensorzig-srcbackendopszig)) may declare vector twins of its scalar rules —
 `forwardVec`/`backwardVec` for unary ops,
 `forwardVec`/`backwardAVec`/`backwardBVec` for binary — and the elemental

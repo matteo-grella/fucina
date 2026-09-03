@@ -13,7 +13,6 @@ const fucina = @import("fucina");
 
 const backend_mod = fucina.internal.backend_mod;
 const offload = backend_mod.offload;
-const backend_ops = backend_mod.ops;
 const dtype_mod = backend_mod.dtype_info;
 const tensor = fucina.internal.tensor_mod;
 const thread = fucina.internal.thread_mod;
@@ -101,7 +100,7 @@ fn GuDecodeEngine(comptime Bind: type) type {
                     if (state.remaining_gate_up.fetchSub(1, .acq_rel) == 1) {
                         const geglu_requant_start = moe_chain.MoeTaskProfiler.start(state.profiler);
                         for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
-                            g.* = up_v * backend_ops.geluQuantScalar(gate_v);
+                            g.* = up_v * fucina.ops.geluQuantScalar(gate_v);
                         }
                         backend_mod.kernels.quantizeRowQ8_0IntoUnchecked(state.qg, state.g_buf);
                         moe_chain.MoeTaskProfiler.add(state.profiler, .swiglu_requant, geglu_requant_start);
@@ -130,7 +129,7 @@ fn GuDecodeEngine(comptime Bind: type) type {
 
             const geglu_requant_start = moe_chain.MoeTaskProfiler.start(state.profiler);
             for (state.g_buf, state.gate_buf, state.up_buf) |*g, gate_v, up_v| {
-                g.* = up_v * backend_ops.geluQuantScalar(gate_v);
+                g.* = up_v * fucina.ops.geluQuantScalar(gate_v);
             }
             backend_mod.kernels.quantizeRowQ8_0Into(state.qg, state.g_buf) catch {
                 @memset(state.out, 0);
@@ -922,7 +921,7 @@ fn runGuGpuGegluTask(task: *const GuGpuGegluTask) void {
         const row = task.src[(base + i) * 2 * out_pe ..][0 .. 2 * out_pe];
         const g = task.dst[(base + i) * out_pe ..][0..out_pe];
         for (g, row[0..out_pe], row[out_pe..]) |*gv, gate_v, up_v| {
-            gv.* = up_v * backend_ops.geluQuantScalar(gate_v);
+            gv.* = up_v * fucina.ops.geluQuantScalar(gate_v);
         }
     }
 }
@@ -1254,7 +1253,7 @@ fn runGuGegluTask(task: *const GuGegluTask) void {
     const up_out = task.up_buf[base * out_pe ..][0 .. m * out_pe];
     const g_out = task.g_buf[base * out_pe ..][0 .. m * out_pe];
     for (g_out, gate_out, up_out) |*g, gate_v, up_v| {
-        g.* = up_v * backend_ops.geluQuantScalar(gate_v);
+        g.* = up_v * fucina.ops.geluQuantScalar(gate_v);
     }
     for (0..m) |i| {
         backend_mod.kernels.quantizeRowQ8_0IntoUnchecked(task.qg[(base + i) * task.bpc_g ..][0..task.bpc_g], g_out[i * out_pe ..][0..out_pe]);

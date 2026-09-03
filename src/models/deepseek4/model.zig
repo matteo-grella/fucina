@@ -949,8 +949,8 @@ fn hcSplitSinkhorn(mix: []const f32, scale: []const f32, base: []const f32, n_hc
     std.debug.assert(n_hc == 4 and mix.len == 24);
     var out: HcSplit = undefined;
     const eps: f32 = 1.0e-6;
-    for (0..n_hc) |i| out.pre[i] = fucina.internal.backend_mod.ops.sigmoidStableScalar(mix[i] * scale[0] + base[i]) + eps;
-    for (0..n_hc) |i| out.post[i] = 2.0 * fucina.internal.backend_mod.ops.sigmoidStableScalar(mix[n_hc + i] * scale[1] + base[n_hc + i]);
+    for (0..n_hc) |i| out.pre[i] = fucina.ops.sigmoidStableScalar(mix[i] * scale[0] + base[i]) + eps;
+    for (0..n_hc) |i| out.post[i] = 2.0 * fucina.ops.sigmoidStableScalar(mix[n_hc + i] * scale[1] + base[n_hc + i]);
 
     var c: [16]f32 = undefined;
     for (0..n_hc) |dst| {
@@ -1527,7 +1527,7 @@ fn outputLogitsWithInto(self: *Model, ctx: *ExecContext, streams: []const f32, h
     defer pre_t.deinit();
     const pre_vals = try pre_t.dataConst();
     var merge_w: [4]f32 = undefined;
-    for (0..cfg.n_hc) |i| merge_w[i] = fucina.internal.backend_mod.ops.sigmoidStableScalar(pre_vals[i] * head_hc.scale[0] + head_hc.base[i]) + cfg.hc_eps;
+    for (0..cfg.n_hc) |i| merge_w[i] = fucina.ops.sigmoidStableScalar(pre_vals[i] * head_hc.scale[0] + head_hc.base[i]) + cfg.hc_eps;
 
     var streams_t = try fucina.Tensor(.{ .stream, .embed }).fromBorrowedConstSlice(ctx, .{ cfg.n_hc, cfg.hidden_size }, streams);
     defer streams_t.deinit();

@@ -25,6 +25,13 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `fucina.ops` is `src/backend/ops.zig` as a module (the op enums, their
+  scalar reference bodies such as `sigmoidScalar`/`geluQuantScalar`/`erff`,
+  the GEMM request types) and `fucina.simd` is `backend.simd` as a module
+  (adds `unaryVjpVectorizes`, `vecUnaryVjp`, `dotF32F16` to the five names
+  the root mirrored). Rewrites: `fucina.internal.backend_mod.ops.X` →
+  `fucina.ops.X`; `fucina.internal.backend_mod.simd.X` → `fucina.simd.X`;
+  `fucina.internal.backend_mod.active_kind` → `fucina.active_backend_kind`.
 - One home per raw-tensor helper. `ExecContext.contiguousOwned(dtype, x)` is
   the owned contiguous read (a retained view when `x` is already contiguous,
   else a materialized copy) that the VJPs used to reach through two private
