@@ -32,7 +32,6 @@ const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 const contiguousDataConst = vector_common.contiguousDataConst;
 const contiguousData = vector_common.contiguousData;
-const checkedTensorProduct = vector.matmul_quant.checkedTensorProduct;
 const checkedQuantizedProduct = quantized_matmul.types.checkedProduct;
 
 // The LHS quantization band (vector/matmul_quant.zig): the validated
@@ -675,7 +674,7 @@ fn matmulPackedQ8_0x4(
     if (m % 4 != 0) {
         if (m >= 12 and m < parallel.vector_column_min_m) {
             const cd = contiguousData(out, m * n);
-            const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+            const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_0, k);
             const row_groups = (m + 3) / 4;
             var scratch: LhsBlocks(quantized_matmul.BlockQ8_0x4) = undefined;
             const qlhs_blocks = try scratch.acquire(allocator, row_groups * blocks_per_row);
@@ -692,7 +691,7 @@ fn matmulPackedQ8_0x4(
     }
 
     const cd = contiguousData(out, m * n);
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_0, k);
     var scratch: LhsBlocks(quantized_matmul.BlockQ8_0x4) = undefined;
     const qlhs_blocks = try scratch.acquire(allocator, (m / 4) * blocks_per_row);
     defer scratch.release(allocator, qlhs_blocks);
@@ -717,9 +716,9 @@ fn matmul2DQuantizedRhsQ8_0x4BulkTail(
     n: usize,
     k: usize,
 ) !void {
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const cd = contiguousData(out, try tensor.checkedProduct(m, n));
     const ad = try lhsRows(a, m, k);
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_0, k);
     const bulk_rows = m - m % 4;
 
     {
@@ -754,9 +753,9 @@ pub fn matmul2DPackedQ8_0x4LhsRhs(
 ) !void {
     if (m % 4 != 0) return tensor.TensorError.InvalidShape;
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_0, k);
     if (lhs_blocks.len != try checkedQuantizedProduct(m / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const cd = contiguousData(out, try tensor.checkedProduct(m, n));
     vector.matmul_quant.gemm2D(pc, q8_0x4_packed_gemm, cd, lhs_blocks, rhs, m, n, k);
 }
 
@@ -771,9 +770,9 @@ pub fn matmul2DPackedPaddedQ8_0x4LhsRhs(
     k: usize,
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
-    const blocks_per_row = try quantized_matmul.q8k.q8_0BlockCount(k);
+    const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_0, k);
     if (lhs_blocks.len != try checkedQuantizedProduct((m + 3) / 4, blocks_per_row)) return quantized_matmul.types.QuantizedFormatError.InvalidQuantizedLength;
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const cd = contiguousData(out, try tensor.checkedProduct(m, n));
     vector.matmul_quant.gemm2D(pc, q8_0x4_padded_gemm, cd, lhs_blocks, rhs, m, n, k);
 }
 
@@ -855,7 +854,7 @@ fn matmulPackedQ4_Kx2Mmla(
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const cd = contiguousData(out, try tensor.checkedProduct(m, n));
     const ad = try lhsRows(a, m, k);
     const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_k, k);
     const prefix_rows = m - m % 2;
@@ -897,7 +896,7 @@ fn matmul2DQuantizedRhsQ8_Kx4Prefix(
     const rows_g = comptime ops.QuantGemm{ .weight = g.weight, .rhs = g.rhs, .lhs = .q8_k };
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
-    const cd = contiguousData(out, try checkedTensorProduct(m, n));
+    const cd = contiguousData(out, try tensor.checkedProduct(m, n));
     const blocks_per_row = try quantized_matmul.blockCountForDType(.q8_k, k);
     const prefix_rows = quantized_matmul.x4PrefixRows(g.weight, m);
 

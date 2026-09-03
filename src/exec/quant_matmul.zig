@@ -34,10 +34,6 @@ const FusedActQuantTask = exec_row_ops.FusedActQuantTask;
 const SplitSwiGluQuantQ8_0x4Task = exec_row_ops.SplitSwiGluQuantQ8_0x4Task;
 const runSplitSwiGluQuantQ8_0x4Task = exec_row_ops.runSplitSwiGluQuantQ8_0x4Task;
 
-fn checkedTensorProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
-}
-
 pub const RhsLifetime = backend_mod.quantized_matmul.types.RhsLifetime;
 
 pub fn dequantizeTensor(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
@@ -392,7 +388,7 @@ pub fn compactMatmulRhsFromBlocks(
 ) !CompactRhsFor(dt) {
     comptime if (!dtype_mod.supportsQuantizedMatmulRhs(dt)) @compileError("RHS dtype does not support quantized matmul");
     const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(dt, k);
-    if (blocks.len != try checkedTensorProduct(n, blocks_per_row)) return tensor.TensorError.InvalidDataLength;
+    if (blocks.len != try tensor.checkedProduct(n, blocks_per_row)) return tensor.TensorError.InvalidDataLength;
     return compactFromBlocks(CompactRhsFor(dt), self.allocator(), blocks, n, k, blocks_per_row);
 }
 
@@ -512,7 +508,7 @@ fn fusedKQuantGemm(
 
     if (prefix_rows > 0) {
         const row_groups = if (pad_x4) (prefix_rows + 3) / 4 else prefix_rows / 4;
-        var qlhs_x4_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_Kx4, try checkedTensorProduct(row_groups, blocks_per_row));
+        var qlhs_x4_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_Kx4, try tensor.checkedProduct(row_groups, blocks_per_row));
         defer qlhs_x4_lease.release();
         const qlhs_x4 = qlhs_x4_lease.items;
         const TaskT = FusedActQuantTask(act, .q8_kx4);
@@ -538,7 +534,7 @@ fn fusedKQuantGemm(
     if (prefix_rows < m) {
         const tail_rows = m - prefix_rows;
         const tail_groups = (tail_rows + 3) / 4;
-        var qlhs_rows_lease = try self.rt.buffers.acquireScratch(dtype_mod.BlockQ8_K, try checkedTensorProduct(tail_rows, blocks_per_row));
+        var qlhs_rows_lease = try self.rt.buffers.acquireScratch(dtype_mod.BlockQ8_K, try tensor.checkedProduct(tail_rows, blocks_per_row));
         defer qlhs_rows_lease.release();
         const qlhs_rows = qlhs_rows_lease.items;
         const TaskT = FusedActQuantTask(act, .q8_k_rows);
@@ -664,7 +660,7 @@ fn fusedQ8_0x4Pipeline(self: *ExecContext, comptime act: exec_row_ops.FusedActKi
     const qm = backend_mod.quantized_matmul;
     const n = rhs.n;
     const row_groups = (m + 3) / 4;
-    var qlhs_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_0x4, try checkedTensorProduct(row_groups, blocks_per_row));
+    var qlhs_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_0x4, try tensor.checkedProduct(row_groups, blocks_per_row));
     defer qlhs_lease.release();
     const qlhs = qlhs_lease.items;
 

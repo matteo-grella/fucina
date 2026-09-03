@@ -210,10 +210,6 @@ pub const MoeRhs = union(enum) {
     }
 };
 
-fn checkedMoeProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
-}
-
 fn validateMoeRhsStorage(rhs: *const MoeRhs, rows: usize, k: usize) !void {
     const qm = backend_mod.quantized_matmul;
     const expected_bpc = if (rhs.wantsQ8_0Lhs()) blk: {
@@ -657,9 +653,9 @@ pub fn carveDecodeScratch(
             @compileError("MoE scratch regions must align to <= 8");
         }
     }
-    const gate_len = try checkedMoeProduct(top_k, out_pe);
-    const qg_len = try checkedMoeProduct(top_k, blocks_per_g);
-    const out_len = try checkedMoeProduct(top_k, hidden);
+    const gate_len = try tensor.checkedProduct(top_k, out_pe);
+    const qg_len = try tensor.checkedProduct(top_k, blocks_per_g);
+    const out_len = try tensor.checkedProduct(top_k, hidden);
 
     var total: usize = 0;
     total = try Carver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
@@ -699,9 +695,9 @@ pub fn carveDecodeChainScratch(
             @compileError("MoE scratch regions must align to <= 8");
         }
     }
-    const gate_len = try checkedMoeProduct(top_k, out_pe);
-    const qg_len = try checkedMoeProduct(top_k, blocks_per_g);
-    const out_len = try checkedMoeProduct(top_k, hidden);
+    const gate_len = try tensor.checkedProduct(top_k, out_pe);
+    const qg_len = try tensor.checkedProduct(top_k, blocks_per_g);
+    const out_len = try tensor.checkedProduct(top_k, hidden);
 
     var total: usize = 0;
     total = try Carver.need(dtype_mod.BlockQ8_K, total, hidden_blocks);
@@ -1004,14 +1000,14 @@ pub fn expertFfn(
     const blocks_per_g = if (down_q8) 0 else try qm.blockCountForDType(.q8_k, out_pe);
     const blocks_per_g8 = if (down_q8) out_pe / 32 else 0;
     const hidden_blocks_k = if (gate_up_qk) try qm.blockCountForDType(.q8_k, hidden) else 0;
-    const chain_task_count = try checkedMoeProduct(4, top_k);
-    const chain_initial_count = try checkedMoeProduct(2, top_k);
+    const chain_task_count = try tensor.checkedProduct(4, top_k);
+    const chain_initial_count = try tensor.checkedProduct(2, top_k);
 
     // Q8_0-format activations live outside the carved scratch (only the
     // deepseek2-style layers pay this allocation).
     const qx8: []dtype_mod.BlockQ8_0 = if (gate_up_q8) try ctx.allocator().alloc(dtype_mod.BlockQ8_0, hidden / 32) else &.{};
     defer if (qx8.len > 0) ctx.allocator().free(qx8);
-    const qg8_all: []dtype_mod.BlockQ8_0 = if (down_q8) try ctx.allocator().alloc(dtype_mod.BlockQ8_0, try checkedMoeProduct(top_k, blocks_per_g8)) else &.{};
+    const qg8_all: []dtype_mod.BlockQ8_0 = if (down_q8) try ctx.allocator().alloc(dtype_mod.BlockQ8_0, try tensor.checkedProduct(top_k, blocks_per_g8)) else &.{};
     defer if (qg8_all.len > 0) ctx.allocator().free(qg8_all);
 
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
@@ -1447,7 +1443,7 @@ fn runMoeBatchPhased(
         if (m == 0) continue;
         active_count = std.math.add(usize, active_count, 1) catch return tensor.TensorError.InvalidDataLength;
         const gu_width = moePhaseColWidth(m, out_pe, small_m_width);
-        const gate_up_chunks = try checkedMoeProduct(2, moePhaseChunkCount(gu_width, out_pe));
+        const gate_up_chunks = try tensor.checkedProduct(2, moePhaseChunkCount(gu_width, out_pe));
         gate_up_task_count = std.math.add(usize, gate_up_task_count, gate_up_chunks) catch return tensor.TensorError.InvalidDataLength;
         const d_width = moePhaseColWidth(m, hidden, small_m_width);
         down_task_count = std.math.add(usize, down_task_count, moePhaseChunkCount(d_width, hidden)) catch return tensor.TensorError.InvalidDataLength;
@@ -1458,7 +1454,7 @@ fn runMoeBatchPhased(
     defer ctx.allocator().free(down_tasks);
     const chain_states = try ctx.allocator().alloc(MoeBatchPhaseChainState, n_expert);
     defer ctx.allocator().free(chain_states);
-    const active_chain_tasks = try checkedMoeProduct(active_count, 2);
+    const active_chain_tasks = try tensor.checkedProduct(active_count, 2);
     const matmul_chain_tasks = std.math.add(usize, gate_up_task_count, down_task_count) catch return tensor.TensorError.InvalidDataLength;
     const chain_task_count = std.math.add(usize, active_chain_tasks, matmul_chain_tasks) catch return tensor.TensorError.InvalidDataLength;
     const chain_tasks = try ctx.allocator().alloc(MoeBatchPhaseChainTask, chain_task_count);
@@ -1668,7 +1664,7 @@ pub fn expertFfnBatch(
     const seq = av.dim(0);
     const hidden = av.dim(1);
     const x_data = try x.dataConstChecked();
-    const n_pairs = try checkedMoeProduct(seq, top_k);
+    const n_pairs = try tensor.checkedProduct(seq, top_k);
     // Q8_0-lhs experts (q8_0 / mxfp4) batch like the Q8_K default with the
     // activation format swapped end to end — but only uniformly: a mix of
     // Q8_0- and Q8_K-wanting projections stays on the sequential path.
@@ -1715,22 +1711,22 @@ pub fn expertFfnBatch(
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     const group_offset = try a.alloc(usize, n_expert);
     defer a.free(group_offset);
-    const qx = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_in));
+    const qx = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try tensor.checkedProduct(n_pairs, bpc_in));
     defer a.free(qx);
-    const qx8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_in) else 0);
+    const qx8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try tensor.checkedProduct(n_pairs, bpc_in) else 0);
     defer a.free(qx8);
-    const gate_up_len = try checkedMoeProduct(n_pairs, out_pe);
+    const gate_up_len = try tensor.checkedProduct(n_pairs, out_pe);
     const gate_buf = try a.alloc(f32, gate_up_len);
     defer a.free(gate_buf);
     const up_buf = try a.alloc(f32, gate_up_len);
     defer a.free(up_buf);
     const g_buf = try a.alloc(f32, gate_up_len);
     defer a.free(g_buf);
-    const qg = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try checkedMoeProduct(n_pairs, bpc_g));
+    const qg = try a.alloc(dtype_mod.BlockQ8_K, if (q8_lhs) 0 else try tensor.checkedProduct(n_pairs, bpc_g));
     defer a.free(qg);
-    const qg8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try checkedMoeProduct(n_pairs, bpc_g) else 0);
+    const qg8 = try a.alloc(dtype_mod.BlockQ8_0, if (q8_lhs) try tensor.checkedProduct(n_pairs, bpc_g) else 0);
     defer a.free(qg8);
-    const down_buf = try a.alloc(f32, try checkedMoeProduct(n_pairs, hidden));
+    const down_buf = try a.alloc(f32, try tensor.checkedProduct(n_pairs, hidden));
     defer a.free(down_buf);
     const tasks = try a.alloc(MoeBatchTask, n_expert);
     defer a.free(tasks);
@@ -1749,10 +1745,10 @@ pub fn expertFfnBatch(
         group_offset[e] = total_groups;
         total_groups += (count[e] + 3) / 4;
     }
-    const qx_x4_len = if (gate_up_x4) try checkedMoeProduct(total_groups, bpc_in) else 0;
+    const qx_x4_len = if (gate_up_x4) try tensor.checkedProduct(total_groups, bpc_in) else 0;
     const qx_x4 = try a.alloc(qm.BlockQ8_Kx4, qx_x4_len);
     defer a.free(qx_x4);
-    const qg_x4_len = if (down_x4) try checkedMoeProduct(total_groups, bpc_g) else 0;
+    const qg_x4_len = if (down_x4) try tensor.checkedProduct(total_groups, bpc_g) else 0;
     const qg_x4 = try a.alloc(qm.BlockQ8_Kx4, qg_x4_len);
     defer a.free(qg_x4);
     const phased_pool = if (use_phased) ctx.workPool() else null;

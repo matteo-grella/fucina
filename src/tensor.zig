@@ -35,6 +35,11 @@ pub const TensorError = shape_mod.ShapeError || error{
     DivisionByZero,
 };
 
+/// `a * b` as a data length, `InvalidDataLength` on overflow.
+pub fn checkedProduct(a: usize, b: usize) TensorError!usize {
+    return std.math.mul(usize, a, b) catch TensorError.InvalidDataLength;
+}
+
 /// Type-erased releaser for a heap-retained `*TensorOf(dtype)` handle
 /// (`deinit` then `destroy`), shared by the registries that hold facade
 /// tensors behind `*anyopaque` (`ParamRegistry`, the ES slots).
