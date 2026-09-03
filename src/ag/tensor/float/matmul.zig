@@ -143,21 +143,21 @@ pub fn Ops(comptime Self: type) type {
                 const Record = ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag);
                 var saved_right = try other_ptr.asRawTensor().cloneView();
                 errdefer saved_right.deinit();
-                var saved_left: ?RawTensor = if (null != null) try self.asRawTensor().cloneView() else null;
-                errdefer if (saved_left) |*v| v.deinit();
+                // A quantized RHS is constant: no weight gradient ever needs
+                // the left value, so the record saves none.
                 return finishOp(result_tags, ctx, value, Record{
                     .parents = .{ self.grad_state, null },
                     .left_shape = rawShapeArray(tags, self.asRawTensor()),
                     .right_shape = rawShapeArrayOf(Other.dtype, other_tags, other_ptr.asRawTensor()),
                     .right_value = saved_right,
-                    .left_value = saved_left,
+                    .left_value = null,
                 });
             }
-            if (comptime Other.dtype == .f16) {
-                var value = try tag_ops.contract(.{ .half_rhs = .f16 }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
+            if (comptime Other.dtype == .f16 or Other.dtype == .bf16) {
+                var value = try tag_ops.contract(.{ .half_rhs = Other.dtype }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
                 errdefer value.deinit();
                 if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-                const Record = ConstRhsDotBackward(.f16, tags, other_tags, contract_tag);
+                const Record = ConstRhsDotBackward(Other.dtype, tags, other_tags, contract_tag);
                 var saved_right = try other_ptr.asRawTensor().cloneView();
                 errdefer saved_right.deinit();
                 var saved_left: ?RawTensor = if (other_ptr.grad_state != null) try self.asRawTensor().cloneView() else null;
@@ -165,24 +165,7 @@ pub fn Ops(comptime Self: type) type {
                 return finishOp(result_tags, ctx, value, Record{
                     .parents = .{ self.grad_state, other_ptr.grad_state },
                     .left_shape = rawShapeArray(tags, self.asRawTensor()),
-                    .right_shape = rawShapeArrayOf(.f16, other_tags, other_ptr.asRawTensor()),
-                    .right_value = saved_right,
-                    .left_value = saved_left,
-                });
-            }
-            if (comptime Other.dtype == .bf16) {
-                var value = try tag_ops.contract(.{ .half_rhs = .bf16 }, tags, self.asRawTensor(), ctx, other_tags, other_ptr.asRawTensor(), result_tags, .{});
-                errdefer value.deinit();
-                if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
-                const Record = ConstRhsDotBackward(.bf16, tags, other_tags, contract_tag);
-                var saved_right = try other_ptr.asRawTensor().cloneView();
-                errdefer saved_right.deinit();
-                var saved_left: ?RawTensor = if (other_ptr.grad_state != null) try self.asRawTensor().cloneView() else null;
-                errdefer if (saved_left) |*v| v.deinit();
-                return finishOp(result_tags, ctx, value, Record{
-                    .parents = .{ self.grad_state, other_ptr.grad_state },
-                    .left_shape = rawShapeArray(tags, self.asRawTensor()),
-                    .right_shape = rawShapeArrayOf(.bf16, other_tags, other_ptr.asRawTensor()),
+                    .right_shape = rawShapeArrayOf(Other.dtype, other_tags, other_ptr.asRawTensor()),
                     .right_value = saved_right,
                     .left_value = saved_left,
                 });
