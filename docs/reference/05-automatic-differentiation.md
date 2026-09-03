@@ -787,14 +787,14 @@ either irrelevant or rejected):
   `anyAll`, `allAll`, `logicalAnd`, `logicalOr`, `logicalXor`,
   `logicalNot`, `bandMask` — index/mask/sampling outputs; gradients are
   undefined.
-- **Inference-only packed kernels** — dense `packRhs`/`dotPacked` fail with
-  `error.GradientPackedMatmulUnsupported`; quantized `dotPacked` and the fused
+- **Inference-only packed kernels** — dense `packRhs`/`dotPacked`, quantized
+  `dotPacked` and the fused
   `rmsNormMulDotPacked`/`splitSwiGluDotPacked`/`gegluQuantDotPacked` fail with
-  `error.GradientQuantizedMatmulUnsupported` when an operand requires grad
+  `error.UnsupportedGradient` when an operand requires grad
   ([§10](10-quantization.md)). For a *trainable* path use ordinary dense `dot`, or quantized `dot`
   (lhs-grad) / `dotTernarySte` as appropriate.
 - **Prepared-conv entries** — fail with
-  `error.GradientPreparedConv2dUnsupported` when an operand requires grad:
+  `error.UnsupportedGradient` when an operand requires grad:
   `prepareConv2dWeights`, `conv2dPrepared`, `conv2dPreparedRelu` ([§4.14](04-tensor-operations.md#414-convolution-and-channel-last-vision-ops-srcagtensorzig) —
   the prepared Winograd planes live outside the graph; use `conv2d`/
   `conv2dRelu` for the trainable path).
@@ -804,7 +804,7 @@ either irrelevant or rejected):
   `takeScaleNoGrad`, `routerTopK`.
 - **Casts off the float seam**: `to` with a target other than `.f32`,
   `.f16`, or `.bf16` rejects grad-carrying inputs with
-  `error.GradientCastUnsupported` (`to(.f32)` and the f16/bf16 narrows are
+  `error.UnsupportedGradient` (`to(.f32)` and the f16/bf16 narrows are
   differentiable, [§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig)).
 - The typed and quantized constant tensor branches ([§3](03-tensors-types-construction-and-data-access.md), [§10](10-quantization.md)) never carry
   gradients at all.

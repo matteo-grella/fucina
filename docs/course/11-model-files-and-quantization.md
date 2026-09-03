@@ -555,7 +555,7 @@ Two idioms here carry the whole chapter's ownership story into the kernel tier. 
 
 ### Packed RHS and the `RhsLifetime` promise
 
-Two performance seams finish the picture. First, hot formats get **packed RHS layouts**: column-interleaved copies (`q8_0x4`, `q4_kx8`, `q4_kx2mmla`, `q5_kx8`, `q6_kx4`) arranged so the inner loop feeds the CPU's int8 dot instruction directly with 4 or 8 output columns per pass. The intended pattern for model code is pack once at load, `w.packRhs(ctx)` → `x.dotPacked(ctx, &packed, .in, .out)` per step (`docs/reference/10-quantization.md` §10.3) — the LLM weight wrappers of Chapter 12 do exactly this. `dotPacked` has **no gradient support** at all (`error.GradientQuantizedMatmulUnsupported` when the LHS requires grad): it is an inference fast path, and it says so rather than silently doing something slow.
+Two performance seams finish the picture. First, hot formats get **packed RHS layouts**: column-interleaved copies (`q8_0x4`, `q4_kx8`, `q4_kx2mmla`, `q5_kx8`, `q6_kx4`) arranged so the inner loop feeds the CPU's int8 dot instruction directly with 4 or 8 output columns per pass. The intended pattern for model code is pack once at load, `w.packRhs(ctx)` → `x.dotPacked(ctx, &packed, .in, .out)` per step (`docs/reference/10-quantization.md` §10.3) — the LLM weight wrappers of Chapter 12 do exactly this. `dotPacked` has **no gradient support** at all (`error.UnsupportedGradient` when the LHS requires grad): it is an inference fast path, and it says so rather than silently doing something slow.
 
 Second, lifetime as an API type (`src/exec/quant_matmul.zig:39-53`):
 

@@ -10,6 +10,7 @@ const parallel = @import("../../../parallel.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const control = @import("../../control.zig");
 const core = @import("../../core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../../../tags.zig");
 const backward_matmul = @import("../../backward/matmul.zig");
 
@@ -420,10 +421,7 @@ pub fn Ops(comptime Self: type) type {
             }
             comptime if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ4_Kx4)
                 @compileError("dotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade); pack q4_k with packRhs (x2mmla/x8) instead");
-            if (self.requiresGrad()) return if (Rhs == backend_mod.PackedDenseRhs)
-                error.GradientPackedMatmulUnsupported
-            else
-                error.GradientQuantizedMatmulUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             var value = try ctx.matmulQuant(.{ .plain = self.asRawTensor() }, rhs, .{});
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
@@ -434,7 +432,7 @@ pub fn Ops(comptime Self: type) type {
         /// be deinitialized by its owner.
         pub fn packRhs(self: *const Self, ctx: *ExecContext) !PackedRhs(.f32) {
             comptime if (tag_rank != 2) @compileError("packRhs requires a rank-2 tensor");
-            if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             return ctx.packDenseMatmulRhs(.f32, self.asRawTensor());
         }
 
@@ -474,7 +472,7 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("rmsNormMulDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
             }
             const weight_ptr = tensorObjectPtrFrom(@TypeOf(norm_weight), &norm_weight);
-            if (self.requiresGrad() or weight_ptr.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
+            if (self.requiresGrad() or weight_ptr.requiresGrad()) return AgError.UnsupportedGradient;
             var value = try ctx.matmulQuant(.{ .rms_norm = .{ .x = self.asRawTensor(), .weight = weight_ptr.asRawTensor(), .eps = eps } }, rhs, .{ .prologue = .rms_norm_mul });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, contract_tag, out_tag), ctx, value);
@@ -508,7 +506,7 @@ pub fn Ops(comptime Self: type) type {
                 if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ4_Kx4)
                     @compileError("splitSwiGluDotPacked: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
             }
-            if (self.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             var value = try ctx.matmulQuant(.{ .plain = self.asRawTensor() }, rhs, .{ .prologue = .split_swiglu });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, split_tag, out_tag), ctx, value);
@@ -535,7 +533,7 @@ pub fn Ops(comptime Self: type) type {
             }
             comptime if (Rhs != backend_mod.quant.QuantizedMatmulRhsQ8_0x4)
                 @compileError("gegluQuantDotPacked: no fused geglu kernel for packed RHS " ++ @typeName(Rhs));
-            if (self.requiresGrad() or up.requiresGrad()) return error.GradientQuantizedMatmulUnsupported;
+            if (self.requiresGrad() or up.requiresGrad()) return AgError.UnsupportedGradient;
             var value = try ctx.matmulQuant(.{ .gate_up = .{ .gate = self.asRawTensor(), .up = up.asRawTensor() } }, rhs, .{ .prologue = .geglu_quant });
             errdefer value.deinit();
             return finishNoGrad(replaceTag(tags, in_tag, out_tag), ctx, value);

@@ -14,6 +14,7 @@ const tag_ops = @import("../../../tag_ops.zig");
 const tags_mod = @import("../../../tags.zig");
 const backward_common = @import("../../backward/common.zig");
 const backward_elementwise = @import("../../backward/elementwise.zig");
+const AgError = @import("../../core.zig").AgError;
 
 const ExecContext = exec_mod.ExecContext;
 const Tag = tags_mod.Tag;
@@ -42,10 +43,10 @@ pub fn Ops(comptime Self: type) type {
         /// Scalar cast (docs/reference/03, §3.8). `to(.f32)` on a 16-bit
         /// leaf is differentiable (the f32 result joins the graph and the
         /// source receives the upstream gradient unchanged); any other
-        /// cast of a grad-requiring tensor is `error.GradientCastUnsupported`.
+        /// cast of a grad-requiring tensor is `error.UnsupportedGradient`.
         pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: dtype_mod.DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
             if (comptime target_dtype != .f32) {
-                if (self.requiresGrad()) return error.GradientCastUnsupported;
+                if (self.requiresGrad()) return AgError.UnsupportedGradient;
             }
             var value = try ctx.cast(dtype, target_dtype, self.asRawTensor());
             errdefer value.deinit();

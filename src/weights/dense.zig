@@ -143,7 +143,7 @@ fn hasCompactDecodeRoute(comptime dt: DType) bool {
 /// `PackedQuantWeight` format: (where the format has one) the
 /// decode-shape compact route, else the packed dot; the accelerator
 /// attempt happens inside `matmulQuant` on either route. Grad inputs keep
-/// the packed path's explicit GradientQuantizedMatmulUnsupported error.
+/// the packed path's explicit UnsupportedGradient error.
 pub fn linearSeq(
     weight: anytype,
     ctx: *ExecContext,

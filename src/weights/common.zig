@@ -15,7 +15,7 @@ const DType = dtype_mod.DType;
 pub const Error = error{
     InvalidWeightShape,
     UnsupportedWeightType,
-    GradUnsupported,
+    UnsupportedGradient,
 };
 
 pub fn QuantWeight(comptime dtype: DType) type {

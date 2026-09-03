@@ -294,7 +294,7 @@ pub fn Ops(comptime Self: type) type {
 
         pub fn to(self: *const Self, ctx: *ExecContext, comptime target_dtype: DType) !Tensor(.{ .dtype = target_dtype, .tags = tags }) {
             if (comptime (target_dtype != .f32 and target_dtype != .f16 and target_dtype != .bf16)) {
-                if (self.requiresGrad()) return error.GradientCastUnsupported;
+                if (self.requiresGrad()) return AgError.UnsupportedGradient;
             }
             var value = try ctx.cast(.f32, target_dtype, self.asRawTensor());
             errdefer value.deinit();

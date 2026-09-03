@@ -951,8 +951,8 @@ conversions per branch:
 
 | Source branch | Targets | Notes |
 |---|---|---|
-| f32 | any scalar dtype | `to(.f32)` is a differentiable copy; `to(.f16)`/`to(.bf16)` are DIFFERENTIABLE narrows (the mixed-precision seam, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig): the backward is the identity on the f32 upstream gradient); every other target requires no-grad and fails with `error.GradientCastUnsupported` on a `requiresGrad()` tensor — `to(.f64)` is a float↔float cast, non-float targets follow the `castScalar` semantics in the int/bool row |
-| f16/bf16 | any scalar dtype | `to(.f32)` is a DIFFERENTIABLE widen when the source requires grad (the f32 gradient flows back unchanged); casts to any non-f32 target require no-grad (`error.GradientCastUnsupported`) — float targets are float↔float casts, non-float targets follow the `castScalar` semantics in the int/bool row |
+| f32 | any scalar dtype | `to(.f32)` is a differentiable copy; `to(.f16)`/`to(.bf16)` are DIFFERENTIABLE narrows (the mixed-precision seam, [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig): the backward is the identity on the f32 upstream gradient); every other target requires no-grad and fails with `error.UnsupportedGradient` on a `requiresGrad()` tensor — `to(.f64)` is a float↔float cast, non-float targets follow the `castScalar` semantics in the int/bool row |
+| f16/bf16 | any scalar dtype | `to(.f32)` is a DIFFERENTIABLE widen when the source requires grad (the f32 gradient flows back unchanged); casts to any non-f32 target require no-grad (`error.UnsupportedGradient`) — float targets are float↔float casts, non-float targets follow the `castScalar` semantics in the int/bool row |
 | f64 constant | any scalar dtype | always no-grad (an f64 constant never carries a gradient); float targets are float↔float casts, non-float targets follow the `castScalar` semantics in the int/bool row |
 | int/bool constant | any scalar dtype | no-grad `castScalar` semantics: integer↔integer WRAPS (two's complement); integer→float is exact where representable; float→integer truncates toward zero and SATURATES at the target bounds with NaN → 0; anything→bool is `!= 0` (NaN → true); bool→number is 0/1 |
 | block-quantized | `.f32` only | dequantization; other targets are a compile error |
@@ -992,7 +992,7 @@ test "detach and cast rules" {
     defer frozen.deinit();
     try std.testing.expect(!frozen.requiresGrad());
     try std.testing.expectError(error.InvalidShape, frozen.item()); // not single-element
-    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f64));
+    try std.testing.expectError(error.UnsupportedGradient, x.to(&ctx, .f64));
     var narrowed = try x.to(&ctx, .f16); // differentiable narrow: stays in the graph
     defer narrowed.deinit();
     try std.testing.expect(narrowed.requiresGrad());

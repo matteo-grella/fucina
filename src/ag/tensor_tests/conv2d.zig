@@ -404,15 +404,15 @@ test "conv2dPrepared: 1x1 and .empty preparations are inert; grad operands are r
     // prepared, and no operand of conv2dPrepared may require grad.
     var wg = try Tensor(.{ .oc, .kh, .kw, .c }).variableFromSlice(&ctx, .{ 4, 3, 3, 8 }, w3d);
     defer wg.deinit();
-    try std.testing.expectError(error.GradientPreparedConv2dUnsupported, wg.prepareConv2dWeights(&ctx));
+    try std.testing.expectError(error.UnsupportedGradient, wg.prepareConv2dWeights(&ctx));
     var xg = try Tensor(.{ .h, .w, .c }).variableFromSlice(&ctx, .{ 8, 8, 8 }, xd);
     defer xg.deinit();
     try std.testing.expectError(
-        error.GradientPreparedConv2dUnsupported,
+        error.UnsupportedGradient,
         xg.conv2dPrepared(&ctx, &w3, &empty, null, .{ 1, 1 }, .{ 1, 1 }, 1, .{ .h, .w, .c }),
     );
     try std.testing.expectError(
-        error.GradientPreparedConv2dUnsupported,
+        error.UnsupportedGradient,
         x.conv2dPreparedRelu(&ctx, &wg, &empty, null, .{ 1, 1 }, .{ 1, 1 }, 1, .{ .h, .w, .c }),
     );
 }

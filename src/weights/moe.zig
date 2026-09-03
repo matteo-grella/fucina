@@ -397,7 +397,7 @@ pub fn moeGatedFfnSeq(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor(.{ .seq, .embed }) {
-    if (input.requiresGrad()) return Error.GradUnsupported;
+    if (input.requiresGrad()) return Error.UnsupportedGradient;
     const raw_input = input.asRawTensor();
     var raw = if (input.dim(.seq) == 1)
         try moe_mod.expertFfn(

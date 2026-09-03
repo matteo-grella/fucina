@@ -385,7 +385,7 @@ test "tagged autograd f32 cast preserves the graph" {
     var narrowed = try x.to(&ctx, .f16);
     defer narrowed.deinit();
     try std.testing.expect(narrowed.requiresGrad());
-    try std.testing.expectError(error.GradientCastUnsupported, x.to(&ctx, .f64));
+    try std.testing.expectError(error.UnsupportedGradient, x.to(&ctx, .f64));
 }
 
 test "tagged autograd differentiates splitSwiGlu along the fused axis" {

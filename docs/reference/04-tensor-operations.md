@@ -51,7 +51,7 @@ Every operation below shares one contract, implemented by the shared tails
   `requiresGrad()` and gradients are globally enabled (`fucina.noGrad`, [§5](05-automatic-differentiation.md)).
   Families that are no-grad by design, or that restrict which operands
   receive gradients, say so inline; grad-incompatible calls fail with
-  `error.UnsupportedGradient` (or a more specific error named per family).
+  `error.UnsupportedGradient`.
   Ops **composed** from other facade ops (`nllLoss`, `l2Normalize`,
   `cosineSimilarity`, `maskedSelect`, `stack`, `unbindInto`) release their
   intermediates on return; the consumer records retain the graph nodes, so
@@ -1079,9 +1079,8 @@ test "dotTernarySte encodes the latent weight per call" {
 
 - `dotPacked(ctx, rhs, contract_tag, out_tag)` — 2-D `[free, contract]` lhs
   against a pre-packed dense or quantized RHS container (comptime-dispatched
-  from the pointer type). Dense f32/f16/bf16 packs fail with
-  `error.GradientPackedMatmulUnsupported` when the lhs requires grad;
-  quantized packs fail with `error.GradientQuantizedMatmulUnsupported`.
+  from the pointer type). Fails with `error.UnsupportedGradient` when the
+  lhs requires grad.
 - `rmsNormMulDotPacked(ctx, norm_weight, eps, rhs, contract_tag, out_tag)` —
   fused `rmsNormMul(self, norm_weight) · rhsᵀ` without materializing the
   normalized tensor (`self` is the pre-norm `[free, contract]` input,
@@ -1540,13 +1539,13 @@ detection stack):
   (caller `deinit`s); a weight that can never take the Winograd route
   returns `.empty`, which is inert on every conv route. No gradient
   support (the `dotPacked` policy — prepared planes live outside the
-  graph): fails with `error.GradientPreparedConv2dUnsupported` on a
+  graph): fails with `error.UnsupportedGradient` on a
   grad-requiring weight.
 - `conv2dPrepared(ctx, weight, prepared, bias, stride, padding, groups, out_tags)`
   — no-grad conv2d against the prepared planes: bitwise-identical values to
   `conv2d`, minus the per-call weight transform on the Winograd route
   (every other route ignores `prepared`). Fails with
-  `error.GradientPreparedConv2dUnsupported` when any operand requires grad.
+  `error.UnsupportedGradient` when any operand requires grad.
 - `conv2dPreparedRelu(...)` — `conv2dPrepared` with the relu fused into the
   conv epilogue; same no-grad contract.
 - `maxPool2d(ctx, kernel, stride, padding)` — `[h, w]`-ordered params; the
@@ -2207,4 +2206,4 @@ The f32 `to(ctx, target_dtype)` cast is differentiable for `.f32 → .f32`
 and for the mixed-precision narrows `.f32 → .f16`/`.bf16` ([§3.8](03-tensors-types-construction-and-data-access.md#38-casting-todtype-srcagtensorzig-srcexecconvertzig), [§5.1](05-automatic-differentiation.md#51-the-gradient-model-srcagtensorzig-srcagcorezig) —
 the backward is the identity on the f32 upstream gradient); casting a
 grad-requiring tensor to any other dtype fails with
-`error.GradientCastUnsupported`.
+`error.UnsupportedGradient`.

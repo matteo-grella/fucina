@@ -4,6 +4,7 @@
 const tensor_mod = @import("../../../tensor.zig");
 const exec_mod = @import("../../../exec.zig");
 const core = @import("../../core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../../../tags.zig");
 const backward_conv = @import("../../backward/conv.zig");
 
@@ -117,11 +118,11 @@ pub fn Ops(comptime Self: type) type {
         /// route — when the weight can never take the Winograd route. No
         /// gradient support (the `dotPacked` policy; prepared planes live
         /// outside the graph): fails with
-        /// `error.GradientPreparedConv2dUnsupported` when the weight
+        /// `error.UnsupportedGradient` when the weight
         /// requires grad.
         pub fn prepareConv2dWeights(self: *const Self, ctx: *ExecContext) !exec_mod.ExecContext.PreparedConvWeights {
             comptime if (tag_rank != 4) @compileError("prepareConv2dWeights requires a rank-4 [cout, kh, kw, cin] conv weight");
-            if (self.requiresGrad()) return error.GradientPreparedConv2dUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             return ctx.prepareConv2dWeights(self.asRawTensor());
         }
 
@@ -130,7 +131,7 @@ pub fn Ops(comptime Self: type) type {
         /// `conv2d`, minus the per-call weight transform on the Winograd
         /// route; every other route ignores `prepared` (`.empty` is always
         /// inert). No gradient support (same policy as `dotPacked`): fails
-        /// with `error.GradientPreparedConv2dUnsupported` when any operand
+        /// with `error.UnsupportedGradient` when any operand
         /// requires grad.
         pub fn conv2dPrepared(
             self: *const Self,
@@ -150,7 +151,7 @@ pub fn Ops(comptime Self: type) type {
                 any_grad = any_grad or bias_ptr.requiresGrad();
                 break :brk bias_ptr.asRawTensor();
             };
-            if (any_grad) return error.GradientPreparedConv2dUnsupported;
+            if (any_grad) return AgError.UnsupportedGradient;
             var value = try ctx.conv2dPrepared(self.asRawTensor(), weight_ptr.asRawTensor(), prepared, bias_raw, stride, padding, groups);
             errdefer value.deinit();
             return finishNoGrad(out_tags, ctx, value);
@@ -178,7 +179,7 @@ pub fn Ops(comptime Self: type) type {
                 any_grad = any_grad or bias_ptr.requiresGrad();
                 break :brk bias_ptr.asRawTensor();
             };
-            if (any_grad) return error.GradientPreparedConv2dUnsupported;
+            if (any_grad) return AgError.UnsupportedGradient;
             var value = try ctx.conv2dPreparedRelu(self.asRawTensor(), weight_ptr.asRawTensor(), prepared, bias_raw, stride, padding, groups);
             errdefer value.deinit();
             return finishNoGrad(out_tags, ctx, value);

@@ -357,9 +357,7 @@ Packing and consuming happen on the facade:
   packing. The owner calls `deinit()` on the packed container.
 - `x.dotPacked(ctx, &packed, contract_tag, out_tag)` — rank-2 f32 LHS stored
   `[free, contract]`; returns `[free, out_tag]`. **No gradient support**:
-  dense packs return `error.GradientPackedMatmulUnsupported` and quantized
-  packs return `error.GradientQuantizedMatmulUnsupported` when `self`
-  requires grad.
+  `error.UnsupportedGradient` when `self` requires grad.
 - `x.rmsNormMulDotPacked(ctx, &norm_weight, eps, &packed, contract_tag, out_tag)`
   — fused pre-norm + packed GEMM: normalizes up to 4 rows at a time into
   task-private scratch with the exact `rmsNormMulRows` kernel and quantizes

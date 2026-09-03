@@ -146,7 +146,7 @@ pub fn linearSeqBorrowedQuantized(
         .q8_0, .q4_k, .q5_k, .q6_k => {},
         else => @compileError("borrowed quantized linear supports q8_0/q4_k/q5_k/q6_k"),
     };
-    if (input.requiresGrad()) return Error.GradUnsupported;
+    if (input.requiresGrad()) return Error.UnsupportedGradient;
     if (input.dim(in_tag) != shape[1]) return Error.InvalidWeightShape;
 
     const blocks = try blockSlice(BlockStorage(dtype), bytes);

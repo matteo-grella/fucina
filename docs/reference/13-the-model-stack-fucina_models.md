@@ -65,7 +65,7 @@ usable linear weights. It lives in the CORE module (`fucina.weights`, with
 `fucina.ptqtp_gguf` beside it): nothing in it is language-model-specific —
 vision encoders and audio models load through the same band (the
 locate-anything ViT does). Its error set is
-`Error = error{ InvalidWeightShape, UnsupportedWeightType, GradUnsupported }`.
+`Error = error{ InvalidWeightShape, UnsupportedWeightType, UnsupportedGradient }`.
 
 ### 13.2.1 `LinearWeight`
 
@@ -338,7 +338,7 @@ blocks are borrowed straight from the (mmapped) GGUF, skipping the multi-GB
 copy; the caller must then keep the mapping alive for the model's lifetime
 (`gguf.File.takeMapping`, [§12](12-model-io-gguf-and-safetensors.md)). `moeSwiGluFfnSeq` is the tensor-valued
 Qwen-style SwiGLU MoE FFN over those RHS values; it refuses gradient-tracked
-inputs (`Error.GradUnsupported`) and internally splits decode (`seq == 1`)
+inputs (`Error.UnsupportedGradient`) and internally splits decode (`seq == 1`)
 from batched prefill. `moeGatedFfnSeq` is the same entry with the gated
 activation chosen by the caller (`act: fucina.GatedOp`; deepseek4 routes
 through the clamped SwiGLU). `loadMoeRhsStreamed(store, file, layer_i,
@@ -427,7 +427,7 @@ pub const BorrowedQuantLinearOptions = struct {
 ```
 
 The quantized variant is comptime-restricted to q8_0/q4_k/q5_k/q6_k, rejects
-gradient-tracked inputs (`Error.GradUnsupported`), and validates
+gradient-tracked inputs (`Error.UnsupportedGradient`), and validates
 `input.dim(in_tag) == shape[1]` (`Error.InvalidWeightShape`). Neither takes
 ownership of `bytes`.
 

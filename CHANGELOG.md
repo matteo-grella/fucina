@@ -41,6 +41,12 @@ this point; earlier history is `git log`.
   `error.NoGradientGraph`, `error.CheckpointMissingInputGradient` →
   `error.MissingBackwardGradient`,
   `error.LinearCrossEntropyBackwardConsumed` → `error.BackwardAlreadyRun`.
+- One name for "no VJP here": `error.UnsupportedGradient`, raised by every
+  no-grad-only entry; the entry's doc says why. Rewrites:
+  `error.GradientPackedMatmulUnsupported`,
+  `error.GradientQuantizedMatmulUnsupported`,
+  `error.GradientPreparedConv2dUnsupported`, `error.GradientCastUnsupported`
+  and `weights.Error.GradUnsupported` → `UnsupportedGradient`.
 - The row and attention seams are curated namespaces: `backend.rows` and
   `backend.attention` list the Task payloads, the `run*Task` inner-lane
   adapters, the task factories, the tile constants and the shared helpers

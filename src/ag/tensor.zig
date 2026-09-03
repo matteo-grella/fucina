@@ -28,6 +28,7 @@ const dtype_mod = @import("../dtype.zig");
 const exec_mod = @import("../exec.zig");
 const backend_mod = @import("../backend.zig");
 const core = @import("core.zig");
+const AgError = core.AgError;
 const tags_mod = @import("../tags.zig");
 const tag_ops = @import("../tag_ops.zig");
 
@@ -1041,7 +1042,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
                 if (tensor_dtype != .f16 and tensor_dtype != .bf16)
                     @compileError("dense packRhs supports f32, f16, and bf16 weights");
             }
-            if (self.requiresGrad()) return error.GradientPackedMatmulUnsupported;
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
             return ctx.packDenseMatmulRhs(tensor_dtype, self.asRawTensor());
         }
 

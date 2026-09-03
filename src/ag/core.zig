@@ -22,7 +22,10 @@ pub const AgError = error{
     /// A second backward over a graph, or over a single-use VJP record,
     /// that already ran.
     BackwardAlreadyRun,
-    /// A no-grad-only entry touched a grad-requiring tensor.
+    /// A no-grad-only entry touched a grad-requiring tensor: an in-place
+    /// or storage-consuming helper, an inference-only packed kernel, a
+    /// prepared-conv entry, a cast off the float seam, a typed-branch
+    /// view. The one name for "no VJP here"; the entry's doc says why.
     UnsupportedGradient,
     /// `data()` on a tensor that requires gradients.
     MutableDataRequiresNoGrad,
