@@ -19,7 +19,7 @@ every method is an alias line resolving to a function that takes
 `*ExecContext` first. The substrate functions (lifecycle, scopes, worker
 team, tensor allocation primitives, `replace`) live in
 `src/exec/runtime.zig`; the domain ops live in the modules under `src/exec/`
-(`elementwise.zig`, `matmul.zig`, `conv.zig`, `attention.zig`, `moe.zig`, …)
+(`elementwise.zig`, `matmul.zig`, `conv.zig`, `attention.zig`, …)
 and receive `*ExecContext` explicitly.
 
 ```zig

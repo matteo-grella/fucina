@@ -667,7 +667,7 @@ This subsection covers the backend seam.
 **The cross-thread handshake.** The pool is created lazily:
 `tryWorkPool` (under `work_pool_mutex`) initializes one `thread.Pool`
 per `ExecContext` with `cpuThreadCount(vector_max_threads) - 1` workers and
-publishes it in `ExecContext.parallel_pool` — the atomic
+publishes it in the runtime's `rt.parallel_pool` — the atomic
 release-store/acquire-load pair from [§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig) and [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig), because a kernel
 dispatched on another thread may race the publication; every kernel call
 reads it through `ctx.pc()`. `ExecContext.deinit` unpublishes (stores

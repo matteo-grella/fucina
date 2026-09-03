@@ -582,11 +582,11 @@ Lowering: `taggedDot` is a one-line delegation to `taggedEinsum` with
 `dotResultTags(left_tags, right_tags, contract_tag)` as the equation — see
 the taggedEinsum subsection below for the full pipeline (role assignment,
 runtime orientation selection, batch collapse). The classic dot dispatches
-fall out of it: vector·vector runs `ctx.dot`; 2-D layouts pick
-`matmul2D`/`matmulTransA`/`matmulTransB` by whichever aligned orientation is
-contiguous (the `(0,1)` layout wants both transposes — only one is available
-per call, so the smaller operand materializes); canonical batched layouts
-hit `bmm`/`bmmTransA`/`bmmTransB` with no data movement; vectors ride along
+fall out of it: vector·vector runs `ctx.dot`; 2-D layouts pick the
+`matmul` kind (`.plain`, `.trans_a` or `.trans_b`) by whichever aligned
+orientation is contiguous (the `(0,1)` layout wants both transposes — only
+one is available per call, so the smaller operand materializes); canonical
+batched layouts hit `bmm` in the same kinds with no data movement; vectors ride along
 as size-1 GEMM axes; everything else aligns and materializes at most once
 per operand. Kernel outputs are contiguous; a final zero-copy reshape
 restores the canonical per-axis result shape.
@@ -690,8 +690,8 @@ from `einsumPartTags` ([§7.4](07-named-axes-the-tag-algebra.md#74-result-tag-co
    can be taken per call — when both operands prefer transposed, the larger
    keeps it and the smaller is materialized. Groups then collapse by
    zero-copy reshape into `[batch…,m,k]·[batch…,k,n]` (or the trans
-   permutations) and one `matmul2D`/`matmulTransA`/`matmulTransB` (no
-   batch) or `bmm`/`bmmTransA`/`bmmTransB` runs; a side whose no
+   permutations) and one `matmul` (no batch) or `bmm` runs in the
+   `.plain`, `.trans_a` or `.trans_b` kind; a side whose no
    orientation is contiguous materializes once.
 
 The batch group collapses into a single bmm batch axis before the kernel

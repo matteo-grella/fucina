@@ -276,8 +276,7 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         allocator: Allocator,
         data: []Elem,                     // Elem == dtype.Storage(buffer_dtype)
         refs: std.atomic.Value(u32),
-        release_ctx: ?*anyopaque = null,
-        release_fn: ?*const fn (*anyopaque, *Self) void = null,
+        release_hook: Release = .{},      // Release{ .ctx, .run }; run == null means destroy()
         accel: AcceleratorSlots = .{},      // pending_work / pending_use / resource / pending_claim; an empty struct without -Dgpu
         host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
@@ -299,18 +298,20 @@ Constructors (all return `!*Self` with `refs == 1`):
 | Constructor | Data ownership | At `refs == 0` |
 |---|---|---|
 | `create(allocator, len)` | owned, uninitialized `len` elements | `destroy()`: free data + header |
-| `createWithRelease(allocator, len, release_ctx, release_fn)` | owned | `release_fn(release_ctx, self)` |
+| `createWithRelease(allocator, len, hook: Release)` | owned | `hook.run(hook.ctx orelse self, self)` |
 | `fromSlice(allocator, values)` | owned copy of `values` | `destroy()` |
 | `fromBorrowedSlice(allocator, values)` | **aliases** caller memory | destroy header only; caller keeps the bytes |
-| `fromBorrowedSliceWithRelease(allocator, values, release_fn)` | aliases | `release_fn(self, self)` — full cleanup duty |
-| `fromBorrowedSliceWithReleaseCtx(allocator, values, release_ctx, release_fn)` | aliases | `release_fn(release_ctx, self)` — full cleanup duty |
+| `fromBorrowedSliceWithRelease(allocator, values, hook: Release)` | aliases | `hook.run(hook.ctx orelse self, self)` — full cleanup duty for the data and the header |
+
+`Release` is the buffer's hook descriptor: `.{ .ctx = ?*anyopaque, .run = fn (*anyopaque, *Self) void }`;
+a null `ctx` means the buffer itself.
 
 Refcount operations:
 
 - `retain()` — `fetchAdd(1, .monotonic)`. Safe from any thread.
 - `release()` — `fetchSub(1, .acq_rel)`; debug-asserts against
-  over-release. When the count reaches zero it invokes `release_fn` if set,
-  otherwise `destroy()`. Exactly one caller observes zero, so the hook fires
+  over-release. When the count reaches zero it runs the release hook if one
+  is bound, otherwise `destroy()`. Exactly one caller observes zero, so the hook fires
   **exactly once** (`src/storage_tests.zig` pins this).
 - `isUnique()` — acquire-load snapshot `refs == 1`. **Snapshot only**: it is
   meaningful only when the caller already has exclusive access to the tensor

@@ -541,8 +541,9 @@ UnsupportedKvCacheDtype }`. Model surface: `Cache` (= the shared
 softcapping applies to every row), `forwardStepBatch`/`forwardStepBatchSpans`
 (lockstep multi-stream decode, 14.2 — PLE models rejected with
 `Error.PleUnsupported`), `generate` + `GenerateOptions`,
-`ForwardProfile`. Only f16 caches are accepted (`requireF16KvCache` returns
-`Error.UnsupportedKvCacheDtype` for q8_0). Final logits are softcapped when
+`ForwardProfile`. `initCache` builds the per-layer f16 cache
+(`KvCache.initPerLayer`); no other cache dtype is constructed for this
+family. Final logits are softcapped when
 `final_logit_softcapping != 0` (the fused `softcap(cap)` kernel at the
 file's value). The remaining public symbols are loader/forward
 plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
@@ -552,7 +553,6 @@ plumbing reused by diffusion_gemma and the trainer: `max_heads` (64),
 `FusedAttentionProjection`, `AttentionProjectionResult`,
 `AttentionProjection` (with `toResidentF16` and `project`), `Layer`,
 `loadLayers` (the pub wrapper over a file-private `LayerLoader`),
-`requireF16KvCache`,
 `attnBlock`, `ffnBlock`.
 
 ```zig
@@ -879,7 +879,7 @@ schedule, `Config.deinit(allocator)` frees the list) and
 `Model.load(allocator, io, ctx, dir)` reads `<dir>/config.json` plus
 `<dir>/model.safetensors` (`safetensors.File.loadMmap`).
 
-Heavy lifting goes through the shared exec ops — `matmulTransB`,
+Heavy lifting goes through the shared exec ops — `matmul(.f32, .trans_b)`,
 `causalDepthwiseConv1d`, `gated(.situ)`, `rmsNormMul` — and the
 family-local KDA recurrence (`delta_attention.zig` next door,
 [§4.13](04-tensor-operations.md#413-attention-srcagtensorzig)), while the

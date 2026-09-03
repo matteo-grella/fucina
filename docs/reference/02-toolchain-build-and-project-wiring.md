@@ -211,7 +211,7 @@ itself is centralized in six helpers applied per executable:
   bundled LLVM libunwind via `link_libcpp` (the Rust FFI converts panics to
   error strings with `catch_unwind`, and glibc does not export
   `_Unwind_*`; macOS's libSystem ships an unwinder).
-- `configureNamAudio` / `configureOmnivoiceAudio` / `configureParakeetAudio`
+- `configureNamAudio` / `configureOmnivoiceAudio` / `configureAudioShim`
   — the vendored miniaudio C shims (`apps/nam/audio_shim.c`, plus
   `midi_shim.c` for NAM and `apps/omnivoice/play_shim.c` for playback),
   with CoreAudio/CoreMIDI frameworks on macOS; elsewhere miniaudio `dlopen`s

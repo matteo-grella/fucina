@@ -776,10 +776,10 @@ as the equation, so kernel selection is the einsum lowering's ([§7.9](07-named-
 operand is aligned to the kernel layout as a zero-copy view, and at runtime
 each side picks plain or transposed orientation by contiguity, so classic
 layouts (`[m,k]·[k,n]`, NT weights `[out,in]`, batched `[b..,m,k]·[b..,k,n]`
-and their trans permutations) dispatch straight to
-`matmul2D`/`matmulTransA`/`matmulTransB`/`bmm`/`bmmTransA`/`bmmTransB` with
-no data movement, vector operands ride along as size-1 GEMM axes, and a
-full contraction runs `ctx.dot`. At most one of transA/transB is available
+and their trans permutations) dispatch straight to `matmul` or `bmm` in
+the `.plain`, `.trans_a` or `.trans_b` kind with no data movement, vector
+operands ride along as size-1 GEMM axes, and a full contraction runs
+`ctx.dot`. At most one of `.trans_a`/`.trans_b` is available
 per call, so a layout where BOTH operands want their transposed orientation
 (and no output-order swap covers it) materializes the smaller operand;
 layouts no orientation can express materialize at most once per operand.
@@ -921,8 +921,8 @@ then both operands are aligned (zero-copy permute views) to an
 plain or transposed kernel layout at runtime — the orientation whose aligned
 view is already contiguous wins, because a trans GEMM is free while
 materializing costs a copy pass. Classic layouts therefore dispatch to
-`matmul2D`/`bmm` (and trans variants) with zero copies; at most one of
-transA/transB is available per call (both-want-trans materializes the
+`matmul`/`bmm` (in the plain or a trans kind) with zero copies; at most one
+of `.trans_a`/`.trans_b` is available per call (both-want-trans materializes the
 smaller operand), and layouts no orientation can express materialize at
 most once per operand. When
 `out_tags` nests as `[batch][right free][left free]`, the operands swap
