@@ -352,7 +352,7 @@ pub const Pool = struct {
     }
 
     pub fn spawnWg(self: *Pool, wait_group: *WaitGroup, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) bool {
-        wait_group.group.concurrent(self.io, function, args) catch {
+        wait_group.group.concurrent(self.io, Pinned(function).run, .{args}) catch {
             runEager(function, args);
             return false;
         };
@@ -360,8 +360,21 @@ pub const Pool = struct {
     }
 
     pub fn trySpawnWg(self: *Pool, wait_group: *WaitGroup, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) bool {
-        wait_group.group.concurrent(self.io, function, args) catch return false;
+        wait_group.group.concurrent(self.io, Pinned(function).run, .{args}) catch return false;
         return true;
+    }
+
+    /// The executor's threads are plain `std.Thread`s at default QoS, so a
+    /// task pins the thread it lands on to the same performance-core QoS the
+    /// barrier team runs at (a no-op off macOS; the class sticks to the thread,
+    /// so a reused executor thread pays it once).
+    fn Pinned(comptime function: anytype) type {
+        return struct {
+            fn run(args: std.meta.ArgsTuple(@TypeOf(function))) @typeInfo(@TypeOf(function)).@"fn".return_type.? {
+                pinToPerformanceCores();
+                return @call(.auto, function, args);
+            }
+        };
     }
 
     pub fn waitAndWork(self: *Pool, wait_group: *WaitGroup) void {
