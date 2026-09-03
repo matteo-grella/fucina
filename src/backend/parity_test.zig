@@ -988,30 +988,30 @@ const Impl = struct {
             defer allocator.free(out_b);
             const tol = 1e-6 * @as(f32, @floatFromInt(cols));
 
-            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.softmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols }, 0, n_rows);
+            rows_impl.scalar.softmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols }, 0, n_rows);
             try expectClose(out_b, out_a, tol);
 
-            rows_impl.logSoftmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.logSoftmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.logSoftmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols }, 0, n_rows);
+            rows_impl.scalar.logSoftmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols }, 0, n_rows);
             try expectClose(out_b, out_a, tol);
 
-            rows_impl.logsumexpRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.logsumexpRows(.{ .input = input, .output = out_b, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.logsumexpRows(.{ .input = input, .output = out_a, .axis_dim = cols }, 0, n_rows);
+            rows_impl.scalar.logsumexpRows(.{ .input = input, .output = out_b, .axis_dim = cols }, 0, n_rows);
             try expectClose(out_b[0..n_rows], out_a[0..n_rows], tol);
 
             // Backward over a softmax output.
             const gy = try allocator.alloc(f32, len);
             defer allocator.free(gy);
             fillRandom(rng, gy);
-            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols, .row_start = 0, .row_end = n_rows });
+            rows_impl.softmaxRows(.{ .input = input, .output = out_a, .axis_dim = cols }, 0, n_rows);
             const y = out_a;
             const gx_a = try allocator.alloc(f32, len);
             defer allocator.free(gx_a);
             const gx_b = try allocator.alloc(f32, len);
             defer allocator.free(gx_b);
-            rows_impl.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_a, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_b, .axis_dim = cols, .scale = 0.5, .row_start = 0, .row_end = n_rows });
+            rows_impl.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_a, .axis_dim = cols, .scale = 0.5 }, 0, n_rows);
+            rows_impl.scalar.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_b, .axis_dim = cols, .scale = 0.5 }, 0, n_rows);
             try expectClose(gx_b, gx_a, tol);
         }
     }
@@ -1039,8 +1039,8 @@ const Impl = struct {
             defer allocator.free(stats_a);
             const stats_b = try allocator.alloc(f32, 2 * n_rows);
             defer allocator.free(stats_b);
-            rows_impl.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_a, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_b, .row_stats = stats_b, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .row_start = 0, .row_end = n_rows });
+            rows_impl.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_a, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing }, 0, n_rows);
+            rows_impl.scalar.crossEntropyLossRows(.{ .input = input, .labels = &labels, .row_losses = losses_b, .row_stats = stats_b, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing }, 0, n_rows);
             try expectClose(losses_b, losses_a, tol);
             try expectClose(stats_b, stats_a, tol);
 
@@ -1049,12 +1049,12 @@ const Impl = struct {
             const gx_b = try allocator.alloc(f32, len);
             defer allocator.free(gx_b);
             // The forward-saved-stats one-pass arm (same stats for both sides).
-            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25 }, 0, n_rows);
+            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = stats_a, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25 }, 0, n_rows);
             try expectClose(gx_b, gx_a, tol);
             // The recompute arm.
-            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25, .row_start = 0, .row_end = n_rows });
+            rows_impl.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_a, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25 }, 0, n_rows);
+            rows_impl.scalar.crossEntropyBackwardRows(.{ .input = input, .labels = &labels, .output = gx_b, .per_row_scale = null, .row_stats = null, .class_count = cols, .ignore_index = 42, .label_smoothing = smoothing, .grad_common = 0.25 }, 0, n_rows);
             try expectClose(gx_b, gx_a, tol);
         }
     }
@@ -1077,20 +1077,20 @@ const Impl = struct {
         const out_b = try allocator.alloc(f32, len);
         defer allocator.free(out_b);
 
-        rows_impl.splitSwiGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
-        rows_impl.scalar.splitSwiGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.splitSwiGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half }, 0, outer);
+        rows_impl.scalar.splitSwiGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half }, 0, outer);
         try expectClose(out_b[0 .. outer * half], out_a[0 .. outer * half], 1e-5);
 
-        rows_impl.splitGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
-        rows_impl.scalar.splitGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.splitGluRows(.{ .input = input, .output = out_a, .axis_dim = 2 * half, .half = half }, 0, outer);
+        rows_impl.scalar.splitGluRows(.{ .input = input, .output = out_b, .axis_dim = 2 * half, .half = half }, 0, outer);
         try expectClose(out_b[0 .. outer * half], out_a[0 .. outer * half], 1e-5);
 
-        rows_impl.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
-        rows_impl.scalar.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half }, 0, outer);
+        rows_impl.scalar.splitSwiGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half }, 0, outer);
         try expectClose(out_b, out_a, 1e-5);
 
-        rows_impl.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
-        rows_impl.scalar.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half, .outer_start = 0, .outer_end = outer });
+        rows_impl.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half }, 0, outer);
+        rows_impl.scalar.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half }, 0, outer);
         try expectClose(out_b, out_a, 1e-5);
     }
 
@@ -1121,22 +1121,22 @@ const Impl = struct {
         defer allocator.free(out_b);
         const tol = 1e-6 * @as(f32, @floatFromInt(cols));
 
-        rows_impl.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-        rows_impl.scalar.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+        rows_impl.scalar.rmsNormMulRows(.{ .input = input, .weights = weights, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
         try expectClose(out_b, out_a, tol);
 
-        rows_impl.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-        rows_impl.scalar.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+        rows_impl.scalar.rmsNormMulAddRows(.{ .input = input, .weights = weights, .residual = residual, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
         try expectClose(out_b, out_a, tol);
 
-        rows_impl.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-        rows_impl.scalar.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+        rows_impl.scalar.rmsNormMulBackwardInputRows(.{ .input = input, .weights = weights, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
         try expectClose(out_b, out_a, tol);
 
         @memset(out_a[0..cols], 0);
         @memset(out_b[0..cols], 0);
-        rows_impl.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_a[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-        rows_impl.scalar.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_b[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_a[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+        rows_impl.scalar.rmsNormMulBackwardWeightRows(.{ .input = input, .grad = grad, .output = out_b[0..cols], .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
         try expectClose(out_b[0..cols], out_a[0..cols], tol * @as(f32, @floatFromInt(n_rows)));
 
         // The block-partial reduce: same partials, vector vs serial column walk.
@@ -1146,8 +1146,8 @@ const Impl = struct {
         fillRandom(rng, partials);
         @memset(out_a[0..cols], 0);
         @memset(out_b[0..cols], 0);
-        rows_impl.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_a[0..cols], .block_count = block_count, .axis_dim = cols, .col_start = 0, .col_end = cols });
-        rows_impl.scalar.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_b[0..cols], .block_count = block_count, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        rows_impl.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_a[0..cols], .block_count = block_count, .axis_dim = cols }, 0, cols);
+        rows_impl.scalar.rmsNormWeightGradReduce(.{ .partials = partials, .output = out_b[0..cols], .block_count = block_count, .axis_dim = cols }, 0, cols);
         try expectBitwise(out_b[0..cols], out_a[0..cols]);
     }
 
@@ -1182,12 +1182,12 @@ const Impl = struct {
         for ([_]bool{ false, true }) |affine| {
             const w: ?[]const f32 = if (affine) weights else null;
             const b: ?[]const f32 = if (affine) biases else null;
-            rows_impl.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            rows_impl.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+            rows_impl.scalar.layerNormRows(.{ .input = input, .weights = w, .biases = b, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
             try expectClose(out_b, out_a, tol);
 
-            rows_impl.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-            rows_impl.scalar.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+            rows_impl.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+            rows_impl.scalar.layerNormBackwardInputRows(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
             try expectClose(out_b, out_a, tol);
         }
 
@@ -1214,15 +1214,15 @@ const Impl = struct {
         defer allocator.free(stats_a);
         const stats_b = try allocator.alloc(f32, 2 * n_rows);
         defer allocator.free(stats_b);
-        rows_impl.layerNormRowStats(.{ .input = input, .stats = stats_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
-        rows_impl.scalar.layerNormRowStats(.{ .input = input, .stats = stats_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps, .row_start = 0, .row_end = n_rows });
+        rows_impl.layerNormRowStats(.{ .input = input, .stats = stats_a, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
+        rows_impl.scalar.layerNormRowStats(.{ .input = input, .stats = stats_b, .axis_dim = cols, .inv_axis_dim = inv_cols, .eps = eps }, 0, n_rows);
         try expectClose(stats_b, stats_a, tol);
         @memset(dw_a, 0);
         @memset(dw_b, 0);
         @memset(db_a, 0);
         @memset(db_b, 0);
-        rows_impl.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_a, .dbias = db_a, .rows = n_rows, .axis_dim = cols, .col_start = 0, .col_end = cols });
-        rows_impl.scalar.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_b, .dbias = db_b, .rows = n_rows, .axis_dim = cols, .col_start = 0, .col_end = cols });
+        rows_impl.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_a, .dbias = db_a, .rows = n_rows, .axis_dim = cols }, 0, cols);
+        rows_impl.scalar.layerNormParamGradColumns(.{ .input = input, .grad = grad, .stats = stats_a, .dweight = dw_b, .dbias = db_b, .rows = n_rows, .axis_dim = cols }, 0, cols);
         // Same per-column row-order accumulation on both sides: bitwise.
         try expectBitwise(dw_b, dw_a);
         try expectBitwise(db_b, db_a);
@@ -1243,8 +1243,8 @@ const Impl = struct {
         defer allocator.free(out_a);
         const out_b = try allocator.alloc(f32, dst_rows * row_len);
         defer allocator.free(out_b);
-        rows_impl.scatterAddRows(.{ .grad = grad, .output = out_a, .indices = &indices, .row_len = row_len, .row_start = 0, .row_end = dst_rows });
-        rows_impl.scalar.scatterAddRows(.{ .grad = grad, .output = out_b, .indices = &indices, .row_len = row_len, .row_start = 0, .row_end = dst_rows });
+        rows_impl.scatterAddRows(.{ .grad = grad, .output = out_a, .indices = &indices, .row_len = row_len }, 0, dst_rows);
+        rows_impl.scalar.scatterAddRows(.{ .grad = grad, .output = out_b, .indices = &indices, .row_len = row_len }, 0, dst_rows);
         try expectBitwise(out_b, out_a);
     }
 
@@ -1274,48 +1274,48 @@ const Impl = struct {
         const scratch = try allocator.alloc(f32, 5 * inner);
         defer allocator.free(scratch);
 
-        rows_impl.softmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.softmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.softmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
+        rows_impl.scalar.softmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
         try expectBitwise(out_b, out_a);
 
-        rows_impl.logsumexpInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.logsumexpInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.logsumexpInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
+        rows_impl.scalar.logsumexpInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
         try expectBitwise(out_b[0 .. outer * inner], out_a[0 .. outer * inner]);
 
-        rows_impl.logSoftmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.logSoftmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.logSoftmaxInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
+        rows_impl.scalar.logSoftmaxInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
         try expectBitwise(out_b, out_a);
 
-        rows_impl.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer, .inner_start = 0, .inner_end = inner });
+        rows_impl.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer }, 0, inner);
+        rows_impl.scalar.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer }, 0, inner);
         try expectBitwise(out_b, out_a);
 
-        rows_impl.varianceInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)), .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.varianceInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)), .inner_start = 0, .inner_end = inner });
+        rows_impl.varianceInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)) }, 0, inner);
+        rows_impl.scalar.varianceInner(.{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)) }, 0, inner);
         try expectBitwise(out_b[0 .. outer * inner], out_a[0 .. outer * inner]);
 
         inline for ([_]type{ f32, f64 }) |Acc| {
             const acc_scratch = try allocator.alloc(Acc, 5 * inner);
             defer allocator.free(acc_scratch);
-            rows_impl.standardizeInner(Acc, .{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
-            rows_impl.scalar.standardizeInner(Acc, .{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer, .inner_start = 0, .inner_end = inner });
+            rows_impl.standardizeInner(Acc, .{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
+            rows_impl.scalar.standardizeInner(Acc, .{ .input = input, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = true, .scratch = acc_scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
             try expectBitwise(out_b, out_a);
 
             @memset(out_a, 0);
             @memset(out_b, 0);
-            rows_impl.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer, .inner_start = 0, .inner_end = inner });
-            rows_impl.scalar.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer, .inner_start = 0, .inner_end = inner });
+            rows_impl.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer }, 0, inner);
+            rows_impl.scalar.standardizeBackwardInner(Acc, .{ .input = input, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .valid_count = axis_dim - 2, .ddof_count = 1, .eps = 1e-5, .eps_inside_sqrt = false, .scratch = acc_scratch, .outer = outer }, 0, inner);
             try expectBitwise(out_b, out_a);
         }
 
-        rows_impl.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        rows_impl.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
+        rows_impl.scalar.rmsNormInner(.{ .input = input, .weights = weights, .residual = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
         try expectBitwise(out_b, out_a);
 
         for ([_]bool{ false, true }) |weighted| {
             const w: ?[]const f32 = if (weighted) weights else null;
-            rows_impl.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
-            rows_impl.scalar.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+            rows_impl.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
+            rows_impl.scalar.rmsNormBackwardInputInner(.{ .input = input, .weights = w, .grad = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
             try expectBitwise(out_b, out_a);
         }
 
@@ -1325,8 +1325,8 @@ const Impl = struct {
         rows_impl.scalar.rmsNormBackwardWeightInner(.{ .input = input, .grad = grad, .output = out_b[0..axis_dim], .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps });
         try expectBitwise(out_b[0..axis_dim], out_a[0..axis_dim]);
 
-        rows_impl.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
-        rows_impl.scalar.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps, .inner_start = 0, .inner_end = inner });
+        rows_impl.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
+        rows_impl.scalar.layerNormInner(.{ .input = input, .weights = weights, .biases = weights, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .eps = eps }, 0, inner);
         try expectBitwise(out_b, out_a);
 
         // layerNormBackwardInner: dx keeps per-element order (bitwise); the

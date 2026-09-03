@@ -372,7 +372,7 @@ fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
     // loop's, so the lane split is bitwise-neutral.
     const scratch = try ctx.allocator().alloc(f32, 2 * inner);
     defer ctx.allocator().free(scratch);
-    ctx.dispatchInnerLanes(exec_row_ops.VarianceInnerTask, .{
+    ctx.forRange(inner, ExecContext.innerLaneParts(source.len(), inner), exec_row_ops.VarianceInnerTask{
         .input = input,
         .output = output,
         .axis_dim = axis_dim,
@@ -381,9 +381,7 @@ fn varAxisF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
         .outer = outer,
         .inv_axis_dim = inv_axis_dim,
         .inv_denom = inv_denom,
-        .inner_start = 0,
-        .inner_end = inner,
-    }, source.len(), inner, exec_row_ops.runVarianceInnerTask);
+    }, backend_mod.kernels.varianceInner);
     return out;
 }
 
@@ -466,7 +464,12 @@ fn standardizeAccum(
         // the pool; per-lane order equals the scalar loop below).
         const scratch = try ctx.allocator().alloc(Acc, 2 * inner);
         defer ctx.allocator().free(scratch);
-        ctx.dispatchInnerLanes(exec_row_ops.StandardizeInnerTask(Acc), .{
+        const Inner = struct {
+            fn run(task: exec_row_ops.StandardizeInnerTask(Acc), inner_start: usize, inner_end: usize) void {
+                backend_mod.kernels.standardizeInner(Acc, task, inner_start, inner_end);
+            }
+        };
+        ctx.forRange(inner, ExecContext.innerLaneParts(source.len(), inner), exec_row_ops.StandardizeInnerTask(Acc){
             .input = input,
             .output = output,
             .axis_dim = axis_dim,
@@ -477,9 +480,7 @@ fn standardizeAccum(
             .eps_inside_sqrt = options.eps_mode == .inside_sqrt,
             .scratch = scratch,
             .outer = outer,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, exec_row_ops.runStandardizeInnerTask(Acc));
+        }, Inner.run);
         return out;
     }
     for (0..outer) |outer_i| {
@@ -579,7 +580,12 @@ fn standardizeBackwardAccum(
     if (inner > 1) {
         const scratch = try ctx.allocator().alloc(Acc, 5 * inner);
         defer ctx.allocator().free(scratch);
-        ctx.dispatchInnerLanes(exec_row_ops.StandardizeBackwardInnerTask(Acc), .{
+        const Inner = struct {
+            fn run(task: exec_row_ops.StandardizeBackwardInnerTask(Acc), inner_start: usize, inner_end: usize) void {
+                backend_mod.kernels.standardizeBackwardInner(Acc, task, inner_start, inner_end);
+            }
+        };
+        ctx.forRange(inner, ExecContext.innerLaneParts(source.len(), inner), exec_row_ops.StandardizeBackwardInnerTask(Acc){
             .input = input,
             .grad = upstream,
             .output = output,
@@ -591,9 +597,7 @@ fn standardizeBackwardAccum(
             .eps_inside_sqrt = options.eps_mode == .inside_sqrt,
             .scratch = scratch,
             .outer = outer,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, exec_row_ops.runStandardizeBackwardInnerTask(Acc));
+        }, Inner.run);
         return out;
     }
     for (0..outer) |outer_i| {

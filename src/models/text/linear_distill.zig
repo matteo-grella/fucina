@@ -201,9 +201,7 @@ fn forwardImpl(ctx: *ExecContext, saved: *Saved, options: Options, x: *const Raw
         .input = logits.dataConst(),
         .row_stats = saved.row_stats,
         .class_count = class_count,
-        .row_start = 0,
-        .row_end = sel_rows.len,
-    }, statsRows);
+    }, sel_rows.len, statsRows);
 
     const logit_data = logits.dataConst();
     var total: f32 = 0;
@@ -270,9 +268,7 @@ fn backwardImpl(
         .row_stats = saved.row_stats,
         .row_mass = row_mass,
         .class_count = class_count,
-        .row_start = 0,
-        .row_end = sel_count,
-    }, backwardRows);
+    }, sel_count, backwardRows);
 
     // Sparse target subtraction: entry lists are tiny next to rows x classes.
     const dl_data = dl.data();
@@ -306,8 +302,6 @@ const StatsTask = struct {
     /// Per-row {max, sum_exp} interleaved.
     row_stats: []f32,
     class_count: usize,
-    row_start: usize,
-    row_end: usize,
 };
 
 const BackwardTask = struct {
@@ -319,20 +313,17 @@ const BackwardTask = struct {
     /// scale: output[r, v] = row_mass[r] * softmax(input[r])[v].
     row_mass: []const f32,
     class_count: usize,
-    row_start: usize,
-    row_end: usize,
 };
 
 const Vec = @Vector(8, f32);
 const vector_width = 8;
 
-fn dispatchRows(ctx: *ExecContext, comptime Task: type, task: Task, comptime kernel: fn (Task) void) void {
-    const outer = task.row_end;
-    ctx.dispatchRangeOr(Task, "row_start", "row_end", task, outer, outer > 1 and outer * task.class_count >= row_kernel_len_threshold, kernel);
+fn dispatchRows(ctx: *ExecContext, comptime Task: type, task: Task, rows: usize, comptime kernel: fn (Task, usize, usize) void) void {
+    ctx.forRange(rows, if (rows > 1 and rows * task.class_count >= row_kernel_len_threshold) rows else 1, task, kernel);
 }
 
-fn statsRows(task: StatsTask) void {
-    for (task.row_start..task.row_end) |row_i| {
+fn statsRows(task: StatsTask, row_start: usize, row_end: usize) void {
+    for (row_start..row_end) |row_i| {
         const row_in = task.input[row_i * task.class_count ..][0..task.class_count];
 
         var class_i: usize = 0;
@@ -360,8 +351,8 @@ fn statsRows(task: StatsTask) void {
     }
 }
 
-fn backwardRows(task: BackwardTask) void {
-    for (task.row_start..task.row_end) |row_i| {
+fn backwardRows(task: BackwardTask, row_start: usize, row_end: usize) void {
+    for (row_start..row_end) |row_i| {
         const row_in = task.input[row_i * task.class_count ..][0..task.class_count];
         const row_out = task.output[row_i * task.class_count ..][0..task.class_count];
         const max_value = task.row_stats[2 * row_i];

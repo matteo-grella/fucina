@@ -25,6 +25,25 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- One range dispatch in the runtime: `ExecContext.forRange(total, max_parts,
+  ctx, run)` runs `run(ctx, start, end)` over `[0, total)` in at most
+  `max_parts` proportional parts across the worker team (`backend.tile.bound`
+  boundaries, unchanged) or as one serial call, and the cap is the call
+  site's gate (`if (worth_it) total else 1`, `ExecContext.innerLaneParts`,
+  `parallel.partsForChunk`). It replaces `dispatchRange`, `dispatchRangeOr`,
+  `dispatchRangeCapped`, `dispatchInnerLanes` and `parallelMap` (the
+  string-addressed Task range fields and the pool adapter twins with them);
+  every call site keeps its part count, so the chunk grids and the bits are
+  unchanged. The fused row, inner-lane and attention-reduce kernels of
+  `backend.kernels` take their row, lane, block, column or vector range as
+  two trailing parameters instead of Task fields, and the `run*InnerTask`
+  adapters of the `backend.rows` seam and `runAttentionBackwardReduceTask`
+  are gone. Rewrites: `ctx.parallelMap(n, min_len, c, run)` →
+  `ctx.forRange(n, parallel.partsForChunk(n, min_len), c, run)`;
+  `ctx.dispatchRangeOr(T, "a_start", "a_end", task, n, ok, kernel)` →
+  `ctx.forRange(n, if (ok) n else 1, task, kernel)` with `kernel(task,
+  a_start, a_end)`; a direct `kernels.softmaxRows(task)` (any row or lane
+  kernel) → `kernels.softmaxRows(task, 0, rows)`.
 - The error vocabulary is derived from the band sets. `exec.Error` merges
   `TensorError`, `backend.quant.QuantizedFormatError`, the runtime's
   `ExecError` and `OutOfMemory`; `ag.Error` merges `exec.Error` with

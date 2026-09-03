@@ -70,10 +70,7 @@ fn AxisFoldTask(comptime dtype: DType, comptime fold: AxisFold) type {
         output: []Out,
         axis_dim: usize,
         inner: usize,
-        outer_start: usize,
-        outer_end: usize,
-        inner_start: usize,
-        inner_end: usize,
+        outer: usize,
 
         const In = dtype_mod.Scalar(dtype);
         pub const output_dtype = if (fold == .int_sum) .i64 else dtype_mod.outputDType(.reduction, dtype);
@@ -82,13 +79,23 @@ fn AxisFoldTask(comptime dtype: DType, comptime fold: AxisFold) type {
         /// What the streaming arm accumulates into.
         pub const identity: Out = if (fold == .prod) 1 else 0;
 
-        fn run(task: *const @This()) void {
-            const lanes = task.inner_end - task.inner_start;
-            for (task.outer_start..task.outer_end) |outer_i| {
-                const out_row = task.output[outer_i * task.inner + task.inner_start ..][0..lanes];
+        /// The outer-block split: every lane of the blocks `[outer_start, outer_end)`.
+        fn runOuter(task: @This(), outer_start: usize, outer_end: usize) void {
+            task.foldRange(outer_start, outer_end, 0, task.inner);
+        }
+
+        /// The inner-lane split: the lanes `[inner_start, inner_end)` of every block.
+        fn runInner(task: @This(), inner_start: usize, inner_end: usize) void {
+            task.foldRange(0, task.outer, inner_start, inner_end);
+        }
+
+        fn foldRange(task: @This(), outer_start: usize, outer_end: usize, inner_start: usize, inner_end: usize) void {
+            const lanes = inner_end - inner_start;
+            for (outer_start..outer_end) |outer_i| {
+                const out_row = task.output[outer_i * task.inner + inner_start ..][0..lanes];
                 const block = outer_i * task.axis_dim;
                 for (0..task.axis_dim) |a| {
-                    const in_row = task.input[(block + a) * task.inner + task.inner_start ..][0..lanes];
+                    const in_row = task.input[(block + a) * task.inner + inner_start ..][0..lanes];
                     for (out_row, in_row) |*acc, value| {
                         switch (comptime fold) {
                             .sum => if (comptime dtype == .f32) {
@@ -128,20 +135,16 @@ fn foldAxisStreaming(
         .output = output,
         .axis_dim = axis_dim,
         .inner = inner,
-        .outer_start = 0,
-        .outer_end = outer,
-        .inner_start = 0,
-        .inner_end = inner,
+        .outer = outer,
     };
     if (input.len >= parallel.row_kernel_len_threshold) {
         const workers = parallel.cpuThreadCount(parallel.vector_max_threads);
         if (outer >= workers or inner < 2 * axis_fold_min_inner_lanes) {
-            if (outer > 1 and ctx.dispatchRange(Task, "outer_start", "outer_end", base_task, outer, Task.run)) return;
-        } else if (ctx.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / axis_fold_min_inner_lanes, Task.run)) {
-            return;
+            return ctx.forRange(outer, if (outer > 1) outer else 1, base_task, Task.runOuter);
         }
+        return ctx.forRange(inner, inner / axis_fold_min_inner_lanes, base_task, Task.runInner);
     }
-    Task.run(&base_task);
+    Task.runOuter(base_task, 0, outer);
 }
 
 fn sumF32(ctx: *ExecContext, x: *const Tensor) !Tensor {

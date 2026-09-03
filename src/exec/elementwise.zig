@@ -187,9 +187,6 @@ pub fn tailBroadcastInfo(x: *const Tensor) ?TailBroadcastInfo {
     };
 }
 
-/// Runtime-rank elementwise binary op: dispatches over `a.shape.len` onto
-/// the same rank-monomorphized kernels the comptime-rank spellings
-/// (`add`/`sub`/`mul`/`div`/`max`/`min`) reach directly.
 /// Same-shape binary op with the rank resolved at runtime; `add`..`min`
 /// are the comptime-rank entries. Float 16-bit inputs run the typed kernel
 /// (`.pointwise` policy) except `max`/`min`, which have an f32 kernel only
@@ -285,14 +282,12 @@ fn splitGatedF32(ctx: *ExecContext, comptime op: GatedOp, comptime rank: usize, 
     const inner = productAfterAxis(rank, source.shape, axis);
     const outer = productBeforeAxis(rank, source.shape, axis);
     if (inner == 1) {
-        ctx.dispatchRangeOr(SplitSwiGluTask, "outer_start", "outer_end", .{
+        ctx.forRange(outer, if (out.len() >= parallel.fused_chain_len_threshold) outer else 1, SplitSwiGluTask{
             .input = input,
             .output = output,
             .axis_dim = axis_dim,
             .half = half,
-            .outer_start = 0,
-            .outer_end = outer,
-        }, outer, out.len() >= parallel.fused_chain_len_threshold, rowsKernel);
+        }, rowsKernel);
         return out;
     }
 
@@ -355,15 +350,13 @@ fn splitGatedBackward(ctx: *ExecContext, comptime op: GatedOp, comptime rank: us
 
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
     if (g.inner == 1) {
-        ctx.dispatchRangeOr(SplitSwiGluBackwardTask, "outer_start", "outer_end", .{
+        ctx.forRange(g.outer, if (out.len() >= parallel.split_backward_len_threshold and g.outer > 1) g.outer else 1, SplitSwiGluBackwardTask{
             .input = input,
             .grad = grad,
             .output = output,
             .axis_dim = axis_dim,
             .half = half,
-            .outer_start = 0,
-            .outer_end = g.outer,
-        }, g.outer, out.len() >= parallel.split_backward_len_threshold and g.outer > 1, rowsKernel);
+        }, rowsKernel);
         return out;
     }
 
@@ -850,13 +843,11 @@ fn dropoutApply(ctx: *ExecContext, x: *const Tensor, p: f32, seed: u64) !Tensor 
         .keep_cutoff = dropoutKeepCutoff(p),
         .scale = 1.0 / (1.0 - p),
         .seed = seed,
-        .start = 0,
-        .end = input.len,
     };
     // Counter-based RNG: any flat element range computes independently, so
     // the split is bitwise neutral (same per-element mask and arithmetic
     // for any thread count).
-    ctx.dispatchRangeOr(DropoutRangeTask, "start", "end", base_task, input.len, input.len >= parallel.vector_elementwise_len_threshold, dropoutRange);
+    ctx.forRange(input.len, if (input.len >= parallel.vector_elementwise_len_threshold) input.len else 1, base_task, dropoutRange);
     return out;
 }
 

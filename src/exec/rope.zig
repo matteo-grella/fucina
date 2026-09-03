@@ -485,22 +485,20 @@ fn applyRope(
         .feature_stride = feature_stride,
         .pair_count = pair_count,
         .rotary_offset = rotary_offset,
-        .vector_start = 0,
-        .vector_end = total_vectors,
     };
 
     // Same length gate as the fused rms-norm+rope sibling (norm.zig): the
     // pool is engaged for prefill-sized inputs only; a decode step's
     // handful of vectors stays on the calling thread. The gate decides
     // POOLING only, never per-vector math.
-    ctx.dispatchRangeOr(Task, "vector_start", "vector_end", task, total_vectors, total_vectors > 1 and input.len >= parallel.vector_elementwise_len_threshold / 8, Task.run);
+    ctx.forRange(total_vectors, if (total_vectors > 1 and input.len >= parallel.vector_elementwise_len_threshold / 8) total_vectors else 1, task, Task.run);
     return out;
 }
 
 /// The per-vector rotation walk of `applyRope`, shaped as a range task so
-/// `dispatchRange` can split `[vector_start, vector_end)` across the pool.
-/// Each vector reads its own input features and writes its own output
-/// features, so any split produces the serial walk's bytes.
+/// `ExecContext.forRange` can split `[vector_start, vector_end)` across
+/// the pool. Each vector reads its own input features and writes its own
+/// output features, so any split produces the serial walk's bytes.
 fn RopeVectorsTask(
     comptime rank: usize,
     comptime position_axis: usize,
@@ -518,10 +516,8 @@ fn RopeVectorsTask(
         feature_stride: usize,
         pair_count: usize,
         rotary_offset: usize,
-        vector_start: usize,
-        vector_end: usize,
 
-        fn run(task: @This()) void {
+        fn run(task: @This(), vector_start: usize, vector_end: usize) void {
             const input = task.input;
             const output = task.output;
             const sin_values = task.sin_values;
@@ -530,7 +526,7 @@ fn RopeVectorsTask(
             const pair_count = task.pair_count;
             const rotary_offset = task.rotary_offset;
 
-            for (task.vector_start..task.vector_end) |vector_i| {
+            for (vector_start..vector_end) |vector_i| {
                 var remainder = vector_i;
                 var base_offset: usize = 0;
                 var position_coord: usize = 0;

@@ -52,7 +52,6 @@ const attention_bwd_blas_tile_rows = attn.attention_bwd_blas_tile_rows;
 const runGroupedCausalAttentionBackwardBlasTiledTask = attn.runGroupedCausalAttentionBackwardBlasTiledTask;
 const groupedCausalAttentionBackwardBlasTiles = kernels.groupedCausalAttentionBackwardBlasTiles;
 const AttentionBackwardReduceTask = attn.AttentionBackwardReduceTask;
-const runAttentionBackwardReduceTask = attn.runAttentionBackwardReduceTask;
 const attentionBackwardReduceRows = kernels.attentionBackwardReduceRows;
 const hasAdjacentKvHeadPairs = attn.hasAdjacentKvHeadPairs;
 const GroupedCausalAttentionMultiTask = attn.GroupedCausalAttentionMultiTask;
@@ -406,20 +405,17 @@ pub fn groupedAttentionBackward(self: *ExecContext, request: AttentionBackwardRe
                 .kv_seq = kv_seq,
                 .d = d,
                 .kv_heads = kv_heads,
-                .source_start = 0,
-                .source_end = kv_seq,
             };
             const reduce_targets = [2]struct { partials: ?[]const f32, grad: ?[]f32 }{
                 .{ .partials = if (need_k) dk_target else null, .grad = k_grad },
                 .{ .partials = if (need_v) dv_target else null, .grad = v_grad },
             };
+            const reduce_parts = if (parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold) kv_seq else 1;
             for (reduce_targets) |pair| {
                 var pair_base = reduce_base;
                 pair_base.partials = pair.partials orelse continue;
                 pair_base.grad = pair.grad orelse continue;
-                const reduced = parallel.saturatedMul3(kv_seq, heads, d) >= parallel.vector_elementwise_len_threshold and
-                    self.dispatchRange(AttentionBackwardReduceTask, "source_start", "source_end", pair_base, kv_seq, runAttentionBackwardReduceTask);
-                if (!reduced) attentionBackwardReduceRows(pair_base);
+                self.forRange(kv_seq, reduce_parts, pair_base, attentionBackwardReduceRows);
             }
         }
         return result;

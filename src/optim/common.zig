@@ -30,7 +30,7 @@ pub const GradState = ag_core.GradState;
 const parallel_map_min_len: usize = 1 << 17;
 
 pub fn parallelMap(ctx: *ExecContext, n: usize, context: anytype, comptime runRange: fn (@TypeOf(context), usize, usize) void) void {
-    ctx.parallelMap(n, parallel_map_min_len, context, runRange);
+    ctx.forRange(n, parallel.partsForChunk(n, parallel_map_min_len), context, runRange);
 }
 
 /// Fixed chunk length of the deterministic norm reductions (`sumSquares`):
@@ -75,11 +75,9 @@ fn sumSquaresChunk(values: []const f32) f64 {
 const SumSquaresTask = struct {
     values: []const f32,
     partials: []f64,
-    chunk_start: usize,
-    chunk_end: usize,
 
-    fn run(task: *const @This()) void {
-        for (task.chunk_start..task.chunk_end) |chunk_i| {
+    fn run(task: @This(), chunk_start: usize, chunk_end: usize) void {
+        for (chunk_start..chunk_end) |chunk_i| {
             const start = chunk_i * sumsq_chunk_len;
             const end = @min(start + sumsq_chunk_len, task.values.len);
             task.partials[chunk_i] = sumSquaresChunk(task.values[start..end]);
@@ -100,25 +98,13 @@ const SumSquaresTask = struct {
 pub fn sumSquares(ctx: *ExecContext, values: []const f32) !f64 {
     if (values.len <= sumsq_chunk_len) return sumSquaresChunk(values);
     const chunk_count = (values.len + sumsq_chunk_len - 1) / sumsq_chunk_len;
-    if (values.len >= parallel_map_min_len) {
-        if (ctx.workPool()) |pool| {
-            const partials = try ctx.allocator().alloc(f64, chunk_count);
-            defer ctx.allocator().free(partials);
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), chunk_count);
-            var tasks: [parallel.vector_max_threads]SumSquaresTask = undefined;
-            for (0..task_count) |task_i| {
-                tasks[task_i] = .{
-                    .values = values,
-                    .partials = partials,
-                    .chunk_start = task_i * chunk_count / task_count,
-                    .chunk_end = (task_i + 1) * chunk_count / task_count,
-                };
-            }
-            pool.parallelChunks(SumSquaresTask, tasks[0..task_count], SumSquaresTask.run);
-            var total: f64 = 0;
-            for (partials) |partial| total += partial;
-            return total;
-        }
+    if (values.len >= parallel_map_min_len and ctx.workPool() != null) {
+        const partials = try ctx.allocator().alloc(f64, chunk_count);
+        defer ctx.allocator().free(partials);
+        ctx.forRange(chunk_count, chunk_count, SumSquaresTask{ .values = values, .partials = partials }, SumSquaresTask.run);
+        var total: f64 = 0;
+        for (partials) |partial| total += partial;
+        return total;
     }
     var total: f64 = 0;
     var start: usize = 0;

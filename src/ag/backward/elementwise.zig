@@ -140,19 +140,17 @@ fn vjpMapChunked(comptime Env: type, ctx: *ExecContext, env: Env, as: []const En
         as: []const Env.Elem,
         gys: []const f32,
         dsts: []f32,
-        start: usize,
-        end: usize,
 
-        fn run(chunk: @This()) void {
+        fn run(chunk: @This(), start: usize, end: usize) void {
             if (comptime @hasDecl(Env, "runSlice")) {
-                chunk.env.runSlice(chunk.dsts[chunk.start..chunk.end], chunk.as[chunk.start..chunk.end], chunk.gys[chunk.start..chunk.end]);
+                chunk.env.runSlice(chunk.dsts[start..end], chunk.as[start..end], chunk.gys[start..end]);
             } else {
-                for (chunk.as[chunk.start..chunk.end], chunk.gys[chunk.start..chunk.end], chunk.dsts[chunk.start..chunk.end]) |a, grad, *dst| dst.* = chunk.env.apply(a, grad);
+                for (chunk.as[start..end], chunk.gys[start..end], chunk.dsts[start..end]) |a, grad, *dst| dst.* = chunk.env.apply(a, grad);
             }
         }
     };
     const total = dsts.len;
-    ctx.dispatchRangeOr(Chunk, "start", "end", .{ .env = env, .as = as, .gys = gys, .dsts = dsts, .start = 0, .end = total }, total, total >= parallel.vector_elementwise_len_threshold, Chunk.run);
+    ctx.forRange(total, if (total >= parallel.vector_elementwise_len_threshold) total else 1, Chunk{ .env = env, .as = as, .gys = gys, .dsts = dsts }, Chunk.run);
 }
 
 pub const ReluBackward = struct {

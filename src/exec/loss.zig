@@ -197,10 +197,8 @@ pub fn crossEntropyLoss(
             .class_count = class_count,
             .ignore_index = options.ignore_index,
             .label_smoothing = options.label_smoothing,
-            .row_start = 0,
-            .row_end = outer,
         };
-        ctx.dispatchRangeOr(CrossEntropyLossRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, crossEntropyLossRows);
+        ctx.forRange(outer, if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) outer else 1, base_task, crossEntropyLossRows);
     } else {
         const eps = options.label_smoothing;
         const eps_uniform = eps / @as(f32, @floatFromInt(class_count));
@@ -353,9 +351,7 @@ fn crossEntropyBackwardScaled(
             .ignore_index = options.ignore_index,
             .label_smoothing = options.label_smoothing,
             .grad_common = grad_common,
-            .row_start = 0,
-            .row_end = outer,
-        });
+        }, outer);
         return out;
     }
 
@@ -436,9 +432,8 @@ pub const LinearCrossEntropyGrads = struct {
 /// materializing route and the fused linear+CE VJP: pool split over rows
 /// above the elementwise work threshold, serial otherwise (bitwise identical
 /// either way â disjoint row writes).
-fn dispatchCrossEntropyBackwardRows(ctx: *ExecContext, base_task: CrossEntropyBackwardRowsTask) void {
-    const outer = base_task.row_end;
-    ctx.dispatchRangeOr(CrossEntropyBackwardRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold, crossEntropyBackwardRows);
+fn dispatchCrossEntropyBackwardRows(ctx: *ExecContext, base_task: CrossEntropyBackwardRowsTask, outer: usize) void {
+    ctx.forRange(outer, if (outer > 1 and outer * base_task.class_count >= parallel.row_kernel_len_threshold) outer else 1, base_task, crossEntropyBackwardRows);
 }
 
 /// Fused VJP of `loss = CE(xÂ·Wáµ, labels)` over the forward's saved logits
@@ -512,9 +507,7 @@ pub fn linearCrossEntropyBackwardUpstream(
         .ignore_index = options.ignore_index,
         .label_smoothing = options.label_smoothing,
         .grad_common = grad_common,
-        .row_start = 0,
-        .row_end = rows,
-    });
+    }, rows);
 
     var dx: ?Tensor = null;
     errdefer if (dx) |*value| value.deinit();

@@ -152,9 +152,9 @@ pub const kernels = struct {
     pub const mulRowSlice = vector.elementwise.mulRowSlice;
     pub const pool_free_mulRowSlice = true;
     // The fused row kernels (vector/rows.zig): task-carrying serial
-    // entries. The exec domain modules split the task ranges over the
-    // pool themselves (`dispatchRange`/`dispatchInnerLanes` with the
-    // `rows` run adapters), so every entry here is pool-free by design.
+    // entries taking their row or lane range as parameters. The exec
+    // domain modules split the ranges over the pool themselves
+    // (`ExecContext.forRange`), so every entry here is pool-free by design.
     pub const softmaxRows = vector.rows.softmaxRows;
     pub const pool_free_softmaxRows = true;
     pub const softmaxExtRows = vector.rows.softmaxExtRows;

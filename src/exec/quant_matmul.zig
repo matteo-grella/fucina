@@ -31,8 +31,6 @@ fn packedRhsDType(comptime Rhs: type) DType {
 const Tensor = tensor.Tensor;
 
 const FusedActQuantTask = exec_row_ops.FusedActQuantTask;
-const SplitSwiGluQuantQ8_0x4Task = exec_row_ops.SplitSwiGluQuantQ8_0x4Task;
-const runSplitSwiGluQuantQ8_0x4Task = exec_row_ops.runSplitSwiGluQuantQ8_0x4Task;
 
 pub const RhsLifetime = backend_mod.quant.RhsLifetime;
 
@@ -601,26 +599,26 @@ fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.Fuse
 
             const input = gg.tensor().dataConst();
             const row_groups = (m + 3) / 4;
-            const base: SplitSwiGluQuantQ8_0x4Task = .{
+            // Row groups of 4 quantize independently into their own blocks,
+            // so the group range splits across the pool bitwise-neutrally.
+            const Groups = struct {
+                input: []const f32,
+                blocks: []backend_mod.quant.BlockQ8_0x4,
+                rows: usize,
+                cols: usize,
+                blocks_per_row: usize,
+
+                fn run(g: @This(), group_start: usize, group_end: usize) void {
+                    kernels.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(g.blocks, g.input, g.rows, g.cols, g.blocks_per_row, group_start, group_end);
+                }
+            };
+            self.forRange(row_groups, if (m * k >= parallel.fused_chain_len_threshold) row_groups else 1, Groups{
                 .input = input,
                 .blocks = qlhs_blocks,
                 .rows = m,
                 .cols = k,
                 .blocks_per_row = blocks_per_row,
-                .row_group_start = 0,
-                .row_group_end = row_groups,
-            };
-            const pooled = m * k >= parallel.fused_chain_len_threshold and
-                self.dispatchRange(SplitSwiGluQuantQ8_0x4Task, "row_group_start", "row_group_end", base, row_groups, runSplitSwiGluQuantQ8_0x4Task);
-            if (!pooled) kernels.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
-                qlhs_blocks,
-                input,
-                m,
-                k,
-                blocks_per_row,
-                0,
-                row_groups,
-            );
+            }, Groups.run);
             try packedQ8_0x4Tail(self, out, qlhs_blocks, rhs, m, n, k);
         },
         .rms_norm_mul => {

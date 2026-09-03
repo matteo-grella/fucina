@@ -66,21 +66,15 @@ const KdaTask = struct {
     k_dim: usize,
     v_dim: usize,
     scale: f32,
-    head_start: usize,
-    head_end: usize,
 };
 
-fn runKdaTask(task: *const KdaTask) void {
-    kdaHeads(task.*);
-}
-
-fn kdaHeads(task: KdaTask) void {
+fn kdaHeads(task: KdaTask, head_start: usize, head_end: usize) void {
     const K = task.k_dim;
     const V = task.v_dim;
     const qk_stride = task.heads * K;
     const v_stride = task.heads * V;
 
-    for (task.head_start..task.head_end) |h| {
+    for (head_start..head_end) |h| {
         const state = task.state[h * K * V ..][0 .. K * V];
         if (task.initial_state) |initial| {
             @memcpy(state, initial[h * K * V ..][0 .. K * V]);
@@ -244,14 +238,10 @@ pub fn kdaRecurrent(
         .k_dim = k_dim,
         .v_dim = v_dim,
         .scale = if (scale > 0) scale else 1.0 / @sqrt(@as(f32, @floatFromInt(k_dim))),
-        .head_start = 0,
-        .head_end = heads,
     };
 
     const work = parallel.saturatedMul3(seq, heads, k_dim * v_dim);
-    const dispatched = work >= parallel.attention_work_threshold and
-        ctx.dispatchRange(KdaTask, "head_start", "head_end", base, heads, runKdaTask);
-    if (!dispatched) kdaHeads(base);
+    ctx.forRange(heads, if (work >= parallel.attention_work_threshold) heads else 1, base, kdaHeads);
 
     return .{ .o = o, .state = state };
 }

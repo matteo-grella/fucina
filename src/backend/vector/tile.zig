@@ -12,7 +12,7 @@ const thread = @import("../../thread.zig");
 
 /// The one proportional split boundary: part `i` of `parts` over
 /// `[0, total)` starts at `i * total / parts`. Every range split in the
-/// tree (this file, `ExecContext.dispatchRange`) draws its boundaries
+/// tree (this file, `ExecContext.forRange`) draws its boundaries
 /// here, so a range moves from one splitter to another with no chunk
 /// reordered.
 pub fn bound(i: usize, total: usize, parts: usize) usize {

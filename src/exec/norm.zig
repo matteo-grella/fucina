@@ -42,9 +42,9 @@ const LayerNormParamGradColumnsTask = exec_row_ops.LayerNormParamGradColumnsTask
 const RmsNormInnerTask = exec_row_ops.RmsNormInnerTask;
 const RmsNormBackwardInputInnerTask = exec_row_ops.RmsNormBackwardInputInnerTask;
 const LayerNormInnerTask = exec_row_ops.LayerNormInnerTask;
-const runRmsNormInnerTask = exec_row_ops.runRmsNormInnerTask;
-const runRmsNormBackwardInputInnerTask = exec_row_ops.runRmsNormBackwardInputInnerTask;
-const runLayerNormInnerTask = exec_row_ops.runLayerNormInnerTask;
+const rmsNormInner = backend_mod.kernels.rmsNormInner;
+const rmsNormBackwardInputInner = backend_mod.kernels.rmsNormBackwardInputInner;
+const layerNormInner = backend_mod.kernels.layerNormInner;
 const rmsNormMulRopeHalfVectors = backend_mod.kernels.rmsNormMulRopeHalfVectors;
 const rmsNormMulRows = backend_mod.kernels.rmsNormMulRows;
 const rmsNormMulAddRows = backend_mod.kernels.rmsNormMulAddRows;
@@ -195,7 +195,7 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
     if (g.inner == 1 and weights != null and source.len() >= parallel.row_kernel_len_threshold) {
         if (residual_data) |res| {
-            ctx.dispatchRangeOr(RmsNormMulAddRowsTask, "row_start", "row_end", .{
+            ctx.forRange(g.outer, if (g.outer > 1) g.outer else 1, RmsNormMulAddRowsTask{
                 .input = input,
                 .weights = weights.?,
                 .residual = res,
@@ -203,20 +203,16 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
                 .axis_dim = axis_dim,
                 .inv_axis_dim = inv_axis_dim,
                 .eps = eps,
-                .row_start = 0,
-                .row_end = g.outer,
-            }, g.outer, g.outer > 1, rmsNormMulAddRows);
+            }, rmsNormMulAddRows);
         } else {
-            ctx.dispatchRangeOr(RmsNormMulRowsTask, "row_start", "row_end", .{
+            ctx.forRange(g.outer, if (g.outer > 1) g.outer else 1, RmsNormMulRowsTask{
                 .input = input,
                 .weights = weights.?,
                 .output = output,
                 .axis_dim = axis_dim,
                 .inv_axis_dim = inv_axis_dim,
                 .eps = eps,
-                .row_start = 0,
-                .row_end = g.outer,
-            }, g.outer, g.outer > 1, rmsNormMulRows);
+            }, rmsNormMulRows);
         }
         return out;
     }
@@ -226,7 +222,7 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
         // the pool; per-lane order equals the scalar loop below).
         var scratch = try ctx.empty(.f32, .{g.inner});
         defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormInnerTask, .{
+        ctx.forRange(g.inner, ExecContext.innerLaneParts(source.len(), g.inner), RmsNormInnerTask{
             .input = input,
             .weights = weights,
             .residual = residual_data,
@@ -237,9 +233,7 @@ fn rmsNormF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptim
             .outer = g.outer,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .inner_start = 0,
-            .inner_end = g.inner,
-        }, source.len(), g.inner, runRmsNormInnerTask);
+        }, rmsNormInner);
         return out;
     }
     for (0..g.outer) |outer_i| {
@@ -312,7 +306,7 @@ fn rmsNormBackwardInput(
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
     const inv_axis_dim = 1 / @as(f32, @floatFromInt(axis_dim));
     if (g.inner == 1 and weights != null and source.len() >= parallel.row_kernel_len_threshold) {
-        ctx.dispatchRangeOr(RmsNormMulBackwardInputRowsTask, "row_start", "row_end", .{
+        ctx.forRange(g.outer, if (g.outer > 1) g.outer else 1, RmsNormMulBackwardInputRowsTask{
             .input = input,
             .weights = weights.?,
             .grad = grad,
@@ -320,16 +314,14 @@ fn rmsNormBackwardInput(
             .axis_dim = axis_dim,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .row_start = 0,
-            .row_end = g.outer,
-        }, g.outer, g.outer > 1, rmsNormMulBackwardInputRows);
+        }, rmsNormMulBackwardInputRows);
         return out;
     }
 
     if (g.inner > 1) {
         var scratch = try ctx.empty(.f32, .{2 * g.inner});
         defer scratch.deinit();
-        ctx.dispatchInnerLanes(RmsNormBackwardInputInnerTask, .{
+        ctx.forRange(g.inner, ExecContext.innerLaneParts(source.len(), g.inner), RmsNormBackwardInputInnerTask{
             .input = input,
             .weights = weights,
             .grad = grad,
@@ -340,9 +332,7 @@ fn rmsNormBackwardInput(
             .outer = g.outer,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .inner_start = 0,
-            .inner_end = g.inner,
-        }, source.len(), g.inner, runRmsNormBackwardInputInnerTask);
+        }, rmsNormBackwardInputInner);
         return out;
     }
     for (0..g.outer) |outer_i| {
@@ -411,19 +401,17 @@ fn rmsNormBackwardWeight(
             .axis_dim = axis_dim,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .row_start = 0,
-            .row_end = outer,
         };
         // Fixed row-block grid: each 64-row block accumulates its own
         // partial in row order, the partials are reduced in block order.
-        // Blocks are distributed over the tasks and the grid depends on
+        // Blocks are distributed over the parts and the grid depends on
         // `outer` alone, so one thread and N produce the same bytes (the
         // serial fallbacks below walk the same grid). A single block is
         // the row kernel itself (0 + partial is the partial).
         const block_rows = exec_row_ops.rms_weight_grad_block_rows;
         const block_count = (outer + block_rows - 1) / block_rows;
         if (block_count == 1) {
-            rmsNormMulBackwardWeightRows(base_task);
+            rmsNormMulBackwardWeightRows(base_task, 0, outer);
             return out;
         }
         const partials_buffer = try ctx.rt.buffers.acquire(block_count * axis_dim);
@@ -437,19 +425,15 @@ fn rmsNormBackwardWeight(
             .axis_dim = axis_dim,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .block_start = 0,
-            .block_end = block_count,
         };
-        ctx.dispatchRangeOr(RmsNormWeightGradBlocksTask, "block_start", "block_end", blocks_task, block_count, true, backend_mod.kernels.rmsNormWeightGradBlocks);
+        ctx.forRange(block_count, block_count, blocks_task, backend_mod.kernels.rmsNormWeightGradBlocks);
         const reduce_task: RmsNormWeightGradReduceTask = .{
             .partials = partials,
             .output = output,
             .block_count = block_count,
             .axis_dim = axis_dim,
-            .col_start = 0,
-            .col_end = axis_dim,
         };
-        ctx.dispatchRangeOr(RmsNormWeightGradReduceTask, "col_start", "col_end", reduce_task, axis_dim, partials.len >= parallel.row_kernel_len_threshold, backend_mod.kernels.rmsNormWeightGradReduce);
+        ctx.forRange(axis_dim, if (partials.len >= parallel.row_kernel_len_threshold) axis_dim else 1, reduce_task, backend_mod.kernels.rmsNormWeightGradReduce);
         return out;
     }
 
@@ -571,11 +555,9 @@ pub fn rmsNormMulRopeWithTable(
             .pair_count = pair_count,
             .inv_feature_dim = inv_feature_dim,
             .eps = eps,
-            .vector_start = 0,
-            .vector_end = total_vectors,
         };
 
-        ctx.dispatchRangeOr(RmsNormMulRopeHalfTask, "vector_start", "vector_end", base_task, total_vectors, total_vectors > 1 and source.len() >= parallel.fused_chain_len_threshold, rmsNormMulRopeHalfVectors);
+        ctx.forRange(total_vectors, if (total_vectors > 1 and source.len() >= parallel.fused_chain_len_threshold) total_vectors else 1, base_task, rmsNormMulRopeHalfVectors);
         return out;
     }
 
@@ -675,10 +657,8 @@ pub fn layerNormRows(
         .axis_dim = cols,
         .inv_axis_dim = 1 / @as(f32, @floatFromInt(cols)),
         .eps = eps,
-        .row_start = 0,
-        .row_end = rows,
     };
-    ctx.dispatchRangeOr(LayerNormRowsTask, "row_start", "row_end", base_task, rows, input.len >= parallel.row_kernel_len_threshold and rows > 1, backend_mod.kernels.layerNormRows);
+    ctx.forRange(rows, if (input.len >= parallel.row_kernel_len_threshold and rows > 1) rows else 1, base_task, backend_mod.kernels.layerNormRows);
     return out;
 }
 
@@ -761,17 +741,15 @@ fn layerNormDispatchAxisRank(
             .axis_dim = axis_dim,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .row_start = 0,
-            .row_end = outer,
         };
-        ctx.dispatchRangeOr(LayerNormRowsTask, "row_start", "row_end", base_task, outer, outer > 1, backend_mod.kernels.layerNormRows);
+        ctx.forRange(outer, if (outer > 1) outer else 1, base_task, backend_mod.kernels.layerNormRows);
         return out;
     }
 
     if (inner > 1) {
         var scratch = try ctx.empty(.f32, .{2 * inner});
         defer scratch.deinit();
-        ctx.dispatchInnerLanes(LayerNormInnerTask, .{
+        ctx.forRange(inner, ExecContext.innerLaneParts(source.len(), inner), LayerNormInnerTask{
             .input = input,
             .weights = weights,
             .biases = biases,
@@ -782,9 +760,7 @@ fn layerNormDispatchAxisRank(
             .outer = outer,
             .inv_axis_dim = inv_axis_dim,
             .eps = eps,
-            .inner_start = 0,
-            .inner_end = inner,
-        }, source.len(), inner, runLayerNormInnerTask);
+        }, layerNormInner);
         return out;
     }
 
@@ -953,10 +929,8 @@ fn layerNormBackwardDispatchAxisRank(
                 .axis_dim = axis_dim,
                 .inv_axis_dim = inv_axis_dim,
                 .eps = eps,
-                .row_start = 0,
-                .row_end = outer,
             };
-            ctx.dispatchRangeOr(LayerNormBackwardInputRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, layerNormBackwardInputRows);
+            ctx.forRange(outer, if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) outer else 1, base_task, layerNormBackwardInputRows);
         }
 
         if (need_weight or need_bias) {
@@ -969,17 +943,15 @@ fn layerNormBackwardDispatchAxisRank(
                 defer if (stats.len > 0) ctx.allocator().free(stats);
                 if (need_weight) {
                     stats = try ctx.allocator().alloc(f32, 2 * outer);
-                    ctx.dispatchRangeOr(LayerNormRowStatsTask, "row_start", "row_end", .{
+                    ctx.forRange(outer, outer, LayerNormRowStatsTask{
                         .input = input,
                         .stats = stats,
                         .axis_dim = axis_dim,
                         .inv_axis_dim = inv_axis_dim,
                         .eps = eps,
-                        .row_start = 0,
-                        .row_end = outer,
-                    }, outer, true, layerNormRowStats);
+                    }, layerNormRowStats);
                 }
-                ctx.dispatchRangeOr(LayerNormParamGradColumnsTask, "col_start", "col_end", .{
+                ctx.forRange(axis_dim, axis_dim, LayerNormParamGradColumnsTask{
                     .input = input,
                     .grad = grad,
                     .stats = stats,
@@ -987,9 +959,7 @@ fn layerNormBackwardDispatchAxisRank(
                     .dbias = if (result.bias) |*value| value.data() else null,
                     .rows = outer,
                     .axis_dim = axis_dim,
-                    .col_start = 0,
-                    .col_end = axis_dim,
-                }, axis_dim, true, layerNormParamGradColumns);
+                }, layerNormParamGradColumns);
             } else {
                 layerNormAffineParamGradRows(
                     input,

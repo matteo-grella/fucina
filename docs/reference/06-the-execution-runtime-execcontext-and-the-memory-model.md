@@ -462,10 +462,12 @@ test "fromSlice copies; fromBorrowedSlice wraps caller storage" {
 ```
 
 Internal substrate helpers (aliased on `ExecContext` for the domain
-modules; not part of the op surface): `dispatchRange` /
-`dispatchRangeCapped` / `dispatchRangeOr` (the last one carries the
-serial arm and synthesizes the pool adapter, so a row kernel is named
-once, by value), the `enableNative*PoolForWork` pool gates, and
+modules; not part of the op surface): `forRange(total, max_parts, ctx,
+run)`, the one range dispatch (`run(ctx, start, end)` over `[0, total)`
+in at most `max_parts` proportional parts across the team, or one serial
+call; the cap is the call site's gate, `innerLaneParts` and
+`parallel.partsForChunk` the two shared cap rules), the
+`enableNative*PoolForWork` pool gates, and
 `prepareContiguous(dtype, x)` returning `PreparedTensorOf(dtype)`
 (`PreparedTensor` is the f32 instantiation) — a borrowed-or-owned union
 whose `deinit` is a no-op on the borrowed arm, so hot paths can

@@ -606,32 +606,7 @@ const RangeCtx = struct {
 };
 
 fn runRowRanges(ctx: *ExecContext, n: usize, blocks_per_row: usize, range_ctx: RangeCtx) void {
-    if (n * blocks_per_row >= 8) {
-        if (ctx.workPool()) |pool| {
-            const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), n);
-            if (task_count > 1) {
-                const Task = struct {
-                    context: RangeCtx,
-                    start: usize,
-                    end: usize,
-                    fn run(task: *const @This()) void {
-                        quantizeRowRange(task.context, task.start, task.end);
-                    }
-                };
-                var tasks: [parallel.vector_max_threads]Task = undefined;
-                for (0..task_count) |i| {
-                    tasks[i] = .{
-                        .context = range_ctx,
-                        .start = i * n / task_count,
-                        .end = (i + 1) * n / task_count,
-                    };
-                }
-                pool.parallelChunks(Task, tasks[0..task_count], Task.run);
-                return;
-            }
-        }
-    }
-    quantizeRowRange(range_ctx, 0, n);
+    ctx.forRange(n, if (n * blocks_per_row >= 8) n else 1, range_ctx, quantizeRowRange);
 }
 
 fn quantizeRowRange(ctx: RangeCtx, r0: usize, r1: usize) void {

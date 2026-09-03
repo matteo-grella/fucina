@@ -230,11 +230,8 @@ pub const ExecContext = struct {
     pub const tryWorkPool = exec_runtime.tryWorkPool;
     pub const workPool = exec_runtime.workPool;
     pub const pc = exec_runtime.pc;
-    pub const dispatchRange = exec_runtime.dispatchRange;
-    pub const dispatchRangeOr = exec_runtime.dispatchRangeOr;
-    pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;
-    pub const dispatchInnerLanes = exec_runtime.dispatchInnerLanes;
-    pub const parallelMap = exec_runtime.parallelMap;
+    pub const forRange = exec_runtime.forRange;
+    pub const innerLaneParts = exec_runtime.innerLaneParts;
 
     pub const broadcastTo = exec_runtime.broadcastTo;
 

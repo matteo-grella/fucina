@@ -709,6 +709,15 @@ fn EnvironScan(comptime name: [:0]const u8, comptime parse: fn ([]const u8) ?usi
     };
 }
 
+/// Part cap for a map over `n` items in chunks of at least `min_len`: one
+/// part below `min_len`, else `1 + n / min_len` (`ExecContext.forRange`
+/// clamps it to the team size). The chunk grid then depends only on `n`
+/// and the part count; whether that makes a kernel thread-count-invariant
+/// is the kernel's property to state (the optimizer and ES maps do).
+pub fn partsForChunk(n: usize, min_len: usize) usize {
+    return if (n >= min_len) 1 + n / min_len else 1;
+}
+
 pub fn saturatedMul3(a: usize, b: usize, c: usize) usize {
     const ab = std.math.mul(usize, a, b) catch return std.math.maxInt(usize);
     return std.math.mul(usize, ab, c) catch std.math.maxInt(usize);

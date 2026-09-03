@@ -74,8 +74,6 @@ pub const SplitSwiGluTask = struct {
     output: []f32,
     axis_dim: usize,
     half: usize,
-    outer_start: usize,
-    outer_end: usize,
 };
 
 /// The glu twin carries the same payload: one task type, two kernels.
@@ -128,9 +126,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                         .output = group_scratch,
                         .axis_dim = cols * 2,
                         .half = cols,
-                        .outer_start = 0,
-                        .outer_end = rows_in_group,
-                    }),
+                    }, 0, rows_in_group),
                     .geglu_quant => for (0..rows_in_group) |r| {
                         const dst = task.scratch[r * cols ..][0..cols];
                         elementwise.unaryRowSlice(.gelu_quant, dst, task.gate[(row0 + r) * cols ..][0..cols]);
@@ -143,9 +139,7 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
                         .axis_dim = cols,
                         .inv_axis_dim = task.inv_cols,
                         .eps = task.eps,
-                        .row_start = 0,
-                        .row_end = rows_in_group,
-                    }) else for (0..rows_in_group) |r| {
+                    }, 0, rows_in_group) else for (0..rows_in_group) |r| {
                         // The unfused sub-threshold scalar loop, verbatim.
                         const row_in = task.gate[(row0 + r) * cols ..][0..cols];
                         const row_out = task.scratch[r * cols ..][0..cols];
@@ -190,24 +184,12 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
     };
 }
 
-pub const SplitSwiGluQuantQ8_0x4Task = struct {
-    input: []const f32,
-    blocks: []quantized_matmul.BlockQ8_0x4,
-    rows: usize,
-    cols: usize,
-    blocks_per_row: usize,
-    row_group_start: usize,
-    row_group_end: usize,
-};
-
 pub const SplitSwiGluBackwardTask = struct {
     input: []const f32,
     grad: []const f32,
     output: []f32,
     axis_dim: usize,
     half: usize,
-    outer_start: usize,
-    outer_end: usize,
 };
 
 pub const SplitGluBackwardTask = SplitSwiGluBackwardTask;
@@ -229,8 +211,6 @@ pub const RmsNormMulRopeHalfTask = struct {
     pair_count: usize,
     inv_feature_dim: f32,
     eps: f32,
-    vector_start: usize,
-    vector_end: usize,
 };
 
 pub const RmsNormMulRowsTask = struct {
@@ -240,8 +220,6 @@ pub const RmsNormMulRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const RmsNormMulAddRowsTask = struct {
@@ -252,8 +230,6 @@ pub const RmsNormMulAddRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const RmsNormMulBackwardInputRowsTask = struct {
@@ -264,8 +240,6 @@ pub const RmsNormMulBackwardInputRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const RmsNormMulBackwardWeightRowsTask = struct {
@@ -275,8 +249,6 @@ pub const RmsNormMulBackwardWeightRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 /// Row-block grid of the large-input rmsNorm weight gradient: a fixed
@@ -297,8 +269,6 @@ pub const RmsNormWeightGradBlocksTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    block_start: usize,
-    block_end: usize,
 };
 
 pub const RmsNormWeightGradReduceTask = struct {
@@ -310,8 +280,6 @@ pub const RmsNormWeightGradReduceTask = struct {
     output: []f32,
     block_count: usize,
     axis_dim: usize,
-    col_start: usize,
-    col_end: usize,
 };
 
 pub const LayerNormRowsTask = struct {
@@ -325,8 +293,6 @@ pub const LayerNormRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const LayerNormBackwardInputRowsTask = struct {
@@ -338,8 +304,6 @@ pub const LayerNormBackwardInputRowsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const LayerNormRowStatsTask = struct {
@@ -351,8 +315,6 @@ pub const LayerNormRowStatsTask = struct {
     axis_dim: usize,
     inv_axis_dim: f32,
     eps: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const LayerNormParamGradColumnsTask = struct {
@@ -368,16 +330,12 @@ pub const LayerNormParamGradColumnsTask = struct {
     dbias: ?[]f32,
     rows: usize,
     axis_dim: usize,
-    col_start: usize,
-    col_end: usize,
 };
 
 pub const SoftmaxRowsTask = struct {
     input: []const f32,
     output: []f32,
     axis_dim: usize,
-    row_start: usize,
-    row_end: usize,
 };
 
 /// The fused log-domain row kernels share the softmax payload:
@@ -408,11 +366,11 @@ inline fn rowMaxSafe(row_in: []const f32) f32 {
 /// one SIMD max scan and one SIMD vexpf-sum per row, no materialized
 /// intermediate. Output holds one slot per row.
 pub const logsumexpRows = if (isa.reference) scalar.logsumexpRows else nativeLogsumexpRows;
-fn nativeLogsumexpRows(task: LogRowsTask) void {
+fn nativeLogsumexpRows(task: LogRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const row_in = task.input[row_i * task.axis_dim ..][0..task.axis_dim];
         const max_safe = rowMaxSafe(row_in);
 
@@ -435,11 +393,11 @@ fn nativeLogsumexpRows(task: LogRowsTask) void {
 /// max — two SIMD passes per row (vexpf-sum, then shift), no
 /// materialized intermediate.
 pub const logSoftmaxRows = if (isa.reference) scalar.logSoftmaxRows else nativeLogSoftmaxRows;
-fn nativeLogSoftmaxRows(task: LogRowsTask) void {
+fn nativeLogSoftmaxRows(task: LogRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const row_in = task.input[base..][0..task.axis_dim];
         const row_out = task.output[base..][0..task.axis_dim];
@@ -486,8 +444,6 @@ pub fn SoftmaxExtRowsTask(comptime rank: usize) type {
         // inner == 1 and the mask (if any) is unit-stride along the softmax
         // axis: rows are contiguous, so they take the SIMD body.
         simd_rows: bool,
-        row_start: usize,
-        row_end: usize,
     };
 }
 
@@ -497,8 +453,6 @@ pub const SoftmaxBackwardRowsTask = struct {
     output: []f32,
     axis_dim: usize,
     scale: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const CrossEntropyLossRowsTask = struct {
@@ -519,8 +473,6 @@ pub const CrossEntropyLossRowsTask = struct {
     class_count: usize,
     ignore_index: ?usize,
     label_smoothing: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const CrossEntropyBackwardRowsTask = struct {
@@ -541,8 +493,6 @@ pub const CrossEntropyBackwardRowsTask = struct {
     ignore_index: ?usize,
     label_smoothing: f32,
     grad_common: f32,
-    row_start: usize,
-    row_end: usize,
 };
 
 pub const DropoutRangeTask = struct {
@@ -559,8 +509,6 @@ pub const DropoutRangeTask = struct {
     keep_cutoff: u64,
     scale: f32,
     seed: u64,
-    start: usize,
-    end: usize,
 };
 
 /// Integer form of the dropout keep predicate (see `DropoutRangeTask`).
@@ -585,27 +533,13 @@ pub const ScatterAddRowsTask = struct {
     output: []f32,
     indices: []const usize,
     row_len: usize,
-    row_start: usize,
-    row_end: usize,
 };
 
-pub fn runSplitSwiGluQuantQ8_0x4Task(task: *const SplitSwiGluQuantQ8_0x4Task) void {
-    quantized_matmul.q8_0.quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
-        task.blocks,
-        task.input,
-        task.rows,
-        task.cols,
-        task.blocks_per_row,
-        task.row_group_start,
-        task.row_group_end,
-    );
-}
-
 pub const splitSwiGluRows = if (isa.reference) scalar.splitSwiGluRows else nativeSplitSwiGluRows;
-fn nativeSplitSwiGluRows(task: SplitSwiGluTask) void {
+fn nativeSplitSwiGluRows(task: SplitSwiGluTask, outer_start: usize, outer_end: usize) void {
     const Vec = @Vector(4, f32);
     const one: Vec = @splat(1);
-    for (task.outer_start..task.outer_end) |outer_i| {
+    for (outer_start..outer_end) |outer_i| {
         const in_base = outer_i * task.axis_dim;
         const out_base = outer_i * task.half;
         var i: usize = 0;
@@ -623,10 +557,10 @@ fn nativeSplitSwiGluRows(task: SplitSwiGluTask) void {
 }
 
 pub const splitGluRows = if (isa.reference) scalar.splitGluRows else nativeSplitGluRows;
-fn nativeSplitGluRows(task: SplitGluTask) void {
+fn nativeSplitGluRows(task: SplitGluTask, outer_start: usize, outer_end: usize) void {
     const Vec = @Vector(4, f32);
     const one: Vec = @splat(1);
-    for (task.outer_start..task.outer_end) |outer_i| {
+    for (outer_start..outer_end) |outer_i| {
         const in_base = outer_i * task.axis_dim;
         const out_base = outer_i * task.half;
         var i: usize = 0;
@@ -644,10 +578,10 @@ fn nativeSplitGluRows(task: SplitGluTask) void {
 }
 
 pub const splitSwiGluBackwardRows = if (isa.reference) scalar.splitSwiGluBackwardRows else nativeSplitSwiGluBackwardRows;
-fn nativeSplitSwiGluBackwardRows(task: SplitSwiGluBackwardTask) void {
+fn nativeSplitSwiGluBackwardRows(task: SplitSwiGluBackwardTask, outer_start: usize, outer_end: usize) void {
     const Vec = @Vector(4, f32);
     const one: Vec = @splat(1);
-    for (task.outer_start..task.outer_end) |outer_i| {
+    for (outer_start..outer_end) |outer_i| {
         const in_base = outer_i * task.axis_dim;
         const grad_base = outer_i * task.half;
         var i: usize = 0;
@@ -675,10 +609,10 @@ fn nativeSplitSwiGluBackwardRows(task: SplitSwiGluBackwardTask) void {
 }
 
 pub const splitGluBackwardRows = if (isa.reference) scalar.splitGluBackwardRows else nativeSplitGluBackwardRows;
-fn nativeSplitGluBackwardRows(task: SplitGluBackwardTask) void {
+fn nativeSplitGluBackwardRows(task: SplitGluBackwardTask, outer_start: usize, outer_end: usize) void {
     const Vec = @Vector(4, f32);
     const one: Vec = @splat(1);
-    for (task.outer_start..task.outer_end) |outer_i| {
+    for (outer_start..outer_end) |outer_i| {
         const in_base = outer_i * task.axis_dim;
         const grad_base = outer_i * task.half;
         var i: usize = 0;
@@ -747,11 +681,11 @@ pub inline fn rowSumSq(row: []const f32) f32 {
 }
 
 pub const rmsNormMulRopeHalfVectors = if (isa.reference) scalar.rmsNormMulRopeHalfVectors else nativeRmsNormMulRopeHalfVectors;
-fn nativeRmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
+fn nativeRmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask, vector_start: usize, vector_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.vector_start..task.vector_end) |vector_i| {
+    for (vector_start..vector_end) |vector_i| {
         var remainder = vector_i;
         var input_base: usize = task.input_offset;
         var output_base: usize = 0;
@@ -793,11 +727,11 @@ fn nativeRmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
 }
 
 pub const rmsNormMulRows = if (isa.reference) scalar.rmsNormMulRows else nativeRmsNormMulRows;
-fn nativeRmsNormMulRows(task: RmsNormMulRowsTask) void {
+fn nativeRmsNormMulRows(task: RmsNormMulRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
         const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -816,11 +750,11 @@ fn nativeRmsNormMulRows(task: RmsNormMulRowsTask) void {
 }
 
 pub const rmsNormMulAddRows = if (isa.reference) scalar.rmsNormMulAddRows else nativeRmsNormMulAddRows;
-fn nativeRmsNormMulAddRows(task: RmsNormMulAddRowsTask) void {
+fn nativeRmsNormMulAddRows(task: RmsNormMulAddRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
         const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -840,11 +774,11 @@ fn nativeRmsNormMulAddRows(task: RmsNormMulAddRowsTask) void {
 }
 
 pub const rmsNormMulBackwardInputRows = if (isa.reference) scalar.rmsNormMulBackwardInputRows else nativeRmsNormMulBackwardInputRows;
-fn nativeRmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void {
+fn nativeRmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         var axis_i: usize = 0;
         var sumsq0: Vec = @splat(0);
@@ -899,11 +833,11 @@ fn nativeRmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void
 }
 
 pub const rmsNormMulBackwardWeightRows = if (isa.reference) scalar.rmsNormMulBackwardWeightRows else nativeRmsNormMulBackwardWeightRows;
-fn nativeRmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void {
+fn nativeRmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
         const rms_scale = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -926,8 +860,8 @@ fn nativeRmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) vo
 /// `dweight + gy * x * (1/rms)` chain as the small-input path), so a
 /// partial depends only on the block's rows, never on the task that ran
 /// it.
-pub fn rmsNormWeightGradBlocks(task: RmsNormWeightGradBlocksTask) void {
-    for (task.block_start..task.block_end) |block_i| {
+pub fn rmsNormWeightGradBlocks(task: RmsNormWeightGradBlocksTask, block_start: usize, block_end: usize) void {
+    for (block_start..block_end) |block_i| {
         const partial = task.partials[block_i * task.axis_dim ..][0..task.axis_dim];
         @memset(partial, 0);
         const row_start = block_i * rms_weight_grad_block_rows;
@@ -938,26 +872,24 @@ pub fn rmsNormWeightGradBlocks(task: RmsNormWeightGradBlocksTask) void {
             .axis_dim = task.axis_dim,
             .inv_axis_dim = task.inv_axis_dim,
             .eps = task.eps,
-            .row_start = row_start,
-            .row_end = @min(row_start + rms_weight_grad_block_rows, task.rows),
-        });
+        }, row_start, @min(row_start + rms_weight_grad_block_rows, task.rows));
     }
 }
 
 /// Block-ordered reduction of the partials into the task's column range.
 pub const rmsNormWeightGradReduce = if (isa.reference) scalar.rmsNormWeightGradReduce else nativeRmsNormWeightGradReduce;
-fn nativeRmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask) void {
+fn nativeRmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask, col_start: usize, col_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
-    var col = task.col_start;
-    while (col + vector_width <= task.col_end) : (col += vector_width) {
+    var col = col_start;
+    while (col + vector_width <= col_end) : (col += vector_width) {
         var acc: Vec = task.output[col..][0..vector_width].*;
         for (0..task.block_count) |block_i| {
             acc = acc + @as(Vec, task.partials[block_i * task.axis_dim + col ..][0..vector_width].*);
         }
         task.output[col..][0..vector_width].* = acc;
     }
-    while (col < task.col_end) : (col += 1) {
+    while (col < col_end) : (col += 1) {
         var acc = task.output[col];
         for (0..task.block_count) |block_i| {
             acc = acc + task.partials[block_i * task.axis_dim + col];
@@ -967,11 +899,11 @@ fn nativeRmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask) void {
 }
 
 pub const layerNormRows = if (isa.reference) scalar.layerNormRows else nativeLayerNormRows;
-fn nativeLayerNormRows(task: LayerNormRowsTask) void {
+fn nativeLayerNormRows(task: LayerNormRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const row_in = task.input[base..][0..task.axis_dim];
         const row_out = task.output[base..][0..task.axis_dim];
@@ -1027,11 +959,11 @@ fn nativeLayerNormRows(task: LayerNormRowsTask) void {
 }
 
 pub const layerNormBackwardInputRows = if (isa.reference) scalar.layerNormBackwardInputRows else nativeLayerNormBackwardInputRows;
-fn nativeLayerNormBackwardInputRows(task: LayerNormBackwardInputRowsTask) void {
+fn nativeLayerNormBackwardInputRows(task: LayerNormBackwardInputRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const row_in = task.input[base..][0..task.axis_dim];
         const row_gy = task.grad[base..][0..task.axis_dim];
@@ -1216,11 +1148,11 @@ fn nativeLayerNormAffineParamGradRows(
 }
 
 pub const layerNormRowStats = if (isa.reference) scalar.layerNormRowStats else nativeLayerNormRowStats;
-fn nativeLayerNormRowStats(task: LayerNormRowStatsTask) void {
+fn nativeLayerNormRowStats(task: LayerNormRowStatsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const row_in = task.input[row_i * task.axis_dim ..][0..task.axis_dim];
 
         var axis_i: usize = 0;
@@ -1259,14 +1191,14 @@ fn nativeLayerNormRowStats(task: LayerNormRowStatsTask) void {
 /// a vector lane or the tail — the column split can move with the task count
 /// without changing any result bit.
 pub const layerNormParamGradColumns = if (isa.reference) scalar.layerNormParamGradColumns else nativeLayerNormParamGradColumns;
-fn nativeLayerNormParamGradColumns(task: LayerNormParamGradColumnsTask) void {
+fn nativeLayerNormParamGradColumns(task: LayerNormParamGradColumnsTask, col_start: usize, col_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
     for (0..task.rows) |row_i| {
         const base = row_i * task.axis_dim;
 
-        var col = task.col_start;
+        var col = col_start;
         if (task.dweight) |dweight| {
             // Stats are only filled (and only needed) when dweight exists;
             // bias-only runs skip the stats pass entirely.
@@ -1275,31 +1207,31 @@ fn nativeLayerNormParamGradColumns(task: LayerNormParamGradColumnsTask) void {
             const mean_vec: Vec = @splat(mean_value);
             const sigma_vec: Vec = @splat(inv_sigma);
             if (task.dbias) |dbias| {
-                while (col + vector_width <= task.col_end) : (col += vector_width) {
+                while (col + vector_width <= col_end) : (col += vector_width) {
                     const gy_vec: Vec = task.grad[base + col ..][0..vector_width].*;
                     const normalized = (@as(Vec, task.input[base + col ..][0..vector_width].*) - mean_vec) * sigma_vec;
                     dweight[col..][0..vector_width].* = @as(Vec, dweight[col..][0..vector_width].*) + gy_vec * normalized;
                     dbias[col..][0..vector_width].* = @as(Vec, dbias[col..][0..vector_width].*) + gy_vec;
                 }
-                while (col < task.col_end) : (col += 1) {
+                while (col < col_end) : (col += 1) {
                     dweight[col] += task.grad[base + col] * ((task.input[base + col] - mean_value) * inv_sigma);
                     dbias[col] += task.grad[base + col];
                 }
             } else {
-                while (col + vector_width <= task.col_end) : (col += vector_width) {
+                while (col + vector_width <= col_end) : (col += vector_width) {
                     const gy_vec: Vec = task.grad[base + col ..][0..vector_width].*;
                     const normalized = (@as(Vec, task.input[base + col ..][0..vector_width].*) - mean_vec) * sigma_vec;
                     dweight[col..][0..vector_width].* = @as(Vec, dweight[col..][0..vector_width].*) + gy_vec * normalized;
                 }
-                while (col < task.col_end) : (col += 1) {
+                while (col < col_end) : (col += 1) {
                     dweight[col] += task.grad[base + col] * ((task.input[base + col] - mean_value) * inv_sigma);
                 }
             }
         } else if (task.dbias) |dbias| {
-            while (col + vector_width <= task.col_end) : (col += vector_width) {
+            while (col + vector_width <= col_end) : (col += vector_width) {
                 dbias[col..][0..vector_width].* = @as(Vec, dbias[col..][0..vector_width].*) + @as(Vec, task.grad[base + col ..][0..vector_width].*);
             }
-            while (col < task.col_end) : (col += 1) {
+            while (col < col_end) : (col += 1) {
                 dbias[col] += task.grad[base + col];
             }
         }
@@ -1307,11 +1239,11 @@ fn nativeLayerNormParamGradColumns(task: LayerNormParamGradColumnsTask) void {
 }
 
 pub const softmaxRows = if (isa.reference) scalar.softmaxRows else nativeSoftmaxRows;
-fn nativeSoftmaxRows(task: SoftmaxRowsTask) void {
+fn nativeSoftmaxRows(task: SoftmaxRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const row_in = task.input[base..][0..task.axis_dim];
         const row_out = task.output[base..][0..task.axis_dim];
@@ -1353,12 +1285,12 @@ fn nativeSoftmaxRows(task: SoftmaxRowsTask) void {
     }
 }
 
-pub fn softmaxExtRows(comptime rank: usize, comptime axis: usize, task: SoftmaxExtRowsTask(rank)) void {
-    if (comptime isa.reference) return scalar.softmaxExtRows(rank, axis, task);
+pub fn softmaxExtRows(comptime rank: usize, comptime axis: usize, task: SoftmaxExtRowsTask(rank), row_start: usize, row_end: usize) void {
+    if (comptime isa.reference) return scalar.softmaxExtRows(rank, axis, task, row_start, row_end);
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row| {
+    for (row_start..row_end) |row| {
         const outer_i = row / task.inner;
         const inner_i = row % task.inner;
         const base = outer_i * task.axis_dim * task.inner;
@@ -1481,11 +1413,11 @@ pub fn softmaxExtRows(comptime rank: usize, comptime axis: usize, task: SoftmaxE
 }
 
 pub const softmaxBackwardRows = if (isa.reference) scalar.softmaxBackwardRows else nativeSoftmaxBackwardRows;
-fn nativeSoftmaxBackwardRows(task: SoftmaxBackwardRowsTask) void {
+fn nativeSoftmaxBackwardRows(task: SoftmaxBackwardRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
         const row_y = task.y[base..][0..task.axis_dim];
         const row_gy = task.gy[base..][0..task.axis_dim];
@@ -1619,29 +1551,13 @@ pub const SoftmaxInnerTask = struct {
     /// single scratch allocation serves every task disjointly.
     scratch: []f32,
     outer: usize,
-    // Lane sub-range this task owns. Lanes are independent, so any split is
-    // bitwise identical to the serial full-range call.
-    inner_start: usize,
-    inner_end: usize,
 };
 
-pub fn runSoftmaxInnerTask(task: *const SoftmaxInnerTask) void {
-    softmaxInner(task.*);
-}
-
-pub fn runLogsumexpInnerTask(task: *const SoftmaxInnerTask) void {
-    logsumexpInner(task.*);
-}
-
-pub fn runLogSoftmaxInnerTask(task: *const SoftmaxInnerTask) void {
-    logSoftmaxInner(task.*);
-}
-
 pub const softmaxInner = if (isa.reference) scalar.softmaxInner else nativeSoftmaxInner;
-fn nativeSoftmaxInner(task: SoftmaxInnerTask) void {
+fn nativeSoftmaxInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const max_row = task.scratch[lane0..][0..lanes];
     const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -1663,10 +1579,10 @@ fn nativeSoftmaxInner(task: SoftmaxInnerTask) void {
 
 /// Output holds one `inner`-wide row per outer block (the axis removed).
 pub const logsumexpInner = if (isa.reference) scalar.logsumexpInner else nativeLogsumexpInner;
-fn nativeLogsumexpInner(task: SoftmaxInnerTask) void {
+fn nativeLogsumexpInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const max_row = task.scratch[lane0..][0..lanes];
     const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -1688,10 +1604,10 @@ fn nativeLogsumexpInner(task: SoftmaxInnerTask) void {
 }
 
 pub const logSoftmaxInner = if (isa.reference) scalar.logSoftmaxInner else nativeLogSoftmaxInner;
-fn nativeLogSoftmaxInner(task: SoftmaxInnerTask) void {
+fn nativeLogSoftmaxInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const max_row = task.scratch[lane0..][0..lanes];
     const sum_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -1727,13 +1643,7 @@ pub const SoftmaxBackwardInnerTask = struct {
     scratch: []f32,
     scale: f32,
     outer: usize,
-    inner_start: usize,
-    inner_end: usize,
 };
-
-pub fn runSoftmaxBackwardInnerTask(task: *const SoftmaxBackwardInnerTask) void {
-    softmaxBackwardInner(task.*);
-}
 
 pub const LayerNormBackwardInnerTask = struct {
     input: []const f32,
@@ -1881,10 +1791,10 @@ fn nativeLayerNormBackwardInner(task: LayerNormBackwardInnerTask) void {
 }
 
 pub const softmaxBackwardInner = if (isa.reference) scalar.softmaxBackwardInner else nativeSoftmaxBackwardInner;
-fn nativeSoftmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
+fn nativeSoftmaxBackwardInner(task: SoftmaxBackwardInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const dot_row = task.scratch[lane0..][0..lanes];
     const scale_vec: InnerVec = @splat(task.scale);
     for (0..task.outer) |outer_i| {
@@ -2002,19 +1912,13 @@ pub const VarianceInnerTask = struct {
     inv_axis_dim: f32,
     /// `1 / (axis_dim - ddof)`.
     inv_denom: f32,
-    inner_start: usize,
-    inner_end: usize,
 };
 
-pub fn runVarianceInnerTask(task: *const VarianceInnerTask) void {
-    varianceInner(task.*);
-}
-
 pub const varianceInner = if (isa.reference) scalar.varianceInner else nativeVarianceInner;
-fn nativeVarianceInner(task: VarianceInnerTask) void {
+fn nativeVarianceInner(task: VarianceInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const mean_row = task.scratch[lane0..][0..lanes];
     const sumsq_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -2049,24 +1953,14 @@ pub fn StandardizeInnerTask(comptime Acc: type) type {
         /// variance (finalized in place to the denominator) row.
         scratch: []Acc,
         outer: usize,
-        inner_start: usize,
-        inner_end: usize,
     };
 }
 
-pub fn runStandardizeInnerTask(comptime Acc: type) fn (task: *const StandardizeInnerTask(Acc)) void {
-    return struct {
-        fn run(task: *const StandardizeInnerTask(Acc)) void {
-            standardizeInner(Acc, task.*);
-        }
-    }.run;
-}
-
-pub fn standardizeInner(comptime Acc: type, task: StandardizeInnerTask(Acc)) void {
-    if (comptime isa.reference) return scalar.standardizeInner(Acc, task);
+pub fn standardizeInner(comptime Acc: type, task: StandardizeInnerTask(Acc), inner_start: usize, inner_end: usize) void {
+    if (comptime isa.reference) return scalar.standardizeInner(Acc, task, inner_start, inner_end);
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const mean_row = task.scratch[lane0..][0..lanes];
     const denom_row = task.scratch[inner + lane0 ..][0..lanes];
     const count: Acc = @floatFromInt(task.valid_count);
@@ -2120,17 +2014,7 @@ pub fn StandardizeBackwardInnerTask(comptime Acc: type) type {
         /// (then mean gradient), centered-gradient dot (then second scale).
         scratch: []Acc,
         outer: usize,
-        inner_start: usize,
-        inner_end: usize,
     };
-}
-
-pub fn runStandardizeBackwardInnerTask(comptime Acc: type) fn (task: *const StandardizeBackwardInnerTask(Acc)) void {
-    return struct {
-        fn run(task: *const StandardizeBackwardInnerTask(Acc)) void {
-            standardizeBackwardInner(Acc, task.*);
-        }
-    }.run;
 }
 
 /// Lane-wise `gsum += g; dot += g * (row - mean)`.
@@ -2152,11 +2036,11 @@ fn addGradMomentsIntoLanes(comptime Acc: type, gsum_row: []Acc, dot_row: []Acc, 
     }
 }
 
-pub fn standardizeBackwardInner(comptime Acc: type, task: StandardizeBackwardInnerTask(Acc)) void {
-    if (comptime isa.reference) return scalar.standardizeBackwardInner(Acc, task);
+pub fn standardizeBackwardInner(comptime Acc: type, task: StandardizeBackwardInnerTask(Acc), inner_start: usize, inner_end: usize) void {
+    if (comptime isa.reference) return scalar.standardizeBackwardInner(Acc, task, inner_start, inner_end);
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const mean_row = task.scratch[lane0..][0..lanes];
     const var_row = task.scratch[inner + lane0 ..][0..lanes];
     const denom_row = task.scratch[2 * inner + lane0 ..][0..lanes];
@@ -2244,13 +2128,7 @@ pub const RmsNormInnerTask = struct {
     outer: usize,
     inv_axis_dim: f32,
     eps: f32,
-    inner_start: usize,
-    inner_end: usize,
 };
-
-pub fn runRmsNormInnerTask(task: *const RmsNormInnerTask) void {
-    rmsNormInner(task.*);
-}
 
 /// Lane-wise `out = in * scale [* w] [+ r]` (the residual added last, on
 /// the left, as the scalar arms wrote it).
@@ -2271,10 +2149,10 @@ fn rmsApplyLanes(out: []f32, in: []const f32, scale_row: []const f32, weight: ?f
 }
 
 pub const rmsNormInner = if (isa.reference) scalar.rmsNormInner else nativeRmsNormInner;
-fn nativeRmsNormInner(task: RmsNormInnerTask) void {
+fn nativeRmsNormInner(task: RmsNormInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const scale_row = task.scratch[lane0..][0..lanes];
     for (0..task.outer) |outer_i| {
         const base = outer_i * task.axis_dim * inner + lane0;
@@ -2311,13 +2189,7 @@ pub const RmsNormBackwardInputInnerTask = struct {
     outer: usize,
     inv_axis_dim: f32,
     eps: f32,
-    inner_start: usize,
-    inner_end: usize,
 };
-
-pub fn runRmsNormBackwardInputInnerTask(task: *const RmsNormBackwardInputInnerTask) void {
-    rmsNormBackwardInputInner(task.*);
-}
 
 /// Lane-wise `sumsq += x^2; dot += (g * w) * x`.
 fn addSqAndWeightedDotIntoLanes(sumsq_row: []f32, dot_row: []f32, row: []const f32, grad: []const f32, w_axis: f32) void {
@@ -2336,10 +2208,10 @@ fn addSqAndWeightedDotIntoLanes(sumsq_row: []f32, dot_row: []f32, row: []const f
 }
 
 pub const rmsNormBackwardInputInner = if (isa.reference) scalar.rmsNormBackwardInputInner else nativeRmsNormBackwardInputInner;
-fn nativeRmsNormBackwardInputInner(task: RmsNormBackwardInputInnerTask) void {
+fn nativeRmsNormBackwardInputInner(task: RmsNormBackwardInputInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const rms_row = task.scratch[lane0..][0..lanes];
     const corr_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -2437,13 +2309,7 @@ pub const LayerNormInnerTask = struct {
     outer: usize,
     inv_axis_dim: f32,
     eps: f32,
-    inner_start: usize,
-    inner_end: usize,
 };
-
-pub fn runLayerNormInnerTask(task: *const LayerNormInnerTask) void {
-    layerNormInner(task.*);
-}
 
 /// Lane-wise `out = (in - mean) * inv_sigma [* w] [+ b]`.
 fn layerNormApplyLanes(out: []f32, in: []const f32, mean_row: []const f32, sigma_row: []const f32, weight: ?f32, bias: ?f32) void {
@@ -2463,10 +2329,10 @@ fn layerNormApplyLanes(out: []f32, in: []const f32, mean_row: []const f32, sigma
 }
 
 pub const layerNormInner = if (isa.reference) scalar.layerNormInner else nativeLayerNormInner;
-fn nativeLayerNormInner(task: LayerNormInnerTask) void {
+fn nativeLayerNormInner(task: LayerNormInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
-    const lane0 = task.inner_start;
-    const lanes = task.inner_end - task.inner_start;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
     const mean_row = task.scratch[lane0..][0..lanes];
     const sigma_row = task.scratch[inner + lane0 ..][0..lanes];
     for (0..task.outer) |outer_i| {
@@ -2496,13 +2362,13 @@ fn nativeLayerNormInner(task: LayerNormInnerTask) void {
 }
 
 pub const crossEntropyLossRows = if (isa.reference) scalar.crossEntropyLossRows else nativeCrossEntropyLossRows;
-fn nativeCrossEntropyLossRows(task: CrossEntropyLossRowsTask) void {
+fn nativeCrossEntropyLossRows(task: CrossEntropyLossRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
     const eps = task.label_smoothing;
     const eps_uniform = eps / @as(f32, @floatFromInt(task.class_count));
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const label = task.labels[row_i];
         if (task.ignore_index) |ignore_index| {
             if (label == ignore_index) {
@@ -2559,13 +2425,13 @@ fn nativeCrossEntropyLossRows(task: CrossEntropyLossRowsTask) void {
 }
 
 pub const crossEntropyBackwardRows = if (isa.reference) scalar.crossEntropyBackwardRows else nativeCrossEntropyBackwardRows;
-fn nativeCrossEntropyBackwardRows(task: CrossEntropyBackwardRowsTask) void {
+fn nativeCrossEntropyBackwardRows(task: CrossEntropyBackwardRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
     const eps = task.label_smoothing;
     const eps_uniform = eps / @as(f32, @floatFromInt(task.class_count));
 
-    for (task.row_start..task.row_end) |row_i| {
+    for (row_start..row_end) |row_i| {
         const label = task.labels[row_i];
         const row_out = task.output[row_i * task.class_count ..][0..task.class_count];
         if (task.ignore_index) |ignore_index| {
@@ -2643,21 +2509,21 @@ fn nativeCrossEntropyBackwardRows(task: CrossEntropyBackwardRowsTask) void {
     }
 }
 
-pub fn dropoutRange(task: DropoutRangeTask) void {
-    for (task.start..task.end) |i| {
+pub fn dropoutRange(task: DropoutRangeTask, start: usize, end: usize) void {
+    for (start..end) |i| {
         task.output[i] = if (rng.at(task.seed, i) >> 11 < task.keep_cutoff) task.input[i] * task.scale else 0;
     }
 }
 
 pub const scatterAddRows = if (isa.reference) scalar.scatterAddRows else nativeScatterAddRows;
-fn nativeScatterAddRows(task: ScatterAddRowsTask) void {
+fn nativeScatterAddRows(task: ScatterAddRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
     const row_len = task.row_len;
 
-    @memset(task.output[task.row_start * row_len .. task.row_end * row_len], 0);
+    @memset(task.output[row_start * row_len .. row_end * row_len], 0);
     for (task.indices, 0..) |index, row| {
-        if (index < task.row_start or index >= task.row_end) continue;
+        if (index < row_start or index >= row_end) continue;
         const src = task.grad[row * row_len ..][0..row_len];
         const dst = task.output[index * row_len ..][0..row_len];
         var i: usize = 0;
@@ -3031,8 +2897,8 @@ pub const scalar = struct {
         return vexpf(1, @splat(value))[0];
     }
 
-    pub fn logsumexpRows(task: LogRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn logsumexpRows(task: LogRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const row_in = task.input[row_i * task.axis_dim ..][0..task.axis_dim];
             const max_safe = rowMaxSafeSerial(row_in);
             var sum_exp: f32 = 0;
@@ -3041,8 +2907,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn logSoftmaxRows(task: LogRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn logSoftmaxRows(task: LogRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const row_in = task.input[base..][0..task.axis_dim];
             const row_out = task.output[base..][0..task.axis_dim];
@@ -3054,8 +2920,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn softmaxRows(task: SoftmaxRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn softmaxRows(task: SoftmaxRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const row_in = task.input[base..][0..task.axis_dim];
             const row_out = task.output[base..][0..task.axis_dim];
@@ -3073,8 +2939,8 @@ pub const scalar = struct {
 
     /// The entry's strided per-row body, applied to every row (it covers
     /// the contiguous `simd_rows` case at `inner == 1`).
-    pub fn softmaxExtRows(comptime rank: usize, comptime axis: usize, task: SoftmaxExtRowsTask(rank)) void {
-        for (task.row_start..task.row_end) |row| {
+    pub fn softmaxExtRows(comptime rank: usize, comptime axis: usize, task: SoftmaxExtRowsTask(rank), row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row| {
             const outer_i = row / task.inner;
             const inner_i = row % task.inner;
             const base = outer_i * task.axis_dim * task.inner;
@@ -3116,8 +2982,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn softmaxBackwardRows(task: SoftmaxBackwardRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn softmaxBackwardRows(task: SoftmaxBackwardRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const row_y = task.y[base..][0..task.axis_dim];
             const row_gy = task.gy[base..][0..task.axis_dim];
@@ -3130,8 +2996,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn splitSwiGluRows(task: SplitSwiGluTask) void {
-        for (task.outer_start..task.outer_end) |outer_i| {
+    pub fn splitSwiGluRows(task: SplitSwiGluTask, outer_start: usize, outer_end: usize) void {
+        for (outer_start..outer_end) |outer_i| {
             const in_base = outer_i * task.axis_dim;
             const out_base = outer_i * task.half;
             for (0..task.half) |i| {
@@ -3142,8 +3008,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn splitGluRows(task: SplitGluTask) void {
-        for (task.outer_start..task.outer_end) |outer_i| {
+    pub fn splitGluRows(task: SplitGluTask, outer_start: usize, outer_end: usize) void {
+        for (outer_start..outer_end) |outer_i| {
             const in_base = outer_i * task.axis_dim;
             const out_base = outer_i * task.half;
             for (0..task.half) |i| {
@@ -3154,8 +3020,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn splitSwiGluBackwardRows(task: SplitSwiGluBackwardTask) void {
-        for (task.outer_start..task.outer_end) |outer_i| {
+    pub fn splitSwiGluBackwardRows(task: SplitSwiGluBackwardTask, outer_start: usize, outer_end: usize) void {
+        for (outer_start..outer_end) |outer_i| {
             const in_base = outer_i * task.axis_dim;
             const grad_base = outer_i * task.half;
             for (0..task.half) |i| {
@@ -3171,8 +3037,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn splitGluBackwardRows(task: SplitGluBackwardTask) void {
-        for (task.outer_start..task.outer_end) |outer_i| {
+    pub fn splitGluBackwardRows(task: SplitGluBackwardTask, outer_start: usize, outer_end: usize) void {
+        for (outer_start..outer_end) |outer_i| {
             const in_base = outer_i * task.axis_dim;
             const grad_base = outer_i * task.half;
             for (0..task.half) |i| {
@@ -3186,8 +3052,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask) void {
-        for (task.vector_start..task.vector_end) |vector_i| {
+    pub fn rmsNormMulRopeHalfVectors(task: RmsNormMulRopeHalfTask, vector_start: usize, vector_end: usize) void {
+        for (vector_start..vector_end) |vector_i| {
             var remainder = vector_i;
             var input_base: usize = task.input_offset;
             var output_base: usize = 0;
@@ -3217,8 +3083,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormMulRows(task: RmsNormMulRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn rmsNormMulRows(task: RmsNormMulRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
             const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -3228,8 +3094,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormMulAddRows(task: RmsNormMulAddRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn rmsNormMulAddRows(task: RmsNormMulAddRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
             const scale_value = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -3239,8 +3105,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn rmsNormMulBackwardInputRows(task: RmsNormMulBackwardInputRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             var sumsq: f32 = 0;
             var dot_acc: f32 = 0;
@@ -3257,8 +3123,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn rmsNormMulBackwardWeightRows(task: RmsNormMulBackwardWeightRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const sumsq = rowSumSq(task.input[base..][0..task.axis_dim]);
             const rms_scale = 1 / @sqrt(sumsq * task.inv_axis_dim + task.eps);
@@ -3268,8 +3134,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask) void {
-        for (task.col_start..task.col_end) |col| {
+    pub fn rmsNormWeightGradReduce(task: RmsNormWeightGradReduceTask, col_start: usize, col_end: usize) void {
+        for (col_start..col_end) |col| {
             var acc = task.output[col];
             for (0..task.block_count) |block_i| {
                 acc = acc + task.partials[block_i * task.axis_dim + col];
@@ -3278,8 +3144,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn layerNormRows(task: LayerNormRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn layerNormRows(task: LayerNormRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const row_in = task.input[base..][0..task.axis_dim];
             const row_out = task.output[base..][0..task.axis_dim];
@@ -3305,8 +3171,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn layerNormBackwardInputRows(task: LayerNormBackwardInputRowsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn layerNormBackwardInputRows(task: LayerNormBackwardInputRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
             const row_in = task.input[base..][0..task.axis_dim];
             const row_gy = task.grad[base..][0..task.axis_dim];
@@ -3383,8 +3249,8 @@ pub const scalar = struct {
         }
     }
 
-    pub fn layerNormRowStats(task: LayerNormRowStatsTask) void {
-        for (task.row_start..task.row_end) |row_i| {
+    pub fn layerNormRowStats(task: LayerNormRowStatsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
             const row_in = task.input[row_i * task.axis_dim ..][0..task.axis_dim];
             var sum_acc: f32 = 0;
             for (row_in) |value| sum_acc += value;
@@ -3399,28 +3265,28 @@ pub const scalar = struct {
         }
     }
 
-    pub fn layerNormParamGradColumns(task: LayerNormParamGradColumnsTask) void {
+    pub fn layerNormParamGradColumns(task: LayerNormParamGradColumnsTask, col_start: usize, col_end: usize) void {
         for (0..task.rows) |row_i| {
             const base = row_i * task.axis_dim;
             if (task.dweight) |dweight| {
                 const mean_value = task.stats[2 * row_i];
                 const inv_sigma = task.stats[2 * row_i + 1];
-                for (task.col_start..task.col_end) |col| {
+                for (col_start..col_end) |col| {
                     dweight[col] += task.grad[base + col] * ((task.input[base + col] - mean_value) * inv_sigma);
                     if (task.dbias) |dbias| dbias[col] += task.grad[base + col];
                 }
             } else if (task.dbias) |dbias| {
-                for (task.col_start..task.col_end) |col| {
+                for (col_start..col_end) |col| {
                     dbias[col] += task.grad[base + col];
                 }
             }
         }
     }
 
-    pub fn crossEntropyLossRows(task: CrossEntropyLossRowsTask) void {
+    pub fn crossEntropyLossRows(task: CrossEntropyLossRowsTask, row_start: usize, row_end: usize) void {
         const eps = task.label_smoothing;
         const eps_uniform = eps / @as(f32, @floatFromInt(task.class_count));
-        for (task.row_start..task.row_end) |row_i| {
+        for (row_start..row_end) |row_i| {
             const label = task.labels[row_i];
             if (task.ignore_index) |ignore_index| {
                 if (label == ignore_index) {
@@ -3450,10 +3316,10 @@ pub const scalar = struct {
         }
     }
 
-    pub fn crossEntropyBackwardRows(task: CrossEntropyBackwardRowsTask) void {
+    pub fn crossEntropyBackwardRows(task: CrossEntropyBackwardRowsTask, row_start: usize, row_end: usize) void {
         const eps = task.label_smoothing;
         const eps_uniform = eps / @as(f32, @floatFromInt(task.class_count));
-        for (task.row_start..task.row_end) |row_i| {
+        for (row_start..row_end) |row_i| {
             const label = task.labels[row_i];
             const row_out = task.output[row_i * task.class_count ..][0..task.class_count];
             if (task.ignore_index) |ignore_index| {
@@ -3491,11 +3357,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn scatterAddRows(task: ScatterAddRowsTask) void {
+    pub fn scatterAddRows(task: ScatterAddRowsTask, row_start: usize, row_end: usize) void {
         const row_len = task.row_len;
-        @memset(task.output[task.row_start * row_len .. task.row_end * row_len], 0);
+        @memset(task.output[row_start * row_len .. row_end * row_len], 0);
         for (task.indices, 0..) |index, row| {
-            if (index < task.row_start or index >= task.row_end) continue;
+            if (index < row_start or index >= row_end) continue;
             const src = task.grad[row * row_len ..][0..row_len];
             const dst = task.output[index * row_len ..][0..row_len];
             for (dst, src) |*out, value| out.* += value;
@@ -3506,11 +3372,11 @@ pub const scalar = struct {
     // axis order (the entries' documented bit contract), so these produce
     // the entries' bytes.
 
-    pub fn softmaxInner(task: SoftmaxInnerTask) void {
+    pub fn softmaxInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var max_value = task.input[base + lane];
                 for (1..task.axis_dim) |axis_i| {
                     max_value = @max(max_value, task.input[base + axis_i * inner + lane]);
@@ -3529,11 +3395,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn logsumexpInner(task: SoftmaxInnerTask) void {
+    pub fn logsumexpInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var max_value = task.input[base + lane];
                 for (1..task.axis_dim) |axis_i| {
                     max_value = @max(max_value, task.input[base + axis_i * inner + lane]);
@@ -3548,11 +3414,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn logSoftmaxInner(task: SoftmaxInnerTask) void {
+    pub fn logSoftmaxInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var max_value = task.input[base + lane];
                 for (1..task.axis_dim) |axis_i| {
                     max_value = @max(max_value, task.input[base + axis_i * inner + lane]);
@@ -3571,11 +3437,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask) void {
+    pub fn softmaxBackwardInner(task: SoftmaxBackwardInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var dot_acc: f32 = 0;
                 for (0..task.axis_dim) |axis_i| {
                     const offset = base + axis_i * inner + lane;
@@ -3589,11 +3455,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn varianceInner(task: VarianceInnerTask) void {
+    pub fn varianceInner(task: VarianceInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var mean_value: f32 = 0;
                 for (0..task.axis_dim) |axis_i| mean_value += task.input[base + axis_i * inner + lane];
                 mean_value = mean_value * task.inv_axis_dim;
@@ -3607,12 +3473,12 @@ pub const scalar = struct {
         }
     }
 
-    pub fn standardizeInner(comptime Acc: type, task: StandardizeInnerTask(Acc)) void {
+    pub fn standardizeInner(comptime Acc: type, task: StandardizeInnerTask(Acc), inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         const count: Acc = @floatFromInt(task.valid_count);
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 if (task.valid_count == 0) {
                     for (0..task.axis_dim) |axis_i| task.output[base + axis_i * inner + lane] = 0;
                     continue;
@@ -3640,13 +3506,13 @@ pub const scalar = struct {
         }
     }
 
-    pub fn standardizeBackwardInner(comptime Acc: type, task: StandardizeBackwardInnerTask(Acc)) void {
+    pub fn standardizeBackwardInner(comptime Acc: type, task: StandardizeBackwardInnerTask(Acc), inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         const count: Acc = @floatFromInt(task.valid_count);
         for (0..task.outer) |outer_i| {
             if (task.valid_count == 0) continue;
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var mean: Acc = 0;
                 for (0..task.valid_count) |axis_i| mean += @as(Acc, @floatCast(task.input[base + axis_i * inner + lane]));
                 mean = mean / count;
@@ -3689,11 +3555,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormInner(task: RmsNormInnerTask) void {
+    pub fn rmsNormInner(task: RmsNormInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var sumsq: f32 = 0;
                 for (0..task.axis_dim) |axis_i| {
                     const value = task.input[base + axis_i * inner + lane];
@@ -3711,11 +3577,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn rmsNormBackwardInputInner(task: RmsNormBackwardInputInnerTask) void {
+    pub fn rmsNormBackwardInputInner(task: RmsNormBackwardInputInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var sumsq: f32 = 0;
                 var dot_acc: f32 = 0;
                 for (0..task.axis_dim) |axis_i| {
@@ -3770,11 +3636,11 @@ pub const scalar = struct {
         }
     }
 
-    pub fn layerNormInner(task: LayerNormInnerTask) void {
+    pub fn layerNormInner(task: LayerNormInnerTask, inner_start: usize, inner_end: usize) void {
         const inner = task.inner;
         for (0..task.outer) |outer_i| {
             const base = outer_i * task.axis_dim * inner;
-            for (task.inner_start..task.inner_end) |lane| {
+            for (inner_start..inner_end) |lane| {
                 var mean_value: f32 = 0;
                 for (0..task.axis_dim) |axis_i| mean_value += task.input[base + axis_i * inner + lane];
                 mean_value = mean_value * task.inv_axis_dim;

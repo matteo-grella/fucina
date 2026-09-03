@@ -386,128 +386,46 @@ pub fn pc(self: *const ExecContext) backend_mod.ParallelConfig {
     return .{ .pool = self.rt.parallel_pool.load(.acquire) };
 }
 
-/// One row/lane-range pool dispatch for the domain modules'
-/// task-parallel kernels: copy `base_task` per task with
-/// `start_field`/`end_field` rewritten to its `[0, count)` sub-range
-/// and run the tasks on the work pool. False — the caller runs its
-/// serial path — when no pool exists or the split degenerates to a
-/// single task. Work GATES stay at the call sites: whether a shape is
-/// worth dispatching is per-op knowledge; how a range splits is not.
-/// Sub-ranges own disjoint output rows, so the pooled result is
-/// bitwise identical to the serial call for any task count. The
-/// boundaries are `backend.tile.bound`'s, the one split formula.
-pub fn dispatchRange(
+/// The one range dispatch of the runtime: run `run(ctx, start, end)`
+/// over `[0, total)`, split into at most `max_parts` proportional parts
+/// across the worker team (`backend.tile.forRange`, the one boundary
+/// formula), or as one serial call over the whole range when the team is
+/// absent or the cap is 1. The cap is the caller's gate, stated at the
+/// call site — `if (worth_it) total else 1`, `innerLaneParts`,
+/// `parallel.partsForChunk` — so whether a shape is worth splitting stays
+/// per-op knowledge while how a range splits is written once. The actual
+/// part count is the cap clamped to the team size. Parts own disjoint
+/// sub-ranges, so a pooled result is bitwise the serial call's for any
+/// part count.
+pub fn forRange(
     self: *ExecContext,
-    comptime Task: type,
-    comptime start_field: []const u8,
-    comptime end_field: []const u8,
-    base_task: Task,
-    count: usize,
-    comptime run: fn (task: *const Task) void,
-) bool {
-    return self.dispatchRangeCapped(Task, start_field, end_field, base_task, count, count, run);
-}
-
-/// `dispatchRange` with its serial arm: split `[0, count)` across the
-/// pool when `parallel_ok` and the pool takes it, else run `kernel` on
-/// the whole base task. The pool adapter is synthesized here, so a row
-/// kernel is stated once (`kernels.softmaxRows`), never as a `run*Task`
-/// twin beside it.
-pub fn dispatchRangeOr(
-    self: *ExecContext,
-    comptime Task: type,
-    comptime start_field: []const u8,
-    comptime end_field: []const u8,
-    base_task: Task,
-    count: usize,
-    parallel_ok: bool,
-    comptime kernel: fn (Task) void,
+    total: usize,
+    max_parts: usize,
+    ctx: anytype,
+    comptime run: fn (@TypeOf(ctx), usize, usize) void,
 ) void {
-    const Adapter = struct {
-        fn run(task: *const Task) void {
-            kernel(task.*);
+    if (max_parts > 1) {
+        if (self.workPool()) |pool| {
+            const parts = @min(parallel.cpuThreadCount(parallel.vector_max_threads), max_parts);
+            if (parts > 1) return backend_mod.tile.forRange(pool, @TypeOf(ctx), ctx, total, parts, run);
         }
-    };
-    if (parallel_ok and self.dispatchRange(Task, start_field, end_field, base_task, count, Adapter.run)) return;
-    kernel(base_task);
+    }
+    run(ctx, 0, total);
 }
 
-// Minimum lanes per task when splitting an inner-lane kernel across the
+// Minimum lanes per part when splitting an inner-lane kernel across the
 // pool: below this the per-dispatch cost outweighs the split.
-const min_inner_lanes_per_task = 64;
+const min_inner_lanes_per_part = 64;
 
-/// Split `base_task`'s `[0, inner)` lane range across the pool when the
-/// total work clears the row-kernel threshold; otherwise run it serially.
-/// The inner-lane kernels (`backend.rows`: softmax, the stats/norm
-/// non-last-axis arms) own disjoint lane sub-ranges and disjoint scratch
-/// columns, so the result is bitwise identical for any task count.
-pub fn dispatchInnerLanes(
-    self: *ExecContext,
-    comptime Task: type,
-    base_task: Task,
-    total_len: usize,
-    inner: usize,
-    comptime run: fn (task: *const Task) void,
-) void {
-    if (total_len >= parallel.row_kernel_len_threshold) {
-        if (self.dispatchRangeCapped(Task, "inner_start", "inner_end", base_task, inner, inner / min_inner_lanes_per_task, run)) return;
-    }
-    run(&base_task);
-}
-
-/// `dispatchRange` with a separate task-count cap (the inner-lane
-/// dispatches cap tasks by a minimum per-task lane width, not by the
-/// range being split).
-pub fn dispatchRangeCapped(
-    self: *ExecContext,
-    comptime Task: type,
-    comptime start_field: []const u8,
-    comptime end_field: []const u8,
-    base_task: Task,
-    count: usize,
-    max_tasks: usize,
-    comptime run: fn (task: *const Task) void,
-) bool {
-    const pool = self.workPool() orelse return false;
-    const task_count = @min(parallel.cpuThreadCount(parallel.vector_max_threads), max_tasks);
-    if (task_count <= 1) return false;
-    var tasks: [parallel.vector_max_threads]Task = undefined;
-    for (0..task_count) |task_i| {
-        tasks[task_i] = base_task;
-        @field(tasks[task_i], start_field) = backend_mod.tile.bound(task_i, count, task_count);
-        @field(tasks[task_i], end_field) = backend_mod.tile.bound(task_i + 1, count, task_count);
-    }
-    pool.parallelChunks(Task, tasks[0..task_count], run);
-    return true;
-}
-
-/// Chunked parallel map with a serial fallback: split `[0, n)` across the
-/// worker team (at most one task per `min_len` items) and run
-/// `runRange(context, start, end)` on each chunk; run the whole range
-/// serially when the team is absent or the split is not worth it. The
-/// chunk grid depends only on `(n, task count)`; whether that makes the
-/// results bitwise thread-count-invariant is the kernel's property to
-/// state (the optimizer and ES elementwise kernels do).
-pub fn parallelMap(
-    self: *ExecContext,
-    n: usize,
-    min_len: usize,
-    context: anytype,
-    comptime runRange: fn (@TypeOf(context), usize, usize) void,
-) void {
-    if (n >= min_len) {
-        const Task = struct {
-            context: @TypeOf(context),
-            start: usize = 0,
-            end: usize = 0,
-            fn run(task: *const @This()) void {
-                runRange(task.context, task.start, task.end);
-            }
-        };
-        const base = Task{ .context = context };
-        if (self.dispatchRangeCapped(Task, "start", "end", base, n, 1 + n / min_len, Task.run)) return;
-    }
-    runRange(context, 0, n);
+/// The part cap of the inner-lane family (`backend.rows`' `*Inner`
+/// kernels: softmax, the stats/norm non-last-axis arms): `inner` lanes
+/// split at `min_inner_lanes_per_part` per part once the whole tensor
+/// clears the row-kernel threshold, one part below it. Lanes are
+/// independent and scratch columns disjoint, so any part count is bitwise
+/// the serial call.
+pub fn innerLaneParts(total_len: usize, inner: usize) usize {
+    if (total_len < parallel.row_kernel_len_threshold) return 1;
+    return inner / min_inner_lanes_per_part;
 }
 
 // ------------------------------------------------------------------
@@ -591,19 +509,19 @@ pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.T
     if (comptime dtype_mod.isScalar(dtype)) {
         if (!x.isContiguous()) {
             const dst = out.data();
-            if (dst.len >= parallel.materialize_parallel_len_threshold) {
-                if (self.workPool()) |pool| {
-                    // One host fence up front: the chunk tasks each
-                    // waitReady on the same buffer, and N workers
-                    // spinning on one pending accelerator Work is
-                    // wasted parallelism (waitReady itself is
-                    // claimant-safe either way).
-                    x.buffer.waitReady();
-                    materializeChunked(dtype, x, dst, pool);
-                    return out;
-                }
-            }
-            x.copyRangeTo(dst, 0, dst.len);
+            // One host fence up front: the parts each waitReady on the
+            // same buffer, and N workers spinning on one pending
+            // accelerator Work is wasted parallelism (waitReady itself
+            // is claimant-safe either way). The source is read-only, so
+            // disjoint ranges of the row-major destination copy
+            // concurrently; a copy is order-free, so any part count is
+            // the same bytes.
+            x.buffer.waitReady();
+            const parts = if (dst.len >= parallel.materialize_parallel_len_threshold)
+                (dst.len + parallel.materialize_parallel_min_chunk - 1) / parallel.materialize_parallel_min_chunk
+            else
+                1;
+            self.forRange(dst.len, parts, MaterializeRange(dtype){ .src = x, .dst = dst }, MaterializeRange(dtype).run);
             return out;
         }
     }
@@ -611,39 +529,17 @@ pub fn materialize(self: *ExecContext, comptime dtype: DType, x: *const tensor.T
     return out;
 }
 
-fn MaterializeTask(comptime dtype: DType) type {
+/// One range of a strided-view materialization: the row-major
+/// destination `[start, end)` copied from the source's linearization.
+fn MaterializeRange(comptime dtype: DType) type {
     return struct {
         src: *const tensor.TensorOf(dtype),
         dst: []dtype_mod.Storage(dtype),
-        start: usize,
-    };
-}
 
-fn runMaterializeTask(comptime dtype: DType) fn (*const MaterializeTask(dtype)) void {
-    return struct {
-        fn run(task: *const MaterializeTask(dtype)) void {
-            task.src.copyRangeTo(task.dst, task.start, task.dst.len);
+        fn run(self: @This(), start: usize, end: usize) void {
+            self.src.copyRangeTo(self.dst[start..end], start, end - start);
         }
-    }.run;
-}
-
-/// Strided-view materialization split across the hot worker team: each
-/// task copies a disjoint range of the row-major destination (the source
-/// is read-only, so ranges are safe to copy concurrently).
-fn materializeChunked(comptime dtype: DType, x: *const tensor.TensorOf(dtype), dst: []dtype_mod.Storage(dtype), pool: *thread.Pool) void {
-    const Task = MaterializeTask(dtype);
-    var tasks: [parallel.vector_max_threads]Task = undefined;
-    const want = (dst.len + parallel.materialize_parallel_min_chunk - 1) / parallel.materialize_parallel_min_chunk;
-    const n = @max(1, @min(tasks.len, want));
-    const chunk = (dst.len + n - 1) / n;
-    var count: usize = 0;
-    var start: usize = 0;
-    while (start < dst.len) : (start += chunk) {
-        const end = @min(start + chunk, dst.len);
-        tasks[count] = .{ .src = x, .dst = dst[start..end], .start = start };
-        count += 1;
-    }
-    pool.parallelChunks(Task, tasks[0..count], runMaterializeTask(dtype));
+    };
 }
 
 pub fn clone(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {

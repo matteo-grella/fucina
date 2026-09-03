@@ -312,14 +312,12 @@ fn shapeOf(comptime rank: usize, t: *const RawTensor) [rank]usize {
 fn dispatchElemental(comptime Body: type, body: Body, ctx: *ExecContext) void {
     const Task = struct {
         body: Body,
-        start: usize,
-        end: usize,
-        fn run(task: @This()) void {
-            task.body.span(task.start, task.end);
+        fn run(task: @This(), start: usize, end: usize) void {
+            task.body.span(start, end);
         }
     };
     const len = bodyLen(Body, body);
-    ctx.dispatchRangeOr(Task, "start", "end", .{ .body = body, .start = 0, .end = len }, len, len >= parallel.vector_elementwise_len_threshold, Task.run);
+    ctx.forRange(len, if (len >= parallel.vector_elementwise_len_threshold) len else 1, Task{ .body = body }, Task.run);
 }
 
 fn bodyLen(comptime Body: type, body: Body) usize {

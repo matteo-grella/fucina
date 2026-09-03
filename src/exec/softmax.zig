@@ -30,10 +30,10 @@ const SoftmaxExtRowsTask = exec_row_ops.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = exec_row_ops.SoftmaxBackwardRowsTask;
 const SoftmaxInnerTask = exec_row_ops.SoftmaxInnerTask;
 const SoftmaxBackwardInnerTask = exec_row_ops.SoftmaxBackwardInnerTask;
-const runSoftmaxInnerTask = exec_row_ops.runSoftmaxInnerTask;
-const runLogsumexpInnerTask = exec_row_ops.runLogsumexpInnerTask;
-const runLogSoftmaxInnerTask = exec_row_ops.runLogSoftmaxInnerTask;
-const runSoftmaxBackwardInnerTask = exec_row_ops.runSoftmaxBackwardInnerTask;
+const softmaxInner = backend_mod.kernels.softmaxInner;
+const logsumexpInner = backend_mod.kernels.logsumexpInner;
+const logSoftmaxInner = backend_mod.kernels.logSoftmaxInner;
+const softmaxBackwardInner = backend_mod.kernels.softmaxBackwardInner;
 
 const softmaxRows = backend_mod.kernels.softmaxRows;
 const softmaxExtRows = backend_mod.kernels.softmaxExtRows;
@@ -66,7 +66,7 @@ pub fn logsumexp(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize,
 }
 
 fn logsumexpF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = true, .rows = logsumexpRows, .inner = runLogsumexpInnerTask });
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = true, .rows = logsumexpRows, .inner = logsumexpInner });
 }
 
 /// Log-softmax along `axis` (torch.log_softmax), shape-preserving:
@@ -85,7 +85,7 @@ pub fn logSoftmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize
 }
 
 fn logSoftmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = logSoftmaxRows, .inner = runLogSoftmaxInnerTask });
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = logSoftmaxRows, .inner = logSoftmaxInner });
 }
 
 /// One f32 kernel; 16-bit inputs follow the `.widened` policy.
@@ -99,15 +99,15 @@ pub fn softmax(ctx: *ExecContext, comptime dtype: DType, comptime rank: usize, x
 }
 
 fn softmaxF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, comptime axis: usize) !Tensor {
-    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = softmaxRows, .inner = runSoftmaxInnerTask });
+    return rowFamilyF32(ctx, rank, x, axis, .{ .reduces = false, .rows = softmaxRows, .inner = softmaxInner });
 }
 
 /// What distinguishes the three row ops over one driver: whether the axis
 /// is removed, the fused last-axis row kernel, and the inner-lane kernel.
 const RowFamily = struct {
     reduces: bool,
-    rows: fn (SoftmaxRowsTask) void,
-    inner: fn (*const SoftmaxInnerTask) void,
+    rows: fn (SoftmaxRowsTask, usize, usize) void,
+    inner: fn (SoftmaxInnerTask, usize, usize) void,
 };
 
 /// The one driver of the softmax family: last-axis rows through the fused
@@ -128,28 +128,24 @@ fn rowFamilyF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
 
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
     if (g.inner == 1) {
-        ctx.dispatchRangeOr(SoftmaxRowsTask, "row_start", "row_end", .{
+        ctx.forRange(g.outer, if (g.outer > 1 and source.len() >= parallel.row_kernel_len_threshold) g.outer else 1, SoftmaxRowsTask{
             .input = input,
             .output = output,
             .axis_dim = g.axis_dim,
-            .row_start = 0,
-            .row_end = g.outer,
-        }, g.outer, g.outer > 1 and source.len() >= parallel.row_kernel_len_threshold, family.rows);
+        }, family.rows);
         return out;
     }
 
     var scratch = try ctx.empty(.f32, .{2 * g.inner});
     defer scratch.deinit();
-    ctx.dispatchInnerLanes(SoftmaxInnerTask, .{
+    ctx.forRange(g.inner, ExecContext.innerLaneParts(source.len(), g.inner), SoftmaxInnerTask{
         .input = input,
         .output = output,
         .axis_dim = g.axis_dim,
         .inner = g.inner,
         .scratch = scratch.data(),
         .outer = g.outer,
-        .inner_start = 0,
-        .inner_end = g.inner,
-    }, source.len(), g.inner, family.inner);
+    }, family.inner);
     return out;
 }
 
@@ -231,15 +227,13 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
         .axis_dim = axis_dim,
         .inner = inner,
         .simd_rows = simd_rows,
-        .row_start = 0,
-        .row_end = rows,
     };
     const Kernel = struct {
-        fn run(task: SoftmaxExtRowsTask(rank)) void {
-            softmaxExtRows(rank, axis, task);
+        fn run(task: SoftmaxExtRowsTask(rank), row_start: usize, row_end: usize) void {
+            softmaxExtRows(rank, axis, task, row_start, row_end);
         }
     };
-    ctx.dispatchRangeOr(SoftmaxExtRowsTask(rank), "row_start", "row_end", base_task, rows, rows > 1 and source.len() >= parallel.row_kernel_len_threshold, Kernel.run);
+    ctx.forRange(rows, if (rows > 1 and source.len() >= parallel.row_kernel_len_threshold) rows else 1, base_task, Kernel.run);
     return out;
 }
 
@@ -271,16 +265,14 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
             .output = output,
             .axis_dim = axis_dim,
             .scale = scale_value,
-            .row_start = 0,
-            .row_end = outer,
         };
-        ctx.dispatchRangeOr(SoftmaxBackwardRowsTask, "row_start", "row_end", base_task, outer, outer > 1 and source.len() >= parallel.row_kernel_len_threshold, softmaxBackwardRows);
+        ctx.forRange(outer, if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) outer else 1, base_task, softmaxBackwardRows);
         return out;
     }
 
     var scratch = try ctx.empty(.f32, .{inner});
     defer scratch.deinit();
-    ctx.dispatchInnerLanes(SoftmaxBackwardInnerTask, .{
+    ctx.forRange(inner, ExecContext.innerLaneParts(source.len(), inner), SoftmaxBackwardInnerTask{
         .y = yd,
         .gy = gyd,
         .output = output,
@@ -289,9 +281,7 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
         .scratch = scratch.data(),
         .scale = scale_value,
         .outer = outer,
-        .inner_start = 0,
-        .inner_end = inner,
-    }, source.len(), inner, runSoftmaxBackwardInnerTask);
+    }, softmaxBackwardInner);
     return out;
 }
 

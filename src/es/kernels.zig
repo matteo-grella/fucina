@@ -95,7 +95,7 @@ pub fn perturbSlot(
         scaled: f32,
         cache: ?SlotCache,
     };
-    ctx.parallelMap(data.len, perturb_min_len, Context{
+    ctx.forRange(data.len, parallel.partsForChunk(data.len, perturb_min_len), Context{
         .data = data,
         .stream_seed = stream_seed,
         .scaled = scaled,
@@ -179,7 +179,7 @@ pub fn updateSlot(
         scale: f32,
         cache: ?UpdateCacheView,
     };
-    ctx.parallelMap(data.len, update_min_len, Context{
+    ctx.forRange(data.len, parallel.partsForChunk(data.len, update_min_len), Context{
         .data = data,
         .stream_seeds = stream_seeds,
         .coeffs = coeffs,
@@ -246,7 +246,7 @@ pub fn anchorSlot(
         decay_step: f32,
         decay: AnchorDecay,
     };
-    ctx.parallelMap(data.len, perturb_min_len, Context{
+    ctx.forRange(data.len, parallel.partsForChunk(data.len, perturb_min_len), Context{
         .data = data,
         .anchor = anchor,
         .decay_step = decay_step,

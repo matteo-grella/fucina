@@ -386,7 +386,7 @@ piece in the order the code runs it.
 
 > **Zig note** — `x = try ctx.replace(x, ...)` is Fucina's idiom for "the
 > new tensor replaces the old one". Its second parameter is an *error
-> union* on purpose (`src/exec/runtime.zig:765`): the block call is evaluated
+> union* on purpose (`src/exec/runtime.zig:671`): the block call is evaluated
 > by the caller, and on error the old `x` is NOT consumed — the binding and
 > its `errdefer` stay valid — while on success the old tensor is released
 > and the new one returned for rebinding. One idiom keeps the residual

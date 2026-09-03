@@ -1456,16 +1456,10 @@ pub const AttentionBackwardReduceTask = struct {
     kv_seq: usize,
     d: usize,
     kv_heads: usize,
-    source_start: usize,
-    source_end: usize,
 };
 
-pub fn runAttentionBackwardReduceTask(task: *const AttentionBackwardReduceTask) void {
-    attentionBackwardReduceRows(task.*);
-}
-
-pub fn attentionBackwardReduceRows(task: AttentionBackwardReduceTask) void {
-    for (task.source_start..task.source_end) |source_i| {
+pub fn attentionBackwardReduceRows(task: AttentionBackwardReduceTask, source_start: usize, source_end: usize) void {
+    for (source_start..source_end) |source_i| {
         for (task.kv_head_for_head, 0..) |kv_head_i, head_i| {
             const grad_row = task.grad[source_i * task.kv_heads * task.d + kv_head_i * task.d ..][0..task.d];
             const partial_row = task.partials[head_i * task.kv_seq * task.d + source_i * task.d ..][0..task.d];

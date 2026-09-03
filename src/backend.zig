@@ -136,17 +136,17 @@ pub const vector_impl = @import("backend/vector.zig");
 // Row-kernel vocabulary seam: the Task payloads the fused row kernels in
 // `kernels` take (slices and dims, plus a ranked shape/stride array or an
 // optional RankedTensor mask where a kernel walks a strided view), the
-// inner-lane `run*Task` pool adapters, the comptime task factories (the
-// fused activation+quantize workers) and the small shared helpers
-// (`dropoutKeepCutoff`, `rowSumSq`, `coordinateForLinear`, the weight-grad
-// block rows). The exec domain modules import those by name from here;
-// the kernel entries themselves they reach through `kernels`, dispatched
-// by value through `ExecContext.dispatchRangeOr`.
+// comptime task factories (the fused activation+quantize workers) and the
+// small shared helpers (`dropoutKeepCutoff`, `rowSumSq`,
+// `coordinateForLinear`, the weight-grad block rows). The exec domain
+// modules import those by name from here; the kernel entries themselves
+// they reach through `kernels`, dispatched by value with their range
+// through `ExecContext.forRange`.
 // Single implementation, `backend/vector/rows.zig`.
 const rows_impl = @import("backend/vector/rows.zig");
 /// The row-kernel seam, curated: the Task payloads (each the parameter of
-/// a kernel in `kernels` or of an adapter here), the inner-lane `run*Task`
-/// adapters, the fused-activation task factory and the shared helpers.
+/// a kernel in `kernels`), the fused-activation task factory and the
+/// shared helpers.
 /// `conformSeam` checks the pairing; the kernel bodies are not reachable
 /// through this namespace.
 pub const rows = struct {
@@ -176,7 +176,6 @@ pub const rows = struct {
     pub const SoftmaxInnerTask = rows_impl.SoftmaxInnerTask;
     pub const SoftmaxRowsTask = rows_impl.SoftmaxRowsTask;
     pub const SplitSwiGluBackwardTask = rows_impl.SplitSwiGluBackwardTask;
-    pub const SplitSwiGluQuantQ8_0x4Task = rows_impl.SplitSwiGluQuantQ8_0x4Task;
     pub const SplitSwiGluTask = rows_impl.SplitSwiGluTask;
     pub const StandardizeBackwardInnerTask = rows_impl.StandardizeBackwardInnerTask;
     pub const StandardizeInnerTask = rows_impl.StandardizeInnerTask;
@@ -185,17 +184,6 @@ pub const rows = struct {
     pub const dropoutKeepCutoff = rows_impl.dropoutKeepCutoff;
     pub const rms_weight_grad_block_rows = rows_impl.rms_weight_grad_block_rows;
     pub const rowSumSq = rows_impl.rowSumSq;
-    pub const runLayerNormInnerTask = rows_impl.runLayerNormInnerTask;
-    pub const runLogSoftmaxInnerTask = rows_impl.runLogSoftmaxInnerTask;
-    pub const runLogsumexpInnerTask = rows_impl.runLogsumexpInnerTask;
-    pub const runRmsNormBackwardInputInnerTask = rows_impl.runRmsNormBackwardInputInnerTask;
-    pub const runRmsNormInnerTask = rows_impl.runRmsNormInnerTask;
-    pub const runSoftmaxBackwardInnerTask = rows_impl.runSoftmaxBackwardInnerTask;
-    pub const runSoftmaxInnerTask = rows_impl.runSoftmaxInnerTask;
-    pub const runSplitSwiGluQuantQ8_0x4Task = rows_impl.runSplitSwiGluQuantQ8_0x4Task;
-    pub const runStandardizeBackwardInnerTask = rows_impl.runStandardizeBackwardInnerTask;
-    pub const runStandardizeInnerTask = rows_impl.runStandardizeInnerTask;
-    pub const runVarianceInnerTask = rows_impl.runVarianceInnerTask;
 };
 // Attention-kernel vocabulary seam: the Task payloads, `run*Task` pool
 // adapters and tile constants of the grouped-causal attention family.
@@ -222,7 +210,6 @@ pub const attention = struct {
     pub const hasAdjacentKvHeadPairs = attention_impl.hasAdjacentKvHeadPairs;
     pub const kvDtypeOf = attention_impl.kvDtypeOf;
     pub const kvRowElems = attention_impl.kvRowElems;
-    pub const runAttentionBackwardReduceTask = attention_impl.runAttentionBackwardReduceTask;
     pub const runGroupedCausalAttentionBackwardBlasTiledTask = attention_impl.runGroupedCausalAttentionBackwardBlasTiledTask;
     pub const runGroupedCausalAttentionBackwardTask = attention_impl.runGroupedCausalAttentionBackwardTask;
     pub const runGroupedCausalAttentionBackwardTiledTask = attention_impl.runGroupedCausalAttentionBackwardTiledTask;

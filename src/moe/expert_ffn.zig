@@ -1629,12 +1629,10 @@ const MoeBatchScatterTask = struct {
     inv: []const usize,
     hidden: usize,
     top_k: usize,
-    t0: usize,
-    t1: usize,
 };
 
-fn runMoeBatchScatterTask(task: *const MoeBatchScatterTask) void {
-    moe_chain.scatterTokenMajor(task.out, task.down_buf, task.weights, task.inv, task.hidden, task.top_k, task.t0, task.t1);
+fn runMoeBatchScatterTask(task: MoeBatchScatterTask, t0: usize, t1: usize) void {
+    moe_chain.scatterTokenMajor(task.out, task.down_buf, task.weights, task.inv, task.hidden, task.top_k, t0, t1);
 }
 
 /// Batched-prefill MoE FFN over `seq > 1` tokens: route-weighted sum over each
@@ -1849,12 +1847,8 @@ pub fn expertFfnBatch(
         .inv = inv,
         .hidden = hidden,
         .top_k = top_k,
-        .t0 = 0,
-        .t1 = seq,
     };
-    const scatter_pooled = use_phased and
-        ctx.dispatchRange(MoeBatchScatterTask, "t0", "t1", scatter_base, seq, runMoeBatchScatterTask);
-    if (!scatter_pooled) runMoeBatchScatterTask(&scatter_base);
+    ctx.forRange(seq, if (use_phased) seq else 1, scatter_base, runMoeBatchScatterTask);
     if (profile) |p| {
         p.scatter_ns += moeBatchProfileElapsed(scatter_start, io);
         p.total_ns += moeBatchProfileElapsed(total_start, io);
