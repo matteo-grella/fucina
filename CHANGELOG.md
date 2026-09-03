@@ -25,6 +25,13 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- One home per raw-tensor helper. `ExecContext.contiguousOwned(dtype, x)` is
+  the owned contiguous read (a retained view when `x` is already contiguous,
+  else a materialized copy) that the VJPs used to reach through two private
+  copies in `ag/backward/common.zig`; the axis split of a reduction is
+  `shape.AxisGeometry.of` everywhere. Removed: `shape.elementCountAssumeValid`
+  (`shape.product` is the same function) and `dtype.name` (`@tagName`). The
+  facade mixins import from `plumbing` only what they use.
 - `parallel.zig` is the dispatch policy only: the comptime thresholds, the
   worker-team size (`cpuThreadCount`, `setMaxThreads`) and the part-count
   helpers. The CPU probes are the std-only leaf `src/cpu_topology.zig`

@@ -26,10 +26,6 @@ pub fn Ops(comptime Self: type) type {
         const attentionKvRepr = ag_tensor.attentionKvRepr;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const recordsGrad = plumbing.recordsGrad;
-        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
-        const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const rowStatsAlloc = plumbing.rowStatsAlloc;
         const finishOp = plumbing.finishOp;
         const finishNoGrad = plumbing.finishNoGrad;

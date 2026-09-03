@@ -270,7 +270,7 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         }
 
         pub fn len(self: *const Self) usize {
-            return shape_mod.elementCountAssumeValid(self.shape.slice());
+            return shape_mod.product(self.shape.slice());
         }
 
         pub fn storageLen(self: *const Self) usize {

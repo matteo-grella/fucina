@@ -37,7 +37,6 @@ pub fn Mod(comptime ag_tensor: type) type {
         const Tensor = ag_tensor.Tensor;
         pub const rawShapeArray = backward_common.rawShapeArray;
         pub const rawShapeArrayOf = backward_common.rawShapeArrayOf;
-        pub const cloneInverseRopeTable = backward_common.cloneInverseRopeTable;
 
         /// The result of a binary op between `Left` and `Right`: the tag
         /// broadcast rule over the left operand's dtype (the operands must

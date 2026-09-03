@@ -56,7 +56,6 @@ pub fn Ops(comptime Self: type) type {
         const finishTypedNoGrad = plumbing.finishTypedNoGrad;
         const rawShapeArray = plumbing.rawShapeArray;
         const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes

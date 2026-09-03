@@ -37,14 +37,11 @@ pub fn Ops(comptime Self: type) type {
         const finishTypedNoGrad = plumbing.finishTypedNoGrad;
         const finishNoGrad = plumbing.finishNoGrad;
         const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
         const dtype = Self.dtype;
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.
         const differentiable = dtype == .f32;
-        const reduced_dtype = dtype_mod.outputDType(.reduction, dtype);
         const padding2dValues = plumbing.padding2dValues;
 
         /// Non-circular `rollBy`: same per-section offsets and sign

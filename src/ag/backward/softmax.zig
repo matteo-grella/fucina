@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
+const shape_mod = @import("../../shape.zig");
 const exec_mod = @import("../../exec.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
@@ -13,7 +14,6 @@ const rawRank = tags_mod.rawRank;
 
 const common = @import("common.zig");
 const rawShapeArray = common.rawShapeArray;
-const contiguousForRead = common.contiguousForRead;
 const axisGeometry = common.axisGeometry;
 
 pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) type {
@@ -27,7 +27,7 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const g = gy_ready.dataConst();
 
@@ -44,7 +44,7 @@ pub fn LogsumexpBackward(comptime source_tags: anytype, comptime axis: usize) ty
 
             const source_shape = rawShapeArray(source_tags, &self.input);
             const axis_dim = source_shape[axis];
-            const geo = axisGeometry(rank, source_shape, axis);
+            const geo = shape_mod.AxisGeometry.of(rank, source_shape, axis);
             if (geo.inner == 1) {
                 for (0..geo.outer) |outer_i| {
                     const upstream = g[outer_i];
@@ -83,10 +83,10 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var y_ready = try contiguousForRead(ctx, &self.output);
+            var y_ready = try ctx.contiguousOwned(.f32, &self.output);
             defer y_ready.deinit();
             const y = y_ready.dataConst();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const g = gy_ready.dataConst();
 
@@ -98,7 +98,7 @@ pub fn LogSoftmaxBackward(comptime source_tags: anytype, comptime axis: usize) t
             // d(log_softmax)/dx: g - softmax·Σg, with softmax = exp(y)
             // (torch saves the output for exactly this identity).
             const axis_dim = source_shape[axis];
-            const geo = axisGeometry(rank, source_shape, axis);
+            const geo = shape_mod.AxisGeometry.of(rank, source_shape, axis);
             for (0..geo.outer) |outer_i| {
                 const base = outer_i * axis_dim * geo.inner;
                 for (0..geo.inner) |inner_i| {

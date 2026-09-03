@@ -247,6 +247,7 @@ pub const ExecContext = struct {
     pub const replace = exec_runtime.replace;
     pub const materialize = exec_runtime.materialize;
     pub const clone = exec_runtime.clone;
+    pub const contiguousOwned = exec_runtime.contiguousOwned;
     pub const prepareContiguous = exec_runtime.prepareContiguous;
     pub const prepareAs = exec_runtime.prepareAs;
     pub const widenedCompute = exec_runtime.widenedCompute;

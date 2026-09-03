@@ -78,22 +78,13 @@ pub fn reduceGradientToTags(
     return ctx.reduceBroadcast(&aligned, target_shape[0..]);
 }
 
-/// Borrow-if-contiguous read access: a retained view when the layout is
-/// already contiguous, else a materialized copy. Shared with `elemental.zig`.
-pub fn contiguousForRead(ctx: *ExecContext, value: *const RawTensor) !RawTensor {
-    if (value.isContiguous()) return value.cloneView();
-    return ctx.materialize(.f32, value);
-}
-
 pub fn expandGradientToTags(
     comptime grad_tags: anytype,
     comptime target_tags: anytype,
-    ctx: *ExecContext,
     grad: *const RawTensor,
     target_shape: [rawRank(target_tags.len)]usize,
 ) !RawTensor {
     const tagged_shape = taggedShapeArray(target_tags, target_shape);
-    _ = ctx;
     return tag_ops.broadcastTensorTo(.f32, grad_tags, grad, target_tags, tagged_shape);
 }
 
@@ -115,14 +106,6 @@ test "reduceGradientToTags uses direct view when tags and shape already match" {
     try std.testing.expectEqual(outstanding_before, ctx.rt.buffers.outstandingBuffers());
 }
 
-/// VJP for `maskedFill(x, mask, value)`: grad passes through where the mask is
-/// clear, zero where it is set (`value` is a constant — no grad).
-/// Contiguous read of a saved typed mask/cond tensor (any scalar dtype).
-pub fn contiguousForReadTyped(comptime mask_dtype: tensor_mod.DType, ctx: *ExecContext, value: *const tensor_mod.TensorOf(mask_dtype)) !tensor_mod.TensorOf(mask_dtype) {
-    if (value.isContiguous()) return value.cloneView();
-    return ctx.materialize(mask_dtype, value);
-}
-
 /// Shared tail of the masked-reduction VJPs: broadcast a result-shaped
 /// gradient back over the reduced axis and zero it wherever the mask excluded
 /// the element. The broadcast alone is a stride-0 view (what the unmasked sum
@@ -138,12 +121,12 @@ pub fn gateGradientByMask(
     mask: *const tensor_mod.TensorOf(mask_dtype),
     source_shape: [rawRank(source_tags.len)]usize,
 ) !RawTensor {
-    var m = try contiguousForReadTyped(mask_dtype, ctx, mask);
+    var m = try ctx.contiguousOwned(mask_dtype, mask);
     defer m.deinit();
 
-    var expanded_view = try expandGradientToTags(result_tags, source_tags, ctx, gy, source_shape);
+    var expanded_view = try expandGradientToTags(result_tags, source_tags, gy, source_shape);
     defer expanded_view.deinit();
-    var expanded = try contiguousForRead(ctx, &expanded_view);
+    var expanded = try ctx.contiguousOwned(.f32, &expanded_view);
     defer expanded.deinit();
 
     var gx = try ctx.empty(.f32, m.shape.slice());
@@ -152,17 +135,6 @@ pub fn gateGradientByMask(
         dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) grad else 0;
     }
     return gx;
-}
-
-/// Row geometry for axis-wise scans: element (outer, i, inner) of a
-/// contiguous `shape` tensor lives at `outer·(shape[axis]·inner_len) +
-/// i·inner_len + inner`.
-pub fn axisGeometry(comptime rank: usize, shape: [rank]usize, comptime axis: usize) struct { outer: usize, inner: usize } {
-    var outer: usize = 1;
-    for (0..axis) |i| outer *= shape[i];
-    var inner: usize = 1;
-    for (axis + 1..rank) |i| inner *= shape[i];
-    return .{ .outer = outer, .inner = inner };
 }
 
 /// Owned copy of a RoPE table with the sin half negated: applying the forward

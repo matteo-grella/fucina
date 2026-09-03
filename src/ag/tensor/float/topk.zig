@@ -24,11 +24,8 @@ pub fn Ops(comptime Self: type) type {
         const TopKResult = ag_tensor.TopKResult;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const recordsGrad = plumbing.recordsGrad;
-        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
         const finishNoGrad = plumbing.finishNoGrad;
         const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         pub fn topK(self: *const Self, ctx: *ExecContext, comptime tag: Tag, k: usize, comptime out_tag: Tag) !TopKResult(replaceTag(tags, tag, out_tag)) {

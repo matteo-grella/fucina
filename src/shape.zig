@@ -125,12 +125,6 @@ pub fn storageElementCount(comptime dtype: dtype_mod.DType, shape: []const usize
     return n;
 }
 
-/// Product of the dimensions of a shape already validated by `elementCount`
-/// (a tensor's own metadata).
-pub fn elementCountAssumeValid(shape: []const usize) usize {
-    return product(shape);
-}
-
 pub fn storageElementCountAssumeValid(comptime dtype: dtype_mod.DType, shape: []const usize) usize {
     if (comptime dtype_mod.isScalar(dtype)) return product(shape);
     return product(shape[0 .. shape.len - 1]) * (shape[shape.len - 1] / dtype_mod.blockSize(dtype));

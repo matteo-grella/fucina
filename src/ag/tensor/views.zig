@@ -68,8 +68,6 @@ pub fn Ops(comptime Self: type) type {
         const finishNoGrad = plumbing.finishNoGrad;
         const finishOp = plumbing.finishOp;
         const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const RawT = tensor_mod.TensorOf(dtype);
         /// The f32 branch is the differentiable one; every other dtype takes
         /// the constant tail.

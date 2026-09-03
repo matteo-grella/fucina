@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
+const shape_mod = @import("../../shape.zig");
 const exec_mod = @import("../../exec.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
@@ -14,7 +15,6 @@ const rawRank = tags_mod.rawRank;
 
 const common = @import("common.zig");
 const rawShapeArray = common.rawShapeArray;
-const contiguousForRead = common.contiguousForRead;
 const axisGeometry = common.axisGeometry;
 
 /// VJP of `relposShift` (S.2 skew). Forward is a per-query gather
@@ -31,7 +31,7 @@ pub const RelposShiftBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
         const gv = try gy_ready.rankView(3); // [H, Tq, Tk]
         const h = gv.shape[0];
@@ -167,7 +167,7 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
             if (core.needs(self, 0)) {
                 if (comptime accumulate) {
                     // scatter-add: d/dbase is the identity.
-                    out[0] = try contiguousForRead(ctx, gy);
+                    out[0] = try ctx.contiguousOwned(.f32, gy);
                 } else {
                     // scatter (overwrite): base positions that were written
                     // lose their gradient — zero every addressed slot.
@@ -176,7 +176,7 @@ pub fn ScatterAlongBackward(comptime tags: anytype, comptime axis: usize, compti
                     const gbd = gb.data();
                     const out_shape = rawShapeArray(tags, gy);
                     const axis_dim = out_shape[axis];
-                    const geo = axisGeometry(rank, out_shape, axis);
+                    const geo = shape_mod.AxisGeometry.of(rank, out_shape, axis);
                     for (0..geo.outer) |outer_i| {
                         const out_base = outer_i * axis_dim * geo.inner;
                         const src_base = outer_i * self.src_axis_len * geo.inner;
@@ -218,7 +218,7 @@ pub fn IndexAddBackward(comptime tags: anytype, comptime axis: usize) type {
             // d/dupdate gathers the addressed rows (duplicate indices each
             // receive their position's gradient — the accumulation adjoint).
             if (core.needs(self, 0)) {
-                out[0] = try contiguousForRead(ctx, gy);
+                out[0] = try ctx.contiguousOwned(.f32, gy);
             }
             if (core.needs(self, 1)) {
                 out[1] = try ctx.gatherAxis(.f32, rawRank(tags.len), gy, axis, self.indices);

@@ -53,7 +53,6 @@ const ExecContext = exec_mod.ExecContext;
 const RawTensor = tensor_mod.Tensor;
 const rawRank = tags_mod.rawRank;
 const pointwiseResultTags = tags_mod.pointwiseResultTags;
-const contiguousForRead = backward_common.contiguousForRead;
 const reduceGradientToTags = backward_common.reduceGradientToTags;
 
 /// `elementalUnary` entry: `TensorT` is the caller's f32 facade tensor type
@@ -103,7 +102,7 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
         pub const Output = TensorT;
 
         pub fn forward(ctx: *ExecContext, extra: Extra, inputs: []const *const RawTensor) !RawTensor {
-            var x = try contiguousForRead(ctx, inputs[0]);
+            var x = try ctx.contiguousOwned(.f32, inputs[0]);
             defer x.deinit();
             var out = try ctx.empty(.f32, inputs[0].shape.slice());
             errdefer out.deinit();
@@ -138,11 +137,11 @@ fn UnarySpec(comptime TensorT: type, comptime Op: type, comptime Extra: type) ty
             out: []?RawTensor,
         ) !void {
             if (!needs_grad[0]) return;
-            var x = try contiguousForRead(ctx, inputs[0]);
+            var x = try ctx.contiguousOwned(.f32, inputs[0]);
             defer x.deinit();
-            var y = try contiguousForRead(ctx, output);
+            var y = try ctx.contiguousOwned(.f32, output);
             defer y.deinit();
-            var g = try contiguousForRead(ctx, gy);
+            var g = try ctx.contiguousOwned(.f32, gy);
             defer g.deinit();
             var gx = try ctx.empty(.f32, inputs[0].shape.slice());
             errdefer gx.deinit();
@@ -235,9 +234,9 @@ fn BinarySpec(
             defer a.deinit();
             var b = try broadcastContiguous(right_tags, inputs[1], result_shape, ctx);
             defer b.deinit();
-            var y = try contiguousForRead(ctx, output);
+            var y = try ctx.contiguousOwned(.f32, output);
             defer y.deinit();
-            var g = try contiguousForRead(ctx, gy);
+            var g = try ctx.contiguousOwned(.f32, gy);
             defer g.deinit();
 
             const Body = struct {
@@ -292,10 +291,10 @@ fn BinarySpec(
             result_shape: [rawRank(result_tags.len)]usize,
             ctx: *ExecContext,
         ) !RawTensor {
-            if (comptime result_tags.len == 0) return contiguousForRead(ctx, source);
+            if (comptime result_tags.len == 0) return ctx.contiguousOwned(.f32, source);
             var view = try tag_ops.broadcastTensorTo(.f32, source_tags, source, result_tags, result_shape);
             defer view.deinit();
-            return contiguousForRead(ctx, &view);
+            return ctx.contiguousOwned(.f32, &view);
         }
     };
 }

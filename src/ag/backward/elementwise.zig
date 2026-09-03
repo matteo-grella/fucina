@@ -22,8 +22,6 @@ const PointwiseOp = tag_ops.PointwiseOp;
 const rawShapeArray = common.rawShapeArray;
 const taggedShapeArray = common.taggedShapeArray;
 const reduceGradientToTags = common.reduceGradientToTags;
-const contiguousForRead = common.contiguousForRead;
-const contiguousForReadTyped = common.contiguousForReadTyped;
 
 pub fn PointwiseBackward(
     comptime op: PointwiseOp,
@@ -121,7 +119,7 @@ pub const IdentityBackward = struct {
 
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
-        out[0] = try contiguousForRead(ctx, gy);
+        out[0] = try ctx.contiguousOwned(.f32, gy);
     }
 
     pub const vtable = core.recordVTable(Self);
@@ -162,9 +160,9 @@ pub const ReluBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var x = try contiguousForRead(ctx, &self.input);
+        var x = try ctx.contiguousOwned(.f32, &self.input);
         defer x.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, x.shape.slice());
@@ -200,9 +198,9 @@ pub const SoftcapBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var y = try contiguousForRead(ctx, &self.output);
+        var y = try ctx.contiguousOwned(.f32, &self.output);
         defer y.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, y.shape.slice());
@@ -237,9 +235,9 @@ pub const LeakyReluBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var x = try contiguousForRead(ctx, &self.input);
+        var x = try ctx.contiguousOwned(.f32, &self.input);
         defer x.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, x.shape.slice());
@@ -313,9 +311,9 @@ pub fn UnaryBackward(comptime op: exec_mod.UnaryOp) type {
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var x = try contiguousForRead(ctx, &self.input);
+            var x = try ctx.contiguousOwned(.f32, &self.input);
             defer x.deinit();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
 
             var gx = try ctx.empty(.f32, x.shape.slice());
@@ -398,9 +396,9 @@ pub const ClampBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var x = try contiguousForRead(ctx, &self.input);
+        var x = try ctx.contiguousOwned(.f32, &self.input);
         defer x.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, x.shape.slice());
@@ -444,7 +442,7 @@ pub fn GatedBackward(
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0) and !core.needs(self, 1)) return;
 
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const gyd = gy_ready.dataConst();
 
@@ -453,9 +451,9 @@ pub fn GatedBackward(
             defer left_b.deinit();
             var right_b = try tag_ops.broadcastTensorTo(.f32, right_tags, &self.right_value, result_tags, result_tagged_shape);
             defer right_b.deinit();
-            var left_ready = try contiguousForRead(ctx, &left_b);
+            var left_ready = try ctx.contiguousOwned(.f32, &left_b);
             defer left_ready.deinit();
-            var right_ready = try contiguousForRead(ctx, &right_b);
+            var right_ready = try ctx.contiguousOwned(.f32, &right_b);
             defer right_ready.deinit();
             const left_data = left_ready.dataConst();
             const right_data = right_ready.dataConst();
@@ -566,9 +564,9 @@ pub const PowScalarBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var x = try contiguousForRead(ctx, &self.input);
+        var x = try ctx.contiguousOwned(.f32, &self.input);
         defer x.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, x.shape.slice());
@@ -597,9 +595,9 @@ pub fn MaskedFillBackward(comptime mask_dtype: tensor_mod.DType) type {
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
-            var m = try contiguousForReadTyped(mask_dtype, ctx, &self.mask);
+            var m = try ctx.contiguousOwned(mask_dtype, &self.mask);
             defer m.deinit();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             var gx = try ctx.empty(.f32, m.shape.slice());
             errdefer gx.deinit();
@@ -632,9 +630,9 @@ pub fn WhereBackward(comptime cond_dtype: tensor_mod.DType) type {
         const Self = @This();
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
-            var c = try contiguousForReadTyped(cond_dtype, ctx, &self.cond);
+            var c = try ctx.contiguousOwned(cond_dtype, &self.cond);
             defer c.deinit();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             if (core.needs(self, 0)) {
                 var gx = try ctx.empty(.f32, c.shape.slice());

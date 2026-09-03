@@ -58,9 +58,6 @@ pub fn Ops(comptime Self: type) type {
         const plumbing = @import("plumbing.zig").Mod(ag_tensor);
         const recordsGrad = plumbing.recordsGrad;
         const finishTypedNoGrad = plumbing.finishTypedNoGrad;
-        const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const pointwise = plumbing.pointwise;
         const gatedPointwise = plumbing.gatedPointwise;
         const finishOp = plumbing.finishOp;

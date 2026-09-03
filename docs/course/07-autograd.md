@@ -442,9 +442,9 @@ pub const ReluBackward = struct {
     pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
         if (!core.needs(self, 0)) return;
 
-        var x = try contiguousForRead(ctx, &self.input);
+        var x = try ctx.contiguousOwned(.f32, &self.input);
         defer x.deinit();
-        var gy_ready = try contiguousForRead(ctx, gy);
+        var gy_ready = try ctx.contiguousOwned(.f32, gy);
         defer gy_ready.deinit();
 
         var gx = try ctx.empty(.f32, x.shape.slice());

@@ -26,7 +26,6 @@ const common = @import("common.zig");
 const rawShapeArray = common.rawShapeArray;
 const rawShapeArrayOf = common.rawShapeArrayOf;
 const tagsDifference = common.tagsDifference;
-const contiguousForRead = common.contiguousForRead;
 const expandGradientToTags = common.expandGradientToTags;
 const runContractionBranches = common.runContractionBranches;
 
@@ -139,13 +138,13 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
         pub fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &self.right_value, left_recover_tags);
             defer grad.deinit();
-            out.* = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
+            out.* = try expandGradientToTags(left_recover_tags, left_tags, &grad, self.left_shape);
         }
 
         pub fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
             var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value, right_recover_tags);
             defer grad.deinit();
-            out.* = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
+            out.* = try expandGradientToTags(right_recover_tags, right_tags, &grad, self.right_shape);
         }
 
         pub fn einsumBackwardWorkEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
@@ -296,12 +295,12 @@ pub fn ConstRhsEinsumBackward(
                 // forward summed away come back as a broadcast.
                 var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &right_f32, left_recover_tags);
                 defer grad.deinit();
-                out[0] = try expandGradientToTags(left_recover_tags, left_tags, ctx, &grad, self.left_shape);
+                out[0] = try expandGradientToTags(left_recover_tags, left_tags, &grad, self.left_shape);
             }
             if (core.needs(self, 1)) {
                 var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
                 defer grad.deinit();
-                out[1] = try expandGradientToTags(right_recover_tags, right_tags, ctx, &grad, self.right_shape);
+                out[1] = try expandGradientToTags(right_recover_tags, right_tags, &grad, self.right_shape);
             }
         }
 
@@ -357,7 +356,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
             const k = self.left.shape.at(1);
             const n = self.rhs.n;
 
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             var gy2d = try gy_ready.reshape(&.{ m, n });
             defer gy2d.deinit();

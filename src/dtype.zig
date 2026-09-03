@@ -424,10 +424,6 @@ pub fn isUnsignedInteger(comptime dtype: DType) bool {
     };
 }
 
-pub fn supportsGrad(comptime dtype: DType) bool {
-    return supportsForwardFloatMath(dtype);
-}
-
 /// Ordinary integer pointwise math (wrapping add/sub/mul, max/min,
 /// explicit divTrunc/divFloor) and i64-accumulated reductions. bool is
 /// excluded from pointwise math but its reductions (sum = count) apply.
@@ -447,6 +443,10 @@ pub fn supportsForwardFloatMath(comptime dtype: DType) bool {
         .f16, .bf16, .f32, .f64 => true,
         else => false,
     };
+}
+
+pub fn supportsGrad(comptime dtype: DType) bool {
+    return supportsForwardFloatMath(dtype);
 }
 
 /// Comptime guard of the forward float ops: the dtype must be one the
@@ -549,10 +549,6 @@ pub fn one(comptime dtype: DType) Scalar(dtype) {
         .f8_e5m2 => 0x3c,
         else => @as(Scalar(dtype), 1),
     };
-}
-
-pub fn name(comptime dtype: DType) []const u8 {
-    return @tagName(dtype);
 }
 
 pub fn toF32(comptime dtype: DType, value: Scalar(dtype)) f32 {

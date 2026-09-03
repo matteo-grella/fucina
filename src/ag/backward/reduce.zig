@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const tensor_mod = @import("../../tensor.zig");
+const shape_mod = @import("../../shape.zig");
 const exec_mod = @import("../../exec.zig");
 const core = @import("../core.zig");
 const tags_mod = @import("../../tags.zig");
@@ -14,7 +15,6 @@ const rawRank = tags_mod.rawRank;
 const common = @import("common.zig");
 const rawShapeArray = common.rawShapeArray;
 const reduceGradientToTags = common.reduceGradientToTags;
-const contiguousForRead = common.contiguousForRead;
 const expandGradientToTags = common.expandGradientToTags;
 const axisGeometry = common.axisGeometry;
 const gateGradientByMask = common.gateGradientByMask;
@@ -26,9 +26,9 @@ pub fn SumBackward(comptime source_tags: anytype, comptime result_tags: anytype)
 
         const Self = @This();
 
-        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+        pub fn vjp(self: *Self, _: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
-            out[0] = try expandGradientToTags(result_tags, source_tags, ctx, gy, self.source_shape);
+            out[0] = try expandGradientToTags(result_tags, source_tags, gy, self.source_shape);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -52,7 +52,7 @@ pub fn MeanBackward(comptime source_tags: anytype, comptime result_tags: anytype
             // full-size pass and its allocation.
             var scaled = try ctx.scale(.f32, gy, 1 / @as(f32, @floatFromInt(self.source_shape[axis])));
             defer scaled.deinit();
-            out[0] = try expandGradientToTags(result_tags, source_tags, ctx, &scaled, self.source_shape);
+            out[0] = try expandGradientToTags(result_tags, source_tags, &scaled, self.source_shape);
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -110,9 +110,9 @@ pub fn MaskedMeanBackward(comptime source_tags: anytype, comptime result_tags: a
             // broadcasting, so the divide runs over the small tensor. A lane
             // that selected nothing produced the caller's `empty` constant,
             // not a mean of the data, so its gradient is zero.
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
-            var counts_ready = try contiguousForRead(ctx, &self.counts);
+            var counts_ready = try ctx.contiguousOwned(.f32, &self.counts);
             defer counts_ready.deinit();
 
             var scaled = try ctx.empty(.f32, gy_ready.shape.slice());
@@ -242,10 +242,10 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var x_ready = try contiguousForRead(ctx, &self.input);
+            var x_ready = try ctx.contiguousOwned(.f32, &self.input);
             defer x_ready.deinit();
             const x = x_ready.dataConst();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const g = gy_ready.dataConst();
 
@@ -258,7 +258,7 @@ pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
             // one zero → its slot gets g·Π(nonzero), the rest 0; two or
             // more zeros → all 0. Computed division-free per row.
             const axis_dim = source_shape[axis];
-            const geo = axisGeometry(rank, source_shape, axis);
+            const geo = shape_mod.AxisGeometry.of(rank, source_shape, axis);
             for (0..geo.outer) |outer_i| {
                 const base = outer_i * axis_dim * geo.inner;
                 for (0..geo.inner) |inner_i| {
@@ -304,13 +304,13 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (!core.needs(self, 0)) return;
 
-            var x_ready = try contiguousForRead(ctx, &self.input);
+            var x_ready = try ctx.contiguousOwned(.f32, &self.input);
             defer x_ready.deinit();
             const x = x_ready.dataConst();
-            var y_ready = try contiguousForRead(ctx, &self.output);
+            var y_ready = try ctx.contiguousOwned(.f32, &self.output);
             defer y_ready.deinit();
             const y = y_ready.dataConst();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const g = gy_ready.dataConst();
 
@@ -324,7 +324,7 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
             // back to the exact division-free O(n²) expansion
             // grad_i = Σ_{j≥i} g_j·Π_{k≤j, k≠i} x_k (torch semantics).
             const axis_dim = source_shape[axis];
-            const geo = axisGeometry(rank, source_shape, axis);
+            const geo = shape_mod.AxisGeometry.of(rank, source_shape, axis);
             for (0..geo.outer) |outer_i| {
                 const base = outer_i * axis_dim * geo.inner;
                 for (0..geo.inner) |inner_i| {

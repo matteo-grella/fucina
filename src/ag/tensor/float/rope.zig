@@ -21,10 +21,7 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const recordsGrad = plumbing.recordsGrad;
-        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
         const finishNoGrad = plumbing.finishNoGrad;
-        const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
         const finishOp = plumbing.finishOp;
 
         /// Rotary position embedding over (`position_tag`, `feature_tag`).

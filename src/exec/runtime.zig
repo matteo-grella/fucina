@@ -546,6 +546,15 @@ pub fn clone(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorO
     return self.materialize(dtype, x);
 }
 
+/// `x` as an OWNED contiguous tensor: a retained view of the same storage
+/// when the layout is already contiguous, else a materialized copy. The
+/// read form of `prepareContiguous` for callers that want one owned value
+/// and one unconditional `deinit` (the VJPs).
+pub fn contiguousOwned(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !tensor.TensorOf(dtype) {
+    if (x.isContiguous()) return x.cloneView();
+    return self.materialize(dtype, x);
+}
+
 // ------------------------------------------------------------------
 // Contiguity preparation: borrow the input when it is already
 // contiguous, otherwise materialize a contiguous copy. `PreparedTensor`

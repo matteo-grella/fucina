@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:964/:1059`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec/runtime.zig:671`). An arena frees
+   (which frees the old buffer each layer, `src/exec/runtime.zig:680`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set
@@ -279,6 +279,7 @@ not on the type:
 | Caller-owned | `variable`/`constant`/`fromSlice`-style constructors, fetched gradients (`grad`/`gradView`), facade op results with NO exec scope open | releases the reference |
 | Scope-owned | any facade op result while an exec scope is open (the scope adopts value + autograd payload; the caller's handle is a borrow) | safe no-op; the scope frees at close |
 | Prepared | `PreparedTensorOf` (`prepareContiguous`): `union` of borrowed input vs owned copy | releases only the owned arm |
+| Owned contiguous | `ExecContext.contiguousOwned(dtype, x)`: a retained view of `x` when it is already contiguous, else a materialized copy (the VJPs' read form of `prepareContiguous`) | releases the one reference, view or copy alike |
 | Taken | `take*` ops consume their target in place when `canTakeInPlace()` holds and return the same storage as a new value | releases the (single) reference |
 | Leased | `BufferPool.acquire`/`acquireScratch` handles (`release()`, not `deinit`) | n/a; `release` returns to the pool |
 

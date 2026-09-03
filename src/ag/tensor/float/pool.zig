@@ -15,11 +15,7 @@ pub fn Ops(comptime Self: type) type {
         const ag_tensor = Self.ag_root;
         const plumbing = @import("../plumbing.zig").Mod(ag_tensor);
         const recordsGrad = plumbing.recordsGrad;
-        const finishTypedNoGrad = plumbing.finishTypedNoGrad;
         const finishNoGrad = plumbing.finishNoGrad;
-        const rawShapeArray = plumbing.rawShapeArray;
-        const rawShapeArrayOf = plumbing.rawShapeArrayOf;
-        const cloneInverseRopeTable = plumbing.cloneInverseRopeTable;
         const finishOp = plumbing.finishOp;
 
         /// 2-D max pool over a channel-last rank-3 `[H, W, C]` tensor

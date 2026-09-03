@@ -13,7 +13,6 @@ const rawRank = tags_mod.rawRank;
 
 const common = @import("common.zig");
 const rawShapeArray = common.rawShapeArray;
-const contiguousForRead = common.contiguousForRead;
 
 /// VJP for a masked extremum: the unmasked first-winner scatter, skipping
 /// lanes whose index is the -1 "nothing selected" sentinel.
@@ -29,7 +28,7 @@ pub fn MaskedMinMaxBackward(comptime source_tags: anytype, comptime axis: usize)
             if (!core.needs(self, 0)) return;
 
             const rank = comptime rawRank(source_tags.len);
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             const idxd = self.indices.dataConst();
 
@@ -80,9 +79,9 @@ pub fn VarBackward(comptime source_tags: anytype, comptime axis: usize) type {
             if (!core.needs(self, 0)) return;
 
             const rank = comptime rawRank(source_tags.len);
-            var x_ready = try contiguousForRead(ctx, &self.input);
+            var x_ready = try ctx.contiguousOwned(.f32, &self.input);
             defer x_ready.deinit();
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
 
             const source_shape = rawShapeArray(source_tags, &self.input);
@@ -168,7 +167,7 @@ pub fn MinMaxBackward(comptime source_tags: anytype, comptime axis: usize) type 
             if (!core.needs(self, 0)) return;
 
             const rank = comptime rawRank(source_tags.len);
-            var gy_ready = try contiguousForRead(ctx, gy);
+            var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
             // The saved indices are a view of the forward kernel's freshly
             // allocated (contiguous) i64 tensor.
