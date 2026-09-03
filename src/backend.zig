@@ -141,12 +141,94 @@ pub const vector_impl = @import("backend/vector.zig");
 // the kernel entries themselves they reach through `kernels`, dispatched
 // by value through `ExecContext.dispatchRangeOr`.
 // Single implementation, `backend/vector/rows.zig`.
-pub const rows = @import("backend/vector/rows.zig");
+const rows_impl = @import("backend/vector/rows.zig");
+/// The row-kernel seam, curated: the Task payloads (each the parameter of
+/// a kernel in `kernels` or of an adapter here), the inner-lane `run*Task`
+/// adapters, the fused-activation task factory and the shared helpers.
+/// `conformSeam` checks the pairing; the kernel bodies are not reachable
+/// through this namespace.
+pub const rows = struct {
+    pub const CrossEntropyBackwardRowsTask = rows_impl.CrossEntropyBackwardRowsTask;
+    pub const CrossEntropyLossRowsTask = rows_impl.CrossEntropyLossRowsTask;
+    pub const DropoutRangeTask = rows_impl.DropoutRangeTask;
+    pub const FusedActKind = rows_impl.FusedActKind;
+    pub const FusedActQuantTask = rows_impl.FusedActQuantTask;
+    pub const LayerNormBackwardInputRowsTask = rows_impl.LayerNormBackwardInputRowsTask;
+    pub const LayerNormInnerTask = rows_impl.LayerNormInnerTask;
+    pub const LayerNormParamGradColumnsTask = rows_impl.LayerNormParamGradColumnsTask;
+    pub const LayerNormRowStatsTask = rows_impl.LayerNormRowStatsTask;
+    pub const LayerNormRowsTask = rows_impl.LayerNormRowsTask;
+    pub const RmsNormBackwardInputInnerTask = rows_impl.RmsNormBackwardInputInnerTask;
+    pub const RmsNormInnerTask = rows_impl.RmsNormInnerTask;
+    pub const RmsNormMulAddRowsTask = rows_impl.RmsNormMulAddRowsTask;
+    pub const RmsNormMulBackwardInputRowsTask = rows_impl.RmsNormMulBackwardInputRowsTask;
+    pub const RmsNormMulBackwardWeightRowsTask = rows_impl.RmsNormMulBackwardWeightRowsTask;
+    pub const RmsNormMulRopeHalfTask = rows_impl.RmsNormMulRopeHalfTask;
+    pub const RmsNormMulRowsTask = rows_impl.RmsNormMulRowsTask;
+    pub const RmsNormWeightGradBlocksTask = rows_impl.RmsNormWeightGradBlocksTask;
+    pub const RmsNormWeightGradReduceTask = rows_impl.RmsNormWeightGradReduceTask;
+    pub const ScatterAddRowsTask = rows_impl.ScatterAddRowsTask;
+    pub const SoftmaxBackwardInnerTask = rows_impl.SoftmaxBackwardInnerTask;
+    pub const SoftmaxBackwardRowsTask = rows_impl.SoftmaxBackwardRowsTask;
+    pub const SoftmaxExtRowsTask = rows_impl.SoftmaxExtRowsTask;
+    pub const SoftmaxInnerTask = rows_impl.SoftmaxInnerTask;
+    pub const SoftmaxRowsTask = rows_impl.SoftmaxRowsTask;
+    pub const SplitSwiGluBackwardTask = rows_impl.SplitSwiGluBackwardTask;
+    pub const SplitSwiGluQuantQ8_0x4Task = rows_impl.SplitSwiGluQuantQ8_0x4Task;
+    pub const SplitSwiGluTask = rows_impl.SplitSwiGluTask;
+    pub const StandardizeBackwardInnerTask = rows_impl.StandardizeBackwardInnerTask;
+    pub const StandardizeInnerTask = rows_impl.StandardizeInnerTask;
+    pub const VarianceInnerTask = rows_impl.VarianceInnerTask;
+    pub const coordinateForLinear = rows_impl.coordinateForLinear;
+    pub const dropoutKeepCutoff = rows_impl.dropoutKeepCutoff;
+    pub const rms_weight_grad_block_rows = rows_impl.rms_weight_grad_block_rows;
+    pub const rowSumSq = rows_impl.rowSumSq;
+    pub const runLayerNormInnerTask = rows_impl.runLayerNormInnerTask;
+    pub const runLogSoftmaxInnerTask = rows_impl.runLogSoftmaxInnerTask;
+    pub const runLogsumexpInnerTask = rows_impl.runLogsumexpInnerTask;
+    pub const runRmsNormBackwardInputInnerTask = rows_impl.runRmsNormBackwardInputInnerTask;
+    pub const runRmsNormInnerTask = rows_impl.runRmsNormInnerTask;
+    pub const runSoftmaxBackwardInnerTask = rows_impl.runSoftmaxBackwardInnerTask;
+    pub const runSoftmaxInnerTask = rows_impl.runSoftmaxInnerTask;
+    pub const runSplitSwiGluQuantQ8_0x4Task = rows_impl.runSplitSwiGluQuantQ8_0x4Task;
+    pub const runStandardizeBackwardInnerTask = rows_impl.runStandardizeBackwardInnerTask;
+    pub const runStandardizeInnerTask = rows_impl.runStandardizeInnerTask;
+    pub const runVarianceInnerTask = rows_impl.runVarianceInnerTask;
+};
 // Attention-kernel vocabulary seam: the Task payloads, `run*Task` pool
 // adapters and tile constants of the grouped-causal attention family.
 // Single implementation, `backend/vector/attention.zig`; the kernel
 // entries themselves are reached through `kernels`.
-pub const attention = @import("backend/vector/attention.zig");
+const attention_impl = @import("backend/vector/attention.zig");
+/// The attention seam, curated like `rows`: Task payloads, `run*Task`
+/// adapters, the tile constants and the KV-layout helpers.
+pub const attention = struct {
+    pub const AttentionBackwardReduceTask = attention_impl.AttentionBackwardReduceTask;
+    pub const GroupedCausalAttentionBackwardTask = attention_impl.GroupedCausalAttentionBackwardTask;
+    pub const GroupedCausalAttentionBackwardTiledTask = attention_impl.GroupedCausalAttentionBackwardTiledTask;
+    pub const GroupedCausalAttentionMultiTask = attention_impl.GroupedCausalAttentionMultiTask;
+    pub const GroupedCausalAttentionPairTask = attention_impl.GroupedCausalAttentionPairTask;
+    pub const GroupedCausalAttentionTask = attention_impl.GroupedCausalAttentionTask;
+    pub const GroupedCausalAttentionTiledTask = attention_impl.GroupedCausalAttentionTiledTask;
+    pub const attentionTileKeyCount = attention_impl.attentionTileKeyCount;
+    pub const attention_bwd_blas_tile_rows = attention_impl.attention_bwd_blas_tile_rows;
+    pub const attention_bwd_tile_rows = attention_impl.attention_bwd_tile_rows;
+    pub const attention_q8_max_d = attention_impl.attention_q8_max_d;
+    pub const attention_tile_max_d = attention_impl.attention_tile_max_d;
+    pub const attention_tile_rows = attention_impl.attention_tile_rows;
+    pub const attention_tiled_min_q_seq = attention_impl.attention_tiled_min_q_seq;
+    pub const hasAdjacentKvHeadPairs = attention_impl.hasAdjacentKvHeadPairs;
+    pub const kvDtypeOf = attention_impl.kvDtypeOf;
+    pub const kvRowElems = attention_impl.kvRowElems;
+    pub const runAttentionBackwardReduceTask = attention_impl.runAttentionBackwardReduceTask;
+    pub const runGroupedCausalAttentionBackwardBlasTiledTask = attention_impl.runGroupedCausalAttentionBackwardBlasTiledTask;
+    pub const runGroupedCausalAttentionBackwardTask = attention_impl.runGroupedCausalAttentionBackwardTask;
+    pub const runGroupedCausalAttentionBackwardTiledTask = attention_impl.runGroupedCausalAttentionBackwardTiledTask;
+    pub const runGroupedCausalAttentionMultiTask = attention_impl.runGroupedCausalAttentionMultiTask;
+    pub const runGroupedCausalAttentionPairTask = attention_impl.runGroupedCausalAttentionPairTask;
+    pub const runGroupedCausalAttentionTask = attention_impl.runGroupedCausalAttentionTask;
+    pub const runGroupedCausalAttentionTiledTask = attention_impl.runGroupedCausalAttentionTiledTask;
+};
 // The one proportional range splitter (`forRange`/`reduceRange`) behind
 // the vector kernels' parallel dispatch, exported for the upper bands'
 // own chunked loops (the ag elementwise VJP maps ride `forRange`): the
@@ -226,6 +308,8 @@ pub const kernels = native_impl.kernels;
 
 comptime {
     conformKernels(native_impl.kernels);
+    conformSeam(rows, native_impl.kernels);
+    conformSeam(attention, native_impl.kernels);
 }
 
 /// The kernel-set contract, derived from the declarations themselves
@@ -237,6 +321,73 @@ comptime {
 /// explicit decision rather than an accident. Generic entries (comptime
 /// dtype/op/request or `anytype` containers) satisfy the same rule: their
 /// `pc` parameter, when present, is concrete.
+/// The seam contract: every `*Task` type a seam publishes is the payload of
+/// a kernel in `kernels` (by value or behind a pointer) or of a `run*Task`
+/// adapter in the seam, and every `run*Task` adapter takes a pointer to a
+/// Task the seam publishes. A payload nobody dispatches, or an adapter over
+/// a private Task, is a compile error; factories, helpers and constants are
+/// the seam's remaining decls.
+fn conformSeam(comptime Seam: type, comptime Kernels: type) void {
+    comptime {
+        @setEvalBranchQuota(200_000);
+        for (@typeInfo(Seam).@"struct".decls) |d| {
+            const value = @field(Seam, d.name);
+            const is_task_type = @TypeOf(value) == type and std.mem.endsWith(u8, d.name, "Task");
+            // A `run*Task` whose first parameter is a `type` is a comptime
+            // factory of adapters (the typed inner-lane family); the adapter
+            // it returns is checked where a kernel takes it, not here.
+            const is_adapter = std.mem.startsWith(u8, d.name, "run") and std.mem.endsWith(u8, d.name, "Task") and @typeInfo(@TypeOf(value)) == .@"fn" and
+                !(@typeInfo(@TypeOf(value)).@"fn".params.len > 0 and @typeInfo(@TypeOf(value)).@"fn".params[0].type == type);
+            if (is_task_type) {
+                if (!seamTaskIsDispatched(value, Seam, Kernels)) @compileError(
+                    "seam payload `" ++ d.name ++ "` is the parameter of no kernel and no adapter",
+                );
+            } else if (is_adapter) {
+                const params = @typeInfo(@TypeOf(value)).@"fn".params;
+                if (params.len == 0 or params[0].type == null or !seamPublishesTask(Seam, payloadOf(params[0].type.?))) @compileError(
+                    "seam adapter `" ++ d.name ++ "` does not take a pointer to a published Task",
+                );
+            }
+        }
+    }
+}
+
+/// The Task behind a kernel or adapter parameter type: the type itself, or
+/// the pointee of a single-item pointer.
+fn payloadOf(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |ptr| if (ptr.size == .one) ptr.child else T,
+        else => T,
+    };
+}
+
+fn seamPublishesTask(comptime Seam: type, comptime T: type) bool {
+    for (@typeInfo(Seam).@"struct".decls) |d| {
+        const value = @field(Seam, d.name);
+        if (@TypeOf(value) == type and value == T) return true;
+    }
+    return false;
+}
+
+fn seamTaskIsDispatched(comptime T: type, comptime Seam: type, comptime Kernels: type) bool {
+    for (@typeInfo(Kernels).@"struct".decls) |d| {
+        const value = @field(Kernels, d.name);
+        if (@typeInfo(@TypeOf(value)) != .@"fn") continue;
+        for (@typeInfo(@TypeOf(value)).@"fn".params) |p| {
+            if (p.type) |pt| if (payloadOf(pt) == T) return true;
+        }
+    }
+    for (@typeInfo(Seam).@"struct".decls) |d| {
+        const value = @field(Seam, d.name);
+        if (@typeInfo(@TypeOf(value)) != .@"fn") continue;
+        if (!std.mem.startsWith(u8, d.name, "run")) continue;
+        for (@typeInfo(@TypeOf(value)).@"fn".params) |p| {
+            if (p.type) |pt| if (payloadOf(pt) == T) return true;
+        }
+    }
+    return false;
+}
+
 fn conformKernels(comptime Impl: type) void {
     comptime {
         @setEvalBranchQuota(20_000);

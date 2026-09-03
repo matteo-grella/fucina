@@ -25,6 +25,13 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The row and attention seams are curated namespaces: `backend.rows` and
+  `backend.attention` list the Task payloads, the `run*Task` inner-lane
+  adapters, the task factories, the tile constants and the shared helpers
+  the exec domain modules use, and nothing else (the kernel bodies are
+  reached through `backend.kernels` only). `conformSeam` checks at compile
+  time that every published Task is the parameter of a kernel or an
+  adapter and that every adapter takes a published Task.
 - The core bands reach the backend through one door: `backend.quant` is the
   curated quantized surface (the `QuantizedMatmulRhs*` containers,
   `RhsLifetime`/`RawRhs`, the lane-packed block types, `blockCountForDType`,

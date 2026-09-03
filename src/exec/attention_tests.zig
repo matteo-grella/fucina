@@ -9,7 +9,7 @@ const std = @import("std");
 
 const exec_mod = @import("../exec.zig");
 const exec_attention = @import("attention.zig");
-const backend_attn = @import("../backend.zig").attention;
+const backend_attn = @import("../backend/vector/attention.zig"); // the kernel bodies: tests are exempt from the door
 
 const ExecContext = exec_mod.ExecContext;
 
