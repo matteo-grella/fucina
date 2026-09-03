@@ -96,14 +96,16 @@ pub const offload = @import("backend/offload.zig");
 // microbenches that compare its row-kernel and blocked paths directly; the
 // curated upper-band vocabulary is `simd` below.
 pub const vector_impl = @import("backend/vector.zig");
-// Row-kernel vocabulary seam: the Task payloads (pure slices/dims) the
-// fused row kernels in `kernels` take, the inner-lane `run*Task` pool
-// adapters, and the comptime task factories (the fused activation+quantize
-// workers); the row kernels themselves are dispatched by value through
-// `ExecContext.dispatchRangeOr`.
-// Single implementation, `backend/vector/rows.zig`; the serial kernel
-// entries themselves are reached through `kernels`, never through this
-// namespace by name.
+// Row-kernel vocabulary seam: the Task payloads the fused row kernels in
+// `kernels` take (slices and dims, plus a ranked shape/stride array or an
+// optional RankedTensor mask where a kernel walks a strided view), the
+// inner-lane `run*Task` pool adapters, the comptime task factories (the
+// fused activation+quantize workers) and the small shared helpers
+// (`dropoutKeepCutoff`, `rowSumSq`, `coordinateForLinear`, the weight-grad
+// block rows). The exec domain modules import those by name from here;
+// the kernel entries themselves they reach through `kernels`, dispatched
+// by value through `ExecContext.dispatchRangeOr`.
+// Single implementation, `backend/vector/rows.zig`.
 pub const rows = @import("backend/vector/rows.zig");
 // Attention-kernel vocabulary seam: the Task payloads, `run*Task` pool
 // adapters and tile constants of the grouped-causal attention family.

@@ -2,8 +2,9 @@
 //! (softmax/log-softmax/logsumexp rows, layer/RMS-norm rows and their
 //! backward stats, cross-entropy rows, dropout, scatter-add, gated
 //! activations, and the fused activation+re-quantize passes the quantized
-//! matmuls chain onto), each with its `Task` payload (pure slices/dims —
-//! no runtime types). The serial
+//! matmuls chain onto), each with its `Task` payload: slices and dims,
+//! plus a ranked shape/stride array or an optional RankedTensor mask where
+//! a kernel walks a strided view. The serial
 //! kernel entries are registered in `native.zig`'s `kernels` table; the
 //! `exec/` domain modules that own the ops (`softmax.zig`, `norm.zig`,
 //! `loss.zig`, `quant_matmul.zig`, ...) validate, lay out, allocate and

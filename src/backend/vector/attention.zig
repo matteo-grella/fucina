@@ -2,7 +2,7 @@
 //! head/pair units over f32/f16/q8_0 KV, the query-tiled online-softmax
 //! prefill kernel), the tiled backward with its BLAS-strip variant, the
 //! multi-stream ragged decode walker, and the dK/dV plane reduction —
-//! each with its Task payload (pure slices/dims) and `run*Task` pool
+//! each with its Task payload (slices, dims and strides) and `run*Task` pool
 //! adapter. The kernel entries are registered in `native.zig`'s `kernels`
 //! table; `exec/attention.zig` owns validation, layout, allocation and
 //! dispatch. On `-Dbackend=scalar` builds (`isa.reference`) the f32/f16
