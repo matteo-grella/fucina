@@ -10,6 +10,7 @@
 //! `scalar` namespace below; the q8_0 KV arms are reference-by-composition
 //! (their integer dot/weighted-row kernels select their own scalar tiers).
 const std = @import("std");
+const common = @import("common.zig");
 const build_options = @import("build_options");
 const dtype_mod = @import("../../dtype.zig");
 const isa = @import("../isa.zig");
@@ -295,8 +296,8 @@ fn groupedCausalAttentionUnits(
     const kv_head_stride = task.d;
     const kv_seq_stride = task.kv_heads * task.d;
     const out_seq_stride = task.heads * task.d;
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
     const Lane = KvLane(KvElem);
     // q8_0 KV: each of the group's query rows is quantized ONCE per (query,
     // unit) and the score pass runs the integer q8xq8 dot straight on the
@@ -589,8 +590,8 @@ pub fn groupedCausalAttentionQueryTiles(
     // load/store traffic either way, so a doubled chunk halves loop overhead.
     const DotVec = @Vector(4, f32);
     const dot_width = 4;
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
     const RVec = @Vector(rows, f32);
     const RVecI = @Vector(rows, i32);
     const ones: RVec = @splat(1);
@@ -858,8 +859,8 @@ pub fn groupedCausalAttentionBackwardKvHeads(task: GroupedCausalAttentionBackwar
     const kv_head_stride = task.d;
     const kv_seq_stride = task.kv_heads * task.d;
     const out_seq_stride = task.heads * task.d;
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
 
     for (0..task.heads) |head_i| {
         const kv_head_i = task.kv_head_for_head[head_i];
@@ -1025,8 +1026,8 @@ inline fn attentionBackwardSoftmaxTileRows(
     ds_panel_all: []f32,
     stats_head: ?[]const f32,
 ) void {
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
     const neg_inf = -std.math.inf(f32);
 
     for (0..rows_active) |r| {
@@ -1118,8 +1119,8 @@ pub fn groupedCausalAttentionBackwardTiles(task: GroupedCausalAttentionBackwardT
     const qr_block = 4;
     const DotVec = @Vector(4, f32);
     const dot_width = 4;
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
 
     const d = task.d;
     const q_seq_stride = task.heads * d;
@@ -1490,8 +1491,8 @@ pub fn addSliceInPlace(dest: []f32, src: []const f32) void {
         for (dest, src) |*d, s| d.* += s;
         return;
     }
-    const Vec = @Vector(8, f32);
-    const vector_width = 8;
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
     var i: usize = 0;
     while (i + vector_width <= src.len) : (i += vector_width) {
         const dest_vec: Vec = dest[i..][0..vector_width].*;

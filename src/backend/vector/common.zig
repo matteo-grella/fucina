@@ -31,6 +31,13 @@ pub fn refSerial(pc: ParallelConfig) ParallelConfig {
 // any SIMD-capable target) if the compiler can't infer a better one.
 pub const vector_len: comptime_int = std.simd.suggestVectorLength(f32) orelse 4;
 pub const Vf32 = @Vector(vector_len, f32);
+
+/// The fixed lane width of the fused row and attention kernels. A bit
+/// contract, not the machine width: these kernels reduce eight lanes at a
+/// time on every target, so their float results do not change with the
+/// ISA (the reference build and the parity tests pin them).
+pub const row_lanes: comptime_int = 8;
+pub const RowVec = @Vector(row_lanes, f32);
 pub const vector_len_f64: comptime_int = std.simd.suggestVectorLength(f64) orelse 2;
 pub const Vf64 = @Vector(vector_len_f64, f64);
 pub const vector_len_f16: comptime_int = std.simd.suggestVectorLength(f16) orelse 8;
