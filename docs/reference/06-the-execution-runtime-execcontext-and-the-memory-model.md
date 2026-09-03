@@ -651,19 +651,19 @@ team to them does); `setMaxThreads` remains the escape hatch for
 deliberate oversubscription — lowered by `FUCINA_MAX_THREADS`. No single
 value wins every workload (measured: prefill fastest at all P-cores when
 cool, decode often faster one or two threads lower), hence the runtime
-knobs. The env parsers behind these knobs are themselves public:
-`parallel.envPositiveUsize(name)` implements the positive-usize knob
+knobs. The env parsers behind these knobs are themselves public, as
+`fucina.parallel.env` (`src/env.zig`): `env.positiveUsize(name)` implements the positive-usize knob
 contract (libc `getenv`, or a libc-free `/proc/self/environ` scan on static
-Linux; unset/invalid/`0` ⇒ `null`), `parallel.envNonNegativeUsize(name)` is
+Linux; unset/invalid/`0` ⇒ `null`), `env.nonNegativeUsize(name)` is
 the same read with `0` as a value, not "unset" (the `FUCINA_SPIN_BUDGET`
-and GPU-floor contract), and `parallel.envFlagValue(name)` is the tri-state
-boolean read the tuning table's gates go through (unset/empty ⇒ `null`). `parallel.physicalCpuCount()` (macOS sysctl /
+and GPU-floor contract), and `env.flagValue(name)` is the tri-state
+boolean read the tuning table's gates go through (unset/empty ⇒ `null`). `parallel.topology.physicalCpuCount()` (`src/cpu_topology.zig`; macOS sysctl /
 Linux sysfs-topology-over-affinity; null where unknown; probed once and
 process-cached, first caller's affinity mask wins) is public as well — it
 is the count the oversubscription guard compares the team size against
 (deliberately the all-physical-cores reference, so a team sized between
 the P-core and all-cores counts is not treated as oversubscribed).
-`parallel.performanceCpuCount()` (Apple Silicon sysctl
+`parallel.topology.performanceCoreCount()` (Apple Silicon sysctl
 `hw.perflevel0.physicalcpu`; null elsewhere; same probe-once caching) is
 the count the team-size default clamps to on those machines.
 

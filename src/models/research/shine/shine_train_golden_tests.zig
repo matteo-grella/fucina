@@ -623,7 +623,7 @@ test "SHINE training step timing at 0.6B (informational)" {
     // grad-free block forward makes the packed GEMMs GPU-eligible. Width 4
     // clears the GPU dispatch crossover (4096*3072*1024 > 2^32). Opt-in
     // via FUCINA_SHINE_PACKED_BENCH=1 — a long 0.6B battery.
-    if (!fucina.parallel.envFlag("FUCINA_SHINE_PACKED_BENCH")) return;
+    if (!fucina.parallel.env.flag("FUCINA_SHINE_PACKED_BENCH")) return;
     trainer.checkpoint_layers = true;
     const example = shine_train.Example{ .evidence = evidence, .input = inputs, .labels = labels };
     const widths = [_]usize{ 1, 2, 4 };

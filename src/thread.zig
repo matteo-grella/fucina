@@ -552,7 +552,7 @@ const BarrierPool = struct {
         const budgets = spinBudgets(
             tuning.get().spin_budget,
             worker_count + 1, // the dispatcher is a participant too
-            parallel.schedulableCpuCount(),
+            parallel.topology.schedulableCpuCount(),
         );
         self.* = .{
             .allocator = allocator,
@@ -966,7 +966,7 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
     const expected = BarrierPool.spinBudgets(
         tuning.get().spin_budget,
         worker_count + 1,
-        parallel.physicalCpuCount(),
+        parallel.topology.physicalCpuCount(),
     );
     try std.testing.expectEqual(expected.worker, bp.spin_budget);
     try std.testing.expectEqual(expected.join, bp.join_spin_budget);
@@ -974,7 +974,7 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
     // On machines with fewer than 25 physical cores (every dev target) the
     // guard must have zeroed the worker spin budget; an explicit
     // FUCINA_SPIN_BUDGET in the environment legitimately overrides that half.
-    if (parallel.physicalCpuCount()) |cores| {
+    if (parallel.topology.physicalCpuCount()) |cores| {
         if (worker_count + 1 > cores) {
             try std.testing.expectEqual(BarrierPool.oversubscribed_join_spin_budget, bp.join_spin_budget);
             if (tuning.get().spin_budget == null) {

@@ -171,6 +171,8 @@ const band_table = [_]struct { path: []const u8, band: Band }{
     .{ .path = "src/fpenv.zig", .band = .core },
     .{ .path = "src/caching_allocator.zig", .band = .core },
     .{ .path = "src/streamconv.zig", .band = .core },
+    .{ .path = "src/cpu_topology.zig", .band = .core },
+    .{ .path = "src/env.zig", .band = .core },
 };
 
 fn bandOf(path: []const u8) ?Band {

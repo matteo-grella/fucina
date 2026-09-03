@@ -25,6 +25,18 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `parallel.zig` is the dispatch policy only: the comptime thresholds, the
+  worker-team size (`cpuThreadCount`, `setMaxThreads`) and the part-count
+  helpers. The CPU probes are the std-only leaf `src/cpu_topology.zig`
+  (`fucina.parallel.topology`) and the `FUCINA_*` readers the leaf
+  `src/env.zig` (`fucina.parallel.env`, names without the `env` prefix).
+  The uncached `performanceCoreCount` and the cached `performanceCpuCount`
+  were one probe: the cached one keeps the public name. Rewrites:
+  `parallel.performanceCoreCount()` → `parallel.topology.performanceCoreCount()`;
+  `parallel.physicalCpuCount()` / `cgroupCpuBudget()` / `schedulableCpuCount()`
+  → `parallel.topology.<same>()`; `parallel.envFlag` → `parallel.env.flag`,
+  `envFlagValue` → `env.flagValue`, `envPositiveUsize` → `env.positiveUsize`,
+  `envNonNegativeUsize` → `env.nonNegativeUsize`, `envStringIs` → `env.stringIs`.
 - `backend.quant` is the quant module itself (`backend/quant.zig`), not a
   curated list beside it, and the raw name `backend.quantized_matmul` is
   gone. The RHS containers, descriptors and the block-count rule have one

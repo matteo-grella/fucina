@@ -223,7 +223,7 @@ pub fn main(init: std.process.Init) !void {
     // Training is a dense fork-join stream: chunks parked on efficiency
     // cores stall every barrier, so default the team to the performance
     // cores. --threads N overrides.
-    if (threads orelse fucina.parallel.performanceCoreCount()) |n| fucina.parallel.setMaxThreads(n);
+    if (threads orelse fucina.parallel.topology.performanceCoreCount()) |n| fucina.parallel.setMaxThreads(n);
 
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);

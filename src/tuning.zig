@@ -27,9 +27,9 @@
 //! default. Integers parse base-10; an unparsable value keeps the default.
 //! Top-level crossovers treat `0` as unset; leaves under `gpu` accept `0`
 //! (a zero work floor always offloads, a zero fill gate is occupancy-blind).
-//! All reads go through `parallel.envFlagValue` / `envPositiveUsize` /
-//! `envNonNegativeUsize`, the only sanctioned env readers (libc-free Linux
-//! builds have no `std.c.getenv`).
+//! All reads go through `env.flagValue` / `env.positiveUsize` /
+//! `env.nonNegativeUsize` (`src/env.zig`), the only sanctioned env readers
+//! (libc-free Linux builds have no `std.c.getenv`).
 //!
 //! The table is read once and cached at the first `get()`; changing the
 //! process environment afterwards has no effect. `set`/`setField` are the
@@ -47,7 +47,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
-const parallel = @import("parallel.zig");
+const env = @import("env.zig");
 
 /// Comptime default selector for GPU crossovers the two providers measured
 /// differently. The active provider is a build-time fact (`-Dgpu`), so the
@@ -383,13 +383,13 @@ fn loadGroup(
                 const child_mode = comptime if (@hasDecl(f.type, "env_int_parse")) f.type.env_int_parse else mode;
                 loadGroup(f.type, &@field(out, f.name), name, child_mode);
             },
-            .bool => if (parallel.envFlagValue(name)) |v| {
+            .bool => if (env.flagValue(name)) |v| {
                 @field(out, f.name) = v;
             },
             .int => if (readInt(name, mode)) |v| {
                 @field(out, f.name) = v;
             },
-            .optional => if (parallel.envNonNegativeUsize(name)) |v| {
+            .optional => if (env.nonNegativeUsize(name)) |v| {
                 @field(out, f.name) = v;
             },
             else => @compileError("unsupported tuning leaf type: " ++ @typeName(f.type)),
@@ -399,8 +399,8 @@ fn loadGroup(
 
 fn readInt(comptime name: [:0]const u8, comptime mode: EnvIntParse) ?u64 {
     return switch (mode) {
-        .positive => parallel.envPositiveUsize(name),
-        .non_negative => parallel.envNonNegativeUsize(name),
+        .positive => env.positiveUsize(name),
+        .non_negative => env.nonNegativeUsize(name),
     };
 }
 

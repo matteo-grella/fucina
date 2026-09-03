@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     // steady-state block recycling + a performance-core fork-join team.
     step_cache = fucina.CachingAllocator.init(std.heap.smp_allocator);
     const allocator = step_cache.allocator();
-    if (fucina.parallel.performanceCoreCount()) |n| fucina.parallel.setMaxThreads(n);
+    if (fucina.parallel.topology.performanceCoreCount()) |n| fucina.parallel.setMaxThreads(n);
 
     var ctx: fucina.ExecContext = undefined;
     ctx.init(allocator);

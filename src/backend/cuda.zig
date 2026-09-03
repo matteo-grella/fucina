@@ -1658,7 +1658,7 @@ fn ensureKernels(ctx: *Ctx) ?*Kernels {
     // FUCINA_GPU_KERNELS is string-valued ("src" selects the NVRTC
     // recompile path), so it stays outside the tuning table as a direct
     // env read (one-shot: the kernels latch above guards this body).
-    if (!parallel.envStringIs("FUCINA_GPU_KERNELS", "src")) {
+    if (!parallel.env.stringIs("FUCINA_GPU_KERNELS", "src")) {
         if (d.cuModuleLoadData(&module, kernels_ptx.ptr) != 0) module = null;
     }
     if (module == null) {

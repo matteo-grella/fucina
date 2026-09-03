@@ -48,8 +48,8 @@ Top-down; a band may depend only on bands at or below it:
 | backend | `src/backend.zig`, `src/backend/**` (the one CPU kernel provider behind the conformance-checked `backend.kernels` set; the single-implementation fused kernels live beside their ops in `exec/`) |
 | tags | `src/tags.zig` (comptime tag algebra) |
 | tensor | `src/tensor.zig` (raw tensor) |
-| primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (the tuning table over `parallel`'s env readers) |
-| core | `src/dtype.zig`, `src/shape.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig` |
+| primitives | `src/thread.zig`, `src/parallel.zig`, `src/tuning.zig` (the tuning table over `env`'s readers) |
+| core | `src/dtype.zig`, `src/shape.zig`, `src/storage.zig`, `src/accelerator.zig`, `src/rng.zig`, and the std-only leaves `src/fpenv.zig`, `src/caching_allocator.zig`, `src/streamconv.zig`, `src/cpu_topology.zig`, `src/env.zig` |
 
 ## Public Surface
 
@@ -142,7 +142,11 @@ Core value types and substrate:
 - `src/tags.zig`: comptime tag/rank algebra (no runtime representation).
 - `src/rng.zig`: repo-owned deterministic RNG; the (seed → values) mapping is
   a checkpoint contract (APOLLO projections, dropout masks).
-- `src/parallel.zig`: thresholds and CPU-count helpers.
+- `src/parallel.zig`: the comptime dispatch thresholds and the worker-team
+  size, over two std-only leaves it re-exports: `src/cpu_topology.zig`
+  (`parallel.topology`: physical/performance cores, the cgroup budget,
+  the schedulable count) and `src/env.zig` (`parallel.env`: the sanctioned
+  `FUCINA_*` readers, libc and libc-free Linux arms).
 - `src/thread.zig`: thread pool. The worker team stays hot between dispatches
   (spin-then-park); the dependency-chained fork-join mode carries a documented
   exactly-once/exact-count enqueue contract with safety-build-only accounting
