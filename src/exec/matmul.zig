@@ -12,7 +12,6 @@ const parallel = @import("../parallel.zig");
 const storage_mod = @import("../storage.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
-const thread = @import("../thread.zig");
 
 const exec_convert = @import("convert.zig");
 const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
@@ -618,9 +617,7 @@ fn bmmLoop(
     const total_work = std.math.mul(usize, per_batch_flops, info.num_batches) catch std.math.maxInt(usize);
     self.enableNativeVectorPoolForWork(total_work, parallel.vector_matmul_work_threshold);
 
-    if (info.num_batches > 1 and total_work >= parallel.bmm_loop_work_threshold) {
-        try bmmLoopParallel(self, kind, ap, bp, &out, info, stride_c);
-    } else if (info.batch_mode == .broadcast) {
+    if (info.batch_mode == .broadcast) {
         bmmBroadcastDispatchRange(self.pc(), kind, ap, bp, &out, info, stride_c, 0, info.num_batches);
     } else {
         bmmDispatchRange(self.pc(), kind, ap, bp, &out, info, stride_c, 0, info.num_batches);
@@ -699,96 +696,4 @@ fn batchOffsetForLinear(info: *const BmmShape, linear: usize, strides: []const u
         offset += coord * strides[dim];
     }
     return offset;
-}
-
-fn bmmLoopParallel(
-    self: *ExecContext,
-    kind: BmmKind,
-    a: *const Tensor,
-    b: *const Tensor,
-    out: *Tensor,
-    info: BmmShape,
-    stride_c: usize,
-) !void {
-    const pool = self.tryWorkPool() catch {
-        if (info.batch_mode == .broadcast) {
-            bmmBroadcastDispatchRange(self.pc(), kind, a, b, out, info, stride_c, 0, info.num_batches);
-        } else {
-            bmmDispatchRange(self.pc(), kind, a, b, out, info, stride_c, 0, info.num_batches);
-        }
-        return;
-    };
-    var wait_group: thread.WaitGroup = .{};
-
-    const target_chunks = @min(
-        @min(info.num_batches, parallel.cpuThreadCount(parallel.bmm_loop_max_chunks)),
-        parallel.bmm_loop_max_chunks,
-    );
-    const chunk_size = (info.num_batches + target_chunks - 1) / target_chunks;
-
-    var tasks: [parallel.bmm_loop_max_chunks]BmmChunkTask = undefined;
-    var dispatched: usize = 0;
-
-    var start: usize = 0;
-    while (start < info.num_batches) : (start += chunk_size) {
-        const count = @min(chunk_size, info.num_batches - start);
-        tasks[dispatched] = .{
-            .pc = self.pc(),
-            .kind = kind,
-            .a = a,
-            .b = b,
-            .out = out,
-            .info = info,
-            .stride_c = stride_c,
-            .start = start,
-            .count = count,
-        };
-        dispatched += 1;
-    }
-
-    for (tasks[1..dispatched]) |*task| {
-        _ = pool.spawnWg(&wait_group, runBmmChunkTask, .{task});
-    }
-    runBmmChunkTask(&tasks[0]);
-    pool.waitAndWork(&wait_group);
-}
-
-const BmmChunkTask = struct {
-    pc: backend_mod.ParallelConfig,
-    kind: BmmKind,
-    a: *const Tensor,
-    b: *const Tensor,
-    out: *Tensor,
-    info: BmmShape,
-    stride_c: usize,
-    start: usize,
-    count: usize,
-};
-
-fn runBmmChunkTask(task: *BmmChunkTask) void {
-    if (task.info.batch_mode == .broadcast) {
-        bmmBroadcastDispatchRange(
-            task.pc,
-            task.kind,
-            task.a,
-            task.b,
-            task.out,
-            task.info,
-            task.stride_c,
-            task.start,
-            task.count,
-        );
-    } else {
-        bmmDispatchRange(
-            task.pc,
-            task.kind,
-            task.a,
-            task.b,
-            task.out,
-            task.info,
-            task.stride_c,
-            task.start,
-            task.count,
-        );
-    }
 }

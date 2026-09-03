@@ -253,6 +253,25 @@ pub const Pool = struct {
         tasks: []const Task,
         comptime run: fn (*const Task) void,
     ) void {
+        self.parallelChunksOpts(Task, tasks, run, .{});
+    }
+
+    pub const DispatchOptions = struct {
+        /// Workers park right after this dispatch instead of spinning for
+        /// the next one: for chunks that hand their work to a library with
+        /// its own threads (BLAS), where spinning workers would compete
+        /// with those threads for the cores.
+        park_after: bool = false,
+    };
+
+    /// `parallelChunks` with per-dispatch options.
+    pub fn parallelChunksOpts(
+        self: *Pool,
+        comptime Task: type,
+        tasks: []const Task,
+        comptime run: fn (*const Task) void,
+        options: DispatchOptions,
+    ) void {
         const n = tasks.len;
         if (n == 0) return;
         if (n == 1) {
@@ -276,7 +295,7 @@ pub const Pool = struct {
                 run(&base[index]);
             }
         };
-        barrier.?.dispatch(n, @ptrCast(@constCast(tasks.ptr)), Thunk.call);
+        barrier.?.dispatch(n, @ptrCast(@constCast(tasks.ptr)), Thunk.call, options.park_after);
     }
 
     // Dependency-chained fork-join over the same hot team: tasks[0..initial_count)
@@ -414,6 +433,8 @@ const BarrierPool = struct {
     job_ctx: *anyopaque = undefined,
     job_count: usize = 0,
     job_mode: JobMode = .chunks,
+    /// Workers skip their spin window after this job (see `Pool.DispatchOptions`).
+    job_park_after: bool = false,
     job_next: std.atomic.Value(usize) = .init(0),
     job_claim_chunk: usize = 1,
     generation: std.atomic.Value(u32) = .init(0),
@@ -631,12 +652,13 @@ const BarrierPool = struct {
         std.debug.print("\n", .{});
     }
 
-    fn dispatch(self: *BarrierPool, count: usize, ctx: *anyopaque, run: JobFn) void {
+    fn dispatch(self: *BarrierPool, count: usize, ctx: *anyopaque, run: JobFn, park_after: bool) void {
         self.job_ctx = ctx;
         self.job_run = run;
         self.job_count = count;
         const participants = self.worker_count + 1;
         self.job_mode = .chunks;
+        self.job_park_after = park_after;
         self.job_next.store(0, .release);
         self.job_claim_chunk = dynamicClaimChunk(count, participants);
         self.done.store(0, .release);
@@ -730,6 +752,7 @@ const BarrierPool = struct {
         self.chain_run = run;
         self.job_count = count;
         self.job_mode = .chained;
+        self.job_park_after = false;
         self.done.store(0, .release);
         self.chain_completed.store(0, .release);
         const dispatch_ns = self.profileBegin();
@@ -856,8 +879,11 @@ const BarrierPool = struct {
         // Announce readiness only after latching the baseline generation, so
         // `init` cannot let a dispatch advance the generation behind our back.
         _ = self.ready.fetchAdd(1, .release);
+        var park_now = false;
         while (true) {
-            var spins: u32 = 0;
+            // A park-after job sends the worker straight to the futex.
+            var spins: u32 = if (park_now) spin_budget else 0;
+            park_now = false;
             var gen = self.generation.load(.acquire);
             while (gen == seen) {
                 spins +%= 1;
@@ -883,6 +909,7 @@ const BarrierPool = struct {
                 .chunks => self.runChunkClaims(index),
                 .chained => self.runChainClaims(index),
             }
+            park_now = self.job_park_after;
             _ = self.done.fetchAdd(1, .release);
         }
     }
@@ -972,7 +999,7 @@ test "oversubscribed team: guard engages and dispatch stays exactly-once" {
     var ctx = Ctx{ .hits = hits };
     for (0..3) |_| {
         for (hits) |*h| h.* = .init(0);
-        bp.dispatch(n_tasks, &ctx, Ctx.run);
+        bp.dispatch(n_tasks, &ctx, Ctx.run, false);
         for (hits) |*h| try std.testing.expectEqual(@as(u32, 1), h.load(.monotonic));
     }
 }
@@ -1013,7 +1040,7 @@ test "joinWorkers timed-wait arm engages on a straggling join and stays exactly-
     const reps = 10;
     for (0..reps) |_| {
         for (&ctx.hits) |*h| h.store(0, .monotonic);
-        bp.dispatch(n_tasks, &ctx, Ctx.run);
+        bp.dispatch(n_tasks, &ctx, Ctx.run, false);
         for (&ctx.hits) |*h| try std.testing.expectEqual(@as(u32, 1), h.load(.monotonic));
     }
     if (comptime std.debug.runtime_safety) {

@@ -39,6 +39,19 @@ pub fn forRange(
     thread_count: usize,
     comptime runFn: fn (Ctx, usize, usize) void,
 ) void {
+    forRangeOpts(pool, Ctx, ctx, total, thread_count, runFn, .{});
+}
+
+/// `forRange` with per-dispatch options (`Pool.DispatchOptions`).
+pub fn forRangeOpts(
+    pool: *thread.Pool,
+    comptime Ctx: type,
+    ctx: Ctx,
+    total: usize,
+    thread_count: usize,
+    comptime runFn: fn (Ctx, usize, usize) void,
+    options: thread.Pool.DispatchOptions,
+) void {
     const Task = RangeTask(Ctx);
     const runner = struct {
         fn run(task: *const Task) void {
@@ -53,7 +66,7 @@ pub fn forRange(
             .end = bound(ti + 1, total, thread_count),
         };
     }
-    pool.parallelChunks(Task, tasks[0..thread_count], runner.run);
+    pool.parallelChunksOpts(Task, tasks[0..thread_count], runner.run, options);
 }
 
 /// The reduction form: each chunk computes `chunkFn(ctx, start, end)` into

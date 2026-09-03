@@ -25,6 +25,19 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Batched matmul parallelizes on the worker team alone: the BLAS arm of
+  `kernels.gemmBatched` splits batch ranges over the team (each range runs
+  its batches through BLAS on its own thread) instead of running every
+  batch sequentially on the caller, and the exec-side executor chunk loop
+  (`bmmLoopParallel`, `parallel.bmm_loop_work_threshold`,
+  `bmm_loop_max_chunks`) is gone with it. Chunks of one batch used to miss
+  the batched-BLAS gate and fall to the single-threaded vector kernel; a
+  few-large-batch `bmm` now takes BLAS. The split applies below
+  `parallel.blas_batch_split_max_work` per batch; above it BLAS threads
+  each batch itself. `Pool.parallelChunksOpts`/`tile.forRangeOpts` take a
+  `DispatchOptions{ .park_after }` hint: workers park right after such a
+  dispatch instead of spinning, so a range that hands its work to BLAS
+  does not compete with BLAS's threads for the cores.
 - The contraction backward's right branch runs as one task on the work
   pool (`Pool.spawnWg`) instead of on a dedicated thread: the runtime's
   `dot_backward_worker` and `ExecContext.dotBackwardWorker` are gone, and

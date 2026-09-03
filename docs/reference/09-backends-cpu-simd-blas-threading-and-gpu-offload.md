@@ -371,8 +371,7 @@ splits is decided by the thread-count gates in `common.zig`
 | `vector_column_work_multiplier` | 1 | scales the column-split work gate: `columnThreadCount` stays serial below `multiplier × vector_matmul_work_threshold` m·n·k |
 | `backward_matmul_work_threshold` | 262 144 | autograd-side pool-enable gate ([§5](05-automatic-differentiation.md)) |
 | `backward_async_work_threshold` | 256 Mi | dot-backward async offload gate ([§5](05-automatic-differentiation.md)) |
-| `bmm_loop_work_threshold` | 262 144 (= `backward_matmul_work_threshold`) | total m·n·k·batches above which a multi-batch matmul loop splits batches across the pool (`src/exec/matmul.zig`) |
-| `bmm_loop_max_chunks` | 16 | chunk cap and stack task-array bound for that batched-loop split |
+| `blas_batch_split_max_work` | 256 Mi | per-batch m·n·k below which the BLAS arm of `gemmBatched` splits the batches over the team (workers park right after, so they do not compete with BLAS's own threads); at or above it the batches run sequentially and BLAS threads each one |
 | `q8_0_lhs_stack_blocks` | 512 blocks | stack budget for the per-call Q8_0 LHS-quantization scratch of the quantized-RHS dispatch tier (decode stays heap-free) |
 | `q4_k_x4_min_rows` | 4 | q4_k prefill rows at/above which the padded x4 kernel takes every m in one pass over the packed weights |
 | `q5_k_x4_prefix_min_rows` | 128 | q5_k's bulk+tail x4 split re-reads the packed weights for the 1-3 remainder rows, so the per-row path wins below this |

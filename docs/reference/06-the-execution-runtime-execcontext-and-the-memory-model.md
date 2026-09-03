@@ -685,6 +685,7 @@ pub const Pool = struct {
     pub fn deinit(self: *Pool) void;
     pub fn parallelChunks(self: *Pool, comptime Task: type,
         tasks: []const Task, comptime run: fn (*const Task) void) void;
+    pub fn parallelChunksOpts(..., options: DispatchOptions) void;  // .park_after
     pub fn parallelChained(self: *Pool, comptime Task: type, tasks: []Task,
         initial_count: usize, comptime run: fn (*Task, *const Chain) void) bool;
     pub fn spawnWg / trySpawnWg / waitAndWork;               // std.Io-executor tasks
@@ -695,7 +696,11 @@ pub const Pool = struct {
 fork-join over the hot team, the caller executing chunk 0 and the team the
 rest, rendezvousing before return. Degradation is always safe: no barrier,
 zero workers, or a team already mid-dispatch (`parallel_chunks_active`)
-runs the tasks serially on the caller. `parallelChained` is
+runs the tasks serially on the caller. `parallelChunksOpts` adds a
+per-dispatch `DispatchOptions{ .park_after }`: the workers park right after
+that dispatch instead of spinning for the next one, for chunks that hand
+their work to a library with its own threads (the BLAS arm of the batched
+GEMM, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)). `parallelChained` is
 dependency-chained fork-join: `tasks[0..initial_count)` start runnable and
 a running task makes successors runnable via `chain.enqueue(i)`; it returns
 `false` when the team is unavailable or busy (the caller must run the graph

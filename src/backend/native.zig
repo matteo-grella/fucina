@@ -1009,7 +1009,7 @@ pub fn gemmBatched(
     }
     if (comptime build_options.use_blas and !isa.reference) {
         if (shouldUseBatchedBlas(m, n, k, batch_count)) {
-            blasBatched(kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
+            blasBatched(pc, kind, out, a, b, m, n, k, batch_count, stride_a, stride_b, stride_c);
             return;
         }
     }
@@ -1029,7 +1029,12 @@ pub fn gemmBatched(
     );
 }
 
+/// The BLAS arm of the batched GEMM: batch ranges split over the worker
+/// team (the same `batchedThreadCount` gate as the vector arm), each range
+/// running its batches through BLAS on its own thread, so cross-batch
+/// parallelism does not depend on the caller chunking the loop.
 fn blasBatched(
+    pc: ParallelConfig,
     comptime kind: ops.MatmulKind,
     out: *Tensor,
     a: *const Tensor,
@@ -1045,24 +1050,59 @@ fn blasBatched(
     a.buffer.waitReady();
     b.buffer.waitReady();
     out.buffer.waitMutable();
-    const ap = a.buffer.data[a.offset..].ptr;
-    const bp = b.buffer.data[b.offset..].ptr;
-    const cp = out.buffer.data[out.offset..].ptr;
-    const matrix_a_len = if (kind == .trans_a) k * m else m * k;
-    const matrix_b_len = if (kind == .trans_b) n * k else k * n;
-
-    for (0..batch_count) |bi| {
-        blas.gemm(
-            kind,
-            m,
-            n,
-            k,
-            ap[bi * stride_a .. bi * stride_a + matrix_a_len],
-            bp[bi * stride_b .. bi * stride_b + matrix_b_len],
-            0.0,
-            cp[bi * stride_c .. bi * stride_c + m * n],
-        );
+    const batches: BlasBatches = .{
+        .ap = a.buffer.data[a.offset..].ptr,
+        .bp = b.buffer.data[b.offset..].ptr,
+        .cp = out.buffer.data[out.offset..].ptr,
+        .m = m,
+        .n = n,
+        .k = k,
+        .stride_a = stride_a,
+        .stride_b = stride_b,
+        .stride_c = stride_c,
+    };
+    const run = blasBatchRange(kind);
+    if (pc.pool) |pool| {
+        const per_batch = parallel.saturatedMul3(m, n, k);
+        if (per_batch < parallel.blas_batch_split_max_work) {
+            const thread_count = vector.common.batchedThreadCount(batch_count, m, n, k);
+            if (thread_count > 1) return vector.tile.forRangeOpts(pool, BlasBatches, batches, batch_count, thread_count, run, .{ .park_after = true });
+        }
     }
+    run(batches, 0, batch_count);
+}
+
+const BlasBatches = struct {
+    ap: [*]const f32,
+    bp: [*]const f32,
+    cp: [*]f32,
+    m: usize,
+    n: usize,
+    k: usize,
+    stride_a: usize,
+    stride_b: usize,
+    stride_c: usize,
+};
+
+fn blasBatchRange(comptime kind: ops.MatmulKind) fn (BlasBatches, usize, usize) void {
+    return struct {
+        fn go(b: BlasBatches, batch_start: usize, batch_end: usize) void {
+            const matrix_a_len = if (kind == .trans_a) b.k * b.m else b.m * b.k;
+            const matrix_b_len = if (kind == .trans_b) b.n * b.k else b.k * b.n;
+            for (batch_start..batch_end) |bi| {
+                blas.gemm(
+                    kind,
+                    b.m,
+                    b.n,
+                    b.k,
+                    b.ap[bi * b.stride_a .. bi * b.stride_a + matrix_a_len],
+                    b.bp[bi * b.stride_b .. bi * b.stride_b + matrix_b_len],
+                    0.0,
+                    b.cp[bi * b.stride_c .. bi * b.stride_c + b.m * b.n],
+                );
+            }
+        }
+    }.go;
 }
 
 fn shouldUseBlas(m: usize, n: usize, k: usize) bool {

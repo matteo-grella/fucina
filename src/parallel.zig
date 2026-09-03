@@ -68,8 +68,13 @@ pub const vector_column_chunk: usize = 64;
 
 pub const backward_matmul_work_threshold: usize = 262_144;
 pub const backward_async_work_threshold: usize = 256 * 1024 * 1024;
-pub const bmm_loop_work_threshold: usize = backward_matmul_work_threshold;
-pub const bmm_loop_max_chunks: usize = 16;
+/// Per-batch m·n·k below which the BLAS arm of the batched GEMM splits the
+/// batches over the worker team (each range running its batches through
+/// BLAS on its own thread); at or above it the batches run sequentially and
+/// BLAS threads each one itself. Measured on M1 Max with Accelerate: the
+/// split wins up to 33M per batch (8x512x128x512: 370 vs 497 us) and loses
+/// at 1G (4x1024^3: 5.96 vs 4.38 ms).
+pub const blas_batch_split_max_work: usize = 256 * 1024 * 1024;
 
 // Quantized-RHS dispatch gates of `backend/native.zig`: comptime
 // crossovers like the ones above, kept here so the whole policy table is
