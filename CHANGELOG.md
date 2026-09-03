@@ -25,6 +25,12 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Buffer release hooks are one descriptor: `BufferOf(dt).Release{ .ctx, .run }`
+  (a null `ctx` means the buffer itself). `createWithRelease(allocator, len,
+  release)` and `fromBorrowedSliceWithRelease(allocator, values, release)`
+  take it; `fromBorrowedSliceWithReleaseCtx` and the `release_ctx`/
+  `release_fn` field pair are gone (`release_hook: Release` holds the hook).
+- `dtype.isInteger` is gone; `supportsIntMath` is the one integer set.
 - Batched matmul parallelizes on the worker team alone: the BLAS arm of
   `kernels.gemmBatched` splits batch ranges over the team (each range runs
   its batches through BLAS on its own thread) instead of running every

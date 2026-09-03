@@ -43,14 +43,14 @@ type at `src/exec/buffer_pool.zig:52`). It is:
   `Buffer` with `reclaim` as the release callback. `reclaim` inserts *before*
   existing same-length entries, so within a size class reuse is LIFO — the
   most recently released buffer is handed back first.
-- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:278`): `len <= 1024` →
+- **Size-rounded.** `allocationLen` (`src/exec/buffer_pool.zig:268`): `len <= 1024` →
   `ceilPowerOfTwo`; else `alignForward(len, 1024)`. This collapses nearby
   logical sizes into shared buckets, which *helps* reuse.
 - **Bounded.** `max_cached_bytes` caps the CACHED (free-list) bytes at 1 GiB
   (`src/exec/buffer_pool.zig:64` — raised from the original 64 MB so big prefill
   transients stay cached; per the code comment at `:54-58`, retention is bounded
   by the actual peak transient set, not by this cap). In `reclaim`
-  (`src/exec/buffer_pool.zig:176`) a returned buffer is destroyed instead of
+  (`src/exec/buffer_pool.zig:166`) a returned buffer is destroyed instead of
   cached if it alone exceeds the cap, or if adding it would; otherwise it is
   inserted (sorted) and `cached_bytes` is bumped.
 - **Mutex-guarded**, with an atomic `outstanding` counter incremented on every
@@ -245,7 +245,7 @@ inference frame helper is unchanged.
   context alive holds up to `max_cached_bytes` of cache. `ExecContext.deinit`
   frees everything.
 - **`acquire`/`acquireSlab` release the mutex before allocating** a fresh
-  buffer/slab on the miss path (`src/exec/buffer_pool.zig:87-113/:210-230`). Correct
+  buffer/slab on the miss path (`src/exec/buffer_pool.zig:87-108/:210-230`). Correct
   today (the new buffer is not yet shared, `outstanding` is atomic), but any
   future change touching shared pool state in that window must re-take the lock.
 - **Typed pooled buffers must never be marked stable-lifetime GPU RHS.** The

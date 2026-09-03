@@ -410,13 +410,6 @@ pub fn isF8(comptime dtype: DType) bool {
     };
 }
 
-pub fn isInteger(comptime dtype: DType) bool {
-    return switch (dtype) {
-        .u8, .u16, .i8, .i16, .i32, .i64 => true,
-        else => false,
-    };
-}
-
 pub fn isSignedInteger(comptime dtype: DType) bool {
     return switch (dtype) {
         .i8, .i16, .i32, .i64 => true,

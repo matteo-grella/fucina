@@ -52,7 +52,7 @@ test "borrowed buffer with release hook fires once at refs==0" {
     };
     Hook.calls = 0;
 
-    const buf = try Buffer.fromBorrowedSliceWithRelease(allocator, values[0..], Hook.release);
+    const buf = try Buffer.fromBorrowedSliceWithRelease(allocator, values[0..], .{ .run = Hook.release });
     buf.retain();
     buf.release();
     try std.testing.expectEqual(@as(usize, 0), Hook.calls);
@@ -66,8 +66,8 @@ test "borrowed buffer with release hook fires once at refs==0" {
 test "buffer header carries the accelerator slots only with a provider" {
     // Without a GPU provider nothing can be pending on a buffer, so the four
     // accelerator slots cost no bytes: the header is the allocator, the data
-    // slice, the refcount, the release hook pair, and the host-shadow slot.
-    const base = 2 * @sizeOf(usize) + @sizeOf([]f32) + @sizeOf(u32) + @sizeOf(?*anyopaque) + @sizeOf(?*const fn (*anyopaque, *Buffer) void) + @sizeOf(?*storage.HostShadow);
+    // slice, the refcount, the release hook, and the host-shadow slot.
+    const base = 2 * @sizeOf(usize) + @sizeOf([]f32) + @sizeOf(u32) + @sizeOf(Buffer.Release) + @sizeOf(?*storage.HostShadow);
     if (comptime storage.has_accelerator) {
         try std.testing.expect(@sizeOf(storage.AcceleratorSlots) > 0);
         try std.testing.expect(@sizeOf(Buffer) > std.mem.alignForward(usize, base, @alignOf(Buffer)));

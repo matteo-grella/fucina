@@ -131,11 +131,10 @@ Classification predicates (all comptime, all `pub`):
 | `kind(dtype)` | returns `.scalar` or `.block_quantized` |
 | `isScalar` / `isBlockQuantized` | kind shorthands |
 | `isF8` | `.f8_e4m3`, `.f8_e5m2` (OCP FP8 storage-only floats: convertible to/from f32, excluded from forward math and grads) |
-| `isInteger` | `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` |
 | `isSignedInteger` / `isUnsignedInteger` | the obvious subsets |
 | `supportsForwardFloatMath` | `.f16`, `.bf16`, `.f32`, `.f64` — THE float predicate (forward math on the typed facade, [§3](03-tensors-types-construction-and-data-access.md)) |
 | `supportsGrad` | `== supportsForwardFloatMath` (only float tensors can carry gradients; in practice only `.f32` does, [§5](05-automatic-differentiation.md)) |
-| `supportsIntMath` | `== isInteger` (wrapping integer pointwise math and i64-accumulated reductions; `.bool` reduces but has no pointwise math) |
+| `supportsIntMath` | `.u8`, `.u16`, `.i8`, `.i16`, `.i32`, `.i64` (wrapping integer pointwise math and i64-accumulated reductions; `.bool` reduces but has no pointwise math) |
 | `supportsToFloat` | floats, the f8 storage floats, plus every block-quantized dtype (dequantizable) |
 | `supportsQuantizedMatmulRhs` | every block dtype **except** `.q8_1` and `.q8_k` (those two are activation-side dot-product formats, [§10](10-quantization.md)) |
 | `supportsQuantizedGetRows` | `== isBlockQuantized` (embedding-row gather) |

@@ -78,7 +78,7 @@ pub fn gpuResidentQuantTensor(comptime dtype: DType, ctx: *ExecContext, shape: [
     var dev_owned: ?[]u8 = dev;
     errdefer if (dev_owned) |bytes| offload.freeResidentBytes(bytes);
     const dev_blocks = try blockSliceMut(BlockStorage(dtype), dev);
-    const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator(), dev_blocks, hook.releaseDeviceBytes);
+    const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator(), dev_blocks, .{ .run = hook.releaseDeviceBytes });
     dev_owned = null; // from here the buffer's release hook frees the device bytes
     var raw = Raw.fromOwnedBuffer(buffer, &shape) catch |err| {
         buffer.release();
@@ -110,7 +110,7 @@ pub fn gpuResidentDenseTensor(comptime dtype: DType, comptime Facade: type, ctx:
     const Elem = std.meta.Child(@FieldType(DevBuffer, "data"));
     if (dev.len % @sizeOf(Elem) != 0) return Error.InvalidWeightShape;
     const elems: []Elem = @alignCast(std.mem.bytesAsSlice(Elem, dev));
-    const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator(), elems, hook.releaseDeviceBytes);
+    const buffer = try DevBuffer.fromBorrowedSliceWithRelease(ctx.allocator(), elems, .{ .run = hook.releaseDeviceBytes });
     dev_owned = null; // from here the buffer's release hook frees the device bytes
     var raw = Raw.fromOwnedBuffer(buffer, &shape) catch |err| {
         buffer.release();

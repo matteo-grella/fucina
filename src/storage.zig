@@ -47,14 +47,29 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         allocator: Allocator,
         data: []Elem,
         refs: std.atomic.Value(u32),
-        release_ctx: ?*anyopaque = null,
-        release_fn: ?*const fn (*anyopaque, *Self) void = null,
+        /// Runs once at refs == 0 in place of `destroy`, with full cleanup
+        /// responsibility for the data and this header; `run == null` means
+        /// the plain `destroy`.
+        release_hook: Release = .{},
         accel: AcceleratorSlots = .{},
         host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
         const Self = @This();
         pub const dtype = buffer_dtype;
         pub const Element = Elem;
+
+        /// A release hook: `run(ctx, buffer)` replaces `destroy` when the last
+        /// reference drops and must free the data and the header
+        /// (`destroyHeader`). A null `ctx` means the buffer itself.
+        pub const Release = struct {
+            ctx: ?*anyopaque = null,
+            run: ?*const fn (*anyopaque, *Self) void = null,
+        };
+
+        fn bind(self: *Self, hook: Release) void {
+            std.debug.assert(hook.run != null);
+            self.release_hook = .{ .ctx = hook.ctx orelse @ptrCast(self), .run = hook.run };
+        }
 
         pub fn create(allocator: Allocator, len: usize) !*Self {
             const self = try allocator.create(Self);
@@ -68,15 +83,10 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
             return self;
         }
 
-        pub fn createWithRelease(
-            allocator: Allocator,
-            len: usize,
-            release_ctx: *anyopaque,
-            release_fn: *const fn (*anyopaque, *Self) void,
-        ) !*Self {
+        /// Owned data with a release hook (the buffer pool's recycling).
+        pub fn createWithRelease(allocator: Allocator, len: usize, hook: Release) !*Self {
             const self = try create(allocator, len);
-            self.release_ctx = release_ctx;
-            self.release_fn = release_fn;
+            self.bind(hook);
             return self;
         }
 
@@ -86,55 +96,23 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
             return self;
         }
 
+        /// Borrowed data: `values` stays external and is never freed here; the
+        /// header is destroyed when the last reference drops.
         pub fn fromBorrowedSlice(allocator: Allocator, values: []Elem) !*Self {
-            const self = try allocator.create(Self);
-            self.* = .{
-                .allocator = allocator,
-                .data = values,
-                .refs = std.atomic.Value(u32).init(1),
-            };
-            self.release_ctx = @ptrCast(self);
-            self.release_fn = releaseBorrowed;
-            return self;
+            return fromBorrowedSliceWithRelease(allocator, values, .{ .run = releaseBorrowed });
         }
 
-        // Borrowed-data variant of `createWithRelease`: `values` stays external
-        // and `release_fn` runs once at refs==0 with full cleanup responsibility
-        // for both the external data and this header (`allocator.destroy(self)`).
-        pub fn fromBorrowedSliceWithRelease(
-            allocator: Allocator,
-            values: []Elem,
-            release_fn: *const fn (*anyopaque, *Self) void,
-        ) !*Self {
+        /// Borrowed data with a release hook that owns the cleanup of both the
+        /// external data and this header (device-resident weight bytes, the
+        /// buffer pool's slabs).
+        pub fn fromBorrowedSliceWithRelease(allocator: Allocator, values: []Elem, hook: Release) !*Self {
             const self = try allocator.create(Self);
             self.* = .{
                 .allocator = allocator,
                 .data = values,
                 .refs = std.atomic.Value(u32).init(1),
             };
-            self.release_ctx = @ptrCast(self);
-            self.release_fn = release_fn;
-            return self;
-        }
-
-        // Explicit-ctx mirror of `fromBorrowedSliceWithRelease` (the borrowed
-        // analog of `createWithRelease`): `release_fn` receives `release_ctx`
-        // instead of the header itself and keeps full cleanup responsibility
-        // for both the external data and this header (`allocator.destroy(self)`).
-        pub fn fromBorrowedSliceWithReleaseCtx(
-            allocator: Allocator,
-            values: []Elem,
-            release_ctx: *anyopaque,
-            release_fn: *const fn (*anyopaque, *Self) void,
-        ) !*Self {
-            const self = try allocator.create(Self);
-            self.* = .{
-                .allocator = allocator,
-                .data = values,
-                .refs = std.atomic.Value(u32).init(1),
-            };
-            self.release_ctx = release_ctx;
-            self.release_fn = release_fn;
+            self.bind(hook);
             return self;
         }
 
@@ -154,8 +132,8 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
             if (old == 1) {
                 self.discardPending();
                 self.waitUnused();
-                if (self.release_fn) |release_fn| {
-                    release_fn(self.release_ctx.?, self);
+                if (self.release_hook.run) |run| {
+                    run(self.release_hook.ctx.?, self);
                 } else {
                     self.destroy();
                 }

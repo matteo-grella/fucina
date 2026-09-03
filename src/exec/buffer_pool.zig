@@ -102,12 +102,7 @@ pub const BufferPool = struct {
         }
         self.mutex.unlock();
 
-        const buffer = try storage.Buffer.createWithRelease(
-            self.allocator,
-            requested_len,
-            self,
-            reclaim,
-        );
+        const buffer = try storage.Buffer.createWithRelease(self.allocator, requested_len, .{ .ctx = self, .run = reclaim });
         _ = self.outstanding.fetchAdd(1, .monotonic);
         return buffer;
     }
@@ -132,12 +127,7 @@ pub const BufferPool = struct {
 
         const view_len = slab.len / @sizeOf(Elem);
         const elems: [*]Elem = @ptrCast(@alignCast(slab.ptr));
-        return storage.BufferOf(dtype).fromBorrowedSliceWithReleaseCtx(
-            self.allocator,
-            elems[0..view_len],
-            self,
-            reclaimTypedFor(dtype),
-        );
+        return storage.BufferOf(dtype).fromBorrowedSliceWithRelease(self.allocator, elems[0..view_len], .{ .ctx = self, .run = reclaimTypedFor(dtype) });
     }
 
     /// Pooled scratch slab viewed as `[]T` for non-DType block types (packed
