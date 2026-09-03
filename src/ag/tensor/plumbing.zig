@@ -145,18 +145,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                     errdefer value.deinit();
                     if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
                     if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
-                    const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
-                    var saved_left: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try left_tensor.cloneView() else null;
-                    errdefer if (saved_left) |*v| v.deinit();
-                    var saved_right: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try right_tensor.cloneView() else null;
-                    errdefer if (saved_right) |*v| v.deinit();
-                    return finishOp(OutT.axis_tags, ctx, value, Record{
-                        .parents = .{ gradStateOf(left), gradStateOf(right) },
-                        .left_shape = rawShapeArray(left_tags, left_tensor),
-                        .right_shape = rawShapeArray(right_tags, right_tensor),
-                        .left_value = saved_left,
-                        .right_value = saved_right,
-                    });
+                    return finishPointwise(op, OutT, left_tags, right_tags, result_tags, ctx, value, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor);
                 }
             }
 
@@ -164,18 +153,7 @@ pub fn Mod(comptime ag_tensor: type) type {
             errdefer value.deinit();
             if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
             if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
-            const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
-            var saved_left: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try left_tensor.cloneView() else null;
-            errdefer if (saved_left) |*v| v.deinit();
-            var saved_right: ?RawTensor = if (comptime op == .mul or op == .div or op == .max or op == .min) try right_tensor.cloneView() else null;
-            errdefer if (saved_right) |*v| v.deinit();
-            return finishOp(OutT.axis_tags, ctx, value, Record{
-                .parents = .{ gradStateOf(left), gradStateOf(right) },
-                .left_shape = rawShapeArray(left_tags, left_tensor),
-                .right_shape = rawShapeArray(right_tags, right_tensor),
-                .left_value = saved_left,
-                .right_value = saved_right,
-            });
+            return finishPointwise(op, OutT, left_tags, right_tags, result_tags, ctx, value, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor);
         }
 
         pub fn gatedPointwise(comptime op: GatedOp, self: anytype, ctx: *ExecContext, other: anytype) !BinaryOut(@TypeOf(self), @TypeOf(other)) {
@@ -199,19 +177,7 @@ pub fn Mod(comptime ag_tensor: type) type {
                     errdefer value.deinit();
                     if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
                     if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
-                    const Record = GatedBackward(op, left_tags, right_tags, result_tags);
-                    var saved_left = try left_tensor.cloneView();
-                    errdefer saved_left.deinit();
-                    var saved_right = try right_tensor.cloneView();
-                    errdefer saved_right.deinit();
-                    return finishOp(OutT.axis_tags, ctx, value, Record{
-                        .parents = .{ gradStateOf(left), gradStateOf(right) },
-                        .left_shape = rawShapeArray(left_tags, left_tensor),
-                        .right_shape = rawShapeArray(right_tags, right_tensor),
-                        .result_shape = rawShapeArray(result_tags, (&value)),
-                        .left_value = saved_left,
-                        .right_value = saved_right,
-                    });
+                    return finishGated(op, OutT, left_tags, right_tags, result_tags, ctx, value, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor);
                 }
             }
 
@@ -219,16 +185,42 @@ pub fn Mod(comptime ag_tensor: type) type {
             errdefer value.deinit();
             if (comptime OutT.dtype != .f32) return finishTypedNoGrad(OutT, ctx, value, wants_grad);
             if (!recordsGrad(wants_grad)) return finishNoGrad(OutT.axis_tags, ctx, value);
+            return finishGated(op, OutT, left_tags, right_tags, result_tags, ctx, value, gradStateOf(left), gradStateOf(right), left_tensor, right_tensor);
+        }
+
+        /// The record tail of `pointwise`, spelled once for the same-shape
+        /// and the broadcast path: the operand views the op's VJP reads
+        /// (mul/div/max/min) and the finished op. Consumes `value` on
+        /// success; on error it stays with the caller.
+        fn finishPointwise(comptime op: PointwiseOp, comptime OutT: type, comptime left_tags: anytype, comptime right_tags: anytype, comptime result_tags: anytype, ctx: *ExecContext, value: RawTensor, left_parent: ?*GradState, right_parent: ?*GradState, left_tensor: *const RawTensor, right_tensor: *const RawTensor) !OutT {
+            const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
+            const saves = comptime (op == .mul or op == .div or op == .max or op == .min);
+            var saved_left: ?RawTensor = if (saves) try left_tensor.cloneView() else null;
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right: ?RawTensor = if (saves) try right_tensor.cloneView() else null;
+            errdefer if (saved_right) |*v| v.deinit();
+            return finishOp(OutT.axis_tags, ctx, value, Record{
+                .parents = .{ left_parent, right_parent },
+                .left_shape = rawShapeArray(left_tags, left_tensor),
+                .right_shape = rawShapeArray(right_tags, right_tensor),
+                .left_value = saved_left,
+                .right_value = saved_right,
+            });
+        }
+
+        /// The record tail of `gatedPointwise`, spelled once for both paths.
+        fn finishGated(comptime op: GatedOp, comptime OutT: type, comptime left_tags: anytype, comptime right_tags: anytype, comptime result_tags: anytype, ctx: *ExecContext, value: RawTensor, left_parent: ?*GradState, right_parent: ?*GradState, left_tensor: *const RawTensor, right_tensor: *const RawTensor) !OutT {
             const Record = GatedBackward(op, left_tags, right_tags, result_tags);
             var saved_left = try left_tensor.cloneView();
             errdefer saved_left.deinit();
             var saved_right = try right_tensor.cloneView();
             errdefer saved_right.deinit();
+            var v = value;
             return finishOp(OutT.axis_tags, ctx, value, Record{
-                .parents = .{ gradStateOf(left), gradStateOf(right) },
+                .parents = .{ left_parent, right_parent },
                 .left_shape = rawShapeArray(left_tags, left_tensor),
                 .right_shape = rawShapeArray(right_tags, right_tensor),
-                .result_shape = rawShapeArray(result_tags, (&value)),
+                .result_shape = rawShapeArray(result_tags, (&v)),
                 .left_value = saved_left,
                 .right_value = saved_right,
             });
