@@ -98,12 +98,10 @@ const Impl = struct {
             _ = pc;
             elementwise.scalar.channelAffineInto(z, x, scale, shift, rows, cols);
         }
-        fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
-            _ = pc;
+        fn preluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
             elementwise.scalar.preluChannelsBackwardInputInto(gx, gy, x, alpha, rows, cols);
         }
-        fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
-            _ = pc;
+        fn preluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
             elementwise.scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
         }
         fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: Allocator, out: *Tensor, a: *const Tensor, rhs: qm.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
@@ -677,12 +675,12 @@ const Impl = struct {
             native.channelAffineInto(.{}, zn, x, alpha, null, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.preluChannelsBackwardInputInto(.{}, zc, x, x, alpha, rows, c);
-            native.preluChannelsBackwardInputInto(.{}, zn, x, x, alpha, rows, c);
+            cpu.preluChannelsBackwardInputInto(zc, x, x, alpha, rows, c);
+            native.preluChannelsBackwardInputInto(zn, x, x, alpha, rows, c);
             try expectClose(zc, zn, elementwise_tolerance);
 
-            cpu.preluChannelsBackwardAlphaInto(.{}, zc[0..c], x, x, rows, c);
-            native.preluChannelsBackwardAlphaInto(.{}, zn[0..c], x, x, rows, c);
+            cpu.preluChannelsBackwardAlphaInto(zc[0..c], x, x, rows, c);
+            native.preluChannelsBackwardAlphaInto(zn[0..c], x, x, rows, c);
             try expectClose(zc[0..c], zn[0..c], elementwise_tolerance);
         }
     }

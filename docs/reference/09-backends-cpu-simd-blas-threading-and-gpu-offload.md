@@ -176,11 +176,11 @@ op, request, or container type):
 
 | Family | Kernels |
 |---|---|
-| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`†, `scaleInto`, `unaryContiguousIntoUnchecked`†, `leakyReluContiguousIntoUnchecked`, `softcapContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked`† |
-| row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*†, `unaryRowSlice`*†, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`, `channelAffineInto` |
-| reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`†, `dot`† (comptime dtype; f32 takes the dedicated reduction, every other float dtype the typed one) |
+| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`*†, `scaleInto`, `unaryContiguousIntoUnchecked`†, `leakyReluContiguousIntoUnchecked`, `softcapContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked`† |
+| row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*†, `unaryRowSlice`*†, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`*, `preluChannelsBackwardAlphaInto`*, `channelAffineInto` |
+| reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`*†, `dot`† (comptime dtype; f32 takes the dedicated reduction, every other float dtype the typed one) |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
-| 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`, `maxPool2dBackwardInto`, `upsample2xNearestInto` |
+| 2-D conv / image | `conv2dInto`, `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`*, `maxPool2dBackwardInto`*, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
 | fused row kernels (`vector/rows.zig`; task-carrying, all pool-free — the exec domain modules split the task ranges themselves) | `softmaxRows`*, `softmaxExtRows`*†, `softmaxBackwardRows`*, `logsumexpRows`*, `logSoftmaxRows`*, `softmaxInner`*, `logsumexpInner`*, `logSoftmaxInner`*, `softmaxBackwardInner`*, `splitSwiGluRows`*, `splitGluRows`*, `splitSwiGluBackwardRows`*, `splitGluBackwardRows`*, `rmsNormMulRopeHalfVectors`*, `rmsNormMulRows`*, `rmsNormMulAddRows`*, `rmsNormMulBackwardInputRows`*, `rmsNormMulBackwardWeightRows`*, `rmsNormWeightGradBlocks`*, `rmsNormWeightGradReduce`*, `rmsNormInner`*, `rmsNormBackwardInputInner`*, `rmsNormBackwardWeightInner`*, `layerNormRows`*, `layerNormBackwardInputRows`*, `layerNormAffineParamGradRows`*, `layerNormRowStats`*, `layerNormParamGradColumns`*, `layerNormInner`*, `layerNormBackwardInner`*, `varianceInner`*, `standardizeInner`*†, `standardizeBackwardInner`*†, `crossEntropyLossRows`*, `crossEntropyBackwardRows`*, `dropoutRange`*, `scatterAddRows`* (Task payloads: the `backend.rows` seam; exec dispatches them by value through `ExecContext.dispatchRangeOr`) |
@@ -214,7 +214,7 @@ test "kernel interface inventory" {
         }
     }
     try std.testing.expectEqual(@as(usize, 162), kernel_count);
-    try std.testing.expectEqual(@as(usize, 99), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 105), pool_free_count);
     try std.testing.expectEqual(@as(usize, 26), generic_count);
 }
 ```

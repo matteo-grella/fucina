@@ -170,7 +170,7 @@ pub fn sum(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(d
     defer xx.deinit();
 
     ctx.enableNativeVectorPoolForWork(xx.tensor().len(), parallel.vector_elementwise_len_threshold);
-    var out = try ctx.scalar(output_dtype, kernels.sumSliceTyped(ctx.pc(), dtype, xx.tensor().dataConst()));
+    var out = try ctx.scalar(output_dtype, kernels.sumSliceTyped(dtype, xx.tensor().dataConst()));
     errdefer out.deinit();
     return out;
 }
@@ -221,7 +221,7 @@ fn reduceAxis(
     }
     if (comptime axis == rank - 1) {
         const axis_dim = source.shape[axis];
-        for (0..output.len) |row| output[row] = reduceRow(ctx, dtype, fold, input[row * axis_dim ..][0..axis_dim]);
+        for (0..output.len) |row| output[row] = reduceRow(dtype, fold, input[row * axis_dim ..][0..axis_dim]);
         return out;
     }
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
@@ -245,7 +245,7 @@ fn reduceWhole(
             if (comptime dtype == .f32) {
                 try kernels.sumInto(ctx.pc(), out, xp);
             } else {
-                out.data()[0] = kernels.sumSliceTyped(ctx.pc(), dtype, xp.dataConst());
+                out.data()[0] = kernels.sumSliceTyped(dtype, xp.dataConst());
             }
         },
         .prod => {
@@ -257,14 +257,13 @@ fn reduceWhole(
 
 /// The last-axis arm of `reduceAxis`: one row kernel per output element.
 fn reduceRow(
-    ctx: *ExecContext,
     comptime dtype: DType,
     comptime fold: AxisFold,
     values: []const dtype_mod.Scalar(dtype),
 ) AxisFoldTask(dtype, fold).Out {
     return switch (comptime fold) {
         .int_sum => intSumSlice(dtype, values),
-        .sum => if (comptime dtype == .f32) kernels.sumSlice(values) else kernels.sumSliceTyped(ctx.pc(), dtype, values),
+        .sum => if (comptime dtype == .f32) kernels.sumSlice(values) else kernels.sumSliceTyped(dtype, values),
         .prod => kernels.prodSlice(values),
     };
 }

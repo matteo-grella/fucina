@@ -132,8 +132,7 @@ inline fn scaleChannels(acc: []f32, s: f32) void {
 /// avg-pool VJP: scatter `gy[oh,ow,c] / valid_count(oh,ow)` back over the
 /// window's valid taps. `out` is `[H,W,C]`, zeroed here. Serial
 /// (correctness-first; each input cell may receive from overlapping windows).
-pub fn avgPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, gy: *const Tensor, d: Pool2dDims) void {
-    _ = pc;
+pub fn avgPool2dBackwardInto(out: *Tensor, gy: *const Tensor, d: Pool2dDims) void {
     const gx = out.data();
     const g = gy.dataConst();
     @memset(gx, 0);
@@ -180,8 +179,7 @@ pub fn avgPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, gy: *const
 /// occurrence in `(kh,kw)` scan order winning ties (recomputed from the saved
 /// forward input — no index tensor is stored). `out` is `[H,W,C]`, zeroed
 /// here. Serial (correctness-first).
-pub fn maxPool2dBackwardInto(pc: common.ParallelConfig, out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims) void {
-    _ = pc;
+pub fn maxPool2dBackwardInto(out: *Tensor, input: *const Tensor, gy: *const Tensor, d: Pool2dDims) void {
     const gx = out.data();
     const in = input.dataConst();
     const g = gy.dataConst();

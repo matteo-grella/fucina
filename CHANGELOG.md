@@ -25,6 +25,11 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Six kernels that took a `ParallelConfig` and ignored it are pool-free:
+  `elementwiseContiguousIntoTyped`, `sumSliceTyped`,
+  `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`,
+  `avgPool2dBackwardInto`, `maxPool2dBackwardInto` drop the leading `pc`
+  and carry the `pool_free_` marker.
 - Buffer release hooks are one descriptor: `BufferOf(dt).Release{ .ctx, .run }`
   (a null `ctx` means the buffer itself). `createWithRelease(allocator, len,
   release)` and `fromBorrowedSliceWithRelease(allocator, values, release)`

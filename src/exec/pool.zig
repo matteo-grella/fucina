@@ -79,7 +79,7 @@ pub fn avgPool2dBackward(ctx: *ExecContext, gy: *const Tensor, in_h: usize, in_w
     defer gg.deinit();
     var out = try ctx.empty(.f32, .{ in_h, in_w, d.c });
     errdefer out.deinit();
-    kernels.avgPool2dBackwardInto(ctx.pc(), &out, gg.tensor(), d);
+    kernels.avgPool2dBackwardInto(&out, gg.tensor(), d);
     return out;
 }
 
@@ -98,7 +98,7 @@ pub fn maxPool2dBackward(ctx: *ExecContext, input: *const Tensor, gy: *const Ten
     defer gg.deinit();
     var out = try ctx.empty(.f32, .{ d.h, d.w, d.c });
     errdefer out.deinit();
-    kernels.maxPool2dBackwardInto(ctx.pc(), &out, ii.tensor(), gg.tensor(), d);
+    kernels.maxPool2dBackwardInto(&out, ii.tensor(), gg.tensor(), d);
     return out;
 }
 

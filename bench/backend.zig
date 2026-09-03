@@ -37,8 +37,7 @@ const scalar = struct {
             _ = pc;
             return vector.elementwise.scalar.dot(tensor_dtype, out, a, b);
         }
-        fn elementwiseContiguousIntoTyped(pc: ParallelConfig, comptime tensor_dtype: DType, comptime op: raw_backend.ops.ElementwiseOp, out: anytype, a: anytype, b: anytype, len: usize) void {
-            _ = pc;
+        fn elementwiseContiguousIntoTyped(comptime tensor_dtype: DType, comptime op: raw_backend.ops.ElementwiseOp, out: anytype, a: anytype, b: anytype, len: usize) void {
             vector.elementwise.scalar.elementwiseContiguousIntoTyped(tensor_dtype, op, out, a, b, len);
         }
         fn gemm(pc: ParallelConfig, comptime g: raw_backend.ops.Gemm, out: anytype, a: anytype, b: anytype, m: usize, n: usize, k: usize) void {
@@ -680,12 +679,12 @@ fn benchTypedElementwise(comptime tensor_dtype: DType, allocator: std.mem.Alloca
 
     const ScalarRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, len: usize) void {
-            scalar.kernels.elementwiseContiguousIntoTyped(.{}, tensor_dtype, .add, o, lhs, rhs, len);
+            scalar.kernels.elementwiseContiguousIntoTyped(tensor_dtype, .add, o, lhs, rhs, len);
         }
     }.run;
     const NativeRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, len: usize) void {
-            native.kernels.elementwiseContiguousIntoTyped(.{}, tensor_dtype, .add, o, lhs, rhs, len);
+            native.kernels.elementwiseContiguousIntoTyped(tensor_dtype, .add, o, lhs, rhs, len);
         }
     }.run;
 

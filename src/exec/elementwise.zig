@@ -772,7 +772,7 @@ pub fn preluChannelsBackwardInput(ctx: *ExecContext, gy: *const Tensor, x: *cons
     var out = try ctx.empty(.f32, xx.tensor().shape.slice());
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(x.len(), parallel.vector_elementwise_len_threshold);
-    kernels.preluChannelsBackwardInputInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
+    kernels.preluChannelsBackwardInputInto(out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), aa.tensor().dataConst(), rc.rows, rc.cols);
     return out;
 }
 
@@ -787,7 +787,7 @@ pub fn preluChannelsBackwardAlpha(ctx: *ExecContext, gy: *const Tensor, x: *cons
 
     var out = try ctx.empty(.f32, .{rc.cols});
     errdefer out.deinit();
-    kernels.preluChannelsBackwardAlphaInto(ctx.pc(), out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), rc.rows, rc.cols);
+    kernels.preluChannelsBackwardAlphaInto(out.data(), gg.tensor().dataConst(), xx.tensor().dataConst(), rc.rows, rc.cols);
     return out;
 }
 
@@ -1206,7 +1206,7 @@ fn elementwiseRankTyped(
     var out = try ctx.empty(output_dtype, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(out.len(), parallel.vector_elementwise_len_threshold);
-    kernels.elementwiseContiguousIntoTyped(ctx.pc(), dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
+    kernels.elementwiseContiguousIntoTyped(dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
     return out;
 }
 

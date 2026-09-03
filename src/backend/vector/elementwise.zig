@@ -166,7 +166,6 @@ fn typedVectorizes(comptime dtype: DType) bool {
 }
 
 pub fn elementwiseContiguousIntoTyped(
-    pc: ParallelConfig,
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: *tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)),
@@ -174,7 +173,6 @@ pub fn elementwiseContiguousIntoTyped(
     b: *const tensor.TensorOf(dtype),
     len: usize,
 ) void {
-    _ = pc;
     if (comptime isa.reference) return scalar.elementwiseContiguousIntoTyped(dtype, op, out, a, b, len);
     const x = common.contiguousDataConstOf(dtype, a, len);
     const y = common.contiguousDataConstOf(dtype, b, len);
@@ -323,11 +321,10 @@ fn channelAffineRows(z: []f32, x: []const f32, scale: []const f32, shift: ?[]con
 
 /// PReLU input-VJP: `gx[r,c] = x > 0 ? gy : α[c]·gy` (subgradient 0 at the
 /// kink follows the forward's `>` test, matching the composed relu VJP).
-pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
+pub fn preluChannelsBackwardInputInto(gx: []f32, gy: []const f32, x: []const f32, alpha: []const f32, rows: usize, cols: usize) void {
     if (comptime isa.reference) return scalar.preluChannelsBackwardInputInto(gx, gy, x, alpha, rows, cols);
     std.debug.assert(gx.len >= rows * cols and gy.len >= rows * cols and x.len >= rows * cols);
     std.debug.assert(alpha.len == cols);
-    _ = pc;
     const vzero: Vf32 = @splat(0);
     var r: usize = 0;
     while (r < rows) : (r += 1) {
@@ -349,11 +346,10 @@ pub fn preluChannelsBackwardInputInto(pc: ParallelConfig, gx: []f32, gy: []const
 
 /// PReLU slope-VJP: `gα[c] = Σ_rows gy·min(x, 0)` — serial row accumulation
 /// (deterministic order; the slope vector is small).
-pub fn preluChannelsBackwardAlphaInto(pc: ParallelConfig, galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
+pub fn preluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
     if (comptime isa.reference) return scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
     std.debug.assert(galpha.len == cols);
     std.debug.assert(gy.len >= rows * cols and x.len >= rows * cols);
-    _ = pc;
     @memset(galpha, 0);
     var r: usize = 0;
     while (r < rows) : (r += 1) {
@@ -458,11 +454,9 @@ pub fn prodSlice(values: []const f32) f32 {
 }
 
 pub fn sumSliceTyped(
-    pc: ParallelConfig,
     comptime dtype: DType,
     values: []const dtype_mod.Scalar(dtype),
 ) dtype_mod.Scalar(dtype_mod.outputDType(.reduction, dtype)) {
-    _ = pc;
     if (comptime isa.reference) return sumSliceTypedScalar(dtype, values);
     if (comptime typedVectorizes(dtype)) return primitives.vecReduce(dtype, .sum, values, values);
     return sumSliceTypedScalar(dtype, values);
