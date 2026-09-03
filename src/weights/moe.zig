@@ -130,7 +130,7 @@ pub fn loadMoeRhsPtqtp(
 ) !MoeRhs {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
-    const bpc = try backend_mod.quantized_matmul.blockCountForDType(.q8_k, expected_in_dim);
+    const bpc = try backend_mod.quant.blockCountForDType(.q8_k, expected_in_dim);
     const blocks_per_plane = try std.math.mul(usize, rows, bpc);
 
     var planes: [3][]const dtype_mod.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };

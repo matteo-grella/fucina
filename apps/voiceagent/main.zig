@@ -857,8 +857,6 @@ const ReplyWriter = struct {
     }
 };
 
-
-
 /// Hand every finished sentence past `sent` to the talker; returns the new
 /// cursor. A free function because two producers drive it: the writer below,
 /// and the main loop draining a speculative generation.
@@ -1021,9 +1019,9 @@ const SpecTurn = struct {
 fn promptSgr(name: ?[]const u8) []const u8 {
     const n = name orelse return "1;37";
     const table = [_]struct { []const u8, []const u8 }{
-        .{ "white", "1;37" },  .{ "black", "1;30" }, .{ "red", "1;31" },
-        .{ "green", "1;32" },  .{ "yellow", "1;33" }, .{ "blue", "1;34" },
-        .{ "magenta", "1;35" }, .{ "cyan", "1;36" },  .{ "gray", "1;90" },
+        .{ "white", "1;37" },   .{ "black", "1;30" },  .{ "red", "1;31" },
+        .{ "green", "1;32" },   .{ "yellow", "1;33" }, .{ "blue", "1;34" },
+        .{ "magenta", "1;35" }, .{ "cyan", "1;36" },   .{ "gray", "1;90" },
         .{ "grey", "1;90" },
     };
     for (table) |e| if (std.ascii.eqlIgnoreCase(n, e[0])) return e[1];
@@ -1319,7 +1317,6 @@ const Tui = struct {
         self.open_line = true;
         self.out.flush() catch {};
     }
-
 
     /// The user's turn carries a prompt mark; the reply carries none, so the
     /// agent's words are just the text on the screen.
@@ -2247,8 +2244,8 @@ const SimDriver = struct {
             // nonlinearity + multi-tap room response + coloring lowpass)
             // + scripted speech
             const taps = [_]struct { d: usize, g: f32 }{
-                .{ .d = 0, .g = 1.0 },    .{ .d = 336, .g = 0.55 },
-                .{ .d = 624, .g = 0.40 }, .{ .d = 1104, .g = 0.28 },
+                .{ .d = 0, .g = 1.0 },     .{ .d = 336, .g = 0.55 },
+                .{ .d = 624, .g = 0.40 },  .{ .d = 1104, .g = 0.28 },
                 .{ .d = 1968, .g = 0.18 },
             };
             if (self.echo_step_at) |sa| if (self.t >= sa) {
@@ -2444,7 +2441,7 @@ pub fn main(init: std.process.Init) anyerror!void {
     // instruction about what to DO holds.
     const base_system = flagVal(args, "--system") orelse
         "Talk like a friend on the phone: two short spoken sentences of ordinary words, " ++
-        "no lists and no markdown. React to what they told you, or ask them something back.";
+            "no lists and no markdown. React to what they told you, or ask them something back.";
     const tools_on = !hasFlag(args, "--no-tools");
     const eager_text = hasFlag(args, "--eager-text");
     const system = if (tools_on)
@@ -3229,7 +3226,6 @@ pub fn main(init: std.process.Init) anyerror!void {
         const first_push = speak_worker.first_push_ns;
         if (speak_worker.err) |e| return @as(anyerror!void, e);
         engine.setSpeaking(false);
-
 
         if (interrupt.load(.acquire) or barge.pending) {
             // Cut the reveal BEFORE discarding the queue: the discard makes

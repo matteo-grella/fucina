@@ -9,7 +9,7 @@ const backend_mod = @import("../backend.zig");
 const io = @import("io.zig");
 
 const DType = dtype_mod.DType;
-const qm = backend_mod.quantized_matmul;
+const qm = backend_mod.quant;
 const Error = io.Error;
 
 /// Quantized formats an expert stack may stream in: the K-quant family

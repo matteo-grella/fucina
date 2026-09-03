@@ -2,7 +2,7 @@
 //! const-RHS + ternary-STE variants.
 
 const std = @import("std");
-const backend_quant = @import("../../backend.zig").quantized_matmul;
+const backend_quant = @import("../../backend.zig").quant;
 const backend_kernels = @import("../../backend.zig").kernels;
 const tensor_mod = @import("../../tensor.zig");
 const dtype_mod = @import("../../dtype.zig");

@@ -68,7 +68,7 @@ const scalar = struct {
                 stride_c,
             );
         }
-        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, rhs: raw_backend.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
+        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, rhs: raw_backend.quant.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
             _ = pc;
             return vector.matmul_quant.scalar.matmul2DQuantizedRhs(allocator, out, a, rhs, m, n, k);
         }
@@ -994,7 +994,7 @@ fn benchQuantizedI8MatMulTimed(
     comptime n_warmup: usize,
 ) !void {
     const FloatTensor = raw_backend.TensorOf(.f32);
-    const QRhs = raw_backend.QuantizedMatmulRhsI8;
+    const QRhs = raw_backend.quant.QuantizedMatmulRhsI8;
 
     const a_data = try randomSliceTyped(.f32, allocator, m * k, 0x81);
     defer allocator.free(a_data);
@@ -1045,12 +1045,12 @@ fn benchQuantizedGGMLMatMulTimed(
 ) !void {
     const FloatTensor = raw_backend.TensorOf(.f32);
     const QRhs = switch (tensor_dtype) {
-        .q1_0 => raw_backend.QuantizedMatmulRhsQ1_0,
-        .q4_0 => raw_backend.QuantizedMatmulRhsQ4_0,
-        .q4_1 => raw_backend.QuantizedMatmulRhsQ4_1,
-        .q5_0 => raw_backend.QuantizedMatmulRhsQ5_0,
-        .q5_1 => raw_backend.QuantizedMatmulRhsQ5_1,
-        .q8_0 => raw_backend.QuantizedMatmulRhsQ8_0,
+        .q1_0 => raw_backend.quant.QuantizedMatmulRhsQ1_0,
+        .q4_0 => raw_backend.quant.QuantizedMatmulRhsQ4_0,
+        .q4_1 => raw_backend.quant.QuantizedMatmulRhsQ4_1,
+        .q5_0 => raw_backend.quant.QuantizedMatmulRhsQ5_0,
+        .q5_1 => raw_backend.quant.QuantizedMatmulRhsQ5_1,
+        .q8_0 => raw_backend.quant.QuantizedMatmulRhsQ8_0,
         else => @compileError("unsupported GGML benchmark format"),
     };
 
@@ -1123,11 +1123,11 @@ fn benchQuantizedGGMLKMatMulTimed(
 ) !void {
     const FloatTensor = raw_backend.TensorOf(.f32);
     const QRhs = switch (tensor_dtype) {
-        .q2_k => raw_backend.QuantizedMatmulRhsQ2_K,
-        .q3_k => raw_backend.QuantizedMatmulRhsQ3_K,
-        .q4_k => raw_backend.QuantizedMatmulRhsQ4_K,
-        .q5_k => raw_backend.QuantizedMatmulRhsQ5_K,
-        .q6_k => raw_backend.QuantizedMatmulRhsQ6_K,
+        .q2_k => raw_backend.quant.QuantizedMatmulRhsQ2_K,
+        .q3_k => raw_backend.quant.QuantizedMatmulRhsQ3_K,
+        .q4_k => raw_backend.quant.QuantizedMatmulRhsQ4_K,
+        .q5_k => raw_backend.quant.QuantizedMatmulRhsQ5_K,
+        .q6_k => raw_backend.quant.QuantizedMatmulRhsQ6_K,
         else => @compileError("unsupported GGML K benchmark format"),
     };
 
@@ -1246,7 +1246,7 @@ fn benchQuantizedLoadedMatMulTimed(
     try fmtRow(w, name, scalar_ns, native_ns);
 }
 
-fn anyLoadedRhs(comptime tensor_dtype: DType, rhs: *const raw_backend.quantized_matmul.QuantizedMatmulRhsRowsFor(tensor_dtype)) raw_backend.AnyQuantizedMatmulRhs {
+fn anyLoadedRhs(comptime tensor_dtype: DType, rhs: *const raw_backend.quantized_matmul.QuantizedMatmulRhsRowsFor(tensor_dtype)) raw_backend.quant.AnyQuantizedMatmulRhs {
     return switch (tensor_dtype) {
         .iq1_s => .{ .iq1_s = rhs },
         .iq1_m => .{ .iq1_m = rhs },

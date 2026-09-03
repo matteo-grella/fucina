@@ -765,20 +765,20 @@ fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime Rhs: type,
 test "public splitSwiGlu packed Q4_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=13: padded-x4 small path; m=3: rows path; m=68: padded-x4 large path.
     for ([_]usize{ 3, 13, 68 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q4_k, backend_mod.QuantizedMatmulRhsQ4_Kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q4_k, backend_mod.quant.QuantizedMatmulRhsQ4_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q5_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=8: exact-x4 path; m=13: rows path; m=130: x4 prefix + 2-row tail.
     for ([_]usize{ 8, 13, 130 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q5_k, backend_mod.QuantizedMatmulRhsQ5_Kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q5_k, backend_mod.quant.QuantizedMatmulRhsQ5_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q6_Kx4 RHS dot matches unfused path bit-exactly" {
     for ([_]usize{ 5, 12 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q6_k, backend_mod.QuantizedMatmulRhsQ6_Kx4, m);
+        try checkFusedSplitSwiGluKQuant(.q6_k, backend_mod.quant.QuantizedMatmulRhsQ6_Kx4, m);
     }
 }
 

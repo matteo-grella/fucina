@@ -226,8 +226,8 @@ pub fn antispoofCrop(allocator: std.mem.Allocator, src: *const image.Image, box:
     const sx = @as(f32, @floatFromInt(size)) / cw;
     const sy = @as(f32, @floatFromInt(size)) / ch;
     const M = [6]f64{
-        sx, 0, (0.5 - @as(f32, @floatFromInt(cx1))) * sx - 0.5,
-        0, sy, (0.5 - @as(f32, @floatFromInt(cy1))) * sy - 0.5,
+        sx, 0,  (0.5 - @as(f32, @floatFromInt(cx1))) * sx - 0.5,
+        0,  sy, (0.5 - @as(f32, @floatFromInt(cy1))) * sy - 0.5,
     };
     return warpAffine(allocator, src, M, size, size);
 }

@@ -506,8 +506,8 @@ pub const Options = struct {
 /// route application audio, not guitars, so the probe never selects them
 /// (a loopback can carry a strong, clean signal and still be wrong).
 const virtual_name_fragments = [_][]const u8{
-    "teams", "vb-cable", "vb cable", "blackhole", "soundflower",
-    "loopback", "zoomaudio", "camo", "aggregate", "virtual",
+    "teams",    "vb-cable",  "vb cable", "blackhole", "soundflower",
+    "loopback", "zoomaudio", "camo",     "aggregate", "virtual",
 };
 
 fn isVirtualDevice(name: []const u8) bool {

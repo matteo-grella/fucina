@@ -161,7 +161,7 @@ pub fn concatQuantizedRows(
 
     const first = try inputs[0].rankView(2);
     const cols = first.dim(1);
-    const blocks_per_row = try backend_mod.quantized_matmul.blockCountForDType(dtype, cols);
+    const blocks_per_row = try backend_mod.quant.blockCountForDType(dtype, cols);
     var rows: usize = 0;
     for (inputs) |input| {
         const view = try input.rankView(2);

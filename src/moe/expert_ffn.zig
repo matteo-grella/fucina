@@ -82,7 +82,7 @@ pub const MoePtqtpRhs = struct {
     /// switches the expert dot to the one-pass folded kernel; empty is the
     /// per-plane 2-pass path (correct either way, same contract as the
     /// dense `WeightPtqtp.pfold`).
-    folded: []const backend_mod.quantized_matmul.BlockTQ2_0Foldedx4 = &.{},
+    folded: []const backend_mod.quant.BlockTQ2_0Foldedx4 = &.{},
     /// Owns `folded` independently of `planes` — the plane stacks may be
     /// borrowed from the GGUF mapping while the fold is always built.
     folded_allocator: ?Allocator = null,
@@ -104,18 +104,18 @@ pub const MoePtqtpRhs = struct {
 /// win — and it makes load a plain memcpy instead of a repack. Only q4_k /
 /// q5_k / q6_k experts (every real MoE GGUF) are supported.
 pub const MoeRhs = union(enum) {
-    q4_k: backend_mod.QuantizedMatmulRhsQ4_K,
-    q5_k: backend_mod.QuantizedMatmulRhsQ5_K,
-    q6_k: backend_mod.QuantizedMatmulRhsQ6_K,
+    q4_k: backend_mod.quant.QuantizedMatmulRhsQ4_K,
+    q5_k: backend_mod.quant.QuantizedMatmulRhsQ5_K,
+    q6_k: backend_mod.quant.QuantizedMatmulRhsQ6_K,
     /// q8_0 experts (32-elem blocks): the format llama.cpp falls back to
     /// when an expert dim is not a 256 multiple (deepseek2's 1408). Pairs
     /// with Q8_0-quantized activations instead of Q8_K.
-    q8_0: backend_mod.QuantizedMatmulRhsQ8_0,
+    q8_0: backend_mod.quant.QuantizedMatmulRhsQ8_0,
     /// Ternary experts (TQ2_0, 256-elem blocks, ~2.06 bpw): the packed-trit
     /// format the ternary campaign made first-class, and the container the
     /// PTQTP plane persistence uses. Pairs with Q8_K activations like the
     /// K-quants; the sdot/vpdpbusd tile kernel covers decode and batch.
-    tq2_0: backend_mod.QuantizedMatmulRhsTQ2_0,
+    tq2_0: backend_mod.quant.QuantizedMatmulRhsTQ2_0,
     /// PTQTP experts (docs/PTQTP.md): K ∈ {1..3} tq2_0 plane stacks whose
     /// per-projection dots are SUMMED per element in fixed plane order
     /// inside the fused op, before the gated nonlinearity — bitwise the
@@ -124,20 +124,20 @@ pub const MoeRhs = union(enum) {
     ptqtp: MoePtqtpRhs,
     /// q2_k experts (2.5625 bpw): the K-quant floor, present in the UD
     /// 2-bit community files alongside the iq2 codebook formats.
-    q2_k: backend_mod.QuantizedMatmulRhsQ2_K,
+    q2_k: backend_mod.quant.QuantizedMatmulRhsQ2_K,
     /// iq2_xxs experts (2.0625 bpw codebook format): the dominant dtype of
     /// UD-IQ2_XXS releases (DeepSeek V4 2-bit, GLM-5.2 2-bit). Scalar
     /// grid-table dot; Q8_K activations.
-    iq2_xxs: backend_mod.QuantizedMatmulRhsIQ2_XXS,
+    iq2_xxs: backend_mod.quant.QuantizedMatmulRhsIQ2_XXS,
     /// iq3_xxs experts (3.0625 bpw): GLM-5.2's UD 2-bit files carry the
     /// down projections in this format. Same grid-table tile path.
-    iq3_xxs: backend_mod.QuantizedMatmulRhsIQ3_XXS,
+    iq3_xxs: backend_mod.quant.QuantizedMatmulRhsIQ3_XXS,
     /// iq2_s / iq4_xs / q3_k experts: the remaining formats UD "dynamic"
     /// files sprinkle over a handful of layers. Grid-table tiles for the
     /// iq pair, the K-quant tile for q3_k.
-    iq2_s: backend_mod.QuantizedMatmulRhsIQ2_S,
-    iq4_xs: backend_mod.QuantizedMatmulRhsIQ4_XS,
-    q3_k: backend_mod.QuantizedMatmulRhsQ3_K,
+    iq2_s: backend_mod.quant.QuantizedMatmulRhsIQ2_S,
+    iq4_xs: backend_mod.quant.QuantizedMatmulRhsIQ4_XS,
+    q3_k: backend_mod.quant.QuantizedMatmulRhsQ3_K,
     /// Disk-streamed expert stack (`store/expert_store.zig`): same geometry
     /// and kernels as the resident arms, but expert blocks resolve through
     /// the store's acquire-scoped tier (pin → LRU → pread) instead of a
@@ -211,7 +211,7 @@ pub const MoeRhs = union(enum) {
 };
 
 fn validateMoeRhsStorage(rhs: *const MoeRhs, rows: usize, k: usize) !void {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const expected_bpc = if (rhs.wantsQ8_0Lhs()) blk: {
         if (k == 0 or k % 32 != 0) return tensor.TensorError.InvalidShape;
         break :blk k / 32;
@@ -395,7 +395,7 @@ fn expertBlocks(rhs: *const MoeRhs, e: usize, out_dim: usize) ExpertBlocks {
 /// One dtype switch serves resident and streamed storage alike (the
 /// `ExpertBlocks` view resolved the difference).
 fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.BlockQ8_K, qlhs8: []const dtype_mod.BlockQ8_0, out: []f32, out_dim: usize, m: usize, c0: usize, c1: usize) void {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const w = expertBlocks(rhs, e, out_dim);
     const bpc = w.bpc;
     switch (w.quant) {
@@ -408,7 +408,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
             // Same sound @constCast borrow as tq2_0View: allocator is
             // null, so the view never mutates or frees the storage.
             const blocks = @as([*]const dtype_mod.BlockMXFP4, @ptrCast(@alignCast(w.planes[0])))[0 .. out_dim * bpc];
-            const view = backend_mod.QuantizedMatmulRhsMXFP4{
+            const view = backend_mod.quant.QuantizedMatmulRhsMXFP4{
                 .allocator = null,
                 .blocks = @constCast(blocks),
                 .blocks_per_column = bpc,
@@ -433,7 +433,7 @@ fn moeExpertTileDotRange(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.B
             // is the plain ternary stack and takes the single direct tile
             // inside the helper.
             const plane_blocks = out_dim * bpc;
-            var views: [3]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+            var views: [3]backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
             for (0..w.plane_count) |p| {
                 const blocks = @as([*]const dtype_mod.BlockTQ2_0, @ptrCast(@alignCast(w.planes[p])))[0..plane_blocks];
                 views[p] = tq2_0View(blocks, w.k, out_dim, bpc);
@@ -469,7 +469,7 @@ fn moeExpertTileDot(rhs: *const MoeRhs, e: usize, qlhs: []const dtype_mod.BlockQ
     moeExpertTileDotRange(rhs, e, qlhs, qlhs8, out, out_dim, m, 0, out_dim);
 }
 
-fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
+fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: usize) backend_mod.quant.QuantizedMatmulRhsQ8_0 {
     return .{
         .allocator = null,
         .blocks = blocks,
@@ -482,7 +482,7 @@ fn q8_0View(blocks: []const dtype_mod.BlockQ8_0, k: usize, out_dim: usize, bpc: 
 /// Borrowed rows-container view over one expert's grid-table blocks (the
 /// generic RowsFor containers carry mutable blocks; the matmul path never
 /// writes them, so the @constCast is sound — see tq2_0View).
-fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim: usize, bpc: usize) backend_mod.quantized_matmul.QuantizedMatmulRhsRowsFor(dt) {
+fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim: usize, bpc: usize) backend_mod.quant.QuantizedMatmulRhsRowsFor(dt) {
     return .{
         .allocator = null,
         .blocks = @constCast(blocks),
@@ -492,7 +492,7 @@ fn tableView(comptime dt: fucina_dtype.DType, blocks: anytype, k: usize, out_dim
     };
 }
 
-fn tq2_0View(blocks: []const dtype_mod.BlockTQ2_0, k: usize, out_dim: usize, bpc: usize) backend_mod.QuantizedMatmulRhsTQ2_0 {
+fn tq2_0View(blocks: []const dtype_mod.BlockTQ2_0, k: usize, out_dim: usize, bpc: usize) backend_mod.quant.QuantizedMatmulRhsTQ2_0 {
     // The generic rows container carries mutable blocks; the matmul path
     // never writes them, so the @constCast borrow is sound (see the
     // borrow note on exec/quant_matmul.zig's compactFromBlocks).
@@ -526,7 +526,7 @@ const ptqtp_acc_cols: usize = 1024;
 /// buffers, so a bounded private buffer is the allocation-free choice that
 /// stays race-free under any task partition.
 fn moePtqtpTileDotRange(
-    planes: []const backend_mod.QuantizedMatmulRhsTQ2_0,
+    planes: []const backend_mod.quant.QuantizedMatmulRhsTQ2_0,
     qlhs: []const dtype_mod.BlockQ8_K,
     out: []f32,
     out_dim: usize,
@@ -583,8 +583,8 @@ fn moeRhsUsesLanePacked(rhs: *const MoeRhs) bool {
 /// `m >= 4` (the caller gates on `moeRhsUsesLanePacked` + the packed buffer being
 /// present); the `m < 4` tail stays on `moeExpertTileDotRange`. `lhs_x4`
 /// holds this expert's `ceil(m/4)` Q8_Kx4 groups.
-fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
-    const qm = backend_mod.quantized_matmul;
+fn moeExpertTileDotX4Range(rhs: *const MoeRhs, e: usize, lhs_x4: []const backend_mod.quant.BlockQ8_Kx4, m: usize, out: []f32, out_dim: usize, c0: usize, c1: usize) void {
+    const qm = backend_mod.quant;
     const w = expertBlocks(rhs, e, out_dim);
     const bpc = w.bpc;
     switch (w.quant) {
@@ -968,7 +968,7 @@ pub fn expertFfn(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const av = try x.rankView(2);
     if (av.dim(0) != 1) return tensor.TensorError.ShapeMismatch;
     const hidden = av.dim(1);
@@ -1220,7 +1220,7 @@ const MoeBatchGatherTask = struct {
     // Optional 4-row-interleaved repack of `qx` for the lane-packed Q5_K kernel.
     // Empty when the gate/up experts are not q5_k. `x4_group_start` is this
     // expert's first Q8_Kx4 group index (prefix sum of ceil(m/4)).
-    qx_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
+    qx_x4: []backend_mod.quant.BlockQ8_Kx4,
     x4_group_start: usize,
     profiler: ?*moe_chain.MoeTaskProfiler,
 };
@@ -1268,7 +1268,7 @@ const MoeBatchMatmulTask = struct {
     qlhs8: []const dtype_mod.BlockQ8_0 = &.{},
     // 4-row-interleaved repack of `qlhs`; empty unless `rhs` is q5_k. Used for the
     // lane-packed kernel when `m >= 4`. `x4_group_start` is the expert's first group.
-    qlhs_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4,
+    qlhs_x4: []const backend_mod.quant.BlockQ8_Kx4,
     x4_group_start: usize,
     bpc: usize,
     row_start: usize,
@@ -1320,7 +1320,7 @@ const MoeBatchSwiGluTask = struct {
     qg8: []dtype_mod.BlockQ8_0 = &.{},
     // Optional 4-row-interleaved repack of `qg` for the lane-packed Q5_K down-proj.
     // Empty when the down experts are not q5_k.
-    qg_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
+    qg_x4: []backend_mod.quant.BlockQ8_Kx4,
     x4_group_start: usize,
     out_pe: usize,
     blocks_per_g: usize,
@@ -1397,8 +1397,8 @@ fn runMoeBatchPhased(
     qg8: []dtype_mod.BlockQ8_0,
     down_buf: []f32,
     group_offset: []const usize,
-    qx_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
-    qg_x4: []backend_mod.quantized_matmul.BlockQ8_Kx4,
+    qx_x4: []backend_mod.quant.BlockQ8_Kx4,
+    qg_x4: []backend_mod.quant.BlockQ8_Kx4,
     act: Gated,
     profile_enabled: bool,
     io: ?std.Io,
@@ -1410,9 +1410,9 @@ fn runMoeBatchPhased(
     // The lane-packed Q5_K kernel only applies to q5_k experts; per-projection
     // tag check selects the packed LHS (built in the gather/swiglu phases) vs the
     // per-row tile. Empty `qx_x4`/`qg_x4` (non-q5_k model) keeps everything as-is.
-    const empty_x4: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = &.{};
-    const qx_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qx_x4;
-    const qg_x4_const: []const backend_mod.quantized_matmul.BlockQ8_Kx4 = qg_x4;
+    const empty_x4: []const backend_mod.quant.BlockQ8_Kx4 = &.{};
+    const qx_x4_const: []const backend_mod.quant.BlockQ8_Kx4 = qx_x4;
+    const qg_x4_const: []const backend_mod.quant.BlockQ8_Kx4 = qg_x4;
     // Pinned mode (ExecContext.pinRowwiseNumerics) skips the lane-packed
     // Q8_Kx4 kernels: every expert then takes the per-row tile path — the
     // m == 1 numerics — so a speculative verify batch through this op
@@ -1658,7 +1658,7 @@ pub fn expertFfnBatch(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const a = ctx.allocator();
     const av = try x.rankView(2);
     const seq = av.dim(0);

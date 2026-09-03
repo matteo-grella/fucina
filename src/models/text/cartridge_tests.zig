@@ -44,8 +44,8 @@ test "cartridge prefix attention matches finite differences (kv_seq > q_seq, GQA
     // T=3 queries over kv_seq = p(2) + 3 = 5: source_offset = 2 in both the
     // forward kernel and the fused backward.
     var q = try Tensor(.{ .seq, .head, .d }).variableFromSlice(&ctx, .{ 3, 4, 2 }, &.{
-        0.2,  -0.4, 0.5,  0.1,  -0.3, 0.7,  0.05, -0.6,
-        0.4,  0.3,  -0.2, -0.1, 0.6,  -0.5, 0.15, 0.25,
+        0.2,  -0.4, 0.5,  0.1,   -0.3, 0.7,  0.05,  -0.6,
+        0.4,  0.3,  -0.2, -0.1,  0.6,  -0.5, 0.15,  0.25,
         -0.7, 0.1,  0.35, -0.45, 0.55, 0.65, -0.05, -0.15,
     });
     defer q.deinit();
@@ -230,8 +230,8 @@ test "frozen sink rows stay constant while trainable rows receive gradient" {
     try std.testing.expect(cart.layers[0].v.requiresGrad());
 
     var q = try Tensor(.{ .seq, .head, .d }).fromSlice(&ctx, .{ t, 4, d }, &.{
-        0.2, -0.4, 0.5, 0.1, -0.3, 0.7, 0.05, -0.6,
-        0.4, 0.3, -0.2, -0.1, 0.6, -0.5, 0.15, 0.25,
+        0.2, -0.4, 0.5,  0.1,  -0.3, 0.7,  0.05, -0.6,
+        0.4, 0.3,  -0.2, -0.1, 0.6,  -0.5, 0.15, 0.25,
     });
     defer q.deinit();
     var k_tok = try Kv.fromSlice(&ctx, .{ t, kv_heads, d }, &.{

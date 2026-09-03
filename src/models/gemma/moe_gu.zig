@@ -253,9 +253,9 @@ fn guDecodeBody(
 pub fn decodePacked(
     ctx: *ExecContext,
     x: *const Tensor,
-    gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
     selected: []const usize,
     weights: []const f32,
     out_pe: usize,
@@ -290,15 +290,15 @@ pub fn decodePacked(
 /// Expert-weight binding for `guBatchBody`: how a gate/up or down
 /// matmul task names its `rhs` — packed x4 containers by pointer.
 const PackedExpertBind = struct {
-    gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
 
-    fn gu(self: PackedExpertBind, e: usize, is_up: bool) *const backend_mod.QuantizedMatmulRhsQ6_Kx4 {
+    fn gu(self: PackedExpertBind, e: usize, is_up: bool) *const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4 {
         return if (is_up) &self.up[e] else &self.gate[e];
     }
 
-    fn dn(self: PackedExpertBind, e: usize) *const backend_mod.QuantizedMatmulRhsQ8_0x4 {
+    fn dn(self: PackedExpertBind, e: usize) *const backend_mod.quant.QuantizedMatmulRhsQ8_0x4 {
         return &self.down[e];
     }
 
@@ -325,7 +325,7 @@ const RawExpertBind = struct {
         return guRawGuView(self.gw, e, if (is_up) self.out_pe else 0, self.out_pe, self.hidden);
     }
 
-    fn dn(self: RawExpertBind, e: usize) backend_mod.QuantizedMatmulRhsQ8_0 {
+    fn dn(self: RawExpertBind, e: usize) backend_mod.quant.QuantizedMatmulRhsQ8_0 {
         return guRawQ8View(self.gw, e, self.out_pe, self.hidden);
     }
 
@@ -608,9 +608,9 @@ fn guBatchBody(
 pub fn batchPacked(
     ctx: *ExecContext,
     x: *const Tensor,
-    gate: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
     selected: []const usize,
     weights: []const f32,
     top_k: usize,
@@ -931,8 +931,8 @@ fn runGuGpuGegluTask(task: *const GuGpuGegluTask) void {
 /// (gate: `row_off` 0, up: `row_off` out_pe) of one expert in the raw
 /// GGUF gate_up tensor (2*out_pe rows per expert, gate rows first).
 const GuRawGuRhs = union(enum) {
-    q6_k: backend_mod.QuantizedMatmulRhsQ6_K,
-    q4_k: backend_mod.QuantizedMatmulRhsQ4_K,
+    q6_k: backend_mod.quant.QuantizedMatmulRhsQ6_K,
+    q4_k: backend_mod.quant.QuantizedMatmulRhsQ4_K,
 };
 
 fn guRawGuView(
@@ -989,7 +989,7 @@ fn guRawQ8View(
     expert: usize,
     out_pe: usize,
     hidden: usize,
-) backend_mod.QuantizedMatmulRhsQ8_0 {
+) backend_mod.quant.QuantizedMatmulRhsQ8_0 {
     const bpr = out_pe / 32;
     return .{
         .allocator = null,
@@ -1064,7 +1064,7 @@ fn runGuRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuRawQ8MatmulTask = struct {
-    rhs: backend_mod.QuantizedMatmulRhsQ8_0,
+    rhs: backend_mod.quant.QuantizedMatmulRhsQ8_0,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,
@@ -1204,7 +1204,7 @@ fn runGuGatherTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuQ6MatmulTask = struct {
-    rhs: *const backend_mod.QuantizedMatmulRhsQ6_Kx4,
+    rhs: *const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
     qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
     row_start: usize,
@@ -1268,7 +1268,7 @@ fn runGuGegluTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuQ8MatmulTask = struct {
-    rhs: *const backend_mod.QuantizedMatmulRhsQ8_0x4,
+    rhs: *const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,

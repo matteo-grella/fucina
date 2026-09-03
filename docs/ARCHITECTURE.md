@@ -375,9 +375,15 @@ Enforcement:
 
 - `zig build arch-check` runs `tools/check_import_graph.zig` over the
   production (non-test) import graph of `src/`, `examples/`, `apps/`,
-  `bench/`, and `tools/`, and enforces three invariants: no forbidden
-  strongly-connected components, zero band inversions, and every sibling
-  test file forwarded from a production file. An SCC is permitted only
+  `bench/`, and `tools/`, and enforces four invariants: no forbidden
+  strongly-connected components, zero band inversions, every sibling
+  test file forwarded from a production file, and the backend door: a
+  production file of the core bands (ag, tagged, moe, exec, store)
+  imports nothing under `src/backend/` (only `src/backend.zig`) and never
+  names the raw `quantized_matmul` module (its curated surface is
+  `backend.quant`; the models band takes the raw module through
+  `fucina.internal` and the apps band through `raw_backend`, the two
+  documented escape hatches). An SCC is permitted only
   when every member is in the same band and one member is the directory
   root of another (`P.zig` with a member under `P/`: `src/exec.zig` with
   `src/exec/*.zig`, the struct-body-in-the-root shape `std.zig` and

@@ -22,7 +22,7 @@ pub fn QuantWeight(comptime dtype: DType) type {
     return Tensor(.{ .dtype = dtype, .tags = .{ .out, .in } });
 }
 
-pub const backend_quant = backend_mod.quantized_matmul;
+pub const backend_quant = backend_mod.quant;
 
 /// Loader options for `LinearWeight.loadWithOptions` (re-exported there as
 /// `LinearWeight.LoadOptions`).

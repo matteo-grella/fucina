@@ -642,7 +642,7 @@ fn ptqtpPlaneSumDot(
     const bpc = k / qm.types.qk_k_block_size;
     for (planes, 0..) |plane, p| {
         const blocks = plane[e * out_dim * bpc ..][0 .. out_dim * bpc];
-        const view = backend_mod.QuantizedMatmulRhsTQ2_0{
+        const view = backend_mod.quant.QuantizedMatmulRhsTQ2_0{
             .allocator = null,
             .blocks = @constCast(blocks),
             .blocks_per_column = bpc,
@@ -938,7 +938,7 @@ fn foldExpertStack(
     const folded = try allocator.alloc(qm.BlockTQ2_0Foldedx4, n_experts * fg);
     errdefer allocator.free(folded);
     for (0..n_experts) |e| {
-        var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        var views: [2]backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
         for ([2][]const dtype_mod.BlockTQ2_0{ plane1, plane2 }, 0..) |plane, p| {
             views[p] = .{
                 .allocator = null,

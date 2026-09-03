@@ -20,18 +20,16 @@ test "thinking on prefills the think opener in the generation prompt" {
     try expectRender(&.{
         .{ .role = .system, .content = "Be terse." },
         .{ .role = .user, .content = "Hi" },
-    }, false,
-        "<|im_start|>system\nBe terse.<|im_end|>\n" ++
-            "<|im_start|>user\nHi<|im_end|>\n" ++
-            "<|im_start|>assistant\n<think>\n");
+    }, false, "<|im_start|>system\nBe terse.<|im_end|>\n" ++
+        "<|im_start|>user\nHi<|im_end|>\n" ++
+        "<|im_start|>assistant\n<think>\n");
 }
 
 test "thinking off prefills the empty think block" {
     try expectRender(&.{
         .{ .role = .user, .content = "Hi" },
-    }, true,
-        "<|im_start|>user\nHi<|im_end|>\n" ++
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    }, true, "<|im_start|>user\nHi<|im_end|>\n" ++
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n");
 }
 
 test "historical assistant turns render stripped of reasoning" {
@@ -39,9 +37,8 @@ test "historical assistant turns render stripped of reasoning" {
         .{ .role = .user, .content = "2+2?" },
         .{ .role = .assistant, .content = "<think>\nsum\n</think>\n\n4" },
         .{ .role = .user, .content = "And +1?" },
-    }, true,
-        "<|im_start|>user\n2+2?<|im_end|>\n" ++
-            "<|im_start|>assistant\n4<|im_end|>\n" ++
-            "<|im_start|>user\nAnd +1?<|im_end|>\n" ++
-            "<|im_start|>assistant\n<think>\n\n</think>\n\n");
+    }, true, "<|im_start|>user\n2+2?<|im_end|>\n" ++
+        "<|im_start|>assistant\n4<|im_end|>\n" ++
+        "<|im_start|>user\nAnd +1?<|im_end|>\n" ++
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n");
 }

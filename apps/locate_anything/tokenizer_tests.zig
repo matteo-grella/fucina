@@ -8,7 +8,9 @@ const testing = std.testing;
 // plain-BPE runs (specials here do NOT follow the <|...|> marker shape).
 fn syntheticTokenizer(allocator: std.mem.Allocator) !tokenizer.Tokenizer {
     const vocab = [_][]const u8{
-        "a", "b", "c", "ab", "<s>", "<sp>", "Ġ", "Ġa",
+        "a", "b", "c", "ab", "<s>", "<sp>",
+        "Ġ",
+        "Ġa",
     };
     const merges = [_][]const u8{ "a b", "Ġ a" };
     const types = [_]i32{ 1, 1, 1, 1, 4, 4, 1, 1 };

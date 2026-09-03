@@ -25,6 +25,16 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The core bands reach the backend through one door: `backend.quant` is the
+  curated quantized surface (the `QuantizedMatmulRhs*` containers,
+  `RhsLifetime`/`RawRhs`, the lane-packed block types, `blockCountForDType`,
+  the pack/dequantize/get-rows entry points and the compact tiles the MoE
+  engine schedules), replacing the flat `backend.QuantizedMatmulRhs*`
+  re-exports (`fucina.quant` still mirrors the containers). The raw
+  `backend.quantized_matmul` module remains for the models band (through
+  `fucina.internal`) and the research surface. `arch-check` now fails a
+  core-band production file that imports a file under `src/backend/` or
+  names `quantized_matmul`.
 - Six kernels that took a `ParallelConfig` and ignored it are pool-free:
   `elementwiseContiguousIntoTyped`, `sumSliceTyped`,
   `preluChannelsBackwardInputInto`, `preluChannelsBackwardAlphaInto`,

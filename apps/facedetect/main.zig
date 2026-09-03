@@ -60,9 +60,8 @@ pub fn main(init: std.process.Init) !void {
     if (cmd == .info) {
         const cov = loader.coverage(&file);
         return stdout.print("model: {s}\ntensors: {d} (det {d}, rec {d}, genderage {d}, anti-spoof {d})\ngenderage: {s}\nanti-spoof: {s}\n", .{
-            model_path, cov.total, cov.det, cov.rec, cov.ga, cov.antispoof,
-            if (cov.ga > 0) "present" else "absent",
-            if (cov.antispoof > 0) "present" else "absent",
+            model_path,                              cov.total,                                      cov.det, cov.rec, cov.ga, cov.antispoof,
+            if (cov.ga > 0) "present" else "absent", if (cov.antispoof > 0) "present" else "absent",
         });
     }
 

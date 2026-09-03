@@ -49,7 +49,7 @@ const policy = @import("policy.zig");
 const persist = @import("persist.zig");
 
 const Allocator = std.mem.Allocator;
-const qm = backend_mod.quantized_matmul;
+const qm = backend_mod.quant;
 const fd_t = io.fd_t;
 const ProjGeometry = geometry.ProjGeometry;
 const Slot = tiers.Slot;
@@ -1080,7 +1080,7 @@ pub const ExpertStore = struct {
             const dst = std.mem.sliceAsBytes(scratch[plane * plane_blocks ..][0..plane_blocks]);
             try self.preadFull(g.part, copy, dst, g.planeFileOffset(eid, plane));
         }
-        var views: [2]backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        var views: [2]backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
         for (0..2) |plane| {
             views[plane] = .{
                 .allocator = null,

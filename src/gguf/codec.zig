@@ -6,7 +6,7 @@
 const std = @import("std");
 
 const dtype_mod = @import("../dtype.zig");
-const quant = @import("../backend/quant.zig");
+const quant = @import("../backend.zig").quant;
 const wire = @import("wire.zig");
 
 const Allocator = std.mem.Allocator;

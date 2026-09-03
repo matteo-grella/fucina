@@ -12,11 +12,14 @@ kernels over dynamically quantized activations. The stack has three tiers:
    `logicalDType`).
 2. **kernel tier** (`src/backend/quant.zig` and `src/backend/quant/*.zig`) —
    encoders, decoders, activation quantizers, dot/matmul kernels, packed RHS
-   layouts, and the format-trait table. Reachable in-tree as
-   `fucina.internal.backend_mod.quantized_matmul`, which forwards the block
-   and RHS types and exposes the format modules by name
-   (`quantized_matmul.q4_k.X`, `.q8k.X`, `.cold.X`); application code
-   normally never calls it directly.
+   layouts, and the format-trait table. The core bands (exec, moe, store,
+   weights, ag) use its curated surface `backend.quant` (the RHS
+   containers, descriptors, block-count rule and entry points), which
+   `arch-check` enforces; the raw module is reachable as
+   `fucina.internal.backend_mod.quantized_matmul` for the models band and
+   the research surface (bench, tools, examples), and exposes the format
+   modules by name (`quantized_matmul.q4_k.X`, `.q8k.X`, `.cold.X`);
+   application code normally never calls it directly.
 3. **facade tier** (`src/ag/tensor.zig`, `src/exec/quant_matmul.zig`) —
    `fucina.Tensor(.{ .dtype = .q4_k, ... })` constant tensors, `dot` with a
    quantized RHS, `getRows`, `to(.f32)`, `packRhs`/`dotPacked`, and the

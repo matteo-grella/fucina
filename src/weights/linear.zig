@@ -179,7 +179,7 @@ pub const PackedWeight = union(enum) {
     /// (`LinearWeight.supportsNormedFusion`).
     pub fn supportsNormedFusion(self: *const PackedWeight) bool {
         return switch (self.*) {
-            .q4_k => comptime !backend_mod.supports_q4_k_mmla,
+            .q4_k => comptime !backend_mod.quant.supports_q4_k_mmla,
             .q8_0, .q5_k, .q6_k => true,
         };
     }
@@ -197,7 +197,7 @@ pub const PackedWeight = union(enum) {
     ) !?Tensor(.{ .seq, out_tag }) {
         switch (self.*) {
             .q4_k => |*w| {
-                if (comptime backend_mod.supports_q4_k_mmla) return null;
+                if (comptime backend_mod.quant.supports_q4_k_mmla) return null;
                 return try x.rmsNormMulDotPacked(ctx, norm_weight, eps, &w.packed_rhs, in_tag, out_tag);
             },
             inline .q8_0, .q5_k, .q6_k => |*w| return try x.rmsNormMulDotPacked(ctx, norm_weight, eps, &w.packed_rhs, in_tag, out_tag),

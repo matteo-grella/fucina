@@ -52,10 +52,10 @@ const parallel = @import("parallel.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
-const quant = backend_mod.quantized_matmul;
+const quant = backend_mod.quant;
 
 pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
-pub const Rhs = backend_mod.QuantizedMatmulRhsTQ2_0;
+pub const Rhs = backend_mod.quant.QuantizedMatmulRhsTQ2_0;
 
 /// Logical elements per TQ2_0 block — the packed group size.
 pub const block_len: usize = 256;
@@ -158,7 +158,7 @@ pub const PlanePair = struct {
             else => return Error.InvalidShape,
         };
         if (blocks.len == 0) return Error.InvalidShape;
-        return quant.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(self.cols, self.rows, blocks);
+        return quant.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(self.cols, self.rows, blocks);
     }
 
     /// Dequantized sum of the planes into `dst` (row-major rows x cols) —
@@ -193,14 +193,32 @@ const combos_k2 = [9][3]i8{
 };
 const combos_k3 = [27][3]i8{
     .{ 0, 0, 0 },
-    .{ 0, 0, -1 },   .{ 0, 0, 1 },
-    .{ 0, -1, 0 },   .{ 0, 1, 0 },
-    .{ -1, 0, 0 },   .{ 1, 0, 0 },
-    .{ 0, -1, -1 },  .{ 0, -1, 1 },  .{ 0, 1, -1 },  .{ 0, 1, 1 },
-    .{ -1, 0, -1 },  .{ -1, 0, 1 },  .{ 1, 0, -1 },  .{ 1, 0, 1 },
-    .{ -1, -1, 0 },  .{ -1, 1, 0 },  .{ 1, -1, 0 },  .{ 1, 1, 0 },
-    .{ -1, -1, -1 }, .{ -1, -1, 1 }, .{ -1, 1, -1 }, .{ -1, 1, 1 },
-    .{ 1, -1, -1 },  .{ 1, -1, 1 },  .{ 1, 1, -1 },  .{ 1, 1, 1 },
+    .{ 0, 0, -1 },
+    .{ 0, 0, 1 },
+    .{ 0, -1, 0 },
+    .{ 0, 1, 0 },
+    .{ -1, 0, 0 },
+    .{ 1, 0, 0 },
+    .{ 0, -1, -1 },
+    .{ 0, -1, 1 },
+    .{ 0, 1, -1 },
+    .{ 0, 1, 1 },
+    .{ -1, 0, -1 },
+    .{ -1, 0, 1 },
+    .{ 1, 0, -1 },
+    .{ 1, 0, 1 },
+    .{ -1, -1, 0 },
+    .{ -1, 1, 0 },
+    .{ 1, -1, 0 },
+    .{ 1, 1, 0 },
+    .{ -1, -1, -1 },
+    .{ -1, -1, 1 },
+    .{ -1, 1, -1 },
+    .{ -1, 1, 1 },
+    .{ 1, -1, -1 },
+    .{ 1, -1, 1 },
+    .{ 1, 1, -1 },
+    .{ 1, 1, 1 },
 };
 
 fn combosFor(comptime planes: u2) []const [3]i8 {

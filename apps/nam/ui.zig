@@ -38,9 +38,9 @@ const default_height: usize = 5; // rule + in + out + status + keys
 /// Pinned keybinding hints, most-essential first (so the tail is what drops on
 /// a narrow terminal). `?` prints the full reference via live.printKeys().
 const key_hints = [_][]const u8{
-    "q=quit",  "space=byp", "m=mute",  "[ ]=prof", "1-9=slot", ",/.=trim",
-    "+/-=gain", "g=gate",   "</>=thr", "t=tuner",  "n=norm",   "a=auto",
-    "i/o=dev", "c=clr",     "?=help",
+    "q=quit",   "space=byp", "m=mute",  "[ ]=prof", "1-9=slot", ",/.=trim",
+    "+/-=gain", "g=gate",    "</>=thr", "t=tuner",  "n=norm",   "a=auto",
+    "i/o=dev",  "c=clr",     "?=help",
 };
 
 // ---------------------------------------------------------------------------

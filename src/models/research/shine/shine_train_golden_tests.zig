@@ -560,9 +560,18 @@ test "SHINE training step timing at 0.6B (informational)" {
         inline for (0..12) |pi| bufs[pi] = try noiseSlice(allocator, lens[pi], @intCast(7000 + i * 20 + pi));
         defer inline for (0..12) |pi| allocator.free(bufs[pi]);
         block.* = try shine_train.m2pBlockVariables(&ctx, sh, .{
-            .in_w = bufs[0], .in_b = bufs[1], .out_w = bufs[2], .out_b = bufs[3],
-            .ff1_w = bufs[4], .ff1_b = bufs[5], .ff2_w = bufs[6], .ff2_b = bufs[7],
-            .norm1_w = bufs[8], .norm1_b = bufs[9], .norm2_w = bufs[10], .norm2_b = bufs[11],
+            .in_w = bufs[0],
+            .in_b = bufs[1],
+            .out_w = bufs[2],
+            .out_b = bufs[3],
+            .ff1_w = bufs[4],
+            .ff1_b = bufs[5],
+            .ff2_w = bufs[6],
+            .ff2_b = bufs[7],
+            .norm1_w = bufs[8],
+            .norm1_b = bufs[9],
+            .norm2_w = bufs[10],
+            .norm2_b = bufs[11],
         });
     }
     const lp = try noiseSlice(allocator, cfg.num_layers * sh.hidden_size, 31337);

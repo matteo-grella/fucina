@@ -700,7 +700,7 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
     // The loaded pack is the per-expert fold of the plane row-blocks.
     var want: [n_expert * fg]bq.BlockTQ2_0Foldedx4 = undefined;
     for (0..n_expert) |e| {
-        var views: [2]fucina.internal.backend_mod.QuantizedMatmulRhsTQ2_0 = undefined;
+        var views: [2]fucina.internal.backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
         for ([2][]fucina.quant.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
             views[p] = .{
                 .allocator = null,

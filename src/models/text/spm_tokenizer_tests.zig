@@ -25,16 +25,16 @@ const SPACE_MARK = "\xe2\x96\x81";
 ///   10..13: byte tokens for 'x' 'y' '\n' ' '   14:<turn>
 const TinyVocab = struct {
     const tokens = [_][]const u8{
-        "<unk>", "<s>",         "</s>", SPACE_MARK,  "a",
-        "b",     "c",           "ab",   "abc",       SPACE_MARK ++ "a",
-        "<0x78>", "<0x79>",     "<0x0A>", "<0x20>",  "<turn>",
+        "<unk>",  "<s>",    "</s>",   SPACE_MARK, "a",
+        "b",      "c",      "ab",     "abc",      SPACE_MARK ++ "a",
+        "<0x78>", "<0x79>", "<0x0A>", "<0x20>",   "<turn>",
     };
     // higher score = merged earlier; "abc" beats "ab"
     const scores = [_]f32{ 0, 0, 0, -2, -1, -1, -1, -3, -2.5, -4, -5, -5, -5, -5, 0 };
     const attrs = [_]Attr{
-        .unknown,      .control, .control, .normal, .normal,
-        .normal,       .normal,  .normal,  .normal, .normal,
-        .byte,         .byte,    .byte,    .byte,   .control,
+        .unknown, .control, .control, .normal, .normal,
+        .normal,  .normal,  .normal,  .normal, .normal,
+        .byte,    .byte,    .byte,    .byte,   .control,
     };
 
     fn make(allocator: Allocator, opts: Options) !Tokenizer {

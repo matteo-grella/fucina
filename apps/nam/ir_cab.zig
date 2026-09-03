@@ -235,7 +235,7 @@ pub fn resampleIrCubic(
 fn cubicInterp(p: [4]f64, x: f64) f64 {
     return p[1] + 0.5 * x * (p[2] - p[0] +
         x * (2.0 * p[0] - 5.0 * p[1] + 4.0 * p[2] - p[3] +
-        x * (3.0 * (p[1] - p[2]) + p[3] - p[0])));
+            x * (3.0 * (p[1] - p[2]) + p[3] - p[0])));
 }
 
 test "ir cab: same-rate FIR matches gain-scaled direct convolution" {

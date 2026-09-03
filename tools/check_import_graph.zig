@@ -31,6 +31,14 @@
 //! in no band is an error too: a new `src/` root cannot silently inherit
 //! whatever band its neighbours happen to have.
 //!
+//! Fourth invariant — the backend door. The core bands (ag, tagged, moe, exec,
+//! store) reach the backend only through `src/backend.zig`: no production
+//! file of those bands imports a file under `src/backend/`, and none names
+//! the raw quantized module `quantized_matmul` (its curated surface is
+//! `backend.quant`). The models band takes the raw module through
+//! `fucina.internal` and the apps band through `raw_backend`; both are the
+//! documented escape hatches and are exempt.
+//!
 //! Third invariant — test-file forwarding: every test file (`*_tests.zig` /
 //! `*_test.zig`, and every file under a `<name>_tests/` directory suite)
 //! must be reachable from a production forwarding stanza
@@ -51,6 +59,7 @@ const Error = error{
     TestFileNotForwarded,
     BandInversionDetected,
     FileOutsideBandTable,
+    BackendDoorBypassed,
 };
 
 /// The Layer Stack of docs/ARCHITECTURE.md, top-down. A band may depend only
@@ -314,7 +323,9 @@ pub fn main(init: std.process.Init) !void {
     defer test_files.deinit(allocator);
 
     try collectFiles(allocator, io, &graph, &test_files);
-    try collectEdges(allocator, io, &graph, &test_files);
+    var bypasses: std.ArrayListUnmanaged(DoorBypass) = .empty;
+    defer bypasses.deinit(allocator);
+    try collectEdges(allocator, io, &graph, &test_files, &bypasses);
     try propagateTestForwarding(allocator, io, &test_files);
 
     var tarjan = try Tarjan.init(allocator, &graph);
@@ -344,13 +355,17 @@ pub fn main(init: std.process.Init) !void {
 
     const edge_count = countEdges(&graph);
     if (forbidden.items.len == 0 and unforwarded.items.len == 0 and
-        unbanded.items.len == 0 and inversions.items.len == 0)
+        unbanded.items.len == 0 and inversions.items.len == 0 and bypasses.items.len == 0)
     {
         try stdout.print(
-            "production import graph: {d} files, {d} edges, {d} root-anchored SCC(s), 0 forbidden SCCs, 0 band inversions; {d} test files, all forwarded\n",
+            "production import graph: {d} files, {d} edges, {d} root-anchored SCC(s), 0 forbidden SCCs, 0 band inversions, 0 backend-door bypasses; {d} test files, all forwarded\n",
             .{ graph.files.items.len, edge_count, root_anchored, test_files.forwarded_by_path.count() },
         );
         return;
+    }
+    if (bypasses.items.len != 0) {
+        std.debug.print("{d} backend-door bypass(es) — the core bands reach the backend through src/backend.zig only:\n", .{bypasses.items.len});
+        for (bypasses.items) |bp| std.debug.print("  {s} {s}\n", .{ bp.file, bp.what });
     }
 
     if (unbanded.items.len != 0) {
@@ -395,6 +410,7 @@ pub fn main(init: std.process.Init) !void {
     if (forbidden.items.len != 0) return Error.ImportCycleDetected;
     if (unbanded.items.len != 0) return Error.FileOutsideBandTable;
     if (inversions.items.len != 0) return Error.BandInversionDetected;
+    if (bypasses.items.len != 0) return Error.BackendDoorBypassed;
     return Error.TestFileNotForwarded;
 }
 
@@ -421,6 +437,21 @@ fn isRootAnchoredSameBand(graph: *const Graph, cycle: []const usize) bool {
         }
     }
     return false;
+}
+
+/// A core-band production file reaching the backend around `src/backend.zig`.
+const DoorBypass = struct {
+    file: []const u8,
+    what: []const u8,
+};
+
+/// The bands that must use the backend door (everything between the facade
+/// and the backend).
+fn isCoreBand(band: Band) bool {
+    return switch (band) {
+        .ag, .tagged, .moe, .exec, .store => true,
+        else => false,
+    };
 }
 
 const Inversion = struct {
@@ -491,7 +522,7 @@ fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
     }
 }
 
-fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles) !void {
+fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles, bypasses: *std.ArrayListUnmanaged(DoorBypass)) !void {
     for (graph.files.items, 0..) |*file, file_index| {
         const contents = try readFileSentinel(allocator, io, file.path);
         defer allocator.free(contents);
@@ -502,9 +533,14 @@ fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
         defer spans.deinit(allocator);
         try collectProductionSpans(allocator, &ast, &spans);
 
+        const door_bound = if (bandOf(file.path)) |band| isCoreBand(band) and !std.mem.startsWith(u8, file.path, "src/backend/") else false;
+
         for (spans.items) |span| {
             var tok = span.start;
             while (tok + 2 <= span.end) : (tok += 1) {
+                if (door_bound and ast.tokenTag(tok) == .identifier and std.mem.eql(u8, ast.tokenSlice(tok), "quantized_matmul")) {
+                    try bypasses.append(allocator, .{ .file = file.path, .what = "names the raw `quantized_matmul` module (use `backend.quant`)" });
+                }
                 if (ast.tokenTag(tok) != .builtin) continue;
                 if (!std.mem.eql(u8, ast.tokenSlice(tok), "@import")) continue;
                 if (ast.tokenTag(tok + 1) != .l_paren) continue;
@@ -515,6 +551,9 @@ fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
                 defer allocator.free(imported);
                 const resolved = try resolveLocalImport(allocator, file.path, imported) orelse continue;
                 defer allocator.free(resolved);
+                if (door_bound and std.mem.startsWith(u8, resolved, "src/backend/")) {
+                    try bypasses.append(allocator, .{ .file = file.path, .what = "imports a file under src/backend/ (go through src/backend.zig)" });
+                }
                 const target_index = graph.index_by_path.get(resolved) orelse continue;
                 try addEdge(allocator, &graph.files.items[file_index], target_index);
             }

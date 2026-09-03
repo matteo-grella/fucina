@@ -186,7 +186,12 @@ pub fn main(init: std.process.Init) !void {
     // zig-out once produced a 20x-wrong benchmark verdict.
     try stderr.print("[timing:{s}] {d} frames = {d:.2} s audio | talker {d:.2} s ({d:.1} fps vs 12.5 target) | codec {d:.2} s | total RTF {d:.2}\n", .{
         @tagName(@import("builtin").mode),
-        result.frames, audio_s, gen_s, @as(f64, @floatFromInt(result.frames)) / gen_s, dec_s, (gen_s + dec_s) / audio_s,
+        result.frames,
+        audio_s,
+        gen_s,
+        @as(f64, @floatFromInt(result.frames)) / gen_s,
+        dec_s,
+        (gen_s + dec_s) / audio_s,
     });
     try stderr.print("[out] {s}: {d} samples @ {d} Hz\n", .{ out_path, audio.items.len, qtts.codec.sample_rate });
 }
