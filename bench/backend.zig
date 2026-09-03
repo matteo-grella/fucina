@@ -136,6 +136,8 @@ pub fn main(init: std.process.Init) !void {
 
     try benchElementwise(allocator, stdout, "add 1M", 1_000_000);
     try benchElementwise(allocator, stdout, "add 16K", 16_384);
+    try benchGatedBackward(.swiglu, allocator, stdout, "swiglu bwd gate 4M", 4 * 1024 * 1024);
+    try benchGatedBackward(.geglu, allocator, stdout, "geglu bwd gate 4M", 4 * 1024 * 1024);
     try benchReduction(allocator, stdout, "sum 1M", 1_000_000);
     try benchReduction(allocator, stdout, "dot 1M", 1_000_000);
     try benchTypedElementwise(.f64, allocator, stdout, "add f64 1M", 1_000_000);
@@ -616,6 +618,47 @@ fn benchElementwise(allocator: std.mem.Allocator, w: anytype, name: []const u8, 
 
     const scalar_ns = try medianTimer(scalar.kernels.addInto, .{ &out, &a, &b });
     const native_ns = try medianTimer(NativeRunner, .{ &out, &a, &b, n, native_config });
+    try fmtRow(w, name, scalar_ns, native_ns);
+}
+
+/// The gated-pair VJP kernel (`gatedBackwardContiguousIntoUnchecked`): the
+/// serial scalar twin, which is the arithmetic the VJP record used to loop
+/// itself, against the pooled vector kernel.
+fn benchGatedBackward(comptime op: raw_backend.ops.GatedOp, allocator: std.mem.Allocator, w: anytype, name: []const u8, n: usize) !void {
+    const gy_data = try randomSlice(allocator, n, 0x31);
+    defer allocator.free(gy_data);
+    const up_data = try randomSlice(allocator, n, 0x32);
+    defer allocator.free(up_data);
+    const gate_data = try randomSlice(allocator, n, 0x33);
+    defer allocator.free(gate_data);
+
+    var gy = try Tensor.fromSlice(allocator, &.{n}, gy_data);
+    defer gy.deinit();
+    var up = try Tensor.fromSlice(allocator, &.{n}, up_data);
+    defer up.deinit();
+    var gate = try Tensor.fromSlice(allocator, &.{n}, gate_data);
+    defer gate.deinit();
+    var out = try Tensor.zeros(allocator, &.{n});
+    defer out.deinit();
+
+    var pool: raw_backend.ThreadPool = undefined;
+    try pool.init(.{ .allocator = allocator });
+    defer pool.deinit();
+    const native_config: native.ParallelConfig = .{ .pool = &pool };
+
+    const ScalarRunner = struct {
+        fn run(o: *Tensor, g: *const Tensor, u: *const Tensor, v: *const Tensor, len: usize) void {
+            vector.elementwise.scalar.gatedBackwardContiguousIntoUnchecked(op, .gate, o, g, u, v, len);
+        }
+    }.run;
+    const NativeRunner = struct {
+        fn run(o: *Tensor, g: *const Tensor, u: *const Tensor, v: *const Tensor, len: usize, config: native.ParallelConfig) void {
+            native.kernels.gatedBackwardContiguousIntoUnchecked(config, op, .gate, o, g, u, v, len);
+        }
+    }.run;
+
+    const scalar_ns = try medianTimer(ScalarRunner, .{ &out, &gy, &up, &gate, n });
+    const native_ns = try medianTimer(NativeRunner, .{ &out, &gy, &up, &gate, n, native_config });
     try fmtRow(w, name, scalar_ns, native_ns);
 }
 

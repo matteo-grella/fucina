@@ -444,7 +444,6 @@ pub fn GatedBackward(
 
             var gy_ready = try ctx.contiguousOwned(.f32, gy);
             defer gy_ready.deinit();
-            const gyd = gy_ready.dataConst();
 
             const result_tagged_shape = taggedShapeArray(result_tags, self.result_shape);
             var left_b = try tag_ops.broadcastTensorTo(.f32, left_tags, &self.left_value, result_tags, result_tagged_shape);
@@ -455,29 +454,15 @@ pub fn GatedBackward(
             defer left_ready.deinit();
             var right_ready = try ctx.contiguousOwned(.f32, &right_b);
             defer right_ready.deinit();
-            const left_data = left_ready.dataConst();
-            const right_data = right_ready.dataConst();
 
             if (core.needs(self, 0)) {
-                var g = try ctx.empty(.f32, self.result_shape[0..]);
-                if (comptime gatedSourceIsIdentity(op)) {
-                    for (gyd, right_data, g.data()) |grad, gate, *dst| {
-                        dst.* = grad * gatedActivation(op, gate);
-                    }
-                } else {
-                    for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
-                        dst.* = grad * gatedSourceDerivative(op, left) * gatedActivation(op, gate);
-                    }
-                }
+                var g = try ctx.gatedBackward(op, .up, &gy_ready, &left_ready, &right_ready);
                 defer g.deinit();
                 out[0] = try reduceGradientToTags(result_tags, left_tags, ctx, &g, self.left_shape);
             }
 
             if (core.needs(self, 1)) {
-                var g = try ctx.empty(.f32, self.result_shape[0..]);
-                for (gyd, left_data, right_data, g.data()) |grad, left, gate, *dst| {
-                    dst.* = grad * gatedSource(op, left) * gatedActivationDerivative(op, gate);
-                }
+                var g = try ctx.gatedBackward(op, .gate, &gy_ready, &left_ready, &right_ready);
                 defer g.deinit();
                 out[1] = try reduceGradientToTags(result_tags, right_tags, ctx, &g, self.right_shape);
             }
@@ -708,9 +693,9 @@ fn unaryDerivative(comptime op: exec_mod.UnaryOp, value: f32) f32 {
             break :blk 1 - t * t;
         },
         .fast_tanh => fastTanhDerivative(value),
-        .gelu => geluDerivative(value),
+        .gelu => backend_ops.geluDerivativeScalar(value),
         .quick_gelu => quickGeluDerivative(value),
-        .gelu_quant => geluDerivative(value), // inference-only; exact-gelu derivative
+        .gelu_quant => backend_ops.geluDerivativeScalar(value), // inference-only; exact-gelu derivative
         .elu => if (value > 0) 1 else @exp(value),
         .gelu_erf => geluErfDerivative(value),
         // d/dx erf(x) = 2/sqrt(pi) * e^(-x^2)
@@ -755,79 +740,9 @@ fn fastTanhDerivative(value: f32) f32 {
     return (dnumerator * denominator - numerator * ddenominator) / (denominator * denominator);
 }
 
-fn geluDerivative(value: f32) f32 {
-    const sqrt_2_over_pi: f32 = 0.7978845608028654;
-    const x2 = value * value;
-    const u = sqrt_2_over_pi * (value + 0.044715 * value * x2);
-    const t = std.math.tanh(u);
-    const du = sqrt_2_over_pi * (1 + 3 * 0.044715 * x2);
-    return 0.5 * (1 + t) + 0.5 * value * (1 - t * t) * du;
-}
-
 fn quickGeluDerivative(value: f32) f32 {
     const s = backend_ops.sigmoidStableScalar(1.702 * value);
     return s + value * 1.702 * s * (1 - s);
-}
-
-fn gatedActivation(comptime op: exec_mod.GatedOp, value: f32) f32 {
-    return switch (op) {
-        .glu => backend_ops.sigmoidStableScalar(value),
-        .swiglu => value * backend_ops.sigmoidStableScalar(value),
-        .geglu => 0.5 * value * (1 + std.math.tanh(0.7978845608028654 * (value + 0.044715 * value * value * value))),
-        // Inference-only op (DeepSeek V4); no training/backward path.
-        .situ => 4.0 * std.math.tanh(value * 0.25) * backend_ops.sigmoidStableScalar(value),
-    };
-}
-
-fn gatedActivationDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
-    return switch (op) {
-        .glu => blk: {
-            const s = backend_ops.sigmoidStableScalar(value);
-            break :blk s * (1 - s);
-        },
-        .swiglu => blk: {
-            const s = backend_ops.sigmoidStableScalar(value);
-            break :blk s * (1 + value * (1 - s));
-        },
-        .geglu => geluDerivative(value),
-        .situ => blk: {
-            // d/dg [4·tanh(g/4)·σ(g)] = (1 − tanh²(g/4))·σ(g)
-            //                          + 4·tanh(g/4)·σ(g)·(1 − σ(g))
-            const t = std.math.tanh(value * 0.25);
-            const s = backend_ops.sigmoidStableScalar(value);
-            break :blk (1 - t * t) * s + 4.0 * t * s * (1 - s);
-        },
-    };
-}
-
-/// The gated pair's `up`-side transform and its derivative — the identity
-/// (and 1) for ops that use `up` linearly; `situ`'s 25·tanh(u/25) soft
-/// clamp otherwise. Comptime-identity keeps the classic ops' backward
-/// loops exactly as before.
-fn gatedSource(comptime op: exec_mod.GatedOp, value: f32) f32 {
-    return switch (op) {
-        .situ => 25.0 * std.math.tanh(value * 0.04),
-        else => value,
-    };
-}
-
-fn gatedSourceDerivative(comptime op: exec_mod.GatedOp, value: f32) f32 {
-    return switch (op) {
-        .situ => blk: {
-            const t = std.math.tanh(value * 0.04);
-            break :blk 1 - t * t;
-        },
-        else => 1,
-    };
-}
-
-/// Whether the op's `up`-side transform is the identity (its derivative a
-/// comptime 1) — selects the untouched two-operand backward loops.
-inline fn gatedSourceIsIdentity(comptime op: exec_mod.GatedOp) bool {
-    return switch (op) {
-        .situ => false,
-        else => true,
-    };
 }
 
 /// VJP of the per-channel PReLU: `gx = x > 0 ? gy : α[c]·gy`;

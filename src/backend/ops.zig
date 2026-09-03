@@ -159,6 +159,60 @@ pub inline fn gatedSourceScalar(comptime op: GatedOp, up: f32) f32 {
     };
 }
 
+/// Which operand of a gated pair a VJP differentiates with respect to.
+pub const GatedOperand = enum { up, gate };
+
+/// d/dgate of `gatedActivationScalar`. The stable sigmoid: the VJPs must
+/// not form exp of a large positive value.
+pub inline fn gatedActivationDerivativeScalar(comptime op: GatedOp, value: f32) f32 {
+    return switch (op) {
+        .glu => blk: {
+            const s = sigmoidStableScalar(value);
+            break :blk s * (1 - s);
+        },
+        .swiglu => blk: {
+            const s = sigmoidStableScalar(value);
+            break :blk s * (1 + value * (1 - s));
+        },
+        .geglu => geluDerivativeScalar(value),
+        .situ => blk: {
+            // d/dg [4·tanh(g/4)·σ(g)] = (1 − tanh²(g/4))·σ(g) + 4·tanh(g/4)·σ(g)·(1 − σ(g))
+            const t = std.math.tanh(value * 0.25);
+            const s = sigmoidStableScalar(value);
+            break :blk (1 - t * t) * s + 4.0 * t * s * (1 - s);
+        },
+    };
+}
+
+/// d/dup of `gatedSourceScalar`: 1 for the ops that use `up` linearly.
+pub inline fn gatedSourceDerivativeScalar(comptime op: GatedOp, up: f32) f32 {
+    return switch (op) {
+        .situ => blk: {
+            const t = std.math.tanh(up * 0.04);
+            break :blk 1 - t * t;
+        },
+        else => 1,
+    };
+}
+
+/// Whether the op's `up`-side transform is the identity (its derivative a
+/// comptime 1), so the `up` partial is the activation alone.
+pub inline fn gatedSourceIsIdentity(comptime op: GatedOp) bool {
+    return switch (op) {
+        .situ => false,
+        else => true,
+    };
+}
+
+/// The gated pair's partial derivative with respect to `operand`:
+/// `source'(up) · act(gate)` for `.up`, `source(up) · act'(gate)` for `.gate`.
+pub inline fn gatedGradScalar(comptime op: GatedOp, comptime operand: GatedOperand, up: f32, gate: f32) f32 {
+    return switch (operand) {
+        .up => if (comptime gatedSourceIsIdentity(op)) gatedActivationScalar(op, gate) else gatedSourceDerivativeScalar(op, up) * gatedActivationScalar(op, gate),
+        .gate => gatedSourceScalar(op, up) * gatedActivationDerivativeScalar(op, gate),
+    };
+}
+
 /// A gated activation with its parameter: `op` names the function, `clamp`
 /// (when set) bounds both operands before it, the gate to `<= clamp` and
 /// the up input to `[-clamp, clamp]` (DeepSeek V4's clamped SwiGLU is
@@ -204,6 +258,15 @@ pub inline fn sigmoidStableScalar(value: f32) f32 {
 
 pub inline fn geluScalar(value: f32) f32 {
     return 0.5 * value * (1 + std.math.tanh(geluTanhArg(value)));
+}
+
+/// d/dx of `geluScalar` (the tanh form).
+pub inline fn geluDerivativeScalar(value: f32) f32 {
+    const sqrt_2_over_pi: f32 = 0.7978845608028654;
+    const x2 = value * value;
+    const t = std.math.tanh(geluTanhArg(value));
+    const du = sqrt_2_over_pi * (1 + 3 * 0.044715 * x2);
+    return 0.5 * (1 + t) + 0.5 * value * (1 - t * t) * du;
 }
 
 pub inline fn quickGeluScalar(value: f32) f32 {

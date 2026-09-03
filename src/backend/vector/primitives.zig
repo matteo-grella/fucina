@@ -609,6 +609,62 @@ pub inline fn gatedSourceVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
     };
 }
 
+/// Vector twin of `ops.gatedActivationDerivativeScalar`.
+pub inline fn gatedActivationDerivativeVec(comptime op: ops.GatedOp, value: Vf32) Vf32 {
+    const one: Vf32 = @splat(1);
+    return switch (op) {
+        .glu => blk: {
+            const s = sigmoidVec(value);
+            break :blk s * (one - s);
+        },
+        .swiglu => blk: {
+            const s = sigmoidVec(value);
+            break :blk s * (one + value * (one - s));
+        },
+        .geglu => blk: {
+            const half: Vf32 = @splat(0.5);
+            const sqrt_2_over_pi: Vf32 = @splat(0.7978845608028654);
+            const t = tanhVec(geluTanhArgVec(value));
+            const du = sqrt_2_over_pi * (one + @as(Vf32, @splat(3 * 0.044715)) * value * value);
+            break :blk half * (one + t) + half * value * (one - t * t) * du;
+        },
+        .situ => blk: {
+            const t = tanhVec(value * @as(Vf32, @splat(0.25)));
+            const s = sigmoidVec(value);
+            break :blk (one - t * t) * s + @as(Vf32, @splat(4)) * t * s * (one - s);
+        },
+    };
+}
+
+/// Vector twin of `ops.gatedSourceDerivativeScalar`.
+pub inline fn gatedSourceDerivativeVec(comptime op: ops.GatedOp, up: Vf32) Vf32 {
+    const one: Vf32 = @splat(1);
+    return switch (op) {
+        .situ => blk: {
+            const t = tanhVec(up * @as(Vf32, @splat(0.04)));
+            break :blk one - t * t;
+        },
+        else => one,
+    };
+}
+
+/// Vector twin of `ops.gatedGradScalar`.
+pub inline fn gatedGradVec(comptime op: ops.GatedOp, comptime operand: ops.GatedOperand, up: Vf32, gate: Vf32) Vf32 {
+    return switch (operand) {
+        .up => if (comptime ops.gatedSourceIsIdentity(op)) gatedActivationVec(op, gate) else gatedSourceDerivativeVec(op, up) * gatedActivationVec(op, gate),
+        .gate => gatedSourceVec(op, up) * gatedActivationDerivativeVec(op, gate),
+    };
+}
+
+/// dst = gy · ∂(gated pair)/∂operand elementwise, SIMD lanes + scalar tail.
+pub inline fn vecGatedVjp(comptime op: ops.GatedOp, comptime operand: ops.GatedOperand, dst: []f32, gy: []const f32, up: []const f32, gate: []const f32) void {
+    var i: usize = 0;
+    while (i + vector_len <= dst.len) : (i += vector_len) {
+        dst[i..][0..vector_len].* = @as(Vf32, gy[i..][0..vector_len].*) * gatedGradVec(op, operand, up[i..][0..vector_len].*, gate[i..][0..vector_len].*);
+    }
+    while (i < dst.len) : (i += 1) dst[i] = gy[i] * ops.gatedGradScalar(op, operand, up[i], gate[i]);
+}
+
 pub inline fn sigmoidVec(value: Vf32) Vf32 {
     const one: Vf32 = @splat(1);
     return one / (one + vexpf(vector_len, -value));

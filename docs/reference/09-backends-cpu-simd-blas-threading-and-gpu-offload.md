@@ -172,7 +172,7 @@ op, request, or container type):
 
 | Family | Kernels |
 |---|---|
-| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`*†, `scaleInto`, `unaryContiguousIntoUnchecked`†, `leakyReluContiguousIntoUnchecked`, `softcapContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked`† |
+| elementwise | `addInto`*, `addContiguousIntoUnchecked`, `subInto`*, `subContiguousIntoUnchecked`, `mulInto`*, `mulContiguousIntoUnchecked`, `divContiguousIntoUnchecked`, `maximumContiguousIntoUnchecked`, `minimumContiguousIntoUnchecked`, `elementwiseContiguousIntoTyped`*†, `scaleInto`, `unaryContiguousIntoUnchecked`†, `leakyReluContiguousIntoUnchecked`, `softcapContiguousIntoUnchecked`, `clampContiguousIntoUnchecked`, `gatedContiguousIntoUnchecked`†, `gatedBackwardContiguousIntoUnchecked`† |
 | row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*†, `unaryRowSlice`*†, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`*, `preluChannelsBackwardAlphaInto`*, `channelAffineInto` |
 | reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`*†, `dot`† (comptime dtype; f32 takes the dedicated reduction, every other float dtype the typed one) |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
@@ -205,9 +205,9 @@ test "kernel interface inventory" {
         if (info.params.len == 0 or info.params[0].type != backend.ParallelConfig) pool_free_count += 1;
         if (info.is_generic) generic_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 166), kernel_count);
+    try std.testing.expectEqual(@as(usize, 167), kernel_count);
     try std.testing.expectEqual(@as(usize, 109), pool_free_count);
-    try std.testing.expectEqual(@as(usize, 26), generic_count);
+    try std.testing.expectEqual(@as(usize, 27), generic_count);
 }
 ```
 

@@ -429,6 +429,26 @@ pub fn gatedContiguousIntoUnchecked(
     mapContiguous(pc, .{ .z = z, .x = x, .y = y }, gatedRange(op));
 }
 
+/// The gated pair's VJP with respect to `operand` over contiguous,
+/// result-shaped operands: `out = gy · ∂(source(up) · act(gate))/∂operand`.
+pub fn gatedBackwardContiguousIntoUnchecked(
+    pc: ParallelConfig,
+    comptime op: ops.GatedOp,
+    comptime operand: ops.GatedOperand,
+    out: *Tensor,
+    gy: *const Tensor,
+    up: *const Tensor,
+    gate: *const Tensor,
+    len: usize,
+) void {
+    if (comptime isa.reference) return scalar.gatedBackwardContiguousIntoUnchecked(op, operand, out, gy, up, gate, len);
+    const g = contiguousDataConst(gy, len);
+    const x = contiguousDataConst(up, len);
+    const y = contiguousDataConst(gate, len);
+    const z = contiguousData(out, len);
+    mapContiguous(pc, .{ .z = z, .x = x, .y = y, .w = g }, gatedBackwardRange(op, operand));
+}
+
 // ---------------- Reductions ----------------
 
 pub fn sumInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor) !void {
@@ -493,7 +513,7 @@ pub fn dotIntoTyped(
 
 /// Payload of the contiguous map kernels: the output, up to two inputs and
 /// up to two scalar parameters (a scale, a slope, a cap, the clamp bounds).
-const MapCtx = struct { z: []f32, x: []const f32, y: []const f32 = &.{}, p0: f32 = 0, p1: f32 = 0 };
+const MapCtx = struct { z: []f32, x: []const f32, y: []const f32 = &.{}, w: []const f32 = &.{}, p0: f32 = 0, p1: f32 = 0 };
 
 /// `rangeFn(ctx, start, end)` over `[0, z.len)`: proportional chunks on the
 /// pool when the elementwise gate opens, one serial call otherwise.
@@ -525,6 +545,14 @@ fn gatedRange(comptime op: ops.GatedOp) fn (MapCtx, usize, usize) void {
     return struct {
         fn go(c: MapCtx, start: usize, end: usize) void {
             primitives.vecGated(op, c.z[start..end], c.x[start..end], c.y[start..end]);
+        }
+    }.go;
+}
+
+fn gatedBackwardRange(comptime op: ops.GatedOp, comptime operand: ops.GatedOperand) fn (MapCtx, usize, usize) void {
+    return struct {
+        fn go(c: MapCtx, start: usize, end: usize) void {
+            primitives.vecGatedVjp(op, operand, c.z[start..end], c.w[start..end], c.x[start..end], c.y[start..end]);
         }
     }.go;
 }
@@ -1337,6 +1365,14 @@ pub const scalar = struct {
         const y = contiguousDataConst(b, len);
         const z = contiguousData(out, len);
         for (z, x, y) |*dst, left, gate| dst.* = ops.gatedPairScalar(op, gate, left);
+    }
+
+    pub fn gatedBackwardContiguousIntoUnchecked(comptime op: ops.GatedOp, comptime operand: ops.GatedOperand, out: *Tensor, gy: *const Tensor, up: *const Tensor, gate: *const Tensor, len: usize) void {
+        const g = contiguousDataConst(gy, len);
+        const x = contiguousDataConst(up, len);
+        const y = contiguousDataConst(gate, len);
+        const z = contiguousData(out, len);
+        for (z, g, x, y) |*dst, grad, u, v| dst.* = grad * ops.gatedGradScalar(op, operand, u, v);
     }
 
     pub fn sumInto(out: *Tensor, a: *const Tensor) !void {

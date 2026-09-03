@@ -18,6 +18,7 @@ const ExecContext = @import("../exec.zig").ExecContext;
 const backend_ops = backend_mod.ops;
 const DType = tensor.DType;
 const GatedOp = backend_mod.ops.GatedOp;
+const GatedOperand = backend_mod.ops.GatedOperand;
 const UnaryOp = backend_mod.ops.UnaryOp;
 
 const dispatchRank = shape_mod.dispatchRank;
@@ -231,6 +232,27 @@ pub fn gated(
     ctx.enableNativeVectorPoolForWork(ap.len(), parallel.vector_elementwise_len_threshold);
     kernels.gatedContiguousIntoUnchecked(ctx.pc(), op, &out, ap, bp, ap.len());
     return ctx.storeAs(compute, dtype, out);
+}
+
+/// The gated pair's VJP with respect to `operand` over result-shaped f32
+/// operands (the VJP record broadcasts `up` and `gate` to the result
+/// first): `gy · source'(up) · act(gate)` for `.up`, `gy · source(up) ·
+/// act'(gate)` for `.gate`. The same dispatch as `gated`.
+pub fn gatedBackward(ctx: *ExecContext, comptime op: GatedOp, comptime operand: GatedOperand, gy: *const Tensor, up: *const Tensor, gate: *const Tensor) !Tensor {
+    try tensor.requireSameShape(gy, up);
+    try tensor.requireSameShape(gy, gate);
+    var gg = try ctx.prepareContiguous(.f32, gy);
+    defer gg.deinit();
+    var uu = try ctx.prepareContiguous(.f32, up);
+    defer uu.deinit();
+    var vv = try ctx.prepareContiguous(.f32, gate);
+    defer vv.deinit();
+    const gp = gg.tensor();
+    var out = try ctx.empty(.f32, gp.shape.slice());
+    errdefer out.deinit();
+    ctx.enableNativeVectorPoolForWork(gp.len(), parallel.vector_elementwise_len_threshold);
+    kernels.gatedBackwardContiguousIntoUnchecked(ctx.pc(), op, operand, &out, gp, uu.tensor(), vv.tensor(), gp.len());
+    return out;
 }
 
 /// Split-gated forward: `x` halves along `axis`, one half gates the other.

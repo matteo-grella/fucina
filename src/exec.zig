@@ -48,6 +48,7 @@ pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 
 pub const UnaryOp = backend_ops.UnaryOp;
 pub const GatedOp = backend_ops.GatedOp;
+pub const GatedOperand = backend_ops.GatedOperand;
 pub const Gated = backend_ops.Gated;
 pub const ElementwiseOp = backend_ops.ElementwiseOp;
 pub const CompareOp = backend_ops.CompareOp;
@@ -265,6 +266,7 @@ pub const ExecContext = struct {
     pub const mod = exec_elementwise.mod;
     pub const bitwise = exec_elementwise.bitwise;
     pub const gated = exec_elementwise.gated;
+    pub const gatedBackward = exec_elementwise.gatedBackward;
     pub const splitGated = exec_elementwise.splitGated;
     pub const splitSwiGluBackward = exec_elementwise.splitSwiGluBackward;
     pub const splitGluBackward = exec_elementwise.splitGluBackward;

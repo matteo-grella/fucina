@@ -18,6 +18,7 @@ const Impl = struct {
     const ops = @import("ops.zig");
     const vector_common = @import("vector/common.zig");
     const elementwise = @import("vector/elementwise.zig");
+    const primitives = @import("vector/primitives.zig");
     const vector_gemm = @import("vector/gemm.zig");
     const vector_batched = @import("vector/batched.zig");
     const vector_mq = @import("vector/matmul_quant.zig");
@@ -1103,6 +1104,34 @@ const Impl = struct {
         rows_impl.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_a, .axis_dim = 2 * half, .half = half }, 0, outer);
         rows_impl.scalar.splitGluBackwardRows(.{ .input = input, .grad = grad, .output = out_b, .axis_dim = 2 * half, .half = half }, 0, outer);
         try expectClose(out_b, out_a, 1e-5);
+    }
+
+    test "parity: gated-pair VJP lanes vs scalar twin" {
+        const allocator = std.testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x61ad);
+        const rng = prng.random();
+        const len: usize = 1031;
+        const gy = try allocator.alloc(f32, len);
+        defer allocator.free(gy);
+        fillRandom(rng, gy);
+        const up = try allocator.alloc(f32, len);
+        defer allocator.free(up);
+        fillRandom(rng, up);
+        const gate = try allocator.alloc(f32, len);
+        defer allocator.free(gate);
+        fillRandom(rng, gate);
+        const out_a = try allocator.alloc(f32, len);
+        defer allocator.free(out_a);
+        const out_b = try allocator.alloc(f32, len);
+        defer allocator.free(out_b);
+
+        inline for ([_]ops.GatedOp{ .glu, .swiglu, .geglu, .situ }) |op| {
+            inline for ([_]ops.GatedOperand{ .up, .gate }) |operand| {
+                primitives.vecGatedVjp(op, operand, out_a, gy, up, gate);
+                for (out_b, gy, up, gate) |*dst, g, u, v| dst.* = g * ops.gatedGradScalar(op, operand, u, v);
+                try expectClose(out_b, out_a, 1e-5);
+            }
+        }
     }
 
     test "parity: rms-norm row kernels vs scalar twins" {

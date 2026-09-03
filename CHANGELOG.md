@@ -25,6 +25,16 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The gated-activation VJP is a kernel. `ExecContext.gatedBackward(op, operand,
+  gy, up, gate)` dispatches `kernels.gatedBackwardContiguousIntoUnchecked`
+  beside the forward kernel (pooled `@Vector` lanes, scalar reference twin)
+  for the `.up` and `.gate` partials of `swiglu`/`geglu`/`glu`/`situ`,
+  replacing the serial per-element loops in the VJP record. The scalar
+  derivative bodies have one home, `ops.gatedGradScalar` (with
+  `geluDerivativeScalar`, `gatedActivationDerivativeScalar`,
+  `gatedSourceDerivativeScalar`); `ops.GatedOperand` names the operand.
+  4M-element swiglu gate partial: 31.0 ms serial -> 0.61 ms; `bench-backend`
+  times both ops.
 - The log-softmax and logsumexp VJPs are row kernels. `ExecContext.logSoftmaxBackward`
   and `ExecContext.logsumexpBackward` dispatch the fused row kernels
   (`logSoftmaxBackwardRows`, `logsumexpBackwardRows`; `vexpf` lanes,

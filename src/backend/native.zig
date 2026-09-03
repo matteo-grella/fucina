@@ -114,6 +114,7 @@ pub const kernels = struct {
     pub const softcapContiguousIntoUnchecked = vector.elementwise.softcapContiguousIntoUnchecked;
     pub const clampContiguousIntoUnchecked = vector.elementwise.clampContiguousIntoUnchecked;
     pub const gatedContiguousIntoUnchecked = vector.elementwise.gatedContiguousIntoUnchecked;
+    pub const gatedBackwardContiguousIntoUnchecked = vector.elementwise.gatedBackwardContiguousIntoUnchecked;
     pub const sumInto = vector.elementwise.sumInto;
     pub const sumSlice = vector.elementwise.sumSlice;
     pub const prodInto = vector.elementwise.prodInto;
