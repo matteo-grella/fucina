@@ -11,6 +11,7 @@
 //! constants may appear in the tuple but are ignored. Variable inputs must be
 //! contiguous because the harness perturbs their owned storage directly.
 const std = @import("std");
+const reflect = @import("facade_reflect.zig");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
 
@@ -37,7 +38,7 @@ pub fn gradcheck(ctx: *ExecContext, comptime loss_fn: anytype, inputs: anytype, 
     if (!std.math.isFinite(options.rel_tol) or options.rel_tol < 0) return error.InvalidGradcheckOptions;
 
     const Inputs = @TypeOf(inputs);
-    const facade_types = comptime facadeTypes(Inputs);
+    const facade_types = comptime reflect.facadeTypes(Inputs, "gradcheck", .{ .mutable = true });
     const n = facade_types.len;
     comptime validateLoss(loss_fn, n);
 
@@ -147,39 +148,8 @@ fn validateLoss(comptime loss_fn: anytype, comptime input_count: usize) void {
     const Ctx = fn_info.params[0].type orelse @compileError("gradcheck loss parameters must be concrete");
     if (Ctx != *ExecContext) @compileError("gradcheck loss first parameter must be *ExecContext");
     const Return = StripError(fn_info.return_type orelse @compileError("gradcheck loss must return a tensor"));
-    validateFacade(Return, "gradcheck loss result");
+    reflect.validateFacade(Return, "gradcheck loss result");
     if (Return.axis_tags.len != 0) @compileError("gradcheck loss must return scalar Tensor(.{})");
-}
-
-fn inputFields(comptime Inputs: type) []const std.builtin.Type.StructField {
-    const info = @typeInfo(Inputs);
-    if (info != .@"struct" or !info.@"struct".is_tuple) {
-        @compileError("gradcheck inputs must be a tuple of mutable f32 facade tensor pointers, got " ++ @typeName(Inputs));
-    }
-    return info.@"struct".fields;
-}
-
-fn facadeTypes(comptime Inputs: type) [inputFields(Inputs).len]type {
-    const fields = inputFields(Inputs);
-    var types: [fields.len]type = undefined;
-    for (fields, 0..) |field, i| types[i] = FacadeOf(field.type);
-    return types;
-}
-
-fn FacadeOf(comptime P: type) type {
-    const info = @typeInfo(P);
-    if (info != .pointer or info.pointer.is_const) {
-        @compileError("gradcheck input must be a mutable pointer to an f32 facade tensor, got " ++ @typeName(P));
-    }
-    const T = info.pointer.child;
-    validateFacade(T, "gradcheck input");
-    return T;
-}
-
-fn validateFacade(comptime T: type, comptime what: []const u8) void {
-    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "dtype") or T.dtype != .f32 or !@hasField(T, "grad_state")) {
-        @compileError(what ++ " must be an f32 autograd facade tensor, got " ++ @typeName(T));
-    }
 }
 
 fn StripError(comptime T: type) type {

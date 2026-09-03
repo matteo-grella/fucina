@@ -34,6 +34,7 @@ const tensor_mod = @import("../tensor.zig");
 const tag_ops = @import("../tag_ops.zig");
 const control = @import("control.zig");
 const core = @import("core.zig");
+const reflect = @import("facade_reflect.zig");
 const plumbing = @import("tensor/plumbing.zig").Mod(@import("tensor.zig"));
 
 const Allocator = std.mem.Allocator;
@@ -46,11 +47,11 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
         if (!@hasDecl(Spec, "Output")) @compileError("custom VJP Spec must declare pub const Output");
         if (!@hasDecl(Spec, "forward")) @compileError("custom VJP Spec must declare forward");
         if (!@hasDecl(Spec, "backward")) @compileError("custom VJP Spec must declare backward");
-        validateFacade(Spec.Output, "custom VJP output");
+        reflect.validateFacade(Spec.Output, "custom VJP output");
     }
 
     const Inputs = @TypeOf(inputs);
-    const facade_types = comptime facadeTypes(Inputs);
+    const facade_types = comptime reflect.facadeTypes(Inputs, "custom VJP", .{});
     const n = facade_types.len;
 
     var any_grad = false;
@@ -103,7 +104,7 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
 }
 
 fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: type) type {
-    const facade_types = facadeTypes(Inputs);
+    const facade_types = reflect.facadeTypes(Inputs, "custom VJP", .{});
     const n = facade_types.len;
 
     return struct {
@@ -156,35 +157,6 @@ fn releaseExtra(extra: anytype, allocator: Allocator) void {
 
 fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Output {
     return plumbing.finishTyped(Output, ctx, value);
-}
-
-fn inputFields(comptime Inputs: type) []const std.builtin.Type.StructField {
-    const info = @typeInfo(Inputs);
-    if (info != .@"struct" or !info.@"struct".is_tuple) {
-        @compileError("custom VJP inputs must be a tuple of facade tensor pointers, got " ++ @typeName(Inputs));
-    }
-    return info.@"struct".fields;
-}
-
-fn facadeTypes(comptime Inputs: type) [inputFields(Inputs).len]type {
-    const fields = inputFields(Inputs);
-    var types: [fields.len]type = undefined;
-    for (fields, 0..) |field, i| types[i] = FacadeOf(field.type);
-    return types;
-}
-
-fn FacadeOf(comptime P: type) type {
-    const info = @typeInfo(P);
-    if (info != .pointer) @compileError("custom VJP input must be a pointer to an f32 facade tensor, got " ++ @typeName(P));
-    const T = info.pointer.child;
-    validateFacade(T, "custom VJP input");
-    return T;
-}
-
-fn validateFacade(comptime T: type, comptime what: []const u8) void {
-    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "dtype") or T.dtype != .f32 or !@hasField(T, "grad_state")) {
-        @compileError(what ++ " must be an f32 autograd facade tensor, got " ++ @typeName(T));
-    }
 }
 
 test {

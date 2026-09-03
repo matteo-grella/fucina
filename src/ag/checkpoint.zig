@@ -48,6 +48,8 @@ const std = @import("std");
 const exec_mod = @import("../exec.zig");
 const tensor_mod = @import("../tensor.zig");
 const core = @import("core.zig");
+const reflect = @import("facade_reflect.zig");
+const input_pointer: reflect.Pointer = .{ .single_item = true };
 const plumbing = @import("tensor/plumbing.zig").Mod(@import("tensor.zig"));
 
 const Allocator = std.mem.Allocator;
@@ -99,7 +101,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
     const Extra = @TypeOf(extra);
     const Inputs = @TypeOf(inputs);
     const Output = BlockOutputImpl(block, Extra, Inputs);
-    const facade_types = comptime facadeTypes(Inputs);
+    const facade_types = comptime reflect.facadeTypes(Inputs, "checkpoint", input_pointer);
     const n = facade_types.len;
 
     var any_grad = false;
@@ -133,7 +135,7 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
         var quant_gpu_scope = ctx.disableQuantDotGpu();
         defer quant_gpu_scope.close();
 
-        var consts: FacadeTuple(Inputs) = undefined;
+        var consts: reflect.FacadeTuple(Inputs, "checkpoint", input_pointer) = undefined;
         var built: usize = 0;
         defer {
             inline for (0..n) |i| {
@@ -189,7 +191,7 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
         else => @compileError("checkpoint block must be a comptime function, got " ++ @typeName(F)),
     };
     const lead = leadParamCount(Extra);
-    const fields = inputFields(Inputs);
+    const fields = reflect.inputFields(Inputs, "checkpoint");
     const Ctx = fn_info.params[0].type orelse @compileError("checkpoint block parameters must be concrete (no anytype)");
     if (Ctx != *ExecContext) {
         @compileError("checkpoint block must take *ExecContext as its first parameter, got " ++ @typeName(Ctx));
@@ -210,7 +212,7 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
             ));
         }
         for (fields, param_fields, 0..) |field, param_field, i| {
-            if (FacadeOf(param_field.type) != FacadeOf(field.type)) {
+            if (reflect.FacadeOf(param_field.type, "checkpoint", input_pointer) != reflect.FacadeOf(field.type, "checkpoint", input_pointer)) {
                 @compileError(std.fmt.comptimePrint(
                     "checkpoint input {d} is {s} but the block expects {s}",
                     .{ i, @typeName(field.type), @typeName(param_field.type) },
@@ -226,7 +228,7 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
         }
         for (fields, 0..) |field, i| {
             const Param = fn_info.params[i + lead].type orelse @compileError("checkpoint block parameters must be concrete (no anytype)");
-            if (FacadeOf(Param) != FacadeOf(field.type)) {
+            if (reflect.FacadeOf(Param, "checkpoint", input_pointer) != reflect.FacadeOf(field.type, "checkpoint", input_pointer)) {
                 @compileError(std.fmt.comptimePrint(
                     "checkpoint input {d} is {s} but the block expects {s}",
                     .{ i, @typeName(field.type), @typeName(Param) },
@@ -236,7 +238,7 @@ fn BlockOutputImpl(comptime block: anytype, comptime Extra: type, comptime Input
     }
     const ret = fn_info.return_type orelse @compileError("checkpoint block must have a concrete return type");
     const Out = StripError(ret);
-    validateFacade(Out, "checkpoint block result");
+    reflect.validateFacade(Out, "checkpoint block result");
     return Out;
 }
 
@@ -263,7 +265,7 @@ fn blockTakesInputsTuple(comptime fn_info: std.builtin.Type.Fn, comptime Extra: 
 /// inputs' GradStates (the operands, one reference each); rebuilds the block
 /// subgraph on demand inside backward.
 fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime Inputs: type) type {
-    const facade_types = facadeTypes(Inputs);
+    const facade_types = reflect.facadeTypes(Inputs, "checkpoint", input_pointer);
     const n = facade_types.len;
 
     return struct {
@@ -299,7 +301,7 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
 
             // Inputs that need gradients come back as variables (fresh leaf
             // states local to this recompute); the rest stay constants.
-            var rewrapped: FacadeTuple(Inputs) = undefined;
+            var rewrapped: reflect.FacadeTuple(Inputs, "checkpoint", input_pointer) = undefined;
             var built: usize = 0;
             defer {
                 inline for (0..n) |i| {
@@ -371,41 +373,6 @@ fn callBlock(
         }
     }
     return @call(.auto, block, args);
-}
-
-fn inputFields(comptime Inputs: type) []const std.builtin.Type.StructField {
-    const info = @typeInfo(Inputs);
-    if (info != .@"struct" or !info.@"struct".is_tuple) {
-        @compileError("checkpoint inputs must be a tuple of facade tensor pointers, got " ++ @typeName(Inputs));
-    }
-    return info.@"struct".fields;
-}
-
-fn facadeTypes(comptime Inputs: type) [inputFields(Inputs).len]type {
-    const fields = inputFields(Inputs);
-    var types: [fields.len]type = undefined;
-    for (fields, 0..) |field, i| types[i] = FacadeOf(field.type);
-    return types;
-}
-
-fn FacadeTuple(comptime Inputs: type) type {
-    const types = facadeTypes(Inputs);
-    return std.meta.Tuple(&types);
-}
-
-fn FacadeOf(comptime Ptr: type) type {
-    const info = @typeInfo(Ptr);
-    if (info != .pointer or info.pointer.size != .one) {
-        @compileError("checkpoint input must be a single-item pointer to a facade tensor, got " ++ @typeName(Ptr));
-    }
-    validateFacade(info.pointer.child, "checkpoint input");
-    return info.pointer.child;
-}
-
-fn validateFacade(comptime T: type, comptime what: []const u8) void {
-    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "dtype") or T.dtype != .f32 or !@hasField(T, "grad_state")) {
-        @compileError(what ++ " must be an f32 autograd facade tensor, got " ++ @typeName(T));
-    }
 }
 
 fn StripError(comptime T: type) type {
