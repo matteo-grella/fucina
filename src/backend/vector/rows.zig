@@ -331,6 +331,24 @@ pub const SoftmaxBackwardRowsTask = struct {
     scale: f32,
 };
 
+/// `logSoftmaxBackwardRows` over the saved log-softmax output `y`:
+/// `gy - exp(y) · Σ gy` per row.
+pub const LogSoftmaxBackwardRowsTask = struct {
+    y: []const f32,
+    gy: []const f32,
+    output: []f32,
+    axis_dim: usize,
+};
+
+/// `logsumexpBackwardRows`: `gy` holds ONE upstream value per row (the
+/// reduced shape); the output row is `softmax(x) · gy[row]`.
+pub const LogsumexpBackwardRowsTask = struct {
+    input: []const f32,
+    gy: []const f32,
+    output: []f32,
+    axis_dim: usize,
+};
+
 pub const CrossEntropyLossRowsTask = struct {
     input: []const f32,
     labels: []const usize,
@@ -478,6 +496,31 @@ pub const SoftmaxBackwardInnerTask = struct {
     /// Tasks touch only their own `[inner_start, inner_end)` columns.
     scratch: []f32,
     scale: f32,
+    outer: usize,
+};
+
+pub const LogSoftmaxBackwardInnerTask = struct {
+    y: []const f32,
+    gy: []const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `inner`: the per-lane Σ gy row.
+    /// Tasks touch only their own `[inner_start, inner_end)` columns.
+    scratch: []f32,
+    outer: usize,
+};
+
+pub const LogsumexpBackwardInnerTask = struct {
+    input: []const f32,
+    /// One value per (outer, lane): the reduced-shape upstream gradient.
+    gy: []const f32,
+    output: []f32,
+    axis_dim: usize,
+    inner: usize,
+    /// Pooled f32 scratch of length `2 * inner`: max row, then sum row
+    /// (which then holds the per-lane scale `gy / sum`).
+    scratch: []f32,
     outer: usize,
 };
 

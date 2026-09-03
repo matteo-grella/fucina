@@ -40,6 +40,8 @@ const SoftmaxRowsTask = tasks.SoftmaxRowsTask;
 const LogRowsTask = tasks.LogRowsTask;
 const SoftmaxExtRowsTask = tasks.SoftmaxExtRowsTask;
 const SoftmaxBackwardRowsTask = tasks.SoftmaxBackwardRowsTask;
+const LogSoftmaxBackwardRowsTask = tasks.LogSoftmaxBackwardRowsTask;
+const LogsumexpBackwardRowsTask = tasks.LogsumexpBackwardRowsTask;
 const CrossEntropyLossRowsTask = tasks.CrossEntropyLossRowsTask;
 const CrossEntropyBackwardRowsTask = tasks.CrossEntropyBackwardRowsTask;
 const DropoutRangeTask = tasks.DropoutRangeTask;
@@ -47,6 +49,8 @@ const ScatterAddRowsTask = tasks.ScatterAddRowsTask;
 const rowSumSq = tasks.rowSumSq;
 const SoftmaxInnerTask = tasks.SoftmaxInnerTask;
 const SoftmaxBackwardInnerTask = tasks.SoftmaxBackwardInnerTask;
+const LogSoftmaxBackwardInnerTask = tasks.LogSoftmaxBackwardInnerTask;
+const LogsumexpBackwardInnerTask = tasks.LogsumexpBackwardInnerTask;
 const LayerNormBackwardInnerTask = tasks.LayerNormBackwardInnerTask;
 const VarianceInnerTask = tasks.VarianceInnerTask;
 const StandardizeInnerTask = tasks.StandardizeInnerTask;
@@ -832,49 +836,107 @@ fn nativeLayerNormParamGradColumns(task: LayerNormParamGradColumnsTask, col_star
     }
 }
 
+/// `out = exp(in - max(in))` over one contiguous row; returns Σ out. The
+/// unnormalized pass the softmax row kernel and the logsumexp VJP share.
+fn expShiftedRow(row_out: []f32, row_in: []const f32) f32 {
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
+    const axis_dim = row_in.len;
+
+    var axis_i: usize = 0;
+    var max_vec: Vec = @splat(-std.math.inf(f32));
+    while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
+        max_vec = @max(max_vec, @as(Vec, row_in[axis_i..][0..vector_width].*));
+    }
+    var max_value = @reduce(.Max, max_vec);
+    while (axis_i < axis_dim) : (axis_i += 1) {
+        max_value = @max(max_value, row_in[axis_i]);
+    }
+
+    const max_splat: Vec = @splat(max_value);
+    var sum_vec: Vec = @splat(0);
+    axis_i = 0;
+    while (axis_i + vector_width <= axis_dim) : (axis_i += vector_width) {
+        const value = vexpf(vector_width, @as(Vec, row_in[axis_i..][0..vector_width].*) - max_splat);
+        row_out[axis_i..][0..vector_width].* = value;
+        sum_vec += value;
+    }
+    var sum_exp = @reduce(.Add, sum_vec);
+    while (axis_i < axis_dim) : (axis_i += 1) {
+        const value = vexpf(1, @splat(row_in[axis_i] - max_value))[0];
+        row_out[axis_i] = value;
+        sum_exp += value;
+    }
+    return sum_exp;
+}
+
+/// `row *= factor` over one contiguous row.
+fn scaleRow(row: []f32, factor: f32) void {
+    const Vec = common.RowVec;
+    const vector_width = common.row_lanes;
+    const factor_vec: Vec = @splat(factor);
+    var i: usize = 0;
+    while (i + vector_width <= row.len) : (i += vector_width) {
+        row[i..][0..vector_width].* = @as(Vec, row[i..][0..vector_width].*) * factor_vec;
+    }
+    while (i < row.len) : (i += 1) {
+        row[i] *= factor;
+    }
+}
+
 pub const softmaxRows = if (isa.reference) scalar.softmaxRows else nativeSoftmaxRows;
 fn nativeSoftmaxRows(task: SoftmaxRowsTask, row_start: usize, row_end: usize) void {
+    for (row_start..row_end) |row_i| {
+        const base = row_i * task.axis_dim;
+        const row_out = task.output[base..][0..task.axis_dim];
+        const sum_exp = expShiftedRow(row_out, task.input[base..][0..task.axis_dim]);
+        scaleRow(row_out, 1 / sum_exp);
+    }
+}
+
+/// `softmax(x) · gy[row]`: the softmax row pass with the upstream value
+/// folded into the normalizer.
+pub const logsumexpBackwardRows = if (isa.reference) scalar.logsumexpBackwardRows else nativeLogsumexpBackwardRows;
+fn nativeLogsumexpBackwardRows(task: LogsumexpBackwardRowsTask, row_start: usize, row_end: usize) void {
+    for (row_start..row_end) |row_i| {
+        const base = row_i * task.axis_dim;
+        const row_out = task.output[base..][0..task.axis_dim];
+        const sum_exp = expShiftedRow(row_out, task.input[base..][0..task.axis_dim]);
+        scaleRow(row_out, task.gy[row_i] / sum_exp);
+    }
+}
+
+/// `gy - exp(y) · Σ gy` over the saved log-softmax output `y`.
+pub const logSoftmaxBackwardRows = if (isa.reference) scalar.logSoftmaxBackwardRows else nativeLogSoftmaxBackwardRows;
+fn nativeLogSoftmaxBackwardRows(task: LogSoftmaxBackwardRowsTask, row_start: usize, row_end: usize) void {
     const Vec = common.RowVec;
     const vector_width = common.row_lanes;
 
     for (row_start..row_end) |row_i| {
         const base = row_i * task.axis_dim;
-        const row_in = task.input[base..][0..task.axis_dim];
+        const row_y = task.y[base..][0..task.axis_dim];
+        const row_gy = task.gy[base..][0..task.axis_dim];
         const row_out = task.output[base..][0..task.axis_dim];
 
         var axis_i: usize = 0;
-        var max_vec: Vec = @splat(-std.math.inf(f32));
-        while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            max_vec = @max(max_vec, @as(Vec, row_in[axis_i..][0..vector_width].*));
-        }
-        var max_value = @reduce(.Max, max_vec);
-        while (axis_i < task.axis_dim) : (axis_i += 1) {
-            max_value = @max(max_value, row_in[axis_i]);
-        }
-
-        const max_splat: Vec = @splat(max_value);
         var sum_vec: Vec = @splat(0);
-        axis_i = 0;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            const value = vexpf(vector_width, @as(Vec, row_in[axis_i..][0..vector_width].*) - max_splat);
-            row_out[axis_i..][0..vector_width].* = value;
-            sum_vec += value;
+            sum_vec += @as(Vec, row_gy[axis_i..][0..vector_width].*);
         }
-        var sum_exp = @reduce(.Add, sum_vec);
+        var sum_gy = @reduce(.Add, sum_vec);
         while (axis_i < task.axis_dim) : (axis_i += 1) {
-            const value = vexpf(1, @splat(row_in[axis_i] - max_value))[0];
-            row_out[axis_i] = value;
-            sum_exp += value;
+            sum_gy += row_gy[axis_i];
         }
 
-        const inv_sum = 1 / sum_exp;
-        const inv_vec: Vec = @splat(inv_sum);
+        const sum_splat: Vec = @splat(sum_gy);
         axis_i = 0;
         while (axis_i + vector_width <= task.axis_dim) : (axis_i += vector_width) {
-            row_out[axis_i..][0..vector_width].* = @as(Vec, row_out[axis_i..][0..vector_width].*) * inv_vec;
+            const yv: Vec = row_y[axis_i..][0..vector_width].*;
+            const gyv: Vec = row_gy[axis_i..][0..vector_width].*;
+            row_out[axis_i..][0..vector_width].* = gyv - vexpf(vector_width, yv) * sum_splat;
         }
         while (axis_i < task.axis_dim) : (axis_i += 1) {
-            row_out[axis_i] *= inv_sum;
+            row_out[axis_i] = row_gy[axis_i] - vexpf(1, @splat(row_y[axis_i]))[0] * sum_gy;
         }
     }
 }
@@ -1135,6 +1197,15 @@ fn mulIntoLanes(dot_row: []f32, gy: []const f32, y: []const f32) void {
     while (i < dot_row.len) : (i += 1) dot_row[i] += gy[i] * y[i];
 }
 
+/// Lane-wise `out *= factor`.
+fn mulLanes(out: []f32, factor_row: []const f32) void {
+    var i: usize = 0;
+    while (i + inner_vec_width <= out.len) : (i += inner_vec_width) {
+        out[i..][0..inner_vec_width].* = @as(InnerVec, out[i..][0..inner_vec_width].*) * @as(InnerVec, factor_row[i..][0..inner_vec_width].*);
+    }
+    while (i < out.len) : (i += 1) out[i] *= factor_row[i];
+}
+
 pub const softmaxInner = if (isa.reference) scalar.softmaxInner else nativeSoftmaxInner;
 fn nativeSoftmaxInner(task: SoftmaxInnerTask, inner_start: usize, inner_end: usize) void {
     const inner = task.inner;
@@ -1370,6 +1441,64 @@ fn nativeSoftmaxBackwardInner(task: SoftmaxBackwardInnerTask, inner_start: usize
             while (i < lanes) : (i += 1) {
                 row_out[i] = task.scale * row_y[i] * (row_gy[i] - dot_row[i]);
             }
+        }
+    }
+}
+
+pub const logSoftmaxBackwardInner = if (isa.reference) scalar.logSoftmaxBackwardInner else nativeLogSoftmaxBackwardInner;
+fn nativeLogSoftmaxBackwardInner(task: LogSoftmaxBackwardInnerTask, inner_start: usize, inner_end: usize) void {
+    const inner = task.inner;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
+    const sum_row = task.scratch[lane0..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memset(sum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            addIntoLanes(f32, sum_row, task.gy[base + axis_i * inner ..][0..lanes]);
+        }
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            const row_y = task.y[offset..][0..lanes];
+            const row_gy = task.gy[offset..][0..lanes];
+            const row_out = task.output[offset..][0..lanes];
+            var i: usize = 0;
+            while (i + inner_vec_width <= lanes) : (i += inner_vec_width) {
+                const yv: InnerVec = row_y[i..][0..inner_vec_width].*;
+                const gyv: InnerVec = row_gy[i..][0..inner_vec_width].*;
+                const sv: InnerVec = sum_row[i..][0..inner_vec_width].*;
+                row_out[i..][0..inner_vec_width].* = gyv - vexpf(inner_vec_width, yv) * sv;
+            }
+            while (i < lanes) : (i += 1) {
+                row_out[i] = row_gy[i] - vexpf(1, @splat(row_y[i]))[0] * sum_row[i];
+            }
+        }
+    }
+}
+
+pub const logsumexpBackwardInner = if (isa.reference) scalar.logsumexpBackwardInner else nativeLogsumexpBackwardInner;
+fn nativeLogsumexpBackwardInner(task: LogsumexpBackwardInnerTask, inner_start: usize, inner_end: usize) void {
+    const inner = task.inner;
+    const lane0 = inner_start;
+    const lanes = inner_end - inner_start;
+    const max_row = task.scratch[lane0..][0..lanes];
+    const sum_row = task.scratch[inner + lane0 ..][0..lanes];
+    for (0..task.outer) |outer_i| {
+        const base = outer_i * task.axis_dim * inner + lane0;
+        @memcpy(max_row, task.input[base..][0..lanes]);
+        for (1..task.axis_dim) |axis_i| {
+            maxIntoLanes(max_row, task.input[base + axis_i * inner ..][0..lanes]);
+        }
+        @memset(sum_row, 0);
+        for (0..task.axis_dim) |axis_i| {
+            const offset = base + axis_i * inner;
+            expSubStoreLanes(task.output[offset..][0..lanes], task.input[offset..][0..lanes], max_row, sum_row);
+        }
+        // The scale row reuses the sum slots: gy / sum_exp per lane.
+        const gy_row = task.gy[outer_i * inner + lane0 ..][0..lanes];
+        for (sum_row, gy_row) |*sum_exp, upstream| sum_exp.* = upstream / sum_exp.*;
+        for (0..task.axis_dim) |axis_i| {
+            mulLanes(task.output[base + axis_i * inner ..][0..lanes], sum_row);
         }
     }
 }
@@ -2412,6 +2541,35 @@ pub const scalar = struct {
         }
     }
 
+    pub fn logsumexpBackwardRows(task: LogsumexpBackwardRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
+            const base = row_i * task.axis_dim;
+            const row_in = task.input[base..][0..task.axis_dim];
+            const row_out = task.output[base..][0..task.axis_dim];
+            const max_value = rowMaxSerial(row_in);
+            var sum_exp: f32 = 0;
+            for (row_out, row_in) |*out, value| {
+                const exp_value = expSerial(value - max_value);
+                out.* = exp_value;
+                sum_exp += exp_value;
+            }
+            const scale = task.gy[row_i] / sum_exp;
+            for (row_out) |*out| out.* *= scale;
+        }
+    }
+
+    pub fn logSoftmaxBackwardRows(task: LogSoftmaxBackwardRowsTask, row_start: usize, row_end: usize) void {
+        for (row_start..row_end) |row_i| {
+            const base = row_i * task.axis_dim;
+            const row_y = task.y[base..][0..task.axis_dim];
+            const row_gy = task.gy[base..][0..task.axis_dim];
+            const row_out = task.output[base..][0..task.axis_dim];
+            var sum_gy: f32 = 0;
+            for (row_gy) |value| sum_gy += value;
+            for (row_out, row_y, row_gy) |*out, y, gy| out.* = gy - expSerial(y) * sum_gy;
+        }
+    }
+
     pub fn softmaxBackwardRows(task: SoftmaxBackwardRowsTask, row_start: usize, row_end: usize) void {
         for (row_start..row_end) |row_i| {
             const base = row_i * task.axis_dim;
@@ -2863,6 +3021,43 @@ pub const scalar = struct {
                     const offset = base + axis_i * inner + lane;
                     task.output[offset] = task.input[offset] - shift;
                 }
+            }
+        }
+    }
+
+    pub fn logSoftmaxBackwardInner(task: LogSoftmaxBackwardInnerTask, inner_start: usize, inner_end: usize) void {
+        const inner = task.inner;
+        for (0..task.outer) |outer_i| {
+            const base = outer_i * task.axis_dim * inner;
+            for (inner_start..inner_end) |lane| {
+                var sum_gy: f32 = 0;
+                for (0..task.axis_dim) |axis_i| sum_gy += task.gy[base + axis_i * inner + lane];
+                for (0..task.axis_dim) |axis_i| {
+                    const offset = base + axis_i * inner + lane;
+                    task.output[offset] = task.gy[offset] - expSerial(task.y[offset]) * sum_gy;
+                }
+            }
+        }
+    }
+
+    pub fn logsumexpBackwardInner(task: LogsumexpBackwardInnerTask, inner_start: usize, inner_end: usize) void {
+        const inner = task.inner;
+        for (0..task.outer) |outer_i| {
+            const base = outer_i * task.axis_dim * inner;
+            for (inner_start..inner_end) |lane| {
+                var max_value = task.input[base + lane];
+                for (1..task.axis_dim) |axis_i| {
+                    max_value = @max(max_value, task.input[base + axis_i * inner + lane]);
+                }
+                var sum_exp: f32 = 0;
+                for (0..task.axis_dim) |axis_i| {
+                    const offset = base + axis_i * inner + lane;
+                    const value = expSerial(task.input[offset] - max_value);
+                    task.output[offset] = value;
+                    sum_exp += value;
+                }
+                const scale = task.gy[outer_i * inner + lane] / sum_exp;
+                for (0..task.axis_dim) |axis_i| task.output[base + axis_i * inner + lane] *= scale;
             }
         }
     }

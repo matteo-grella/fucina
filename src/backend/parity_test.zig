@@ -1013,6 +1013,17 @@ const Impl = struct {
             rows_impl.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_a, .axis_dim = cols, .scale = 0.5 }, 0, n_rows);
             rows_impl.scalar.softmaxBackwardRows(.{ .y = y, .gy = gy, .output = gx_b, .axis_dim = cols, .scale = 0.5 }, 0, n_rows);
             try expectClose(gx_b, gx_a, tol);
+
+            // Backward over a log-softmax output, and the logsumexp VJP
+            // (one upstream value per row: the first `n_rows` of `gy`).
+            rows_impl.logSoftmaxRows(.{ .input = input, .output = out_b, .axis_dim = cols }, 0, n_rows);
+            rows_impl.logSoftmaxBackwardRows(.{ .y = out_b, .gy = gy, .output = gx_a, .axis_dim = cols }, 0, n_rows);
+            rows_impl.scalar.logSoftmaxBackwardRows(.{ .y = out_b, .gy = gy, .output = gx_b, .axis_dim = cols }, 0, n_rows);
+            try expectClose(gx_b, gx_a, tol);
+
+            rows_impl.logsumexpBackwardRows(.{ .input = input, .gy = gy, .output = gx_a, .axis_dim = cols }, 0, n_rows);
+            rows_impl.scalar.logsumexpBackwardRows(.{ .input = input, .gy = gy, .output = gx_b, .axis_dim = cols }, 0, n_rows);
+            try expectClose(gx_b, gx_a, tol);
         }
     }
 
@@ -1288,6 +1299,14 @@ const Impl = struct {
 
         rows_impl.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer }, 0, inner);
         rows_impl.scalar.softmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .scale = 0.5, .outer = outer }, 0, inner);
+        try expectBitwise(out_b, out_a);
+
+        rows_impl.logSoftmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer }, 0, inner);
+        rows_impl.scalar.logSoftmaxBackwardInner(.{ .y = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0..inner], .outer = outer }, 0, inner);
+        try expectBitwise(out_b, out_a);
+
+        rows_impl.logsumexpBackwardInner(.{ .input = input, .gy = grad, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
+        rows_impl.scalar.logsumexpBackwardInner(.{ .input = input, .gy = grad, .output = out_b, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer }, 0, inner);
         try expectBitwise(out_b, out_a);
 
         rows_impl.varianceInner(.{ .input = input, .output = out_a, .axis_dim = axis_dim, .inner = inner, .scratch = scratch[0 .. 2 * inner], .outer = outer, .inv_axis_dim = inv_axis, .inv_denom = 1 / @as(f32, @floatFromInt(axis_dim - 1)) }, 0, inner);

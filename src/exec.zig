@@ -412,6 +412,8 @@ pub const ExecContext = struct {
     pub const logSoftmax = exec_softmax.logSoftmax;
     pub const softmaxExt = exec_softmax.softmaxExt;
     pub const softmaxBackward = exec_softmax.softmaxBackward;
+    pub const logSoftmaxBackward = exec_softmax.logSoftmaxBackward;
+    pub const logsumexpBackward = exec_softmax.logsumexpBackward;
     /// Standardize over a valid prefix (`standardizeAxis` `.valid_len`).
     pub const standardizeValidPrefix = exec_stats.standardizeValidPrefix;
 

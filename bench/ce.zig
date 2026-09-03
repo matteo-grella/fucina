@@ -2,10 +2,10 @@
 //!
 //! Times the exec-level row kernels at LLM shapes: softmax forward over the
 //! vocab axis (prefill logits), attention-shaped softmax rows, cross-entropy
-//! forward + backward (training loss over the vocab), softmax backward,
-//! dropout forward (the counter-based RNG mask), and layerNorm
-//! forward/backward next to rmsNormMul at the same shapes (the sanity ratio
-//! for the extra mean pass).
+//! forward + backward (training loss over the vocab), the softmax,
+//! log-softmax and logsumexp backward, dropout forward (the counter-based
+//! RNG mask), and layerNorm forward/backward next to rmsNormMul at the same
+//! shapes (the sanity ratio for the extra mean pass).
 //! Each section creates the inputs once and times op-output create/deinit per
 //! iteration, so buffer-pool reuse is in the loop exactly as in training.
 //!
@@ -172,6 +172,48 @@ fn benchSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Alloca
     }
     const ns = timer.read() / iters;
     try printRow(stdout, "softmax bwd", rows, cols, ns, iters);
+}
+
+fn benchLogSoftmaxBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xbce0 + rows);
+    defer x.deinit();
+    var y = try ctx.logSoftmax(.f32, 2, &x, 1);
+    defer y.deinit();
+    var gy = try randomLogits(ctx, allocator, rows, cols, 0xcdf0 + rows);
+    defer gy.deinit();
+
+    for (0..2) |_| {
+        var gx = try ctx.logSoftmaxBackward(2, &y, &gy, 1);
+        gx.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var gx = try ctx.logSoftmaxBackward(2, &y, &gy, 1);
+        gx.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "logsoftmax bwd", rows, cols, ns, iters);
+}
+
+fn benchLogsumexpBackward(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
+    var x = try randomLogits(ctx, allocator, rows, cols, 0xbcf0 + rows);
+    defer x.deinit();
+    var gy = try randomLogits(ctx, allocator, rows, 1, 0xce00 + rows);
+    defer gy.deinit();
+    var gy_row = try gy.reshape(&.{rows});
+    defer gy_row.deinit();
+
+    for (0..2) |_| {
+        var gx = try ctx.logsumexpBackward(2, &x, &gy_row, 1);
+        gx.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var gx = try ctx.logsumexpBackward(2, &x, &gy_row, 1);
+        gx.deinit();
+    }
+    const ns = timer.read() / iters;
+    try printRow(stdout, "logsumexp bwd", rows, cols, ns, iters);
 }
 
 fn benchCrossEntropy(ctx: *ExecContext, io: std.Io, allocator: std.mem.Allocator, stdout: anytype, rows: usize, cols: usize, iters: usize) !void {
@@ -416,6 +458,10 @@ pub fn main(init: std.process.Init) !void {
     try benchLinearCe(&ctx, init.io, allocator, stdout, 1024, 151936, 1024, 3);
 
     try benchSoftmaxBackward(&ctx, init.io, allocator, stdout, 1024, 4096, 50);
+    try benchLogSoftmaxBackward(&ctx, init.io, allocator, stdout, 1024, 151936, 5);
+    try benchLogSoftmaxBackward(&ctx, init.io, allocator, stdout, 1024, 4096, 50);
+    try benchLogsumexpBackward(&ctx, init.io, allocator, stdout, 1024, 151936, 5);
+    try benchLogsumexpBackward(&ctx, init.io, allocator, stdout, 1024, 4096, 50);
 
     try benchSoftmaxForwardAxis0(&ctx, init.io, allocator, stdout, 4096, 1024, 50);
     try benchSoftmaxForwardAxis0(&ctx, init.io, allocator, stdout, 1024, 4096, 50);

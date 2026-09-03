@@ -25,6 +25,14 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The log-softmax and logsumexp VJPs are row kernels. `ExecContext.logSoftmaxBackward`
+  and `ExecContext.logsumexpBackward` dispatch the fused row kernels
+  (`logSoftmaxBackwardRows`, `logsumexpBackwardRows`; `vexpf` lanes,
+  task-parallel over rows) on the last axis and the streaming inner-lane
+  kernels on any other, with scalar reference twins, replacing the serial
+  per-element loops in `ag/backward/softmax.zig` (the log-softmax one called
+  libm `exp` per element). Gradients agree with the old loops in ulps, not
+  bitwise.
 - `fucina.ops` is `src/backend/ops.zig` as a module (the op enums, their
   scalar reference bodies such as `sigmoidScalar`/`geluQuantScalar`/`erff`,
   the GEMM request types) and `fucina.simd` is `backend.simd` as a module

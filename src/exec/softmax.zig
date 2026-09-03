@@ -38,6 +38,14 @@ const softmaxBackwardInner = backend_mod.kernels.softmaxBackwardInner;
 const softmaxRows = backend_mod.kernels.softmaxRows;
 const softmaxExtRows = backend_mod.kernels.softmaxExtRows;
 const softmaxBackwardRows = backend_mod.kernels.softmaxBackwardRows;
+const LogSoftmaxBackwardRowsTask = exec_row_ops.LogSoftmaxBackwardRowsTask;
+const LogsumexpBackwardRowsTask = exec_row_ops.LogsumexpBackwardRowsTask;
+const LogSoftmaxBackwardInnerTask = exec_row_ops.LogSoftmaxBackwardInnerTask;
+const LogsumexpBackwardInnerTask = exec_row_ops.LogsumexpBackwardInnerTask;
+const logSoftmaxBackwardRows = backend_mod.kernels.logSoftmaxBackwardRows;
+const logsumexpBackwardRows = backend_mod.kernels.logsumexpBackwardRows;
+const logSoftmaxBackwardInner = backend_mod.kernels.logSoftmaxBackwardInner;
+const logsumexpBackwardInner = backend_mod.kernels.logsumexpBackwardInner;
 
 pub const SoftmaxExtOptions = struct {
     mask: ?*const Tensor = null,
@@ -110,6 +118,12 @@ const RowFamily = struct {
     inner: fn (SoftmaxInnerTask, usize, usize) void,
 };
 
+/// Parts for a last-axis row dispatch: one per row once the tensor is at
+/// the row-kernel length threshold, else the whole range on the caller.
+fn rowParts(rows: usize, len: usize) usize {
+    return if (rows > 1 and len >= parallel.row_kernel_len_threshold) rows else 1;
+}
+
 /// The one driver of the softmax family: last-axis rows through the fused
 /// row kernel (pool-split above the row threshold), any other axis through
 /// the inner-lane kernel over a `2 * inner` scratch.
@@ -128,7 +142,7 @@ fn rowFamilyF32(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, compt
 
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
     if (g.inner == 1) {
-        ctx.forRange(g.outer, if (g.outer > 1 and source.len() >= parallel.row_kernel_len_threshold) g.outer else 1, SoftmaxRowsTask{
+        ctx.forRange(g.outer, rowParts(g.outer, source.len()), SoftmaxRowsTask{
             .input = input,
             .output = output,
             .axis_dim = g.axis_dim,
@@ -233,7 +247,7 @@ pub fn softmaxExt(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, com
             softmaxExtRows(rank, axis, task, row_start, row_end);
         }
     };
-    ctx.forRange(rows, if (rows > 1 and source.len() >= parallel.row_kernel_len_threshold) rows else 1, base_task, Kernel.run);
+    ctx.forRange(rows, rowParts(rows, source.len()), base_task, Kernel.run);
     return out;
 }
 
@@ -266,7 +280,7 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
             .axis_dim = axis_dim,
             .scale = scale_value,
         };
-        ctx.forRange(outer, if (outer > 1 and source.len() >= parallel.row_kernel_len_threshold) outer else 1, base_task, softmaxBackwardRows);
+        ctx.forRange(outer, rowParts(outer, source.len()), base_task, softmaxBackwardRows);
         return out;
     }
 
@@ -282,6 +296,101 @@ pub fn softmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor
         .scale = scale_value,
         .outer = outer,
     }, softmaxBackwardInner);
+    return out;
+}
+
+/// Log-softmax VJP along `axis` over the saved output `y`:
+/// `gy - exp(y) · Σ_axis gy` (torch saves the output for exactly this
+/// identity). The two arms of `softmaxBackward`: the fused row kernel on
+/// the last axis, the streaming inner-lane kernel over an `inner` scratch
+/// on any other.
+pub fn logSoftmaxBackward(ctx: *ExecContext, comptime rank: usize, y: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
+    if (axis >= rank) @compileError("axis out of bounds");
+    try tensor.requireSameShape(y, gy);
+
+    const source = try y.rankView(rank);
+    var yy = try ctx.prepareContiguous(.f32, y);
+    defer yy.deinit();
+    var ggy = try ctx.prepareContiguous(.f32, gy);
+    defer ggy.deinit();
+    const yd = yy.tensor().dataConst();
+    const gyd = ggy.tensor().dataConst();
+
+    var out = try ctx.empty(.f32, source.shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    if (g.inner == 1) {
+        ctx.forRange(g.outer, rowParts(g.outer, source.len()), LogSoftmaxBackwardRowsTask{
+            .y = yd,
+            .gy = gyd,
+            .output = output,
+            .axis_dim = g.axis_dim,
+        }, logSoftmaxBackwardRows);
+        return out;
+    }
+
+    var scratch = try ctx.empty(.f32, .{g.inner});
+    defer scratch.deinit();
+    ctx.forRange(g.inner, ExecContext.innerLaneParts(source.len(), g.inner), LogSoftmaxBackwardInnerTask{
+        .y = yd,
+        .gy = gyd,
+        .output = output,
+        .axis_dim = g.axis_dim,
+        .inner = g.inner,
+        .scratch = scratch.data(),
+        .outer = g.outer,
+    }, logSoftmaxBackwardInner);
+    return out;
+}
+
+/// Logsumexp VJP along `axis`: `softmax(x) · gy` with `gy` at the reduced
+/// shape (one value per row). The normalizer is recomputed from `x`
+/// instead of read back from the saved result, so the gradient agrees
+/// with the forward in ulps rather than bitwise; the FD suite is the
+/// contract. The two arms of `softmaxBackward`.
+pub fn logsumexpBackward(ctx: *ExecContext, comptime rank: usize, x: *const Tensor, gy: *const Tensor, comptime axis: usize) !Tensor {
+    if (axis >= rank) @compileError("axis out of bounds");
+
+    const source = try x.rankView(rank);
+    const out_rank = if (rank == 1) 1 else rank - 1;
+    const reduced_shape = shapeWithoutAxis(rank, out_rank, source.shape, axis);
+    if (!std.mem.eql(usize, gy.shape.slice(), &reduced_shape)) return tensor.TensorError.InvalidShape;
+
+    var xx = try ctx.prepareContiguous(.f32, x);
+    defer xx.deinit();
+    var ggy = try ctx.prepareContiguous(.f32, gy);
+    defer ggy.deinit();
+    const input = xx.tensor().dataConst();
+    const gyd = ggy.tensor().dataConst();
+
+    var out = try ctx.empty(.f32, source.shape);
+    errdefer out.deinit();
+    const output = out.data();
+
+    const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
+    if (g.inner == 1) {
+        ctx.forRange(g.outer, rowParts(g.outer, source.len()), LogsumexpBackwardRowsTask{
+            .input = input,
+            .gy = gyd,
+            .output = output,
+            .axis_dim = g.axis_dim,
+        }, logsumexpBackwardRows);
+        return out;
+    }
+
+    var scratch = try ctx.empty(.f32, .{2 * g.inner});
+    defer scratch.deinit();
+    ctx.forRange(g.inner, ExecContext.innerLaneParts(source.len(), g.inner), LogsumexpBackwardInnerTask{
+        .input = input,
+        .gy = gyd,
+        .output = output,
+        .axis_dim = g.axis_dim,
+        .inner = g.inner,
+        .scratch = scratch.data(),
+        .outer = g.outer,
+    }, logsumexpBackwardInner);
     return out;
 }
 
