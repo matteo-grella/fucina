@@ -35,7 +35,7 @@ pub fn packLaneGroups(
     blocks_per_row: usize,
 ) !Rhs {
     if (n % lanes != 0) return tensor.TensorError.InvalidShape;
-    const expected = if (comptime SrcBlock == dtype_mod.BlockQ8_0) try q8_0BlockCount(k) else try qkBlockCount(k);
+    const expected = if (comptime SrcBlock == dtype_mod.BlockQ8_0) try types.blockCountForDType(.q8_0, k) else try qkBlockCount(k);
     if (blocks_per_row != expected) return tensor.TensorError.InvalidShape;
     if (blocks.len != try types.checkedProduct(n, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
@@ -95,7 +95,7 @@ pub fn packGroupKx8(dst: anytype, cols: anytype, comptime groups: usize, comptim
 }
 
 pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
-    const block_count = try q8_0BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q8_0, src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     quantizeRowQ8_0IntoUnchecked(dst, src);
 }
@@ -176,7 +176,7 @@ pub fn quantizeRowsQ8_0(allocator: Allocator, src: *const Tensor) !types.Quantiz
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
-    const blocks_per_row = try q8_0BlockCount(cols);
+    const blocks_per_row = try types.blockCountForDType(.q8_0, cols);
 
     const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, try types.checkedProduct(rows, blocks_per_row));
     errdefer allocator.free(blocks);
@@ -195,7 +195,7 @@ pub fn quantizeRowsQ8_0Into(blocks: []dtype_mod.BlockQ8_0, src: *const Tensor) !
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
-    const blocks_per_row = try q8_0BlockCount(cols);
+    const blocks_per_row = try types.blockCountForDType(.q8_0, cols);
     if (blocks.len != try types.checkedProduct(rows, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     const data = try src.dataConstChecked();
@@ -234,9 +234,6 @@ pub fn getRowsQ8_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ8_0, indi
         if (index >= table.rows) return tensor.TensorError.IndexOutOfBounds;
         try dequantizeRowQ8_0Into(out[row * table.cols ..][0..table.cols], table.rowBlocks(index));
     }
-}
-pub fn q8_0BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q8_0_block_size, len);
 }
 pub fn qkBlockCount(len: usize) !usize {
     return types.blockCountExact(qk_k_block_size, len);

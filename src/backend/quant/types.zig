@@ -79,6 +79,13 @@ pub fn checkedProduct(a: usize, b: usize) QuantizedFormatError!usize {
 
 /// The one whole-block length rule behind every per-format `*BlockCount`
 /// spelling: `len` must be a whole number of `block_size`-element blocks.
+/// The one block-count rule for every block format: `len` must be a whole
+/// number of `dtype_mod.blockSize(dt)` blocks (a non-block dtype is a
+/// compile error).
+pub fn blockCountForDType(comptime dt: DType, len: usize) QuantizedFormatError!usize {
+    return blockCountExact(comptime dtype_mod.blockSize(dt), len);
+}
+
 pub fn blockCountExact(comptime block_size: usize, len: usize) QuantizedFormatError!usize {
     if (len % block_size != 0) return QuantizedFormatError.InvalidQuantizedLength;
     return len / block_size;

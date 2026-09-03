@@ -28,7 +28,7 @@ const f32ToF16Bits = common.f32ToF16Bits;
 const qk_k_block_size = types.qk_k_block_size;
 
 pub fn quantizeRowQ4_0Into(dst: []dtype_mod.BlockQ4_0, src: []const f32) !void {
-    const block_count = try q4_0BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q4_0, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     var block_index: usize = 0;
@@ -79,7 +79,7 @@ pub fn quantizeRowsQ4_0(allocator: Allocator, src: *const Tensor) !types.Quantiz
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
-    const blocks_per_row = try q4_0BlockCount(cols);
+    const blocks_per_row = try types.blockCountForDType(.q4_0, cols);
     const data = try src.dataConstChecked();
 
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_0, try checkedProduct(rows, blocks_per_row));
@@ -106,7 +106,7 @@ pub fn quantizeMatmulRhsQ4_0(allocator: Allocator, rhs: *const Tensor) !types.Qu
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
-    const blocks_per_column = try q4_0BlockCount(k);
+    const blocks_per_column = try types.blockCountForDType(.q4_0, k);
     const data = try rhs.dataConstChecked();
 
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_0, try checkedProduct(n, blocks_per_column));
@@ -156,40 +156,12 @@ pub fn getRowsQ4_0Into(dst: *Tensor, table: *const types.QuantizedRowsQ4_0, indi
     }
 }
 
-fn q4_0BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q4_0_block_size, len);
-}
-
 fn quantizeToQ4_0Nibble(x: f32) u8 {
     // ggml: MIN(15, (int8_t)(x + 8.5f)). Clamp in float space with Zig's
     // NaN-collapsing @min/@max so a degenerate x (NaN/inf) never reaches
     // @intFromFloat (UB in ReleaseFast). In-contract x is in [-8, 8], where
     // trunc(x + 8.5) is in [0, 16] and both formulations agree byte-exactly.
     return @intFromFloat(@min(@as(f32, 15.0), @max(@as(f32, 0.0), x + 8.5)));
-}
-
-pub fn q1_0BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q1_0_block_size, len);
-}
-
-fn q2_0BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q2_0_block_size, len);
-}
-
-pub fn q4_1BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q4_1_block_size, len);
-}
-
-pub fn q5_0BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q5_0_block_size, len);
-}
-
-pub fn q5_1BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q5_1_block_size, len);
-}
-
-fn q8_1BlockCount(len: usize) !usize {
-    return types.blockCountExact(types.q8_1_block_size, len);
 }
 
 pub fn dequantizeRowQ1_0Into(dst: []f32, src: []const dtype_mod.BlockQ1_0) !void {
@@ -230,7 +202,7 @@ pub fn dequantizeRowQ2_0Into(dst: []f32, src: []const dtype_mod.BlockQ2_0) !void
 /// blocks (subnormal absmax overflowing 1/d) produce defined clamped output
 /// instead of @intFromFloat UB.
 pub fn quantizeRowQ2_0Into(dst: []dtype_mod.BlockQ2_0, src: []const f32) !void {
-    const block_count = try q2_0BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q2_0, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
@@ -260,7 +232,7 @@ pub fn quantizeRowQ2_0Into(dst: []dtype_mod.BlockQ2_0, src: []const f32) !void {
 /// degenerate-but-finite blocks (subnormal/overflowing spreads) produce
 /// defined clamped output instead of @intFromFloat UB.
 pub fn quantizeRowQ4_1Into(dst: []dtype_mod.BlockQ4_1, src: []const f32) !void {
-    const block_count = try q4_1BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q4_1, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
@@ -313,7 +285,7 @@ pub fn dequantizeRowQ4_1Into(dst: []f32, src: []const dtype_mod.BlockQ4_1) !void
 /// degenerate-but-finite blocks (subnormal spreads) produce defined clamped
 /// output instead of @intFromFloat UB.
 pub fn quantizeRowQ5_0Into(dst: []dtype_mod.BlockQ5_0, src: []const f32) !void {
-    const block_count = try q5_0BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q5_0, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
@@ -378,7 +350,7 @@ pub fn dequantizeRowQ5_0Into(dst: []f32, src: []const dtype_mod.BlockQ5_0) !void
 /// degenerate-but-finite blocks (subnormal/overflowing spreads) produce
 /// defined clamped output instead of @intFromFloat UB.
 pub fn quantizeRowQ5_1Into(dst: []dtype_mod.BlockQ5_1, src: []const f32) !void {
-    const block_count = try q5_1BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q5_1, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
@@ -439,7 +411,7 @@ pub fn dequantizeRowQ5_1Into(dst: []f32, src: []const dtype_mod.BlockQ5_1) !void
 }
 
 pub fn quantizeRowQ8_1Into(dst: []dtype_mod.BlockQ8_1, src: []const f32) !void {
-    const block_count = try q8_1BlockCount(src.len);
+    const block_count = try types.blockCountForDType(.q8_1, src.len);
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     var block_index: usize = 0;
@@ -463,7 +435,7 @@ pub fn quantizeRowsQ8_1(allocator: Allocator, src: *const Tensor) !types.Quantiz
     const view = try src.rankView(2);
     const rows = view.dim(0);
     const cols = view.dim(1);
-    const blocks_per_row = try q8_1BlockCount(cols);
+    const blocks_per_row = try types.blockCountForDType(.q8_1, cols);
     const data = try src.dataConstChecked();
 
     const blocks = try allocator.alloc(dtype_mod.BlockQ8_1, try checkedProduct(rows, blocks_per_row));

@@ -323,7 +323,7 @@ pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !Quantize
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
-    const blocks_per_column = try q8k.q8_0BlockCount(k);
+    const blocks_per_column = try types.blockCountForDType(.q8_0, k);
     const data = try rhs.dataConstChecked();
 
     const blocks = try allocator.alloc(dtype_mod.BlockQ8_0, try types.checkedProduct(n, blocks_per_column));
@@ -397,12 +397,7 @@ pub fn getRowsTensorInto(comptime tensor_dtype: DType, dst: *Tensor, table: *con
     }
 }
 
-pub fn blockCountForDType(comptime tensor_dtype: DType, len: usize) !usize {
-    // One rule for every format: the length must be a whole number of
-    // blocks. `dtype_mod.blockSize` compile-errors on non-block dtypes,
-    // preserving the old switch's `else` behavior.
-    return types.blockCountExact(comptime dtype_mod.blockSize(tensor_dtype), len);
-}
+pub const blockCountForDType = types.blockCountForDType;
 
 /// How many leading rows of an m-row batch the x4-lane-packed LHS kernels
 /// take, per K-quant weight: the padded Q4_K kernel takes every batch of at

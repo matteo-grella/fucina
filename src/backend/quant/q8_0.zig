@@ -33,7 +33,7 @@ pub fn quantizeRowsQ8_0x4PaddedInto(blocks: []BlockQ8_0x4, src: *const Tensor) !
     const rows = view.dim(0);
     const cols = view.dim(1);
 
-    const blocks_per_row = try q8k.q8_0BlockCount(cols);
+    const blocks_per_row = try types.blockCountForDType(.q8_0, cols);
     const row_groups = (rows + 3) / 4;
     if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
@@ -125,7 +125,7 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedInto(
     cols: usize,
     blocks_per_row: usize,
 ) !void {
-    if (blocks_per_row != try q8k.q8_0BlockCount(cols)) return tensor.TensorError.InvalidShape;
+    if (blocks_per_row != try types.blockCountForDType(.q8_0, cols)) return tensor.TensorError.InvalidShape;
     const row_groups = (rows + 3) / 4;
     if (blocks.len != try types.checkedProduct(row_groups, blocks_per_row)) return types.QuantizedFormatError.InvalidQuantizedLength;
     const row_len = std.math.mul(usize, rows, cols) catch return tensor.TensorError.InvalidDataLength;

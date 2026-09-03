@@ -209,7 +209,7 @@ fn f32ToF16Bits(x: f32) u16 {
 }
 
 fn makeQ1_0Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]dtype.BlockQ1_0 {
-    const blocks_per_column = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q1_0, k);
     const blocks = try allocator.alloc(dtype.BlockQ1_0, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ1_0Block(block, i);
     return blocks;
@@ -221,7 +221,7 @@ fn fillQ1_0Block(block: *dtype.BlockQ1_0, seed: usize) void {
 }
 
 fn makeQ4_1Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]dtype.BlockQ4_1 {
-    const blocks_per_column = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q4_1, k);
     const blocks = try allocator.alloc(dtype.BlockQ4_1, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ4_1Block(block, i);
     return blocks;
@@ -237,7 +237,7 @@ fn fillQ4_1Block(block: *dtype.BlockQ4_1, seed: usize) void {
 }
 
 fn makeQ5_0Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]dtype.BlockQ5_0 {
-    const blocks_per_column = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q5_0, k);
     const blocks = try allocator.alloc(dtype.BlockQ5_0, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ5_0Block(block, i);
     return blocks;
@@ -269,7 +269,7 @@ fn setQ5_0Value(block: *dtype.BlockQ5_0, index: usize, value: i8) void {
 }
 
 fn makeQ5_1Blocks(allocator: std.mem.Allocator, k: usize, n: usize) ![]dtype.BlockQ5_1 {
-    const blocks_per_column = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k);
+    const blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q5_1, k);
     const blocks = try allocator.alloc(dtype.BlockQ5_1, n * blocks_per_column);
     for (blocks, 0..) |*block, i| fillQ5_1Block(block, i);
     return blocks;
@@ -1070,20 +1070,20 @@ fn benchQuantizedGGMLMatMulTimed(
     var qrhs = switch (tensor_dtype) {
         .q1_0 => blk: {
             const blocks = try makeQ1_0Blocks(allocator, k, n);
-            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q1_0BlockCount(k), .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q1_0, k), .k = k, .n = n };
         },
         .q4_0 => try native.kernels.quantizeMatmulRhsQ4_0(allocator, &b),
         .q4_1 => blk: {
             const blocks = try makeQ4_1Blocks(allocator, k, n);
-            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q4_1BlockCount(k), .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q4_1, k), .k = k, .n = n };
         },
         .q5_0 => blk: {
             const blocks = try makeQ5_0Blocks(allocator, k, n);
-            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q5_0BlockCount(k), .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q5_0, k), .k = k, .n = n };
         },
         .q5_1 => blk: {
             const blocks = try makeQ5_1Blocks(allocator, k, n);
-            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.cold.q5_1BlockCount(k), .k = k, .n = n };
+            break :blk QRhs{ .allocator = allocator, .blocks = blocks, .blocks_per_column = try raw_backend.quantized_matmul.blockCountForDType(.q5_1, k), .k = k, .n = n };
         },
         .q8_0 => try native.kernels.quantizeMatmulRhsQ8_0(allocator, &b),
         else => unreachable,

@@ -218,7 +218,7 @@ fn rowsRefQ8_0(
 ) ![]f32 {
     var lhs = try Tensor.fromSlice(allocator, &.{ m, split_test_k }, lhs_values[0 .. m * split_test_k]);
     defer lhs.deinit();
-    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
+    const blocks_per_row = try quant.blockCountForDType(.q8_0, split_test_k);
     const qlhs = try allocator.alloc(dtype_mod.BlockQ8_0, m * blocks_per_row);
     defer allocator.free(qlhs);
     try quant.q8k.quantizeRowsQ8_0Into(qlhs, &lhs);
@@ -273,7 +273,7 @@ fn buildSplitRhsQ5_Kx8(allocator: std.mem.Allocator, random: std.Random) !quant.
 }
 
 fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ8_0x4 {
-    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
+    const blocks_per_row = try quant.blockCountForDType(.q8_0, split_test_k);
     const values = try allocator.alloc(f32, split_test_n * split_test_k);
     defer allocator.free(values);
     fillSplitTestValues(values, random);
@@ -286,7 +286,7 @@ fn buildSplitRhsQ8_0x4(allocator: std.mem.Allocator, random: std.Random) !quant.
 }
 
 fn buildRowsRhsQ8_0(allocator: std.mem.Allocator, random: std.Random) !quant.QuantizedMatmulRhsQ8_0 {
-    const blocks_per_row = try quant.q8k.q8_0BlockCount(split_test_k);
+    const blocks_per_row = try quant.blockCountForDType(.q8_0, split_test_k);
     const values = try allocator.alloc(f32, split_test_n * split_test_k);
     defer allocator.free(values);
     fillSplitTestValues(values, random);
@@ -296,7 +296,9 @@ fn buildRowsRhsQ8_0(allocator: std.mem.Allocator, random: std.Random) !quant.Qua
     errdefer allocator.free(blocks);
     try quant.q8k.quantizeRowsQ8_0Into(blocks, &weights);
     return .{
-        .allocator = allocator, .blocks = blocks, .blocks_per_column = blocks_per_row,
+        .allocator = allocator,
+        .blocks = blocks,
+        .blocks_per_column = blocks_per_row,
         .k = split_test_k,
         .n = split_test_n,
     };

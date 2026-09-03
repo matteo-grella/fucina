@@ -384,10 +384,6 @@ fn maybeParallelQ8_0x4PackedPaddedRhs(
 // and lane-packed-LHS forms above them) and the reference `scalar`
 // namespace below (which passes no pool).
 
-pub fn checkedTensorProduct(a: usize, b: usize) !usize {
-    return std.math.mul(usize, a, b) catch tensor.TensorError.InvalidDataLength;
-}
-
 /// The `[rows, cols]` f32 activation behind an LHS tensor, validated once
 /// at the dispatch tier (rank 2, the declared dims, contiguous) so the
 /// allocation-free range quantizers run unchecked below it.
@@ -490,7 +486,7 @@ pub fn matmulQuantRows(
     const cd = common.contiguousData(out, m * n);
     switch (comptime g.lhs) {
         .q8_0 => {
-            const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
+            const blocks_per_row = try quant.blockCountForDType(.q8_0, k);
             var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
             const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
             defer scratch.release(allocator, qlhs_blocks);
@@ -526,8 +522,8 @@ pub fn matmul2DQuantizedRhsI8(
 ) !void {
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
 
-    const a_len = try checkedTensorProduct(m, k);
-    const out_len = try checkedTensorProduct(m, n);
+    const a_len = try tensor.checkedProduct(m, k);
+    const out_len = try tensor.checkedProduct(m, n);
     const ad = common.contiguousDataConst(a, a_len);
     const cd = common.contiguousData(out, out_len);
 
@@ -640,7 +636,7 @@ pub const scalar = struct {
     ) !void {
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
         const cd = common.contiguousData(out, m * n);
-        const blocks_per_row = try quant.q8k.q8_0BlockCount(k);
+        const blocks_per_row = try quant.blockCountForDType(.q8_0, k);
         var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
         const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
         defer scratch.release(allocator, qlhs_blocks);

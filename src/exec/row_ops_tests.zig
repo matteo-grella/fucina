@@ -99,7 +99,7 @@ test "pinned rowwise kernels: batched quant ops reproduce the m == 1 numerics bi
         }
         var q6_rhs = try qm.q6_k.packMatmulRhsQ6_Kx4(allocator, q6_blocks, n, k, bpc);
         defer q6_rhs.deinit();
-        const q8_bpc = try qm.q8k.q8_0BlockCount(k);
+        const q8_bpc = try qm.blockCountForDType(.q8_0, k);
         const q8_blocks = try allocator.alloc(dtype_mod.BlockQ8_0, n * q8_bpc);
         defer allocator.free(q8_blocks);
         {

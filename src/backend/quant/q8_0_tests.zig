@@ -68,7 +68,7 @@ test "ggml_q8_0 rejects partial GGML blocks" {
     var blocks: [1]BlockQ8_0 = undefined;
 
     try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, q8k.quantizeRowQ8_0Into(&blocks, &src));
-    try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, q8k.q8_0BlockCount(src.len));
+    try std.testing.expectError(types.QuantizedFormatError.InvalidQuantizedLength, types.blockCountForDType(.q8_0, src.len));
 }
 
 test "ggml_q8_0 quantized rows dequantize and gather rows" {
