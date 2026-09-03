@@ -258,31 +258,38 @@ pub fn gatherAxis(
     errdefer out.deinit();
     const output = out.data();
 
-    if (comptime axis == 0) {
-        const row_len = productAfterAxis(rank, source.shape, 0);
-        for (indices, 0..) |index, row| {
-            const src = input[index * row_len ..][0..row_len];
-            const dst = output[row * row_len ..][0..row_len];
-            @memcpy(dst, src);
-        }
-        return out;
-    }
-
-    const source_strides = contiguousStridesArray(rank, source.shape);
-    const out_strides = contiguousStridesArray(rank, out_shape);
-    for (output, 0..) |*dst, linear| {
-        var remainder = linear;
-        var src_linear: usize = 0;
-        inline for (0..rank) |dim| {
-            const coord = remainder / out_strides[dim];
-            remainder %= out_strides[dim];
-            const src_coord = if (dim == axis) indices[coord] else coord;
-            src_linear += src_coord * source_strides[dim];
-        }
-        dst.* = input[src_linear];
-    }
-
+    const inner = productAfterAxis(rank, source.shape, axis);
+    const rows = productBeforeAxis(rank, source.shape, axis) * indices.len;
+    ctx.forRange(rows, if (rows > 1 and output.len >= parallel.row_kernel_len_threshold) rows else 1, GatherRows(dtype){
+        .input = input,
+        .output = output,
+        .indices = indices,
+        .axis_dim = source.shape[axis],
+        .inner = inner,
+    }, GatherRows(dtype).run);
     return out;
+}
+
+/// The gather copy: one `inner`-long run per (outer block, index) pair,
+/// the rows split across the pool. Row `r` of `outer * indices.len` is
+/// block `r / indices.len` at source index `indices[r % indices.len]`.
+fn GatherRows(comptime dtype: DType) type {
+    return struct {
+        input: []const dtype_mod.Scalar(dtype),
+        output: []dtype_mod.Scalar(dtype),
+        indices: []const usize,
+        axis_dim: usize,
+        inner: usize,
+
+        fn run(task: @This(), row_start: usize, row_end: usize) void {
+            const out_axis_dim = task.indices.len;
+            for (row_start..row_end) |row| {
+                const block = row / out_axis_dim;
+                const index = task.indices[row % out_axis_dim];
+                @memcpy(task.output[row * task.inner ..][0..task.inner], task.input[(block * task.axis_dim + index) * task.inner ..][0..task.inner]);
+            }
+        }
+    };
 }
 
 pub fn setSliceAxis(

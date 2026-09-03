@@ -223,8 +223,12 @@ fn reduceAxis(
         return out;
     }
     if (comptime axis == rank - 1) {
-        const axis_dim = source.shape[axis];
-        for (0..output.len) |row| output[row] = reduceRow(dtype, fold, input[row * axis_dim ..][0..axis_dim]);
+        const rows = output.len;
+        ctx.forRange(rows, if (rows > 1 and input.len >= parallel.row_kernel_len_threshold) rows else 1, RowFold(dtype, fold){
+            .input = input,
+            .output = output,
+            .axis_dim = source.shape[axis],
+        }, RowFold(dtype, fold).run);
         return out;
     }
     const g = shape_mod.AxisGeometry.of(rank, source.shape, axis);
@@ -234,6 +238,22 @@ fn reduceAxis(
 
 /// The rank-1 arm of `reduceAxis`: one whole-tensor kernel into the scalar
 /// output (the pooled SIMD kernels for the float folds).
+/// The last-axis arm: one `reduceRow` per output element, the rows split
+/// across the pool (disjoint outputs, so any part count gives the same bits).
+fn RowFold(comptime dtype: DType, comptime fold: AxisFold) type {
+    return struct {
+        input: []const dtype_mod.Scalar(dtype),
+        output: []AxisFoldTask(dtype, fold).Out,
+        axis_dim: usize,
+
+        fn run(task: @This(), row_start: usize, row_end: usize) void {
+            for (row_start..row_end) |row| {
+                task.output[row] = reduceRow(dtype, fold, task.input[row * task.axis_dim ..][0..task.axis_dim]);
+            }
+        }
+    };
+}
+
 fn reduceWhole(
     ctx: *ExecContext,
     comptime dtype: DType,

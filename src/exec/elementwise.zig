@@ -26,7 +26,6 @@ const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
 const requireSameRankShape = shape_mod.requireSameRankShape;
 const shapeArrayFromSlice = shape_mod.arrayFromSlice;
 const validateBroadcastRank = shape_mod.validateBroadcastRank;
-const isExactSuffixRank = shape_mod.isExactSuffixRank;
 const productAfterAxis = shape_mod.productAfterAxis;
 const productBeforeAxis = shape_mod.productBeforeAxis;
 const contiguousStridesArray = shape_mod.contiguousStrides;
@@ -52,18 +51,18 @@ pub const TailBroadcastInfo = struct {
     values: []const f32,
 };
 
-pub fn tryTailBroadcastElementwise(comptime op: ElementwiseOp, out: *Tensor, a: *const Tensor, b: *const Tensor) !bool {
+pub fn tryTailBroadcastElementwise(ctx: *ExecContext, comptime op: ElementwiseOp, out: *Tensor, a: *const Tensor, b: *const Tensor) !bool {
     const out_data = out.data();
 
     if (a.isContiguous()) {
         if (tailBroadcastInfo(b)) |bi| {
-            tailBroadcastRows(op, false, out_data, a.dataConst(), bi);
+            tailBroadcastRows(ctx, op, false, out_data, a.dataConst(), bi);
             return true;
         }
     }
     if (b.isContiguous()) {
         if (tailBroadcastInfo(a)) |ai| {
-            tailBroadcastRows(op, true, out_data, b.dataConst(), ai);
+            tailBroadcastRows(ctx, op, true, out_data, b.dataConst(), ai);
             return true;
         }
     }
@@ -72,29 +71,75 @@ pub fn tryTailBroadcastElementwise(comptime op: ElementwiseOp, out: *Tensor, a: 
     const bi = tailBroadcastInfo(b) orelse return false;
     if (ai.inner != bi.inner and ai.inner != 1 and bi.inner != 1) return false;
 
+    // Both operands are tail rows, so every output row is the same row:
+    // compute it once, then replicate.
     const inner = @max(ai.inner, bi.inner);
-    var base: usize = 0;
-    while (base < out_data.len) : (base += inner) {
-        for (0..inner) |j| {
-            const av = ai.values[if (ai.inner == 1) 0 else j];
-            const bv = bi.values[if (bi.inner == 1) 0 else j];
-            out_data[base + j] = applyElementwise(op, av, bv);
-        }
+    const first = out_data[0..inner];
+    if (ai.inner == inner and bi.inner == inner) {
+        opRow(op, false, first, ai.values[0..inner], bi.values[0..inner]);
+    } else if (ai.inner == 1) {
+        opRow(op, true, first, bi.values[0..inner], ai.values[0]);
+    } else {
+        opRow(op, false, first, ai.values[0..inner], bi.values[0]);
     }
+    replicateRow(ctx, out_data, inner);
     return true;
+}
+
+/// Parts for an elementwise map over `len` elements: proportional chunks
+/// above the elementwise threshold, one otherwise (`forRange` caps at the
+/// team size). Disjoint outputs, so any part count gives the same bits.
+fn elementwiseParts(len: usize) usize {
+    return parallel.partsForChunk(len, parallel.vector_elementwise_len_threshold);
+}
+
+/// Copy the first `inner`-long row of `out` into every row after it.
+fn replicateRow(ctx: *ExecContext, out: []f32, inner: usize) void {
+    const rows = out.len / inner;
+    if (rows <= 1) return;
+    const Rows = struct {
+        out: []f32,
+        inner: usize,
+        fn run(task: @This(), start: usize, end: usize) void {
+            const first = task.out[0..task.inner];
+            for (start..end) |r| @memcpy(task.out[(r + 1) * task.inner ..][0..task.inner], first);
+        }
+    };
+    ctx.forRange(rows - 1, @min(rows - 1, elementwiseParts(out.len)), Rows{ .out = out, .inner = inner }, Rows.run);
 }
 
 /// `out = op(contiguous, broadcast)`, `broadcast` on the left when
 /// `broadcast_is_left`: one tail row of `inner` values reused across every
 /// row of `out`, or one scalar across all of it. `out` may alias
-/// `contiguous` (the in-place form).
-fn tailBroadcastRows(comptime op: ElementwiseOp, comptime broadcast_is_left: bool, out: []f32, contiguous: []const f32, broadcast: TailBroadcastInfo) void {
+/// `contiguous` (the in-place form). Rows (or, for the scalar, element
+/// ranges) split across the pool.
+fn tailBroadcastRows(ctx: *ExecContext, comptime op: ElementwiseOp, comptime broadcast_is_left: bool, out: []f32, contiguous: []const f32, broadcast: TailBroadcastInfo) void {
     const inner = broadcast.inner;
-    if (inner == 1) return opRow(op, broadcast_is_left, out, contiguous, broadcast.values[0]);
-    var base: usize = 0;
-    while (base < out.len) : (base += inner) {
-        opRow(op, broadcast_is_left, out[base..][0..inner], contiguous[base..][0..inner], broadcast.values[0..inner]);
+    if (inner == 1) {
+        const Ranges = struct {
+            out: []f32,
+            contiguous: []const f32,
+            value: f32,
+            fn run(task: @This(), start: usize, end: usize) void {
+                opRow(op, broadcast_is_left, task.out[start..end], task.contiguous[start..end], task.value);
+            }
+        };
+        return ctx.forRange(out.len, elementwiseParts(out.len), Ranges{ .out = out, .contiguous = contiguous, .value = broadcast.values[0] }, Ranges.run);
     }
+    const Rows = struct {
+        out: []f32,
+        contiguous: []const f32,
+        values: []const f32,
+        inner: usize,
+        fn run(task: @This(), row_start: usize, row_end: usize) void {
+            for (row_start..row_end) |row| {
+                const base = row * task.inner;
+                opRow(op, broadcast_is_left, task.out[base..][0..task.inner], task.contiguous[base..][0..task.inner], task.values[0..task.inner]);
+            }
+        }
+    };
+    const rows = out.len / inner;
+    ctx.forRange(rows, @min(rows, elementwiseParts(out.len)), Rows{ .out = out, .contiguous = contiguous, .values = broadcast.values[0..inner], .inner = inner }, Rows.run);
 }
 
 /// One row `out[j] = op(x[j], y_j)` (`op(y_j, x[j])` when `y_is_left`),
@@ -124,10 +169,10 @@ inline fn opVec(comptime op: ElementwiseOp, a: ElementwiseVec, b: ElementwiseVec
     };
 }
 
-pub fn tryTailBroadcastElementwiseInPlace(comptime op: ElementwiseOp, target: *Tensor, other: *const Tensor) bool {
+pub fn tryTailBroadcastElementwiseInPlace(ctx: *ExecContext, comptime op: ElementwiseOp, target: *Tensor, other: *const Tensor) bool {
     const broadcast = tailBroadcastInfo(other) orelse return false;
     const data = target.data();
-    tailBroadcastRows(op, false, data, data, broadcast);
+    tailBroadcastRows(ctx, op, false, data, data, broadcast);
     return true;
 }
 
@@ -1076,57 +1121,42 @@ fn reduceBroadcastFromRankToRank(
     if (source_rank == target_rank and std.mem.eql(usize, target_shape[0..], source.shape[0..])) {
         return x.cloneView();
     }
+    if (target_rank == 1 and target_shape[0] == 1) {
+        var total = try ctx.sum(.f32, x);
+        defer total.deinit();
+        return total.reshape(&target_shape);
+    }
 
+    // Reducing a broadcast is summing over the broadcast axes: the leading
+    // axes the target lacks fold as one block, then every same-rank axis the
+    // target holds at 1 folds through a rank-3 [before, axis, after] view.
+    // Each fold is `sumAxis`, so the pool split and the per-element order
+    // are the reduction engine's.
     var xx = try ctx.prepareContiguous(.f32, x);
     defer xx.deinit();
-    const xp = xx.tensor();
-
-    var out = try ctx.zeros(.f32, target_shape);
-    errdefer out.deinit();
-
-    const xd = xp.dataConst();
-    const od = out.data();
-
-    if (target_rank == 1 and target_shape[0] == 1) {
-        var total: f32 = 0;
-        for (xd) |value| total += value;
-        od[0] = total;
-        return out;
-    }
-
-    if (isExactSuffixRank(target_rank, source_rank, target_shape, source.shape)) {
-        const inner = shape_mod.product(&target_shape);
-        var base: usize = 0;
-        while (base < xd.len) : (base += inner) {
-            for (0..inner) |j| {
-                od[j] += xd[base + j];
-            }
-        }
-        return out;
-    }
-
-    const out_strides = contiguousStridesArray(target_rank, target_shape);
     const rank_diff = source_rank - target_rank;
-    for (xd, 0..) |value, linear| {
-        var remainder = linear;
-        var out_linear: usize = 0;
-        comptime var dim = source_rank;
-        inline while (dim > 0) {
-            dim -= 1;
-            const coord = remainder % source.shape[dim];
-            remainder /= source.shape[dim];
-
-            if (dim >= rank_diff) {
-                const target_dim = dim - rank_diff;
-                if (target_shape[target_dim] == source.shape[dim]) {
-                    out_linear += coord * out_strides[target_dim];
-                }
-            }
+    var cur_shape: [target_rank]usize = source.shape[rank_diff..].*;
+    var cur: Tensor = if (rank_diff == 0) try xx.tensor().cloneView() else blk: {
+        var lead = try xx.tensor().reshape(&.{ shape_mod.product(source.shape[0..rank_diff]), shape_mod.product(&cur_shape) });
+        defer lead.deinit();
+        var folded = try ctx.sumAxis(.f32, 2, &lead, 0);
+        defer folded.deinit();
+        break :blk try folded.reshape(&cur_shape);
+    };
+    errdefer cur.deinit();
+    inline for (0..target_rank) |dim| {
+        if (target_shape[dim] == 1 and cur_shape[dim] != 1) {
+            var view = try cur.reshape(&.{ shape_mod.product(cur_shape[0..dim]), cur_shape[dim], shape_mod.product(cur_shape[dim + 1 ..]) });
+            defer view.deinit();
+            var folded = try ctx.sumAxis(.f32, 3, &view, 1);
+            defer folded.deinit();
+            cur_shape[dim] = 1;
+            const next = try folded.reshape(&cur_shape);
+            cur.deinit();
+            cur = next;
         }
-        od[out_linear] += value;
     }
-
-    return out;
+    return cur;
 }
 
 /// Consume `target` and return `op(target, other)` (same shape); ownership
@@ -1383,7 +1413,7 @@ fn elementwiseRankInto(
         return backendElementwiseContiguousUnchecked(ctx, op, out, a, b, len);
     }
 
-    if (try tryTailBroadcastElementwise(op, out, a, b)) {
+    if (try tryTailBroadcastElementwise(ctx, op, out, a, b)) {
         return;
     }
 
@@ -1413,7 +1443,7 @@ pub fn elementwiseInPlace(
         return backendElementwiseContiguousUnchecked(ctx, op, target, target, other, target.len());
     }
 
-    if (tryTailBroadcastElementwiseInPlace(op, target, other)) {
+    if (tryTailBroadcastElementwiseInPlace(ctx, op, target, other)) {
         return;
     }
 

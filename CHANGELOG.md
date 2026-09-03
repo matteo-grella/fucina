@@ -25,6 +25,21 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Reducing a broadcast is summing over the broadcast axes. `reduceBroadcast`
+  (the tail of every broadcast VJP and of the dot/einsum VJPs) folds the
+  leading axes as one block and each axis the target holds at 1 through a
+  rank-3 view, every fold `sumAxis`, in place of three serial scalar arms
+  (one of them an integer divide per rank dimension per element). The
+  last-axis arm of `sum`/`prod`, the gather copy (`gatherAxis`, every axis:
+  one `inner`-long run per (block, index) row, no per-element decode) and
+  the tail-broadcast elementwise path (a contiguous operand against a
+  trailing row or one scalar, both operands tail rows computed once and
+  replicated) split their rows across the pool through `ExecContext.forRange`;
+  all four are element-independent, so any part count gives the same bits.
+  4096 x 4096 f32: reduce-broadcast 5.41 ms -> 1.68 ms, add with a bias row
+  2.02 -> 1.07 ms, last-axis sum 3.65 -> 0.57 ms; gather of 4096 rows of
+  1024: 1.27 -> 0.27 ms. `bench-scatter` times the gather beside its
+  scatter-add twin.
 - The gated-activation VJP is a kernel. `ExecContext.gatedBackward(op, operand,
   gy, up, gate)` dispatches `kernels.gatedBackwardContiguousIntoUnchecked`
   beside the forward kernel (pooled `@Vector` lanes, scalar reference twin)

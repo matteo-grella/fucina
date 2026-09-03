@@ -85,6 +85,39 @@ fn benchScatterAdd(
     try stdout.flush();
 }
 
+/// The forward twin of the scatter-add: `gatherAxis` on axis 0 reading
+/// `token_count` rows of the vocab x dim table.
+fn benchGather(
+    ctx: *ExecContext,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    token_count: usize,
+    iters: usize,
+) !void {
+    var table = try randomGrad(ctx, allocator, vocab, dim, 0x7ab1e);
+    defer table.deinit();
+    const indices = try randomIndices(allocator, token_count, 0, 0xbdd0 + token_count);
+    defer allocator.free(indices);
+
+    for (0..2) |_| {
+        var out = try ctx.gatherAxis(.f32, 2, &table, 0, indices);
+        out.deinit();
+    }
+    var timer = try Timer.start(io);
+    for (0..iters) |_| {
+        var out = try ctx.gatherAxis(.f32, 2, &table, 0, indices);
+        out.deinit();
+    }
+    const ns = timer.read() / iters;
+    const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+    // Bytes moved: read the selected rows, write the output.
+    const bytes = @as(f64, @floatFromInt(2 * token_count * dim * @sizeOf(f32)));
+    const gbs = bytes / @as(f64, @floatFromInt(ns));
+    try stdout.print("gather     {s:<14} {d:>6} idx <- {d} x {d}  {d:>9.3} ms {d:>7.2} GB/s  ({d} iters)\n", .{ "uniform", token_count, vocab, dim, ms, gbs, iters });
+    try stdout.flush();
+}
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var mode: bench_alloc.AllocatorMode = .smp;
@@ -107,6 +140,7 @@ pub fn main(init: std.process.Init) !void {
 
     try stdout.print("scatter-add (embedding-gradient) benchmark — backend={s}\n\n", .{@tagName(fucina.active_backend_kind)});
 
+    try benchGather(&ctx, init.io, allocator, stdout, 2048, 20);
     try benchScatterAdd(&ctx, init.io, allocator, stdout, 2048, 0, 5);
     try benchScatterAdd(&ctx, init.io, allocator, stdout, 2048, 1000, 5);
     try benchScatterAdd(&ctx, init.io, allocator, stdout, 32768, 0, 5);
