@@ -15,7 +15,7 @@ const thread = @import("../../thread.zig");
 const testing = std.testing;
 
 const Tensor = tensor.Tensor;
-const qk_k = qm.types.qk_k_block_size;
+const qk_k = dtype_mod.qk_k_block_size;
 
 // Shapes pinned to the dispatch gates (common.zig matmulThreadCount /
 // i8ColumnThreadCount): the row split needs m >= vector_column_min_m and
@@ -215,9 +215,9 @@ test "pooled dispatch matches serial: plain-block formats" {
 
         // Encoder-backed K-quants against the Q8_K activations.
         inline for (.{
-            .{ .q4_k, qm.QuantizedMatmulRhsQ4_K, dtype_mod.BlockQ4_K, gemm2DEntry(.{ .weight = .q4_k, .lhs = .q8_k }), qm.q4_k.matmulQ4_KRhsRange },
-            .{ .q5_k, qm.QuantizedMatmulRhsQ5_K, dtype_mod.BlockQ5_K, gemm2DEntry(.{ .weight = .q5_k, .lhs = .q8_k }), qm.q5_k.matmulQ5_KRhsRange },
-            .{ .q6_k, qm.QuantizedMatmulRhsQ6_K, dtype_mod.BlockQ6_K, gemm2DEntry(.{ .weight = .q6_k, .lhs = .q8_k }), qm.q6_k.matmulQ6_KRhsRange },
+            .{ .q4_k, qm.types.QuantizedMatmulRhsQ4_K, dtype_mod.BlockQ4_K, gemm2DEntry(.{ .weight = .q4_k, .lhs = .q8_k }), qm.q4_k.matmulQ4_KRhsRange },
+            .{ .q5_k, qm.types.QuantizedMatmulRhsQ5_K, dtype_mod.BlockQ5_K, gemm2DEntry(.{ .weight = .q5_k, .lhs = .q8_k }), qm.q5_k.matmulQ5_KRhsRange },
+            .{ .q6_k, qm.types.QuantizedMatmulRhsQ6_K, dtype_mod.BlockQ6_K, gemm2DEntry(.{ .weight = .q6_k, .lhs = .q8_k }), qm.q6_k.matmulQ6_KRhsRange },
         }) |spec| {
             const rblocks = try allocator.alloc(spec[2], n * (k / qk_k));
             defer allocator.free(rblocks);
@@ -233,14 +233,14 @@ test "pooled dispatch matches serial: plain-block formats" {
             const rblocks = try randomBlocks(dtype_mod.BlockQ2_K, allocator, &prng, n * (k / qk_k));
             defer allocator.free(rblocks);
             for (rblocks) |*bl| bl.dm = .{ f16Bits(0.01), f16Bits(0.002) };
-            const rhs: qm.QuantizedMatmulRhsQ2_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
+            const rhs: qm.types.QuantizedMatmulRhsQ2_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q2_k, .lhs = .q8_k }), qm.cold.matmulQ2_KRhsRange, lhs_q8k, &rhs, m, n, k);
         }
         {
             const rblocks = try randomBlocks(dtype_mod.BlockQ3_K, allocator, &prng, n * (k / qk_k));
             defer allocator.free(rblocks);
             for (rblocks) |*bl| bl.d = f16Bits(0.01);
-            const rhs: qm.QuantizedMatmulRhsQ3_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
+            const rhs: qm.types.QuantizedMatmulRhsQ3_K = .{ .allocator = null, .blocks = rblocks, .k = k, .n = n, .blocks_per_column = k / qk_k };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q3_k, .lhs = .q8_k }), qm.cold.matmulQ3_KRhsRange, lhs_q8k, &rhs, m, n, k);
         }
 
@@ -249,14 +249,14 @@ test "pooled dispatch matches serial: plain-block formats" {
             const rblocks = try allocator.alloc(dtype_mod.BlockQ8_0, n * (k / 32));
             defer allocator.free(rblocks);
             try qm.quantizeRowForDType(.q8_0, rblocks, w);
-            const rhs: qm.QuantizedMatmulRhsQ8_0 = .{ .allocator = null, .blocks = rblocks, .blocks_per_column = k / 32, .k = k, .n = n };
+            const rhs: qm.types.QuantizedMatmulRhsQ8_0 = .{ .allocator = null, .blocks = rblocks, .blocks_per_column = k / 32, .k = k, .n = n };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q8_0, .lhs = .q8_0 }), qm.q8_0.matmulQ8_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
         {
             const q4_blocks = try allocator.alloc(dtype_mod.BlockQ4_0, n * (k / 32));
             defer allocator.free(q4_blocks);
             try qm.quantizeRowForDType(.q4_0, q4_blocks, w);
-            const rhs: qm.QuantizedMatmulRhsQ4_0 = .{ .allocator = null, .blocks = q4_blocks, .blocks_per_column = k / 32, .k = k, .n = n };
+            const rhs: qm.types.QuantizedMatmulRhsQ4_0 = .{ .allocator = null, .blocks = q4_blocks, .blocks_per_column = k / 32, .k = k, .n = n };
             try expectPooledMatchesSerial(gemm2DEntry(.{ .weight = .q4_0, .lhs = .q8_0 }), qm.cold.matmulQ4_0RhsRange, lhs_q80, &rhs, m, n, k);
         }
     }
@@ -319,10 +319,10 @@ test "pooled dispatch matches serial: lane-packed LHS entries" {
         // {plain dtype, PlainBlock, LhsBlock, lhs quantizer, packFn, entry, range, shapes}
         // (64, 64, 256) forces the ROW arm (n below the column gate);
         // m stays a group multiple, the packed-LHS entries' contract.
-        .{ .q4_k, dtype_mod.BlockQ4_K, qm.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q4_k.packMatmulRhsQ4_Kx8, gemm2DEntry(.{ .weight = .q4_k, .rhs = .x8, .lhs = .q8_kx4 }), qm.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
-        .{ .q5_k, dtype_mod.BlockQ5_K, qm.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q5_k.packMatmulRhsQ5_Kx8, gemm2DEntry(.{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_kx4 }), qm.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
-        .{ .q4_k, dtype_mod.BlockQ4_K, qm.BlockQ8_Kx2Mmla, qm.q8k.quantizeRowsQ8_Kx2MmlaInto, qm.q4_k.packMatmulRhsQ4_Kx2Mmla, gemm2DEntry(.{ .weight = .q4_k, .rhs = .x2mmla, .lhs = .q8_kx2mmla }), qm.q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange, .{ .{ 64, 64, qk_k }, .{ 2, col_n, col_k }, .{ 128, 128, qk_k } } },
-        .{ .q8_0, dtype_mod.BlockQ8_0, qm.BlockQ8_0x4, qm.q8_0.quantizeRowsQ8_0x4PaddedInto, qm.q8_0.packMatmulRhsQ8_0x4, gemm2DEntry(.{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4 }), qm.q8_0.matmulQ8_0x4PackedRhsRange, .{ .{ row_m, row_n, row_k }, .{ 4, col_n, col_k }, .{ 128, col_n, col_k } } },
+        .{ .q4_k, dtype_mod.BlockQ4_K, qm.types.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q4_k.packMatmulRhsQ4_Kx8, gemm2DEntry(.{ .weight = .q4_k, .rhs = .x8, .lhs = .q8_kx4 }), qm.q4_k.matmulQ4_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
+        .{ .q5_k, dtype_mod.BlockQ5_K, qm.types.BlockQ8_Kx4, qm.q8k.quantizeRowsQ8_Kx4PaddedInto, qm.q5_k.packMatmulRhsQ5_Kx8, gemm2DEntry(.{ .weight = .q5_k, .rhs = .x8, .lhs = .q8_kx4 }), qm.q5_k.matmulQ5_Kx8Q8_Kx4RhsRange, .{ .{ 64, 64, qk_k }, .{ 4, col_n, col_k }, .{ row_m, row_n, row_k } } },
+        .{ .q4_k, dtype_mod.BlockQ4_K, qm.types.BlockQ8_Kx2Mmla, qm.q8k.quantizeRowsQ8_Kx2MmlaInto, qm.q4_k.packMatmulRhsQ4_Kx2Mmla, gemm2DEntry(.{ .weight = .q4_k, .rhs = .x2mmla, .lhs = .q8_kx2mmla }), qm.q4_k.matmulQ4_Kx2MmlaQ8_Kx2MmlaRhsRange, .{ .{ 64, 64, qk_k }, .{ 2, col_n, col_k }, .{ 128, 128, qk_k } } },
+        .{ .q8_0, dtype_mod.BlockQ8_0, qm.types.BlockQ8_0x4, qm.q8_0.quantizeRowsQ8_0x4PaddedInto, qm.q8_0.packMatmulRhsQ8_0x4, gemm2DEntry(.{ .weight = .q8_0, .rhs = .x4, .lhs = .q8_0x4 }), qm.q8_0.matmulQ8_0x4PackedRhsRange, .{ .{ row_m, row_n, row_k }, .{ 4, col_n, col_k }, .{ 128, col_n, col_k } } },
     }) |spec| {
         inline for (spec[7]) |shape| {
             const m, const n, const k = shape;
@@ -332,7 +332,7 @@ test "pooled dispatch matches serial: lane-packed LHS entries" {
             fillUniform(&prng, acts, 1.0);
             var a = try Tensor.fromSlice(allocator, &.{ m, k }, acts);
             defer a.deinit();
-            const group: usize = if (spec[2] == qm.BlockQ8_Kx2Mmla) 2 else 4;
+            const group: usize = if (spec[2] == qm.types.BlockQ8_Kx2Mmla) 2 else 4;
             const groups = (m + group - 1) / group;
             const lhs = try allocator.alloc(spec[2], groups * (k / blockElems(spec[1])));
             defer allocator.free(lhs);

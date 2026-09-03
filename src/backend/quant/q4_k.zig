@@ -486,7 +486,7 @@ fn q4Kx2MmlaDmin(rhs: *const types.BlockQ4_Kx2Mmla, lhs: *const types.BlockQ8_Kx
     };
 }
 
-fn q4Kx2MmlaValue(qs: *const [types.qk_k_block_size * 2]i8, subblock: usize, feature: usize, lane: usize) i8 {
+fn q4Kx2MmlaValue(qs: *const [dtype_mod.qk_k_block_size * 2]i8, subblock: usize, feature: usize, lane: usize) i8 {
     const half = feature / 16;
     const local = feature % 16;
     const base = subblock * 64 + half * 32;
@@ -1231,7 +1231,7 @@ pub fn accumulateQ4_Kx8Q8_Kx4Scalar(lhs: *const types.BlockQ8_Kx4, rhs: *const B
     }
 }
 
-pub fn dequantizeBlockQ4_KInto(dst: *[types.qk_k_block_size]f32, src: *const BlockQ4_K) void {
+pub fn dequantizeBlockQ4_KInto(dst: *[dtype_mod.qk_k_block_size]f32, src: *const BlockQ4_K) void {
     const d = f16BitsToF32(src.dm[0]);
     const dmin = f16BitsToF32(src.dm[1]);
     var subblock: usize = 0;
@@ -1254,8 +1254,8 @@ fn q4KValue(w: *const BlockQ4_K, subblock: usize, offset: usize) u8 {
 /// f32 -> Q4_K encoder for one 256-element block; faithful port of ggml's
 /// quantize_row_q4_K_ref (byte-exact, see quant/encode_golden_test.zig).
 /// Assumes finite input (no NaN/inf); see the encoder contract in q8k.zig.
-pub fn quantizeBlockQ4_KInto(dst: *BlockQ4_K, src: *const [types.qk_k_block_size]f32) void {
-    var L: [types.qk_k_block_size]u8 = undefined;
+pub fn quantizeBlockQ4_KInto(dst: *BlockQ4_K, src: *const [dtype_mod.qk_k_block_size]f32) void {
+    var L: [dtype_mod.qk_k_block_size]u8 = undefined;
     var Laux: [32]u8 = undefined;
     var weights: [32]f32 = undefined;
     var mins: [8]f32 = undefined;
@@ -1309,7 +1309,7 @@ pub fn quantizeBlockQ4_KInto(dst: *BlockQ4_K, src: *const [types.qk_k_block_size
 
     var qs_offset: usize = 0;
     j = 0;
-    while (j < types.qk_k_block_size) : (j += 64) {
+    while (j < dtype_mod.qk_k_block_size) : (j += 64) {
         var l: usize = 0;
         while (l < 32) : (l += 1) {
             dst.qs[qs_offset + l] = L[j + l] | (L[j + l + 32] << 4);
@@ -1323,7 +1323,7 @@ pub fn quantizeRowQ4_KInto(dst: []BlockQ4_K, src: []const f32) !void {
     const block_count = try q8k.qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (dst, 0..) |*block, block_index| {
-        quantizeBlockQ4_KInto(block, src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size]);
+        quantizeBlockQ4_KInto(block, src[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size]);
     }
 }
 
@@ -1345,15 +1345,15 @@ test "ggml_q4_k dot and matmul consume loaded blocks" {
     var q8: BlockQ8_K = undefined;
     q8k.fillQ8KPattern(&q8);
 
-    var dense_w: [types.qk_k_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.qk_k_block_size]f32 = undefined;
     dequantizeBlockQ4_KInto(&dense_w, &q4);
-    var dense_a: [types.qk_k_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.qk_k_block_size]f32 = undefined;
     q8k.dequantizeBlockQ8_KInto(&dense_a, &q8);
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ4_KQ8_K(&q4, &q8));
 
     var rhs_blocks = [_]BlockQ4_K{ q4, q4 };
-    var qrhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, types.qk_k_block_size, 2, &rhs_blocks);
+    var qrhs = try q8k.quantizedMatmulRhsQ4_KFromBlocks(allocator, dtype_mod.qk_k_block_size, 2, &rhs_blocks);
     defer qrhs.deinit();
     var out: [2]f32 = undefined;
     matmulQ4_KRhsRange(&out, &.{q8}, &qrhs, 1, 2, 0, 1);

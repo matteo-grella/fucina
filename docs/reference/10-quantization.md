@@ -12,14 +12,15 @@ kernels over dynamically quantized activations. The stack has three tiers:
    `logicalDType`).
 2. **kernel tier** (`src/backend/quant.zig` and `src/backend/quant/*.zig`) —
    encoders, decoders, activation quantizers, dot/matmul kernels, packed RHS
-   layouts, and the format-trait table. The core bands (exec, moe, store,
-   weights, ag) use its curated surface `backend.quant` (the RHS
-   containers, descriptors, block-count rule and entry points), which
-   `arch-check` enforces; the raw module is reachable as
-   `fucina.internal.backend_mod.quantized_matmul` for the models band and
-   the research surface (bench, tools, examples), and exposes the format
-   modules by name (`quantized_matmul.q4_k.X`, `.q8k.X`, `.cold.X`);
-   application code normally never calls it directly.
+   layouts, and the format-trait table. `backend.quant` is the module
+   itself: the core bands (exec, moe, store, weights, ag) use its own
+   `pub` surface (the RHS containers and descriptors in `quant.types`,
+   the block-count rule and the entry points), and `arch-check` keeps them
+   off the per-format kernel children (`quant.q4_k.X`, `.q8k.X`,
+   `.cold.X`), which the models band reaches as
+   `fucina.internal.backend_mod.quant.<fmt>` and the research surface
+   (bench, tools, examples) through `raw_backend`; application code
+   normally never calls them directly.
 3. **facade tier** (`src/ag/tensor.zig`, `src/exec/quant_matmul.zig`) —
    `fucina.Tensor(.{ .dtype = .q4_k, ... })` constant tensors, `dot` with a
    quantized RHS, `getRows`, `to(.f32)`, `packRhs`/`dotPacked`, and the
@@ -303,9 +304,9 @@ any format with an RHS kernel, `blocks` (a `[]const` slice: borrowed or
 owned) plus `k`/`n` and `blocks_per_column`, with an **optional
 allocator**: `allocator = null` means the blocks are *borrowed* (mmap'd
 GGUF, packed ES genomes, an expert stack) and `deinit` frees nothing. The
-per-format names are aliases of it: `fucina.quant.QuantizedMatmulRhsQ2_K`,
-`QuantizedMatmulRhsQ4_K`, `QuantizedMatmulRhsQ5_K`, `QuantizedMatmulRhsQ6_K`
-(root), and in the kernel tier `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
+per-format names are aliases of it (`fucina.quant.types`):
+`QuantizedMatmulRhsQ2_K`, `QuantizedMatmulRhsQ4_K`, `QuantizedMatmulRhsQ5_K`,
+`QuantizedMatmulRhsQ6_K`, `QuantizedMatmulRhsQ8_0`, `QuantizedMatmulRhsQ4_0`,
 `QuantizedMatmulRhsQ3_K` and `QuantizedMatmulRhs{Q1_0,Q2_0,Q4_1,Q5_0,Q5_1,IQ1_S,
 IQ1_M,IQ2_XXS,IQ2_XS,IQ2_S,IQ3_XXS,IQ3_S,IQ4_NL,IQ4_XS,TQ1_0,TQ2_0,MXFP4,NVFP4}`.
 The type-erased `AnyQuantizedMatmulRhs` union the backends dispatch on is
@@ -336,7 +337,7 @@ aarch64+i8mm targets, x8 otherwise. Each container owns its snapshot
 (`PackedDenseRhs.rhs` or quantized blocks), holds `k`/`n`, and carries a
 comptime `dtype` that `dotPacked` dispatches on (the Q4_K x8/x2mmla split is
 the container type itself: compare `@TypeOf(rhs)` against
-`fucina.quant.QuantizedMatmulRhsQ4_Kx2Mmla`). The `Q4_Kx4` container exists
+`fucina.quant.types.QuantizedMatmulRhsQ4_Kx2Mmla`). The `Q4_Kx4` container exists
 only for kernel comparisons and has no facade entry (comptime error).
 
 Packing and consuming happen on the facade:

@@ -63,12 +63,12 @@ pub fn packGroupedQ8_0Rhs(
     n_groups: usize,
     rank: usize,
     group_dim: usize,
-) ![]backend_quant.QuantizedMatmulRhsQ8_0x4 {
+) ![]backend_quant.types.QuantizedMatmulRhsQ8_0x4 {
     if (group_dim % 32 != 0 or rank % 4 != 0 or n_groups == 0) return Error.InvalidWeightShape;
     const bpr = group_dim / 32;
     const row_bytes = bpr * @sizeOf(dtype_mod.BlockQ8_0);
     if (weight_bytes.len != n_groups * rank * row_bytes) return Error.InvalidWeightShape;
-    const packs = try allocator.alloc(backend_quant.QuantizedMatmulRhsQ8_0x4, n_groups);
+    const packs = try allocator.alloc(backend_quant.types.QuantizedMatmulRhsQ8_0x4, n_groups);
     var built: usize = 0;
     errdefer {
         for (packs[0..built]) |*p| p.deinit();
@@ -85,7 +85,7 @@ pub fn packGroupedQ8_0Rhs(
 pub fn groupedQ8_0GemvFusedInto(
     ctx: *ExecContext,
     x: []const f32,
-    rhs_packs: []const backend_quant.QuantizedMatmulRhsQ8_0x4,
+    rhs_packs: []const backend_quant.types.QuantizedMatmulRhsQ8_0x4,
     rank: usize,
     group_dim: usize,
     out: []f32,
@@ -105,7 +105,7 @@ pub fn groupedQ8_0GemvFusedInto(
     const Task = struct {
         out: []f32,
         lhs: []const dtype_mod.BlockQ8_0,
-        rhs: *const backend_quant.QuantizedMatmulRhsQ8_0x4,
+        rhs: *const backend_quant.types.QuantizedMatmulRhsQ8_0x4,
         n: usize,
 
         fn run(task: *const @This()) void {

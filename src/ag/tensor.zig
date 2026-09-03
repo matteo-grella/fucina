@@ -1476,7 +1476,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         }
 
         /// Explicit-layout escape hatch over `packRhs`: pack into a specific
-        /// container type (`fucina.quant.QuantizedMatmulRhsQ4_Kx8`, ...),
+        /// container type (`fucina.quant.types.QuantizedMatmulRhsQ4_Kx8`, ...),
         /// comptime-validated against the tensor dtype. Needed e.g. to
         /// exercise the fused x8 kernels on hardware where `packRhs` would
         /// select x2mmla, at the cost of the ISA-best kernel.
@@ -1484,7 +1484,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
             comptime {
                 if (tag_count != 2) @compileError("packRhsAs requires a rank-2 tensor");
                 if (Rhs == backend_mod.PackedDenseRhs) @compileError("packRhsAs(PackedDenseRhs) requires an f32/f16/bf16 tensor; call its packRhs method");
-                if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ4_Kx4) @compileError("packRhsAs: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
+                if (Rhs == backend_mod.quant.types.QuantizedMatmulRhsQ4_Kx4) @compileError("packRhsAs: the Q4_Kx4 pack has no facade entry (kernel-comparison surface below the facade)");
                 if (!isPackedRhsType(Rhs)) @compileError("packRhsAs: " ++ @typeName(Rhs) ++ " is not a packed matmul RHS");
                 if (tensor_dtype != Rhs.dtype) @compileError("packRhsAs(" ++ @typeName(Rhs) ++ ") requires a ." ++ @tagName(Rhs.dtype) ++ " tensor");
             }

@@ -329,7 +329,7 @@ const Layer = struct {
     output_a: []const u8,
     /// Load-time x4 packs of `output_a`, one per group — the decode fast
     /// path's hot-kernel RHS (`weights.groupedQ8_0GemvFusedInto`).
-    output_a_x4: []fucina.quant.QuantizedMatmulRhsQ8_0x4,
+    output_a_x4: []fucina.quant.types.QuantizedMatmulRhsQ8_0x4,
     output_b: LinearWeight,
     attn_compressor: ?Compressor,
     index_compressor: ?Compressor,

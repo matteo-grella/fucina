@@ -66,7 +66,7 @@ pub fn quantizeRowsQ8_0x4PaddedGroupsInto(
                 if (row >= rows) {
                     zeroQ8_0x4Lane(dst, row_lane);
                 } else {
-                    storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]));
+                    storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size]));
                 }
             }
         }
@@ -112,7 +112,7 @@ pub fn quantizeRowsQ8_0x4GroupsInto(
             const dst = &blocks[row_group * blocks_per_row + block_index];
             inline for (0..4) |row_lane| {
                 const row = row_group * 4 + row_lane;
-                storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]));
+                storeQ8_0x4Lane(dst, row_lane, q8k.quantizeBlockQ8_0(data[row * cols + block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size]));
             }
         }
     }
@@ -166,7 +166,7 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
     row_group_end: usize,
 ) void {
     const one: QKV4f32 = @splat(1);
-    var values: [types.q8_0_block_size]f32 = undefined;
+    var values: [dtype_mod.q8_0_block_size]f32 = undefined;
     var row_group = row_group_start;
     while (row_group < row_group_end) : (row_group += 1) {
         var block_index: usize = 0;
@@ -178,8 +178,8 @@ pub fn quantizeSplitSwiGluRowsQ8_0x4PaddedGroupsInto(
                     zeroQ8_0x4Lane(dst, row_lane);
                 } else {
                     const row_base = row * cols * 2;
-                    const gate = data[row_base + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-                    const up = data[row_base + cols + block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
+                    const gate = data[row_base + block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size];
+                    const up = data[row_base + cols + block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size];
 
                     // The amax rides along with the fused SwiGLU values.
                     var amaxv: QKV4f32 = @splat(0);
@@ -783,11 +783,11 @@ pub fn vecDotQ8_0Q8_0Pairx2(
 /// lanes load and store once for both rows. Arithmetic per lane is the
 /// two sequential `weightedQ8_0Row` calls' exact add order.
 pub fn weightedQ8_0Row2(comptime accumulate: bool, out: []f32, b0: []const BlockQ8_0, w0: f32, b1: []const BlockQ8_0, w1: f32) void {
-    std.debug.assert(out.len == b0.len * types.q8_0_block_size and b1.len == b0.len);
+    std.debug.assert(out.len == b0.len * dtype_mod.q8_0_block_size and b1.len == b0.len);
     for (b0, b1, 0..) |*blk0, *blk1, bi| {
         const s0: @Vector(8, f32) = @splat(w0 * f16BitsToF32(blk0.d));
         const s1: @Vector(8, f32) = @splat(w1 * f16BitsToF32(blk1.d));
-        const base = bi * types.q8_0_block_size;
+        const base = bi * dtype_mod.q8_0_block_size;
         inline for (0..4) |c| {
             const v0: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk0.qs[c * 8 ..][0..8].*));
             const v1: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk1.qs[c * 8 ..][0..8].*));
@@ -813,7 +813,7 @@ pub fn weightedQ8_0RowPair2(
     w10: f32,
     w11: f32,
 ) void {
-    std.debug.assert(out0.len == b0.len * types.q8_0_block_size and out1.len == out0.len and b1.len == b0.len);
+    std.debug.assert(out0.len == b0.len * dtype_mod.q8_0_block_size and out1.len == out0.len and b1.len == b0.len);
     for (b0, b1, 0..) |*blk0, *blk1, bi| {
         const d0 = f16BitsToF32(blk0.d);
         const d1 = f16BitsToF32(blk1.d);
@@ -821,7 +821,7 @@ pub fn weightedQ8_0RowPair2(
         const s01: @Vector(8, f32) = @splat(w01 * d0);
         const s10: @Vector(8, f32) = @splat(w10 * d1);
         const s11: @Vector(8, f32) = @splat(w11 * d1);
-        const base = bi * types.q8_0_block_size;
+        const base = bi * dtype_mod.q8_0_block_size;
         inline for (0..4) |c| {
             const v0: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk0.qs[c * 8 ..][0..8].*));
             const v1: @Vector(8, f32) = @floatFromInt(@as(@Vector(8, i8), blk1.qs[c * 8 ..][0..8].*));
@@ -844,10 +844,10 @@ pub fn weightedQ8_0RowPair2(
 /// the quantized bytes, no f32 scratch row. `accumulate=false` overwrites
 /// (the first routed V row), `true` adds.
 pub fn weightedQ8_0Row(comptime accumulate: bool, out: []f32, blocks: []const BlockQ8_0, weight: f32) void {
-    std.debug.assert(out.len == blocks.len * types.q8_0_block_size);
+    std.debug.assert(out.len == blocks.len * dtype_mod.q8_0_block_size);
     for (blocks, 0..) |*b, bi| {
         const scale: @Vector(8, f32) = @splat(weight * f16BitsToF32(b.d));
-        const base = bi * types.q8_0_block_size;
+        const base = bi * dtype_mod.q8_0_block_size;
         inline for (0..4) |c| {
             const chunk: @Vector(8, i8) = b.qs[c * 8 ..][0..8].*;
             const vf: @Vector(8, f32) = @floatFromInt(chunk);
@@ -864,12 +864,12 @@ pub fn weightedQ8_0Row(comptime accumulate: bool, out: []f32, blocks: []const Bl
 /// Pair variant of `weightedQ8_0Row`: two outputs, two weights, one pass
 /// over the shared V row's blocks.
 pub fn weightedQ8_0RowPair(comptime accumulate: bool, out0: []f32, out1: []f32, blocks: []const BlockQ8_0, w0: f32, w1: f32) void {
-    std.debug.assert(out0.len == blocks.len * types.q8_0_block_size and out1.len == out0.len);
+    std.debug.assert(out0.len == blocks.len * dtype_mod.q8_0_block_size and out1.len == out0.len);
     for (blocks, 0..) |*b, bi| {
         const d = f16BitsToF32(b.d);
         const s0: @Vector(8, f32) = @splat(w0 * d);
         const s1: @Vector(8, f32) = @splat(w1 * d);
-        const base = bi * types.q8_0_block_size;
+        const base = bi * dtype_mod.q8_0_block_size;
         inline for (0..4) |c| {
             const chunk: @Vector(8, i8) = b.qs[c * 8 ..][0..8].*;
             const vf: @Vector(8, f32) = @floatFromInt(chunk);

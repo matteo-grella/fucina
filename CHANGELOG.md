@@ -25,6 +25,23 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- `backend.quant` is the quant module itself (`backend/quant.zig`), not a
+  curated list beside it, and the raw name `backend.quantized_matmul` is
+  gone. The RHS containers, descriptors and the block-count rule have one
+  home, `quant.types` (`backend/quant/types.zig`); the block-size constants
+  have one home, `dtype`. Rewrites: `backend.quant.QuantizedMatmulRhsX` →
+  `backend.quant.types.QuantizedMatmulRhsX` (likewise `BlockQ8_0x4`,
+  `BlockQ8_Kx4`, `BlockTQ2_0*`, `AnyQuantizedMatmulRhs`, `CompactRhs`,
+  `LanePackedRhs`, `QuantizedRows*`, `RawRhs`, `RhsLifetime`,
+  `QuantizedFormatError`, `blockCountForDType`); `quant.PackedMatmulRhsI8` →
+  `quant.types.QuantizedMatmulRhsI8`; `quant.qk_k_block_size` and
+  `quant.types.<fmt>_block_size` → `dtype.<fmt>_block_size`;
+  `fucina.internal.backend_mod.quantized_matmul` and `raw_backend.quantized_matmul`
+  → `.quant`; `fucina.quant.QuantizedMatmulRhsX` → `fucina.quant.types.QuantizedMatmulRhsX`
+  (the root keeps the GGML block structs and `q8_0_block_size` by name).
+  The per-format kernel children (`quant.q8k`, `quant.q4_k`, ...) stay the
+  research surface; `arch-check`'s backend-door rule now names them
+  instead of the old module name.
 - The row and attention seams are files, not lists. `backend.rows` is
   `backend/vector/rows.zig` and `backend.attention` is
   `backend/vector/attention.zig`: each is the root of a directory holding

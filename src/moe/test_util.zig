@@ -10,7 +10,7 @@ const f16BitsFromF32 = exec_util.f16BitsFromF32;
 
 pub fn buildTestMoeRhsQ5K(allocator: Allocator, rows: usize, k_dim: usize, seed: usize) !moe.MoeRhs {
     const qm = backend_mod.quant;
-    const bpc = k_dim / qm.qk_k_block_size;
+    const bpc = k_dim / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ5_K, rows * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, block_i| {

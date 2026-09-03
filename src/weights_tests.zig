@@ -736,11 +736,11 @@ test "tie-fitted ptqtp serves the folded one-pass semantics" {
     const qlhs = try allocator.alloc(fucina.quant.BlockQ8_K, seq_len * bpr);
     defer allocator.free(qlhs);
     for (0..seq_len) |r| {
-        try fucina.internal.backend_mod.quantized_matmul.q8k.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);
+        try fucina.internal.backend_mod.quant.q8k.quantizeRowQ8_KInto(qlhs[r * bpr ..][0..bpr], x_vals[r * in_dim ..][0..in_dim]);
     }
     const want = try allocator.alloc(f32, seq_len * out_dim);
     defer allocator.free(want);
-    fucina.internal.backend_mod.quantized_matmul.ternary.matmulTQ2_0FoldedX4RhsRange(want, qlhs, weight.ptqtp.pfold.?, bpr, out_dim, 0, seq_len);
+    fucina.internal.backend_mod.quant.ternary.matmulTQ2_0FoldedX4RhsRange(want, qlhs, weight.ptqtp.pfold.?, bpr, out_dim, 0, seq_len);
     try std.testing.expectEqualSlices(f32, want, try y.dataConst());
 }
 

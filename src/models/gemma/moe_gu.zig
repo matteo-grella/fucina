@@ -164,20 +164,20 @@ fn guDecodeBody(
     profile: ?*MoeBatchProfile,
     total_start: i128,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const Engine = GuDecodeEngine(@TypeOf(bind));
     const top_k = selected.len;
     const profile_enabled = profile != null;
     var task_prof: moe_chain.MoeTaskProfiler = undefined;
     const prof = moe_chain.MoeTaskProfiler.arm(&task_prof, profile_enabled, io);
 
-    const blocks_per_g = try qm.blockCountForDType(.q8_0, out_pe);
+    const blocks_per_g = try qm.types.blockCountForDType(.q8_0, out_pe);
     const chain_task_count = 4 * top_k;
     const chain_initial_count = 2 * top_k;
     const alloc_start = moeBatchProfileStart(profile_enabled, io);
     fucina.moe.lockDecodeScratch(ctx);
     defer fucina.moe.unlockDecodeScratch(ctx);
-    const sv = try fucina.moe.carveDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.blockCountForDType(.q8_k, hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
+    const sv = try fucina.moe.carveDecodeChainScratch(ctx, dtype_mod.BlockQ8_0, Engine.State, Engine.ChainTask, try qm.types.blockCountForDType(.q8_k, hidden), top_k, out_pe, hidden, blocks_per_g, chain_task_count);
     if (profile) |p| p.alloc_ns += moeBatchProfileElapsed(alloc_start, io);
 
     const gather_quant_start = moeBatchProfileStart(profile_enabled, io);
@@ -253,9 +253,9 @@ fn guDecodeBody(
 pub fn decodePacked(
     ctx: *ExecContext,
     x: *const Tensor,
-    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4,
     selected: []const usize,
     weights: []const f32,
     out_pe: usize,
@@ -290,15 +290,15 @@ pub fn decodePacked(
 /// Expert-weight binding for `guBatchBody`: how a gate/up or down
 /// matmul task names its `rhs` — packed x4 containers by pointer.
 const PackedExpertBind = struct {
-    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4,
 
-    fn gu(self: PackedExpertBind, e: usize, is_up: bool) *const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4 {
+    fn gu(self: PackedExpertBind, e: usize, is_up: bool) *const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4 {
         return if (is_up) &self.up[e] else &self.gate[e];
     }
 
-    fn dn(self: PackedExpertBind, e: usize) *const backend_mod.quant.QuantizedMatmulRhsQ8_0x4 {
+    fn dn(self: PackedExpertBind, e: usize) *const backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4 {
         return &self.down[e];
     }
 
@@ -325,7 +325,7 @@ const RawExpertBind = struct {
         return guRawGuView(self.gw, e, if (is_up) self.out_pe else 0, self.out_pe, self.hidden);
     }
 
-    fn dn(self: RawExpertBind, e: usize) backend_mod.quant.QuantizedMatmulRhsQ8_0 {
+    fn dn(self: RawExpertBind, e: usize) backend_mod.quant.types.QuantizedMatmulRhsQ8_0 {
         return guRawQ8View(self.gw, e, self.out_pe, self.hidden);
     }
 
@@ -608,9 +608,9 @@ fn guBatchBody(
 pub fn batchPacked(
     ctx: *ExecContext,
     x: *const Tensor,
-    gate: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    up: []const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
-    down: []const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
+    gate: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    up: []const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
+    down: []const backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4,
     selected: []const usize,
     weights: []const f32,
     top_k: usize,
@@ -618,7 +618,7 @@ pub fn batchPacked(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const a = ctx.allocator();
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
@@ -636,8 +636,8 @@ pub fn batchPacked(
         if (down[e].k != out_pe or down[e].n != hidden) return tensor.TensorError.ShapeMismatch;
     }
 
-    const bpc_in = try qm.blockCountForDType(.q8_k, hidden);
-    const bpc_g = try qm.blockCountForDType(.q8_0, out_pe);
+    const bpc_in = try qm.types.blockCountForDType(.q8_k, hidden);
+    const bpc_g = try qm.types.blockCountForDType(.q8_0, out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -931,8 +931,8 @@ fn runGuGpuGegluTask(task: *const GuGpuGegluTask) void {
 /// (gate: `row_off` 0, up: `row_off` out_pe) of one expert in the raw
 /// GGUF gate_up tensor (2*out_pe rows per expert, gate rows first).
 const GuRawGuRhs = union(enum) {
-    q6_k: backend_mod.quant.QuantizedMatmulRhsQ6_K,
-    q4_k: backend_mod.quant.QuantizedMatmulRhsQ4_K,
+    q6_k: backend_mod.quant.types.QuantizedMatmulRhsQ6_K,
+    q4_k: backend_mod.quant.types.QuantizedMatmulRhsQ4_K,
 };
 
 fn guRawGuView(
@@ -989,7 +989,7 @@ fn guRawQ8View(
     expert: usize,
     out_pe: usize,
     hidden: usize,
-) backend_mod.quant.QuantizedMatmulRhsQ8_0 {
+) backend_mod.quant.types.QuantizedMatmulRhsQ8_0 {
     const bpr = out_pe / 32;
     return .{
         .allocator = null,
@@ -1064,7 +1064,7 @@ fn runGuRawGuMatmulTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuRawQ8MatmulTask = struct {
-    rhs: backend_mod.quant.QuantizedMatmulRhsQ8_0,
+    rhs: backend_mod.quant.types.QuantizedMatmulRhsQ8_0,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,
@@ -1111,7 +1111,7 @@ pub fn batchRaw(
     io: ?std.Io,
     profile: ?*MoeBatchProfile,
 ) !Tensor {
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const a = ctx.allocator();
     const xv = try x.rankView(2);
     const seq = xv.dim(0);
@@ -1126,8 +1126,8 @@ pub fn batchRaw(
     if (gw.guBlockCount() != n_expert * 2 * out_pe * (hidden / 256)) return tensor.TensorError.ShapeMismatch;
     if (gw.dn_blocks.len != n_expert * hidden * (out_pe / 32)) return tensor.TensorError.ShapeMismatch;
 
-    const bpc_in = try qm.blockCountForDType(.q8_k, hidden);
-    const bpc_g = try qm.blockCountForDType(.q8_0, out_pe);
+    const bpc_in = try qm.types.blockCountForDType(.q8_k, hidden);
+    const bpc_g = try qm.types.blockCountForDType(.q8_0, out_pe);
 
     const route_result = try moe_chain.buildMoeRoutePlan(a, selected, n_expert, profile_enabled, io);
     var route = route_result.plan;
@@ -1204,7 +1204,7 @@ fn runGuGatherTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuQ6MatmulTask = struct {
-    rhs: *const backend_mod.quant.QuantizedMatmulRhsQ6_Kx4,
+    rhs: *const backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4,
     qlhs: []const dtype_mod.BlockQ8_K,
     bpc: usize,
     row_start: usize,
@@ -1268,7 +1268,7 @@ fn runGuGegluTaskOpaque(ctx: *anyopaque) void {
 }
 
 const GuQ8MatmulTask = struct {
-    rhs: *const backend_mod.quant.QuantizedMatmulRhsQ8_0x4,
+    rhs: *const backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4,
     qlhs: []const dtype_mod.BlockQ8_0,
     bpc: usize,
     row_start: usize,

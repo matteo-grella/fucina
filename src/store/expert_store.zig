@@ -1080,7 +1080,7 @@ pub const ExpertStore = struct {
             const dst = std.mem.sliceAsBytes(scratch[plane * plane_blocks ..][0..plane_blocks]);
             try self.preadFull(g.part, copy, dst, g.planeFileOffset(eid, plane));
         }
-        var views: [2]backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
+        var views: [2]backend_mod.quant.types.QuantizedMatmulRhsTQ2_0 = undefined;
         for (0..2) |plane| {
             views[plane] = .{
                 .allocator = null,
@@ -1091,7 +1091,7 @@ pub const ExpertStore = struct {
             };
         }
         const fg = (g.out_dim / 4) * g.blocks_per_column;
-        const out = @as([*]qm.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(section.ptr)))[0..fg];
+        const out = @as([*]qm.types.BlockTQ2_0Foldedx4, @ptrCast(@alignCast(section.ptr)))[0..fg];
         backend_mod.kernels.packMatmulRhsTQ2_0Foldedx4Into(out, &views[0], &views[1]) catch return Error.InvalidExpertGeometry;
     }
 

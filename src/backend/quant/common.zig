@@ -657,7 +657,7 @@ pub const ScaleMinK4 = struct {
 
 /// The 6-bit (scale, min) pair of sub-block `index` from a Q4_K/Q5_K
 /// 12-byte scales field (ggml `get_scale_min_k4`).
-pub fn getScaleMinK4(q: *const [types.k_scale_size]u8, index: usize) ScaleMinK4 {
+pub fn getScaleMinK4(q: *const [dtype_mod.k_scale_size]u8, index: usize) ScaleMinK4 {
     if (index < 4) {
         return .{
             .scale = q[index] & 63,

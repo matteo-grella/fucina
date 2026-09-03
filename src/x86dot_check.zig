@@ -624,7 +624,7 @@ fn checkQ8_0(allocator: std.mem.Allocator) !void {
     // excluded by construction — activations are the clamped side).
     for (&rhs_blocks[0].qs) |*q| q.* = -128;
 
-    var rhs = quant.QuantizedMatmulRhsQ8_0{
+    var rhs = quant.types.QuantizedMatmulRhsQ8_0{
         .allocator = allocator,
         .blocks = rhs_blocks,
         .blocks_per_column = blocks_per_row,

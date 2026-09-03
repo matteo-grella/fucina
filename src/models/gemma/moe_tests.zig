@@ -42,7 +42,7 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
     const gpu = backend_mod.offload;
     if (gpu.deviceName() == null) return error.SkipZigTest;
 
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -94,11 +94,11 @@ test "gemma moe raw cpu + gpu arms match the x4 path (-Dgpu=metal)" {
 
     // the x4-widened per-expert handles over the same blocks (the reference
     // path; on gpu builds the loader skips these, but the kernels remain)
-    const gate = try allocator.alloc(backend_mod.quant.QuantizedMatmulRhsQ6_Kx4, n_expert);
+    const gate = try allocator.alloc(backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4, n_expert);
     defer allocator.free(gate);
-    const up = try allocator.alloc(backend_mod.quant.QuantizedMatmulRhsQ6_Kx4, n_expert);
+    const up = try allocator.alloc(backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4, n_expert);
     defer allocator.free(up);
-    const down = try allocator.alloc(backend_mod.quant.QuantizedMatmulRhsQ8_0x4, n_expert);
+    const down = try allocator.alloc(backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4, n_expert);
     defer allocator.free(down);
     var built: usize = 0;
     defer for (0..built) |e| {

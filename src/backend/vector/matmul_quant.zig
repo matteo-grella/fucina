@@ -486,7 +486,7 @@ pub fn matmulQuantRows(
     const cd = common.contiguousData(out, m * n);
     switch (comptime g.lhs) {
         .q8_0 => {
-            const blocks_per_row = try quant.blockCountForDType(.q8_0, k);
+            const blocks_per_row = try quant.types.blockCountForDType(.q8_0, k);
             var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
             const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
             defer scratch.release(allocator, qlhs_blocks);
@@ -515,7 +515,7 @@ pub fn matmul2DQuantizedRhsI8(
     allocator: std.mem.Allocator,
     out: *Tensor,
     a: *const Tensor,
-    rhs: *const quant.QuantizedMatmulRhsI8,
+    rhs: *const quant.types.QuantizedMatmulRhsI8,
     m: usize,
     n: usize,
     k: usize,
@@ -576,7 +576,7 @@ pub const scalar = struct {
         allocator: std.mem.Allocator,
         out: *Tensor,
         a: *const Tensor,
-        rhs: quant.AnyQuantizedMatmulRhs,
+        rhs: quant.types.AnyQuantizedMatmulRhs,
         m: usize,
         n: usize,
         k: usize,
@@ -596,7 +596,7 @@ pub const scalar = struct {
         allocator: std.mem.Allocator,
         out: *Tensor,
         a: *const Tensor,
-        rhs: *const quant.QuantizedMatmulRhsI8,
+        rhs: *const quant.types.QuantizedMatmulRhsI8,
         m: usize,
         n: usize,
         k: usize,
@@ -611,7 +611,7 @@ pub const scalar = struct {
         allocator: std.mem.Allocator,
         out: *Tensor,
         a: *const Tensor,
-        rhs: *const quant.QuantizedMatmulRhsTQ2_0,
+        rhs: *const quant.types.QuantizedMatmulRhsTQ2_0,
         m: usize,
         n: usize,
         k: usize,
@@ -629,14 +629,14 @@ pub const scalar = struct {
         allocator: std.mem.Allocator,
         out: *Tensor,
         a: *const Tensor,
-        rhs: *const quant.QuantizedMatmulRhsQ2_0,
+        rhs: *const quant.types.QuantizedMatmulRhsQ2_0,
         m: usize,
         n: usize,
         k: usize,
     ) !void {
         if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
         const cd = common.contiguousData(out, m * n);
-        const blocks_per_row = try quant.blockCountForDType(.q8_0, k);
+        const blocks_per_row = try quant.types.blockCountForDType(.q8_0, k);
         var scratch: LhsBlocks(dtype_mod.BlockQ8_0) = undefined;
         const qlhs_blocks = try scratch.acquire(allocator, m * blocks_per_row);
         defer scratch.release(allocator, qlhs_blocks);

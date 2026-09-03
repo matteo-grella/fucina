@@ -137,7 +137,7 @@ pub const GradcheckResult = ag.GradcheckResult;
 /// `EmptySelection`, `DivisionByZero`.
 pub const TensorError = tensor.TensorError;
 /// The public error vocabulary, derived from the band sets: `ag.Error` =
-/// `exec.Error` (`TensorError`, `backend.quant.QuantizedFormatError`,
+/// `exec.Error` (`TensorError`, `backend.quant.types.QuantizedFormatError`,
 /// `ExecError`, `OutOfMemory`) merged with `AgError`. Every fallible
 /// `Tensor`/`ExecContext` method keeps its precise inferred error set (a
 /// call site handles only what its op can actually raise); this named
@@ -192,17 +192,9 @@ pub const quant = struct {
     pub const BlockQ5_1 = dtype.BlockQ5_1;
     pub const BlockQ8_0 = dtype.BlockQ8_0;
     pub const q8_0_block_size = dtype.q8_0_block_size;
-    pub const QuantizedMatmulRhsQ8_0x4 = backend.quant.QuantizedMatmulRhsQ8_0x4;
-    pub const QuantizedMatmulRhsQ4_Kx4 = backend.quant.QuantizedMatmulRhsQ4_Kx4;
-    pub const QuantizedMatmulRhsQ4_Kx8 = backend.quant.QuantizedMatmulRhsQ4_Kx8;
-    pub const QuantizedMatmulRhsQ4_Kx2Mmla = backend.quant.QuantizedMatmulRhsQ4_Kx2Mmla;
-    pub const QuantizedMatmulRhsQ5_Kx8 = backend.quant.QuantizedMatmulRhsQ5_Kx8;
-    pub const QuantizedMatmulRhsQ6_Kx4 = backend.quant.QuantizedMatmulRhsQ6_Kx4;
-    pub const QuantizedMatmulRhsQ2_K = backend.quant.QuantizedMatmulRhsQ2_K;
-    pub const QuantizedMatmulRhsQ3_K = backend.quant.QuantizedMatmulRhsQ3_K;
-    pub const QuantizedMatmulRhsQ4_K = backend.quant.QuantizedMatmulRhsQ4_K;
-    pub const QuantizedMatmulRhsQ5_K = backend.quant.QuantizedMatmulRhsQ5_K;
-    pub const QuantizedMatmulRhsQ6_K = backend.quant.QuantizedMatmulRhsQ6_K;
+    /// The packed and compact matmul RHS containers, the RHS lifetime and
+    /// raw-RHS descriptors, and the block-count rule (`backend/quant/types.zig`).
+    pub const types = backend.quant.types;
     pub const BlockQ8_1 = dtype.BlockQ8_1;
     pub const BlockQ2_K = dtype.BlockQ2_K;
     pub const BlockQ3_K = dtype.BlockQ3_K;

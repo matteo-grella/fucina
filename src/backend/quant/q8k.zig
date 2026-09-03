@@ -15,7 +15,7 @@ const Tensor = tensor.Tensor;
 
 const QKV4f32 = common.QKV4f32;
 
-const qk_k_block_size = types.qk_k_block_size;
+const qk_k_block_size = dtype_mod.qk_k_block_size;
 
 /// The shared shell of the lane-pack RHS constructors
 /// (`packMatmulRhs*x4/x8/x2Mmla` in the format files): validation, group
@@ -108,12 +108,12 @@ pub fn quantizeRowQ8_0Into(dst: []dtype_mod.BlockQ8_0, src: []const f32) !void {
 ///
 /// One `quantizeBlockQ8_0` per block.
 pub fn quantizeRowQ8_0IntoUnchecked(dst: []dtype_mod.BlockQ8_0, src: []const f32) void {
-    std.debug.assert(src.len % types.q8_0_block_size == 0);
-    std.debug.assert(dst.len == src.len / types.q8_0_block_size);
+    std.debug.assert(src.len % dtype_mod.q8_0_block_size == 0);
+    std.debug.assert(dst.len == src.len / dtype_mod.q8_0_block_size);
 
     var block_index: usize = 0;
     while (block_index < dst.len) : (block_index += 1) {
-        dst[block_index] = quantizeBlockQ8_0(src[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size]);
+        dst[block_index] = quantizeBlockQ8_0(src[block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size]);
     }
 }
 
@@ -125,7 +125,7 @@ pub fn quantizeRowQ8_0IntoUnchecked(dst: []dtype_mod.BlockQ8_0, src: []const f32
 /// rounding first because the bounds are integral, so every byte equals the
 /// scalar `common.quantizeToI8` form (`x86dot_check.zig` pins the two
 /// against each other on every ISA it runs on).
-pub fn quantizeBlockQ8_0(src: *const [types.q8_0_block_size]f32) dtype_mod.BlockQ8_0 {
+pub fn quantizeBlockQ8_0(src: *const [dtype_mod.q8_0_block_size]f32) dtype_mod.BlockQ8_0 {
     var amaxv: QKV4f32 = @splat(0);
     inline for (0..8) |j| {
         const v: QKV4f32 = src[j * 4 ..][0..4].*;
@@ -136,7 +136,7 @@ pub fn quantizeBlockQ8_0(src: *const [types.q8_0_block_size]f32) dtype_mod.Block
 
 /// The scale-and-round half of `quantizeBlockQ8_0` for a caller that
 /// already holds the block's amax.
-pub fn quantizeBlockQ8_0Scaled(src: *const [types.q8_0_block_size]f32, amax: f32) dtype_mod.BlockQ8_0 {
+pub fn quantizeBlockQ8_0Scaled(src: *const [dtype_mod.q8_0_block_size]f32, amax: f32) dtype_mod.BlockQ8_0 {
     const d = amax / 127.0;
     const inv_d: f32 = if (d == 0) 0 else 1.0 / d;
 
@@ -153,7 +153,7 @@ pub fn quantizeBlockQ8_0Scaled(src: *const [types.q8_0_block_size]f32, amax: f32
 }
 
 pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const dtype_mod.BlockQ8_0) !void {
-    if (dst.len != try types.checkedProduct(src.len, types.q8_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try types.checkedProduct(src.len, dtype_mod.q8_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     // Explicit 8-lane vectors: the q8_0 KV-cache attention path dequantizes
     // every K/V row it streams through this function, and the scalar
@@ -164,8 +164,8 @@ pub fn dequantizeRowQ8_0Into(dst: []f32, src: []const dtype_mod.BlockQ8_0) !void
     for (src, 0..) |block, block_index| {
         const d = common.f16BitsToF32(block.d);
         const dv: @Vector(8, f32) = @splat(d);
-        const out = dst[block_index * types.q8_0_block_size ..][0..types.q8_0_block_size];
-        inline for (0..types.q8_0_block_size / 8) |j| {
+        const out = dst[block_index * dtype_mod.q8_0_block_size ..][0..dtype_mod.q8_0_block_size];
+        inline for (0..dtype_mod.q8_0_block_size / 8) |j| {
             const q: @Vector(8, i8) = block.qs[j * 8 ..][0..8].*;
             const w: @Vector(8, f32) = @floatFromInt(q);
             out[j * 8 ..][0..8].* = w * dv;

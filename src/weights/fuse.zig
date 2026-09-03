@@ -152,7 +152,7 @@ pub fn fuseLinear(ctx: *ExecContext, parts: []const *LinearWeight) !?LinearWeigh
             total_blocks += part.tq2_0_fx4.pack.len;
             total_n += part.tq2_0_fx4.n;
         }
-        const fused = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, total_blocks);
+        const fused = try ctx.allocator().alloc(backend_quant.types.BlockTQ2_0Foldedx4, total_blocks);
         errdefer ctx.allocator().free(fused);
         var off: usize = 0;
         for (parts) |part| {

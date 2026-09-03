@@ -385,10 +385,10 @@ Enforcement:
   test file forwarded from a production file, and the backend door: a
   production file of the core bands (ag, tagged, moe, exec, store)
   imports nothing under `src/backend/` (only `src/backend.zig`) and never
-  names the raw `quantized_matmul` module (its curated surface is
-  `backend.quant`; the models band takes the raw module through
-  `fucina.internal` and the apps band through `raw_backend`, the two
-  documented escape hatches). An SCC is permitted only
+  names a per-format kernel child of the quant module (`quant.q8k`,
+  `quant.q4_k`, ...; every kernel it needs is a `backend.kernels` entry;
+  the models band takes the children through `fucina.internal` and the
+  apps band through `raw_backend`, the two documented escape hatches). An SCC is permitted only
   when every member is in the same band and one member is the directory
   root of another (`P.zig` with a member under `P/`: `src/exec.zig` with
   `src/exec/*.zig`, the struct-body-in-the-root shape `std.zig` and

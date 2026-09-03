@@ -104,7 +104,7 @@ const Impl = struct {
         fn preluChannelsBackwardAlphaInto(galpha: []f32, gy: []const f32, x: []const f32, rows: usize, cols: usize) void {
             elementwise.scalar.preluChannelsBackwardAlphaInto(galpha, gy, x, rows, cols);
         }
-        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: Allocator, out: *Tensor, a: *const Tensor, rhs: qm.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
+        fn matmul2DQuantizedRhs(pc: ParallelConfig, allocator: Allocator, out: *Tensor, a: *const Tensor, rhs: qm.types.AnyQuantizedMatmulRhs, m: usize, n: usize, k: usize) !void {
             _ = pc;
             return vector_mq.scalar.matmul2DQuantizedRhs(allocator, out, a, rhs, m, n, k);
         }
@@ -699,7 +699,7 @@ const Impl = struct {
     const qm = @import("quant.zig");
     const dtype_mod = @import("../dtype.zig");
     const DType = dtype_mod.DType;
-    const qk_k = qm.types.qk_k_block_size;
+    const qk_k = dtype_mod.qk_k_block_size;
 
     // m hits the single-row, generic, and x4-LHS arms (native's
     // q4_k_x4_min_rows = 4; m = 16 also drives the Q8_0x4 packed-LHS path);
@@ -755,7 +755,7 @@ const Impl = struct {
         return deq;
     }
 
-    fn runBothQuant(allocator: Allocator, a: *const Tensor, rhs: qm.AnyQuantizedMatmulRhs, ref: []const f32, m: usize, n: usize, k: usize) !void {
+    fn runBothQuant(allocator: Allocator, a: *const Tensor, rhs: qm.types.AnyQuantizedMatmulRhs, ref: []const f32, m: usize, n: usize, k: usize) !void {
         var cpu_out = try Tensor.zeros(allocator, &.{ m, n });
         defer cpu_out.deinit();
         try cpu.matmul2DQuantizedRhs(.{}, allocator, &cpu_out, a, rhs, m, n, k);
@@ -807,7 +807,7 @@ const Impl = struct {
 
             try runBothQuant(allocator, &a, .{ .q8_0 = &rhs }, ref, m, n, k);
 
-            var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ8_0x4, allocator, rhs.blocks, n, k, rhs.blocks_per_column);
+            var x4 = try qm.packRhsAs(qm.types.QuantizedMatmulRhsQ8_0x4, allocator, rhs.blocks, n, k, rhs.blocks_per_column);
             defer x4.deinit();
             try runBothPacked(allocator, &a, &x4, ref, m, n, k);
         }
@@ -871,7 +871,7 @@ const Impl = struct {
                 else => comptime unreachable,
             };
             defer rhs.deinit();
-            const any: qm.AnyQuantizedMatmulRhs = switch (dt) {
+            const any: qm.types.AnyQuantizedMatmulRhs = switch (dt) {
                 .q4_k => .{ .q4_k = &rhs },
                 .q5_k => .{ .q5_k = &rhs },
                 .q6_k => .{ .q6_k = &rhs },
@@ -882,20 +882,20 @@ const Impl = struct {
             // Packed lane arms.
             switch (dt) {
                 .q4_k => {
-                    var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ4_Kx4, allocator, blocks, n, k, bpc);
+                    var x4 = try qm.packRhsAs(qm.types.QuantizedMatmulRhsQ4_Kx4, allocator, blocks, n, k, bpc);
                     defer x4.deinit();
                     try runBothPacked(allocator, &a, &x4, ref, m, n, k);
-                    var x8 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ4_Kx8, allocator, blocks, n, k, bpc);
+                    var x8 = try qm.packRhsAs(qm.types.QuantizedMatmulRhsQ4_Kx8, allocator, blocks, n, k, bpc);
                     defer x8.deinit();
                     try runBothPacked(allocator, &a, &x8, ref, m, n, k);
                 },
                 .q5_k => {
-                    var x8 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ5_Kx8, allocator, blocks, n, k, bpc);
+                    var x8 = try qm.packRhsAs(qm.types.QuantizedMatmulRhsQ5_Kx8, allocator, blocks, n, k, bpc);
                     defer x8.deinit();
                     try runBothPacked(allocator, &a, &x8, ref, m, n, k);
                 },
                 .q6_k => {
-                    var x4 = try qm.packRhsAs(qm.QuantizedMatmulRhsQ6_Kx4, allocator, blocks, n, k, bpc);
+                    var x4 = try qm.packRhsAs(qm.types.QuantizedMatmulRhsQ6_Kx4, allocator, blocks, n, k, bpc);
                     defer x4.deinit();
                     try runBothPacked(allocator, &a, &x4, ref, m, n, k);
                 },

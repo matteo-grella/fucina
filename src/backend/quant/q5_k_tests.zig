@@ -56,9 +56,9 @@ test "ggml_q5_k x8 packed matmul matches plain q5_k matmul" {
 
     var lhs_blocks = [_]dtype_mod.BlockQ8_K{ q8, q8, q8, q8 };
     var rhs_blocks = [_]BlockQ5_K{ q5, q5, q5, q5, q5, q5, q5, q5 };
-    var rhs_plain = try q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, types.qk_k_block_size, 8, &rhs_blocks);
+    var rhs_plain = try q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, dtype_mod.qk_k_block_size, 8, &rhs_blocks);
     defer rhs_plain.deinit();
-    var rhs_packed = try q5_k.packMatmulRhsQ5_Kx8(allocator, &rhs_blocks, 8, types.qk_k_block_size, 1);
+    var rhs_packed = try q5_k.packMatmulRhsQ5_Kx8(allocator, &rhs_blocks, 8, dtype_mod.qk_k_block_size, 1);
     defer rhs_packed.deinit();
 
     var expected: [32]f32 = undefined;
@@ -70,7 +70,7 @@ test "ggml_q5_k x8 packed matmul matches plain q5_k matmul" {
         try std.testing.expectApproxEqAbs(ref, got, 1e-3);
     }
 
-    const lhs_x4 = try q8k.packRowsQ8_Kx4(allocator, &lhs_blocks, 4, types.qk_k_block_size, 1);
+    const lhs_x4 = try q8k.packRowsQ8_Kx4(allocator, &lhs_blocks, 4, dtype_mod.qk_k_block_size, 1);
     defer allocator.free(lhs_x4);
     var actual_x4: [32]f32 = undefined;
     q5_k.matmulQ5_Kx8Q8_Kx4RhsRange(&actual_x4, lhs_x4, &rhs_packed, 4, 8, 0, 4);
@@ -92,7 +92,7 @@ test "Q5_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
     const allocator = std.testing.allocator;
     const k = 512;
     const n = 16; // x8-multiple (packed-layout requirement); two column groups
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     var prng = std.Random.DefaultPrng.init(0x7a52c90de13fb864);
     const random = prng.random();
@@ -130,7 +130,7 @@ test "Q5_K column-outer matmul matches row-outer tile" {
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -168,7 +168,7 @@ test "Q5_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     const k = 512;
     const n = 9; // non-multiple of any col tile, exercises the column loop tail
     const m = 16; // multiple of 4 so packRowsQ8_Kx4 applies (no padding here)
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -208,7 +208,7 @@ test "Q5_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -250,7 +250,7 @@ test "Q5_K packRowsQ8_Kx4PaddedInto + lane-packed col-outer matches row-outer ti
     const k = 768;
     const n = 7;
     const m = 13; // not a multiple of 4
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -295,7 +295,7 @@ test "Q5_K col-outer kernels: split column ranges are bit-identical to full rang
     const n = 512; // two 256-column phase chunks
     const split = 256;
     const m = 5;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -357,7 +357,7 @@ test "Q5_K col-outer kernels: split column ranges are bit-identical to full rang
 // shape) while the sdot arm executes real sdot; on x86 hosts the same tests
 // execute the real vpdpbusd / vpmaddubsw instructions.
 
-fn fillRandomBlockQ5_Kx8(block: *qm.BlockQ5_Kx8, random: std.Random) void {
+fn fillRandomBlockQ5_Kx8(block: *qm.types.BlockQ5_Kx8, random: std.Random) void {
     for (&block.d) |*d| d.* = f32ToF16Bits(0.25 + random.float(f32));
     for (&block.dmin) |*d| d.* = f32ToF16Bits(0.05 + 0.5 * random.float(f32));
     // packMatmulRhsQ5_Kx8 stores getScaleMinK4 outputs (6-bit) and q5KValue
@@ -386,7 +386,7 @@ fn recomputeBsums(block: *dtype_mod.BlockQ8_K) void {
 fn packBlockQ8_Kx4(rows: *const [4]dtype_mod.BlockQ8_K) types.BlockQ8_Kx4 {
     var dst: types.BlockQ8_Kx4 = undefined;
     inline for (0..4) |row| dst.d[row] = rows[row].d;
-    for (0..types.qk_k_block_size / 4) |feature_group| {
+    for (0..dtype_mod.qk_k_block_size / 4) |feature_group| {
         inline for (0..4) |row| {
             inline for (0..4) |lane| {
                 dst.qs[feature_group * 16 + row * 4 + lane] = rows[row].qs[feature_group * 4 + lane];
@@ -426,7 +426,7 @@ fn expectAcc4x2BitEqual(expected: [4][2]common.QKV4f32, got: [4][2]common.QKV4f3
 }
 
 // Run all plain-LHS arms against the scalar arm for one (lhs, rhs, acc) triple.
-fn checkPlainArms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ5_Kx8, acc0: [2]common.QKV4f32) !void {
+fn checkPlainArms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.types.BlockQ5_Kx8, acc0: [2]common.QKV4f32) !void {
     var ref = acc0;
     q5_k.accumulateQ5_Kx8Scalar(lhs, rhs, &ref);
 
@@ -445,7 +445,7 @@ fn checkPlainArms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ5_Kx8, a
 
 // Run all Q8_Kx4 packed-LHS arms (incl. the sdot arm — bit-exact on every
 // host) against the scalar reference.
-fn checkPackedArms(lhs: *const types.BlockQ8_Kx4, rhs: *const qm.BlockQ5_Kx8, acc0: [4][2]common.QKV4f32) !void {
+fn checkPackedArms(lhs: *const types.BlockQ8_Kx4, rhs: *const qm.types.BlockQ5_Kx8, acc0: [4][2]common.QKV4f32) !void {
     var ref = acc0;
     q5_k.accumulateQ5_Kx8Q8_Kx4Scalar(lhs, rhs, &ref);
 
@@ -476,7 +476,7 @@ const edge_activations = [_][2]i8{
     .{ -128, -128 },
 };
 
-fn fillEdgeBlockQ5_Kx8(block: *qm.BlockQ5_Kx8, qs_value: u8, scale_value: u8) void {
+fn fillEdgeBlockQ5_Kx8(block: *qm.types.BlockQ5_Kx8, qs_value: u8, scale_value: u8) void {
     for (&block.d) |*d| d.* = f32ToF16Bits(1.0);
     for (&block.dmin) |*d| d.* = f32ToF16Bits(1.0);
     for (&block.scales) |*s| s.* = scale_value;
@@ -491,7 +491,7 @@ test "ggml_q5_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
         var lhs: dtype_mod.BlockQ8_K = undefined;
-        var rhs: qm.BlockQ5_Kx8 = undefined;
+        var rhs: qm.types.BlockQ5_Kx8 = undefined;
         fillRandomBlockQ8_KConsistent(&lhs, random);
         fillRandomBlockQ5_Kx8(&rhs, random);
         try checkPlainArms(&lhs, &rhs, randomAcc2(random));
@@ -501,7 +501,7 @@ test "ggml_q5_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     // activations pinned to their extremes.
     const acc_zero: [2]common.QKV4f32 = .{ @splat(0), @splat(0) };
     var lhs: dtype_mod.BlockQ8_K = undefined;
-    var rhs: qm.BlockQ5_Kx8 = undefined;
+    var rhs: qm.types.BlockQ5_Kx8 = undefined;
     lhs.d = 1.0;
     for (edge_activations) |pattern| {
         for (&lhs.qs, 0..) |*q, i| q.* = pattern[i % 2];
@@ -524,7 +524,7 @@ test "ggml_q5_kx8 packed Q8_Kx4 SIMD arms match the scalar arm bit-exactly" {
         var rows: [4]dtype_mod.BlockQ8_K = undefined;
         for (&rows) |*r| fillRandomBlockQ8_KConsistent(r, random);
         const lhs = packBlockQ8_Kx4(&rows);
-        var rhs: qm.BlockQ5_Kx8 = undefined;
+        var rhs: qm.types.BlockQ5_Kx8 = undefined;
         fillRandomBlockQ5_Kx8(&rhs, random);
         const acc0: [4][2]common.QKV4f32 = .{
             randomAcc2(random),
@@ -543,7 +543,7 @@ test "ggml_q5_kx8 packed Q8_Kx4 SIMD arms match the scalar arm bit-exactly" {
         .{ @splat(0), @splat(0) },
     };
     var rows: [4]dtype_mod.BlockQ8_K = undefined;
-    var rhs: qm.BlockQ5_Kx8 = undefined;
+    var rhs: qm.types.BlockQ5_Kx8 = undefined;
     for (edge_activations) |pattern| {
         for (&rows, 0..) |*r, ri| {
             r.d = 1.0;
@@ -572,7 +572,7 @@ test "ggml_q5_kx8 matmul entry points match the scalar-arm reference bit-exactly
     const k = 512;
     const n = 16;
     const m = 29;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
@@ -776,7 +776,7 @@ test "q5_k row-outer tile matches the scalar row dot bit-exactly" {
     const k = 512;
     const n = 3;
     const m = 2;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {

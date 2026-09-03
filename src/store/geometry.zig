@@ -78,7 +78,7 @@ pub const StreamedQuant = enum {
             // so per column it costs 130; geometry math (rows x bpc x
             // blockSize) then yields exact byte counts (out_dim % 4 == 0
             // enforced in ProjGeometry.init).
-            .tq2_0_fx4 => @sizeOf(qm.BlockTQ2_0Foldedx4) / 4,
+            .tq2_0_fx4 => @sizeOf(qm.types.BlockTQ2_0Foldedx4) / 4,
             inline else => |tag| dtype_mod.blockByteSize(@field(DType, @tagName(tag))),
         };
     }

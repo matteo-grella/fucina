@@ -33,11 +33,12 @@
 //!
 //! Fourth invariant — the backend door. The core bands (ag, tagged, moe, exec,
 //! store) reach the backend only through `src/backend.zig`: no production
-//! file of those bands imports a file under `src/backend/`, and none names
-//! the raw quantized module `quantized_matmul` (its curated surface is
-//! `backend.quant`). The models band takes the raw module through
-//! `fucina.internal` and the apps band through `raw_backend`; both are the
-//! documented escape hatches and are exempt.
+//! file of those bands imports a file under `src/backend/`, and none names a
+//! per-format kernel child of the quant module (`quant.q8k`, `quant.q4_k`,
+//! ...; every kernel a core band needs is a `backend.kernels` entry). The
+//! models band takes the children through `fucina.internal` and the apps
+//! band through `raw_backend`; both are the documented escape hatches and
+//! are exempt.
 //!
 //! Third invariant — test-file forwarding: every test file (`*_tests.zig` /
 //! `*_test.zig`, and every file under a `<name>_tests/` directory suite)
@@ -522,6 +523,15 @@ fn collectFiles(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
     }
 }
 
+/// The per-format kernel children of `backend/quant.zig`: the research
+/// surface. A core-band file names none of them; every kernel it needs is
+/// a `backend.kernels` entry.
+fn isQuantKernelChild(name: []const u8) bool {
+    const children = [_][]const u8{ "common", "q8k", "q8_0", "q4_k", "q5_k", "q6_k", "ternary", "mxfp4", "cold" };
+    for (children) |child| if (std.mem.eql(u8, name, child)) return true;
+    return false;
+}
+
 fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *TestFiles, bypasses: *std.ArrayListUnmanaged(DoorBypass)) !void {
     for (graph.files.items, 0..) |*file, file_index| {
         const contents = try readFileSentinel(allocator, io, file.path);
@@ -538,8 +548,10 @@ fn collectEdges(allocator: Allocator, io: std.Io, graph: *Graph, test_files: *Te
         for (spans.items) |span| {
             var tok = span.start;
             while (tok + 2 <= span.end) : (tok += 1) {
-                if (door_bound and ast.tokenTag(tok) == .identifier and std.mem.eql(u8, ast.tokenSlice(tok), "quantized_matmul")) {
-                    try bypasses.append(allocator, .{ .file = file.path, .what = "names the raw `quantized_matmul` module (use `backend.quant`)" });
+                if (door_bound and ast.tokenTag(tok) == .identifier and std.mem.eql(u8, ast.tokenSlice(tok), "quant") and
+                    ast.tokenTag(tok + 1) == .period and ast.tokenTag(tok + 2) == .identifier and isQuantKernelChild(ast.tokenSlice(tok + 2)))
+                {
+                    try bypasses.append(allocator, .{ .file = file.path, .what = "names a quant kernel child (`quant.<fmt>`); take the kernel through `backend.kernels`" });
                 }
                 if (ast.tokenTag(tok) != .builtin) continue;
                 if (!std.mem.eql(u8, ast.tokenSlice(tok), "@import")) continue;

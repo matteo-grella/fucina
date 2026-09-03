@@ -63,7 +63,7 @@ pub fn linearSeqPtqtpFused(
         // Folded resident form: ONE dispatch, async return, no plane sum.
         if (comptime offload.supportsQuant(.tq2_0_folded)) {
             if (m >= 32 and weight.gpu_fold != null) {
-                const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
+                const nb01 = blocks_per_row * @sizeOf(backend_quant.types.BlockTQ2_0Folded);
                 if (try ctx.tryMatmulTernaryFolded(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
                     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
@@ -102,8 +102,8 @@ pub fn linearSeqPtqtpFused(
     // and the accumulating twin folds extra planes straight into `out` with
     // no scratch pass. Without packs, the row kernels + scratch add.
     const px4_ready = weight.px4_allocator != null;
-    var rhs: [3]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
-    var px4s: [3][]const backend_quant.BlockTQ2_0x4 = undefined;
+    var rhs: [3]backend_quant.types.QuantizedMatmulRhsTQ2_0 = undefined;
+    var px4s: [3][]const backend_quant.types.BlockTQ2_0x4 = undefined;
     var plane_count: usize = 0;
     inline for ([_][]const u8{ "p1", "p2", "p3" }, 0..) |plane_field, slot| {
         const plane: ?*const QuantWeight(.tq2_0) = if (comptime std.mem.eql(u8, plane_field, "p1"))
@@ -137,9 +137,9 @@ pub fn linearSeqPtqtpFused(
         out: []f32,
         tmp: []f32,
         lhs: []const dtype_mod.BlockQ8_K,
-        rhs: []const backend_quant.QuantizedMatmulRhsTQ2_0,
-        px4: []const []const backend_quant.BlockTQ2_0x4, // empty = row-kernel path
-        pfold: []const backend_quant.BlockTQ2_0Foldedx4, // nonempty = one-pass fold
+        rhs: []const backend_quant.types.QuantizedMatmulRhsTQ2_0,
+        px4: []const []const backend_quant.types.BlockTQ2_0x4, // empty = row-kernel path
+        pfold: []const backend_quant.types.BlockTQ2_0Foldedx4, // nonempty = one-pass fold
         bpr: usize,
         m: usize,
         n: usize,
@@ -251,7 +251,7 @@ pub fn linearSeqFx4(
     if (comptime offload.enabled and offload.supportsQuant(.tq2_0)) {
         if (comptime offload.supportsQuant(.tq2_0_folded)) {
             if (m >= 32 and weight.gpu_fold != null) {
-                const nb01 = blocks_per_row * @sizeOf(backend_quant.BlockTQ2_0Folded);
+                const nb01 = blocks_per_row * @sizeOf(backend_quant.types.BlockTQ2_0Folded);
                 if (try ctx.tryMatmulTernaryFolded(weight.gpu_fold.?, .stable_process, nb01, input.asRawTensor(), m, n, k)) |out_raw| {
                     return try Tensor(.{ .seq, out_tag }).fromTensor(ctx, out_raw);
                 }
@@ -293,7 +293,7 @@ pub fn linearSeqFx4(
     const Task = struct {
         out: []f32,
         lhs: []const dtype_mod.BlockQ8_K,
-        pack: []const backend_quant.BlockTQ2_0Foldedx4,
+        pack: []const backend_quant.types.BlockTQ2_0Foldedx4,
         bpr: usize,
         m: usize,
         n: usize,
@@ -348,7 +348,7 @@ pub const WeightPtqtp = struct {
     /// every present plane has its pack (slot i mirrors pN) or all slots are
     /// null and the fused path falls back to the row kernels (odd n,
     /// unreadable plane storage, or allocation failure at build time).
-    px4: [3]?[]backend_quant.BlockTQ2_0x4 = .{ null, null, null },
+    px4: [3]?[]backend_quant.types.BlockTQ2_0x4 = .{ null, null, null },
     px4_allocator: ?Allocator = null,
     /// GPU-resident copies of the plane blocks (`backend.offload`
     /// residency): stable device-shared bytes the Metal ternary
@@ -368,7 +368,7 @@ pub const WeightPtqtp = struct {
     /// by the GGUF sidecars (`ptqtp.tie` — ptqtp_gguf.zig), so loaded
     /// tied K=2 decorations rebuild the fold and serve one-pass.
     tied: bool = false,
-    pfold: ?[]backend_quant.BlockTQ2_0Foldedx4 = null,
+    pfold: ?[]backend_quant.types.BlockTQ2_0Foldedx4 = null,
 
     /// Construct with eager x4 pack building (and, on ternary-capable GPU
     /// builds, resident plane copies). Failure of either is silent — the
@@ -578,7 +578,7 @@ pub const WeightPtqtp = struct {
 pub const WeightPtqtpFx4 = struct {
     /// Column-group-major pack: `pack[g * blocks_per_row + bi]`, group `g`
     /// = output columns `4g..4g+3`.
-    pack: []const backend_quant.BlockTQ2_0Foldedx4,
+    pack: []const backend_quant.types.BlockTQ2_0Foldedx4,
     /// Frees `pack`; null = borrowed storage kept alive by the owner.
     allocator: ?Allocator,
     /// Out / in dims — the pack slice carries no shape.
@@ -588,7 +588,7 @@ pub const WeightPtqtpFx4 = struct {
     /// best-effort at init on capable builds.
     gpu_fold: ?[]u8 = null,
 
-    pub fn init(allocator: Allocator, pack: []const backend_quant.BlockTQ2_0Foldedx4, pack_allocator: ?Allocator, n: usize, k: usize, gpu_resident: bool) WeightPtqtpFx4 {
+    pub fn init(allocator: Allocator, pack: []const backend_quant.types.BlockTQ2_0Foldedx4, pack_allocator: ?Allocator, n: usize, k: usize, gpu_resident: bool) WeightPtqtpFx4 {
         var self = WeightPtqtpFx4{ .pack = pack, .allocator = pack_allocator, .n = n, .k = k };
         if (gpu_resident) self.buildGpuResidency(allocator);
         return self;
@@ -618,7 +618,7 @@ pub const WeightPtqtpFx4 = struct {
     /// The fold IS the weight: clone copies the pack (unlike the ptqtp
     /// clone, which drops fold/tie and rebuilds free).
     pub fn cloneView(self: *const WeightPtqtpFx4, ctx: *ExecContext) !WeightPtqtpFx4 {
-        const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, self.pack.len);
+        const owned = try ctx.allocator().alloc(backend_quant.types.BlockTQ2_0Foldedx4, self.pack.len);
         @memcpy(owned, self.pack);
         return WeightPtqtpFx4.init(ctx.allocator(), owned, ctx.allocator(), self.n, self.k, true);
     }

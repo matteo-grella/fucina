@@ -71,7 +71,7 @@ fn toBf16Weight(ctx: *ExecContext, w: *weights.LinearWeight) !void {
     w.* = .{ .dense = .{ .bf16 = converted } };
 }
 
-const quant_encode = fucina.internal.backend_mod.quantized_matmul;
+const quant_encode = fucina.internal.backend_mod.quant;
 
 /// Serving formats the zero-delta parity gate covers (block sizes 32 / 256).
 const ServingFormat = enum { q8_0, q4_k };

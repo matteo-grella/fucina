@@ -32,7 +32,7 @@ const Tensor = tensor.Tensor;
 
 const FusedActQuantTask = exec_row_ops.FusedActQuantTask;
 
-pub const RhsLifetime = backend_mod.quant.RhsLifetime;
+pub const RhsLifetime = backend_mod.quant.types.RhsLifetime;
 
 pub fn dequantizeTensor(self: *ExecContext, comptime dtype: DType, x: *const tensor.TensorOf(dtype)) !Tensor {
     comptime if (!dtype_mod.isBlockQuantized(dtype)) @compileError("dequantizeTensor requires a block-quantized dtype");
@@ -358,7 +358,7 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     }
     self.enableNativeMatmulPoolForWork(comptime if (rhsClass(Rhs) == .dense) .f32 else Rhs.dtype, m, n, k);
     switch (comptime rhsClass(Rhs)) {
-        .compact => try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator(), out, aa.tensor(), @unionInit(backend_mod.quant.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), rhs), m, n, k),
+        .compact => try kernels.matmul2DQuantizedRhs(self.pc(), self.allocator(), out, aa.tensor(), @unionInit(backend_mod.quant.types.AnyQuantizedMatmulRhs, @tagName(Rhs.dtype), rhs), m, n, k),
         .dense, .lane_packed => try kernels.matmulPacked(self.pc(), self.allocator(), out, aa.tensor(), rhs, m, n, k),
     }
 }
@@ -385,7 +385,7 @@ pub fn compactMatmulRhsFromBlocks(
     k: usize,
 ) !CompactRhsFor(dt) {
     comptime if (!dtype_mod.supportsQuantizedMatmulRhs(dt)) @compileError("RHS dtype does not support quantized matmul");
-    const blocks_per_row = try backend_mod.quant.blockCountForDType(dt, k);
+    const blocks_per_row = try backend_mod.quant.types.blockCountForDType(dt, k);
     if (blocks.len != try tensor.checkedProduct(n, blocks_per_row)) return tensor.TensorError.InvalidDataLength;
     return compactFromBlocks(CompactRhsFor(dt), self.allocator(), blocks, n, k, blocks_per_row);
 }
@@ -407,7 +407,7 @@ pub fn packMatmulRhsAs(self: *ExecContext, comptime Rhs: type, rhs: *const tenso
     if (!rhs.isContiguous()) return tensor.TensorError.UnsupportedView;
     const n = view.dim(0);
     const k = view.dim(1);
-    const blocks_per_row = try backend_mod.quant.blockCountForDType(Rhs.dtype, k);
+    const blocks_per_row = try backend_mod.quant.types.blockCountForDType(Rhs.dtype, k);
     return backend_mod.quant.packRhsAs(Rhs, self.allocator(), rhs.dataConst(), n, k, blocks_per_row);
 }
 
@@ -416,13 +416,13 @@ pub fn packMatmulRhsAs(self: *ExecContext, comptime Rhs: type, rhs: *const tenso
 const FusedRhsKind = enum { q8_0x4, q4_kx8, q5_kx8, q6_kx4 };
 
 fn kQuantFusedKind(comptime Rhs: type, comptime op_name: []const u8) FusedRhsKind {
-    return if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ8_0x4)
+    return if (Rhs == backend_mod.quant.types.QuantizedMatmulRhsQ8_0x4)
         .q8_0x4
-    else if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ4_Kx8)
+    else if (Rhs == backend_mod.quant.types.QuantizedMatmulRhsQ4_Kx8)
         .q4_kx8
-    else if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ5_Kx8)
+    else if (Rhs == backend_mod.quant.types.QuantizedMatmulRhsQ5_Kx8)
         .q5_kx8
-    else if (Rhs == backend_mod.quant.QuantizedMatmulRhsQ6_Kx4)
+    else if (Rhs == backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4)
         .q6_kx4
     else
         @compileError(op_name ++ ": no fused kernel for packed RHS " ++ @typeName(Rhs));
@@ -482,7 +482,7 @@ fn fusedKQuantGemm(
     pinned: bool,
 ) !void {
     const qm = backend_mod.quant;
-    const blocks_per_row = try qm.blockCountForDType(.q8_k, k);
+    const blocks_per_row = try qm.types.blockCountForDType(.q8_k, k);
     const n = rhs.n;
     const out_data = out.data();
 
@@ -506,7 +506,7 @@ fn fusedKQuantGemm(
 
     if (prefix_rows > 0) {
         const row_groups = if (pad_x4) (prefix_rows + 3) / 4 else prefix_rows / 4;
-        var qlhs_x4_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_Kx4, try tensor.checkedProduct(row_groups, blocks_per_row));
+        var qlhs_x4_lease = try self.rt.buffers.acquireScratch(qm.types.BlockQ8_Kx4, try tensor.checkedProduct(row_groups, blocks_per_row));
         defer qlhs_x4_lease.release();
         const qlhs_x4 = qlhs_x4_lease.items;
         const TaskT = FusedActQuantTask(act, .q8_kx4);
@@ -562,7 +562,7 @@ fn fusedKQuantGemm(
 /// shared.
 fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.FusedActKind, lhs: Lhs, rhs: anytype, m: usize, k: usize) !void {
     const qm = backend_mod.quant;
-    const blocks_per_row = try qm.blockCountForDType(.q8_0, k);
+    const blocks_per_row = try qm.types.blockCountForDType(.q8_0, k);
     const n = rhs.n;
     switch (comptime act) {
         .split_swiglu => {
@@ -587,13 +587,13 @@ fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.Fuse
             }
 
             const block_count = ((m + 3) / 4) * blocks_per_row;
-            var stack_blocks: [512]qm.BlockQ8_0x4 = undefined;
-            var qlhs_lease: ?exec_buffer_pool.ScratchLease(qm.BlockQ8_0x4) = null;
+            var stack_blocks: [512]qm.types.BlockQ8_0x4 = undefined;
+            var qlhs_lease: ?exec_buffer_pool.ScratchLease(qm.types.BlockQ8_0x4) = null;
             defer if (qlhs_lease) |*lease| lease.release();
             const qlhs_blocks = if (block_count <= stack_blocks.len)
                 stack_blocks[0..block_count]
             else blk: {
-                qlhs_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_0x4, block_count);
+                qlhs_lease = try self.rt.buffers.acquireScratch(qm.types.BlockQ8_0x4, block_count);
                 break :blk qlhs_lease.?.items;
             };
 
@@ -603,7 +603,7 @@ fn fusedQ8_0x4(self: *ExecContext, out: *Tensor, comptime act: exec_row_ops.Fuse
             // so the group range splits across the pool bitwise-neutrally.
             const Groups = struct {
                 input: []const f32,
-                blocks: []backend_mod.quant.BlockQ8_0x4,
+                blocks: []backend_mod.quant.types.BlockQ8_0x4,
                 rows: usize,
                 cols: usize,
                 blocks_per_row: usize,
@@ -658,7 +658,7 @@ fn fusedQ8_0x4Pipeline(self: *ExecContext, comptime act: exec_row_ops.FusedActKi
     const qm = backend_mod.quant;
     const n = rhs.n;
     const row_groups = (m + 3) / 4;
-    var qlhs_lease = try self.rt.buffers.acquireScratch(qm.BlockQ8_0x4, try tensor.checkedProduct(row_groups, blocks_per_row));
+    var qlhs_lease = try self.rt.buffers.acquireScratch(qm.types.BlockQ8_0x4, try tensor.checkedProduct(row_groups, blocks_per_row));
     defer qlhs_lease.release();
     const qlhs = qlhs_lease.items;
 
@@ -685,7 +685,7 @@ fn fusedQ8_0x4Pipeline(self: *ExecContext, comptime act: exec_row_ops.FusedActKi
 }
 
 /// The shared packed-Q8_0x4 GEMM tail of the fused arms.
-fn packedQ8_0x4Tail(self: *ExecContext, out: *Tensor, qlhs: []const backend_mod.quant.BlockQ8_0x4, rhs: anytype, m: usize, n: usize, k: usize) !void {
+fn packedQ8_0x4Tail(self: *ExecContext, out: *Tensor, qlhs: []const backend_mod.quant.types.BlockQ8_0x4, rhs: anytype, m: usize, n: usize, k: usize) !void {
     self.enableNativeMatmulPoolForWork(.q8_0, m, n, k);
     if (m % 4 == 0) {
         try kernels.matmul2DPackedQ8_0x4LhsRhs(self.pc(), out, qlhs, rhs, m, n, k);

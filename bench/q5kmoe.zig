@@ -14,11 +14,11 @@ const raw_backend = @import("raw_backend");
 const dtype_mod = raw_backend.dtype_info;
 
 const Tensor = raw_backend.Tensor;
-const qm = raw_backend.quantized_matmul;
+const qm = raw_backend.quant;
 const BlockQ5_K = dtype_mod.BlockQ5_K;
 const BlockQ6_K = dtype_mod.BlockQ6_K;
 const BlockQ8_K = dtype_mod.BlockQ8_K;
-const BlockQ8_Kx4 = qm.BlockQ8_Kx4;
+const BlockQ8_Kx4 = qm.types.BlockQ8_Kx4;
 
 var io: std.Io = undefined;
 
@@ -32,7 +32,7 @@ const shapes = [_]Shape{
 
 const ms = [_]usize{ 4, 8, 16, 32 };
 
-fn makeRhsQ5(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatmulRhsQ5_K {
+fn makeRhsQ5(allocator: std.mem.Allocator, k: usize, n: usize) !qm.types.QuantizedMatmulRhsQ5_K {
     const bpc = k / 256;
     const blocks = try allocator.alloc(BlockQ5_K, n * bpc);
     defer allocator.free(blocks);
@@ -46,7 +46,7 @@ fn makeRhsQ5(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatm
     return qm.q8k.quantizedMatmulRhsQ5_KFromBlocks(allocator, k, n, blocks);
 }
 
-fn makeRhsQ6(allocator: std.mem.Allocator, k: usize, n: usize) !qm.QuantizedMatmulRhsQ6_K {
+fn makeRhsQ6(allocator: std.mem.Allocator, k: usize, n: usize) !qm.types.QuantizedMatmulRhsQ6_K {
     const bpc = k / 256;
     const blocks = try allocator.alloc(BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
@@ -170,6 +170,6 @@ pub fn main(init: std.process.Init) !void {
     });
     try out.print("{s}\n", .{"-" ** 92});
 
-    try runVariant(out, allocator, "Q5_K", iters, warmup, qm.QuantizedMatmulRhsQ5_K, makeRhsQ5, qm.q5_k.matmulQ5_KRhsCompactColOuter, qm.q5_k.matmulQ5_KCompactQ8_Kx4ColOuter);
-    try runVariant(out, allocator, "Q6_K", iters, warmup, qm.QuantizedMatmulRhsQ6_K, makeRhsQ6, qm.q6_k.matmulQ6_KRhsCompactColOuter, qm.q6_k.matmulQ6_KCompactQ8_Kx4ColOuter);
+    try runVariant(out, allocator, "Q5_K", iters, warmup, qm.types.QuantizedMatmulRhsQ5_K, makeRhsQ5, qm.q5_k.matmulQ5_KRhsCompactColOuter, qm.q5_k.matmulQ5_KCompactQ8_Kx4ColOuter);
+    try runVariant(out, allocator, "Q6_K", iters, warmup, qm.types.QuantizedMatmulRhsQ6_K, makeRhsQ6, qm.q6_k.matmulQ6_KRhsCompactColOuter, qm.q6_k.matmulQ6_KCompactQ8_Kx4ColOuter);
 }

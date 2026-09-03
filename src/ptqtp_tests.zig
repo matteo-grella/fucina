@@ -11,7 +11,7 @@ const exec = @import("exec.zig");
 const ptqtp = @import("ptqtp.zig");
 
 const ExecContext = exec.ExecContext;
-const quant = backend.quantized_matmul;
+const quant = backend.quant;
 const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
 
 fn relErr(w: []const f32, rec: []const f32) f64 {

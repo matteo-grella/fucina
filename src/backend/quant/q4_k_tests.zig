@@ -85,7 +85,7 @@ test "ggml_q4_k x4 packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     var lhs_blocks: [4 * blocks_per_row]dtype_mod.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
@@ -111,7 +111,7 @@ test "ggml_q4_k x8 packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     var lhs_blocks: [4 * blocks_per_row]dtype_mod.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
@@ -137,7 +137,7 @@ test "ggml_q4_k x8 padded q8_k x4 lhs matches row lhs matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     var lhs_values: [3 * k]f32 = undefined;
     for (&lhs_values, 0..) |*value, i| {
@@ -172,7 +172,7 @@ test "ggml_q4_k x2 mmla packed matmul matches plain q4_k matmul" {
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     var lhs_values: [2 * k]f32 = undefined;
     for (&lhs_values, 0..) |*value, i| {
@@ -217,7 +217,7 @@ test "ggml_q4_k randomized blocks: row-outer matmul matches scalar reference" {
     const m = 3;
     const n = 5;
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     var lhs_blocks: [m * blocks_per_row]dtype_mod.BlockQ8_K = undefined;
     for (&lhs_blocks) |*b| fillRandomBlockQ8_K(b, random, false);
@@ -246,7 +246,7 @@ test "Q4_K column-outer matmul matches row-outer tile" {
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -283,7 +283,7 @@ test "Q4_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     const k = 512;
     const n = 9; // non-multiple of any col tile, exercises the column loop tail
     const m = 16; // multiple of 4 so packRowsQ8_Kx4 applies (no padding here)
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -322,7 +322,7 @@ test "Q4_K lane-packed Q8_Kx4 col-outer matches row-outer tile with padded tail"
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -366,7 +366,7 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
     const n = 512; // two 256-column phase chunks
     const split = 256;
     const m = 5;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ4_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -425,7 +425,7 @@ test "Q4_K col-outer kernels: split column ranges are bit-identical to full rang
 // walks and the f32 expression shape); on x86 hosts the same tests execute
 // the real vpdpbusd / vpmaddubsw instructions.
 
-fn fillRandomBlockQ4_Kx4(block: *qm.BlockQ4_Kx4, random: std.Random, max_nibbles: bool) void {
+fn fillRandomBlockQ4_Kx4(block: *qm.types.BlockQ4_Kx4, random: std.Random, max_nibbles: bool) void {
     for (&block.d) |*d| d.* = f32ToF16Bits(0.25 + random.float(f32));
     for (&block.dmin) |*d| d.* = f32ToF16Bits(random.float(f32) * 0.5);
     for (&block.scales) |*s| s.* = random.uintLessThan(u8, 64); // getScaleMinK4 output domain
@@ -434,7 +434,7 @@ fn fillRandomBlockQ4_Kx4(block: *qm.BlockQ4_Kx4, random: std.Random, max_nibbles
     for (&block.qs) |*q| q.* = if (max_nibbles) 15 else @intCast(random.uintLessThan(u8, 16));
 }
 
-fn fillRandomBlockQ4_Kx8(block: *qm.BlockQ4_Kx8, random: std.Random, max_nibbles: bool) void {
+fn fillRandomBlockQ4_Kx8(block: *qm.types.BlockQ4_Kx8, random: std.Random, max_nibbles: bool) void {
     for (&block.d) |*d| d.* = f32ToF16Bits(0.25 + random.float(f32));
     for (&block.dmin) |*d| d.* = f32ToF16Bits(random.float(f32) * 0.5);
     for (&block.scales) |*s| s.* = random.uintLessThan(u8, 64);
@@ -446,7 +446,7 @@ fn fillRandomBlockQ4_Kx8(block: *qm.BlockQ4_Kx8, random: std.Random, max_nibbles
 // Random BlockQ8_Kx4 with the bsums interleave quantizeRowsQ8_Kx4*Into writes:
 // bsums[(G/4)*16 + row*4 + G%4] = row's 16-group-G sum, whose bytes live at
 // qs[subblock*128 + (h*4 + j)*16 + row*4 + t] with G = subblock*2 + h.
-fn fillRandomBlockQ8_Kx4(block: *qm.BlockQ8_Kx4, random: std.Random, extreme: bool) void {
+fn fillRandomBlockQ8_Kx4(block: *qm.types.BlockQ8_Kx4, random: std.Random, extreme: bool) void {
     for (&block.d) |*d| d.* = 0.25 + random.float(f32);
     for (&block.qs, 0..) |*q, i| {
         if (extreme) {
@@ -492,14 +492,14 @@ fn expectAcc42BitEqual(expected: [4][2]common.QKV4f32, got: [4][2]common.QKV4f32
     inline for (0..4) |row| try expectAcc2BitEqual(expected[row], got[row]);
 }
 
-fn checkQ4_Kx4Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ4_Kx4, acc: common.QKV4f32) !void {
+fn checkQ4_Kx4Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.types.BlockQ4_Kx4, acc: common.QKV4f32) !void {
     const ref = q4_k.accumulateQ4_Kx4Scalar(lhs, rhs, acc);
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Vnni(lhs, rhs, acc));
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Avx2(lhs, rhs, acc));
     try expectVec4BitEqual(ref, q4_k.accumulateQ4_Kx4Widen(lhs, rhs, acc));
 }
 
-fn checkQ4_Kx8Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ4_Kx8, acc: [2]common.QKV4f32) !void {
+fn checkQ4_Kx8Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.types.BlockQ4_Kx8, acc: [2]common.QKV4f32) !void {
     var ref = acc;
     q4_k.accumulateQ4_Kx8Scalar(lhs, rhs, &ref);
     var got = acc;
@@ -513,7 +513,7 @@ fn checkQ4_Kx8Arms(lhs: *const dtype_mod.BlockQ8_K, rhs: *const qm.BlockQ4_Kx8, 
     try expectAcc2BitEqual(ref, got);
 }
 
-fn checkQ4_Kx8Q8_Kx4Arms(lhs: *const qm.BlockQ8_Kx4, rhs: *const qm.BlockQ4_Kx8, acc: [4][2]common.QKV4f32) !void {
+fn checkQ4_Kx8Q8_Kx4Arms(lhs: *const qm.types.BlockQ8_Kx4, rhs: *const qm.types.BlockQ4_Kx8, acc: [4][2]common.QKV4f32) !void {
     var ref = acc;
     q4_k.accumulateQ4_Kx8Q8_Kx4Scalar(lhs, rhs, &ref);
     var got = acc;
@@ -532,7 +532,7 @@ test "ggml_q4_kx4 SIMD arms match the scalar arm bit-exactly" {
     const random = prng.random();
 
     var lhs: dtype_mod.BlockQ8_K = undefined;
-    var rhs: qm.BlockQ4_Kx4 = undefined;
+    var rhs: qm.types.BlockQ4_Kx4 = undefined;
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
         fillRandomBlockQ8_K(&lhs, random, false);
@@ -559,7 +559,7 @@ test "ggml_q4_kx8 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     const random = prng.random();
 
     var lhs: dtype_mod.BlockQ8_K = undefined;
-    var rhs: qm.BlockQ4_Kx8 = undefined;
+    var rhs: qm.types.BlockQ4_Kx8 = undefined;
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
         fillRandomBlockQ8_K(&lhs, random, false);
@@ -590,8 +590,8 @@ test "ggml_q4_kx8 q8_kx4-lhs SIMD arms match the scalar arm bit-exactly" {
         .{ @splat(0), @splat(0) },
     };
 
-    var lhs: qm.BlockQ8_Kx4 = undefined;
-    var rhs: qm.BlockQ4_Kx8 = undefined;
+    var lhs: qm.types.BlockQ8_Kx4 = undefined;
+    var rhs: qm.types.BlockQ4_Kx8 = undefined;
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
         fillRandomBlockQ8_Kx4(&lhs, random, false);
@@ -623,7 +623,7 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
     const random = prng.random();
 
     const blocks_per_row = 2;
-    const k = blocks_per_row * types.qk_k_block_size;
+    const k = blocks_per_row * dtype_mod.qk_k_block_size;
 
     // x4 pack: m=6 covers the 4-row block and the single-row tail.
     {
@@ -709,7 +709,7 @@ test "ggml_q4_k packed matmul entry points match the scalar-arm references bit-e
         }
         var lhs = try Tensor.fromSlice(allocator, &.{ m, k }, &lhs_values);
         defer lhs.deinit();
-        var lhs_x4: [2 * blocks_per_row]qm.BlockQ8_Kx4 = undefined;
+        var lhs_x4: [2 * blocks_per_row]qm.types.BlockQ8_Kx4 = undefined;
         try q8k.quantizeRowsQ8_Kx4PaddedInto(&lhs_x4, &lhs);
 
         const rhs_cols = try allocator.alloc(dtype_mod.BlockQ4_K, n * blocks_per_row);
@@ -769,7 +769,7 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
 
     var iter: usize = 0;
     while (iter < 100) : (iter += 1) {
-        var a: qm.BlockQ8_Kx4 = undefined;
+        var a: qm.types.BlockQ8_Kx4 = undefined;
         fillRandomBlockQ8_Kx4(&a, random, iter % 7 == 0);
         // Pre-unpacked sub-block domain: unpackQ4_KSubblock emits unsigned
         // nibble values in [0,15].
@@ -791,7 +791,7 @@ test "q4_k 4-row lane dot SIMD arms match the scalar reference" {
     // bounded by 2*15*128 = 3840 << 2^15).
     const edge_a = [_][2]i8{ .{ -128, -128 }, .{ 127, 127 }, .{ 127, -128 }, .{ -127, 127 } };
     const edge_w = [_]i8{ 15, 0 };
-    var a: qm.BlockQ8_Kx4 = undefined;
+    var a: qm.types.BlockQ8_Kx4 = undefined;
     for (edge_a) |pattern| {
         fillRandomBlockQ8_Kx4(&a, random, false); // sets d + the bsums interleave shape
         for (&a.qs, 0..) |*q, i| q.* = pattern[i % 2];
@@ -834,7 +834,7 @@ test "Q4_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
     const allocator = std.testing.allocator;
     const k = 512;
     const n = 16; // x8-multiple (packed-layout requirement); two column groups
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     var prng = std.Random.DefaultPrng.init(0x4a52c90de13fb864);
     const random = prng.random();

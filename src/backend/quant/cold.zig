@@ -25,7 +25,7 @@ const QuantizedFormatError = types.QuantizedFormatError;
 const checkedProduct = types.checkedProduct;
 const f16BitsToF32 = common.f16BitsToF32;
 const f32ToF16Bits = common.f32ToF16Bits;
-const qk_k_block_size = types.qk_k_block_size;
+const qk_k_block_size = dtype_mod.qk_k_block_size;
 
 pub fn quantizeRowQ4_0Into(dst: []dtype_mod.BlockQ4_0, src: []const f32) !void {
     const block_count = try types.blockCountForDType(.q4_0, src.len);
@@ -33,7 +33,7 @@ pub fn quantizeRowQ4_0Into(dst: []dtype_mod.BlockQ4_0, src: []const f32) !void {
 
     var block_index: usize = 0;
     while (block_index < block_count) : (block_index += 1) {
-        const row = src[block_index * types.q4_0_block_size ..][0..types.q4_0_block_size];
+        const row = src[block_index * dtype_mod.q4_0_block_size ..][0..dtype_mod.q4_0_block_size];
         var amax: f32 = 0;
         var max_value: f32 = 0;
         for (row) |v| {
@@ -54,23 +54,23 @@ pub fn quantizeRowQ4_0Into(dst: []dtype_mod.BlockQ4_0, src: []const f32) !void {
         dst[block_index].d = f32ToF16Bits(d);
         for (&dst[block_index].qs, 0..) |*q, j| {
             const x0 = quantizeToQ4_0Nibble(row[j] * inv_d);
-            const x1 = quantizeToQ4_0Nibble(row[types.q4_0_block_size / 2 + j] * inv_d);
+            const x1 = quantizeToQ4_0Nibble(row[dtype_mod.q4_0_block_size / 2 + j] * inv_d);
             q.* = x0 | (x1 << 4);
         }
     }
 }
 
 pub fn dequantizeRowQ4_0Into(dst: []f32, src: []const dtype_mod.BlockQ4_0) !void {
-    if (dst.len != try checkedProduct(src.len, types.q4_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q4_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.d);
-        const out = dst[block_index * types.q4_0_block_size ..][0..types.q4_0_block_size];
+        const out = dst[block_index * dtype_mod.q4_0_block_size ..][0..dtype_mod.q4_0_block_size];
         for (block.qs, 0..) |q, j| {
             const x0: i32 = @as(i32, q & 0x0f) - 8;
             const x1: i32 = @as(i32, q >> 4) - 8;
             out[j] = @as(f32, @floatFromInt(x0)) * d;
-            out[types.q4_0_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d;
+            out[dtype_mod.q4_0_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d;
         }
     }
 }
@@ -165,11 +165,11 @@ fn quantizeToQ4_0Nibble(x: f32) u8 {
 }
 
 pub fn dequantizeRowQ1_0Into(dst: []f32, src: []const dtype_mod.BlockQ1_0) !void {
-    if (dst.len != try checkedProduct(src.len, types.q1_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q1_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.d);
-        const out = dst[block_index * types.q1_0_block_size ..][0..types.q1_0_block_size];
+        const out = dst[block_index * dtype_mod.q1_0_block_size ..][0..dtype_mod.q1_0_block_size];
         for (out, 0..) |*y, j| {
             const mask: u8 = @as(u8, 1) << @intCast(j % 8);
             y.* = if ((block.qs[j / 8] & mask) != 0) d else -d;
@@ -182,11 +182,11 @@ pub fn dequantizeRowQ1_0Into(dst: []f32, src: []const dtype_mod.BlockQ1_0) !void
 /// Ternary files only ever carry {0,1,2} (the encoder rounds against the
 /// block absmax, so |w/d| <= 1); code 3 = +2d is part of the wire contract.
 pub fn dequantizeRowQ2_0Into(dst: []f32, src: []const dtype_mod.BlockQ2_0) !void {
-    if (dst.len != try checkedProduct(src.len, types.q2_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q2_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.d);
-        const out = dst[block_index * types.q2_0_block_size ..][0..types.q2_0_block_size];
+        const out = dst[block_index * dtype_mod.q2_0_block_size ..][0..dtype_mod.q2_0_block_size];
         for (out, 0..) |*y, j| {
             const shift: u3 = @intCast((j % 4) * 2);
             const q: i32 = (block.qs[j / 4] >> shift) & 0x3;
@@ -206,7 +206,7 @@ pub fn quantizeRowQ2_0Into(dst: []dtype_mod.BlockQ2_0, src: []const f32) !void {
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const x = src[block_index * types.q2_0_block_size ..][0..types.q2_0_block_size];
+        const x = src[block_index * dtype_mod.q2_0_block_size ..][0..dtype_mod.q2_0_block_size];
         var amax: f32 = 0;
         for (x) |v| amax = @max(amax, @abs(v));
 
@@ -236,7 +236,7 @@ pub fn quantizeRowQ4_1Into(dst: []dtype_mod.BlockQ4_1, src: []const f32) !void {
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const row = src[block_index * types.q4_1_block_size ..][0..types.q4_1_block_size];
+        const row = src[block_index * dtype_mod.q4_1_block_size ..][0..dtype_mod.q4_1_block_size];
         var min: f32 = std.math.floatMax(f32);
         var max: f32 = -std.math.floatMax(f32);
         for (row) |v| {
@@ -255,7 +255,7 @@ pub fn quantizeRowQ4_1Into(dst: []dtype_mod.BlockQ4_1, src: []const f32) !void {
         block.dm = .{ f32ToF16Bits(d), f32ToF16Bits(min) };
         for (&block.qs, 0..) |*q, j| {
             const x0 = (row[j] - min) * inv_d;
-            const x1 = (row[types.q4_1_block_size / 2 + j] - min) * inv_d;
+            const x1 = (row[dtype_mod.q4_1_block_size / 2 + j] - min) * inv_d;
             // ggml: MIN(15, (int8_t)(x + 0.5f)); the float-space clamp with
             // NaN-collapsing @min/@max is byte-identical for in-contract
             // x in [0, 15] and keeps NaN away from @intFromFloat.
@@ -267,15 +267,15 @@ pub fn quantizeRowQ4_1Into(dst: []dtype_mod.BlockQ4_1, src: []const f32) !void {
 }
 
 pub fn dequantizeRowQ4_1Into(dst: []f32, src: []const dtype_mod.BlockQ4_1) !void {
-    if (dst.len != try checkedProduct(src.len, types.q4_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q4_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.dm[0]);
         const m = f16BitsToF32(block.dm[1]);
-        const out = dst[block_index * types.q4_1_block_size ..][0..types.q4_1_block_size];
+        const out = dst[block_index * dtype_mod.q4_1_block_size ..][0..dtype_mod.q4_1_block_size];
         for (block.qs, 0..) |q, j| {
             out[j] = @as(f32, @floatFromInt(q & 0x0f)) * d + m;
-            out[types.q4_1_block_size / 2 + j] = @as(f32, @floatFromInt(q >> 4)) * d + m;
+            out[dtype_mod.q4_1_block_size / 2 + j] = @as(f32, @floatFromInt(q >> 4)) * d + m;
         }
     }
 }
@@ -289,7 +289,7 @@ pub fn quantizeRowQ5_0Into(dst: []dtype_mod.BlockQ5_0, src: []const f32) !void {
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const row = src[block_index * types.q5_0_block_size ..][0..types.q5_0_block_size];
+        const row = src[block_index * dtype_mod.q5_0_block_size ..][0..dtype_mod.q5_0_block_size];
         var amax: f32 = 0;
         var max_value: f32 = 0;
         for (row) |v| {
@@ -312,7 +312,7 @@ pub fn quantizeRowQ5_0Into(dst: []dtype_mod.BlockQ5_0, src: []const f32) !void {
         var qh: u32 = 0;
         for (&block.qs, 0..) |*q, j| {
             const x0 = row[j] * inv_d;
-            const x1 = row[types.q5_0_block_size / 2 + j] * inv_d;
+            const x1 = row[dtype_mod.q5_0_block_size / 2 + j] * inv_d;
             // ggml: MIN(31, (int8_t)(x + 16.5f)); the float-space clamp with
             // NaN-collapsing @min/@max is byte-identical for in-contract
             // x in [-16, 16] and keeps NaN away from @intFromFloat.
@@ -321,26 +321,26 @@ pub fn quantizeRowQ5_0Into(dst: []dtype_mod.BlockQ5_0, src: []const f32) !void {
             q.* = (xi0 & 0x0f) | ((xi1 & 0x0f) << 4);
             // the 5-th bit, stored across the packed qh word
             qh |= @as(u32, (xi0 & 0x10) >> 4) << @intCast(j);
-            qh |= @as(u32, (xi1 & 0x10) >> 4) << @intCast(j + types.q5_0_block_size / 2);
+            qh |= @as(u32, (xi1 & 0x10) >> 4) << @intCast(j + dtype_mod.q5_0_block_size / 2);
         }
         writeQh(&block.qh, qh);
     }
 }
 
 pub fn dequantizeRowQ5_0Into(dst: []f32, src: []const dtype_mod.BlockQ5_0) !void {
-    if (dst.len != try checkedProduct(src.len, types.q5_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q5_0_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.d);
         const qh = readQh(&block.qh);
-        const out = dst[block_index * types.q5_0_block_size ..][0..types.q5_0_block_size];
+        const out = dst[block_index * dtype_mod.q5_0_block_size ..][0..dtype_mod.q5_0_block_size];
         for (block.qs, 0..) |q, j| {
             const xh0: u8 = @intCast(((qh >> @intCast(j)) << 4) & 0x10);
             const xh1: u8 = @intCast((qh >> @intCast(j + 12)) & 0x10);
             const x0: i32 = @as(i32, (q & 0x0f) | xh0) - 16;
             const x1: i32 = @as(i32, (q >> 4) | xh1) - 16;
             out[j] = @as(f32, @floatFromInt(x0)) * d;
-            out[types.q5_0_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d;
+            out[dtype_mod.q5_0_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d;
         }
     }
 }
@@ -354,7 +354,7 @@ pub fn quantizeRowQ5_1Into(dst: []dtype_mod.BlockQ5_1, src: []const f32) !void {
     if (dst.len != block_count) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const row = src[block_index * types.q5_1_block_size ..][0..types.q5_1_block_size];
+        const row = src[block_index * dtype_mod.q5_1_block_size ..][0..dtype_mod.q5_1_block_size];
         var min: f32 = std.math.floatMax(f32);
         var max: f32 = -std.math.floatMax(f32);
         for (row) |v| {
@@ -375,7 +375,7 @@ pub fn quantizeRowQ5_1Into(dst: []dtype_mod.BlockQ5_1, src: []const f32) !void {
         var qh: u32 = 0;
         for (&block.qs, 0..) |*q, j| {
             const x0 = (row[j] - min) * inv_d;
-            const x1 = (row[types.q5_1_block_size / 2 + j] - min) * inv_d;
+            const x1 = (row[dtype_mod.q5_1_block_size / 2 + j] - min) * inv_d;
             // ggml does not clamp here: in-contract x0/x1 are in [0, 31] by
             // construction, where the NaN-collapsing float-space clamp is
             // byte-identical; it only exists to keep degenerate NaN away
@@ -385,27 +385,27 @@ pub fn quantizeRowQ5_1Into(dst: []dtype_mod.BlockQ5_1, src: []const f32) !void {
             q.* = (xi0 & 0x0f) | ((xi1 & 0x0f) << 4);
             // the 5-th bit, stored across the packed qh word
             qh |= @as(u32, (xi0 & 0x10) >> 4) << @intCast(j);
-            qh |= @as(u32, (xi1 & 0x10) >> 4) << @intCast(j + types.q5_1_block_size / 2);
+            qh |= @as(u32, (xi1 & 0x10) >> 4) << @intCast(j + dtype_mod.q5_1_block_size / 2);
         }
         writeQh(&block.qh, qh);
     }
 }
 
 pub fn dequantizeRowQ5_1Into(dst: []f32, src: []const dtype_mod.BlockQ5_1) !void {
-    if (dst.len != try checkedProduct(src.len, types.q5_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q5_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.dm[0]);
         const m = f16BitsToF32(block.dm[1]);
         const qh = readQh(&block.qh);
-        const out = dst[block_index * types.q5_1_block_size ..][0..types.q5_1_block_size];
+        const out = dst[block_index * dtype_mod.q5_1_block_size ..][0..dtype_mod.q5_1_block_size];
         for (block.qs, 0..) |q, j| {
             const xh0: u8 = @intCast(((qh >> @intCast(j)) << 4) & 0x10);
             const xh1: u8 = @intCast((qh >> @intCast(j + 12)) & 0x10);
             const x0: u8 = (q & 0x0f) | xh0;
             const x1: u8 = (q >> 4) | xh1;
             out[j] = @as(f32, @floatFromInt(x0)) * d + m;
-            out[types.q5_1_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d + m;
+            out[dtype_mod.q5_1_block_size / 2 + j] = @as(f32, @floatFromInt(x1)) * d + m;
         }
     }
 }
@@ -416,7 +416,7 @@ pub fn quantizeRowQ8_1Into(dst: []dtype_mod.BlockQ8_1, src: []const f32) !void {
 
     var block_index: usize = 0;
     while (block_index < block_count) : (block_index += 1) {
-        const row = src[block_index * types.q8_1_block_size ..][0..types.q8_1_block_size];
+        const row = src[block_index * dtype_mod.q8_1_block_size ..][0..dtype_mod.q8_1_block_size];
         var amax: f32 = 0;
         for (row) |v| amax = @max(amax, @abs(v));
 
@@ -459,40 +459,40 @@ pub fn quantizeRowsQ8_1(allocator: Allocator, src: *const Tensor) !types.Quantiz
 }
 
 pub fn dequantizeRowQ8_1Into(dst: []f32, src: []const dtype_mod.BlockQ8_1) !void {
-    if (dst.len != try checkedProduct(src.len, types.q8_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.q8_1_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.ds[0]);
-        const out = dst[block_index * types.q8_1_block_size ..][0..types.q8_1_block_size];
+        const out = dst[block_index * dtype_mod.q8_1_block_size ..][0..dtype_mod.q8_1_block_size];
         for (out, block.qs) |*y, q| y.* = @as(f32, @floatFromInt(q)) * d;
     }
 }
 
 pub fn dequantizeRowMXFP4Into(dst: []f32, src: []const dtype_mod.BlockMXFP4) !void {
-    if (dst.len != try checkedProduct(src.len, types.mxfp4_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.mxfp4_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = common.e8m0ToF32Half(block.e);
-        const out = dst[block_index * types.mxfp4_block_size ..][0..types.mxfp4_block_size];
+        const out = dst[block_index * dtype_mod.mxfp4_block_size ..][0..dtype_mod.mxfp4_block_size];
         for (block.qs, 0..) |q, j| {
             out[j] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q & 0x0f])) * d;
-            out[j + types.mxfp4_block_size / 2] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q >> 4])) * d;
+            out[j + dtype_mod.mxfp4_block_size / 2] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q >> 4])) * d;
         }
     }
 }
 
 pub fn dequantizeRowNVFP4Into(dst: []f32, src: []const dtype_mod.BlockNVFP4) !void {
-    if (dst.len != try checkedProduct(src.len, types.nvfp4_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.nvfp4_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
-        const out = dst[block_index * types.nvfp4_block_size ..][0..types.nvfp4_block_size];
-        for (0..types.nvfp4_block_size / types.nvfp4_subblock_size) |subblock| {
+        const out = dst[block_index * dtype_mod.nvfp4_block_size ..][0..dtype_mod.nvfp4_block_size];
+        for (0..dtype_mod.nvfp4_block_size / dtype_mod.nvfp4_subblock_size) |subblock| {
             const d = ue4m3ToF32(block.d[subblock]);
-            const sub_out = out[subblock * types.nvfp4_subblock_size ..][0..types.nvfp4_subblock_size];
-            const qs = block.qs[subblock * (types.nvfp4_subblock_size / 2) ..][0 .. types.nvfp4_subblock_size / 2];
+            const sub_out = out[subblock * dtype_mod.nvfp4_subblock_size ..][0..dtype_mod.nvfp4_subblock_size];
+            const qs = block.qs[subblock * (dtype_mod.nvfp4_subblock_size / 2) ..][0 .. dtype_mod.nvfp4_subblock_size / 2];
             for (qs, 0..) |q, j| {
                 sub_out[j] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q & 0x0f])) * d;
-                sub_out[j + types.nvfp4_subblock_size / 2] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q >> 4])) * d;
+                sub_out[j + dtype_mod.nvfp4_subblock_size / 2] = @as(f32, @floatFromInt(tables.kvalues_mxfp4[q >> 4])) * d;
             }
         }
     }
@@ -804,14 +804,14 @@ pub fn dequantizeRowIQ1_MInto(dst: []f32, src: []const dtype_mod.BlockIQ1_M) !vo
 }
 
 pub fn dequantizeRowIQ4_NLInto(dst: []f32, src: []const dtype_mod.BlockIQ4_NL) !void {
-    if (dst.len != try checkedProduct(src.len, types.iq4_nl_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try checkedProduct(src.len, dtype_mod.iq4_nl_block_size)) return QuantizedFormatError.InvalidQuantizedLength;
 
     for (src, 0..) |block, block_index| {
         const d = f16BitsToF32(block.d);
-        const out = dst[block_index * types.iq4_nl_block_size ..][0..types.iq4_nl_block_size];
+        const out = dst[block_index * dtype_mod.iq4_nl_block_size ..][0..dtype_mod.iq4_nl_block_size];
         for (block.qs, 0..) |q, j| {
             out[j] = d * @as(f32, @floatFromInt(tables.kvalues_iq4nl[q & 0x0f]));
-            out[j + types.iq4_nl_block_size / 2] = d * @as(f32, @floatFromInt(tables.kvalues_iq4nl[q >> 4]));
+            out[j + dtype_mod.iq4_nl_block_size / 2] = d * @as(f32, @floatFromInt(tables.kvalues_iq4nl[q >> 4]));
         }
     }
 }
@@ -897,7 +897,7 @@ const matmulQ4_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRh
 pub const matmulQ4_0RhsRange = common.RangeFromTile(matmulQ4_0RhsTile);
 
 /// One Q1_0 block (128 weights) spans four Q8_0 activation blocks.
-const matmulQ1_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ1_0, 1, .{ .lhs_per_rhs = types.q1_0_block_size / types.q8_0_block_size, .dot = dotQ1_0Q8_0 });
+const matmulQ1_0RhsTile = common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsQ1_0, 1, .{ .lhs_per_rhs = dtype_mod.q1_0_block_size / dtype_mod.q8_0_block_size, .dot = dotQ1_0Q8_0 });
 
 const matmulQ4_1RhsTile = common.RowOuterTile(dtype_mod.BlockQ8_1, types.QuantizedMatmulRhsQ4_1, 1, .{ .dot = dotQ4_1Q8_1 });
 
@@ -945,7 +945,7 @@ fn matmulTableQ8_0RhsTile(
 /// `blockSize(rhs_dtype) / 32` activation blocks.
 fn TableQ8_0Tile(comptime rhs_dtype: DType) common.TileFn(BlockQ8_0, types.QuantizedMatmulRhsRowsFor(rhs_dtype)) {
     return common.RowOuterTile(BlockQ8_0, types.QuantizedMatmulRhsRowsFor(rhs_dtype), table_q8_0_col_block, .{
-        .lhs_per_rhs = dtype_mod.blockSize(rhs_dtype) / types.q8_0_block_size,
+        .lhs_per_rhs = dtype_mod.blockSize(rhs_dtype) / dtype_mod.q8_0_block_size,
         .dot = struct {
             fn dot(w: *const dtype_mod.Storage(rhs_dtype), a: []const BlockQ8_0) f32 {
                 return dotTableQ8_0(rhs_dtype, w, a);
@@ -1161,13 +1161,13 @@ fn dotMXFP4Q8_0(w: *const dtype_mod.BlockMXFP4, a: []const BlockQ8_0) f32 {
 }
 
 fn dotNVFP4Q8_0(w: *const dtype_mod.BlockNVFP4, a: []const BlockQ8_0) f32 {
-    std.debug.assert(a.len == types.nvfp4_block_size / types.q8_0_block_size);
+    std.debug.assert(a.len == dtype_mod.nvfp4_block_size / dtype_mod.q8_0_block_size);
     var sum: f32 = 0;
-    for (0..types.nvfp4_block_size / types.nvfp4_subblock_size) |subblock| {
-        const ab = &a[(subblock * types.nvfp4_subblock_size) / types.q8_0_block_size];
-        const a_offset = (subblock * types.nvfp4_subblock_size) % types.q8_0_block_size;
-        const qs = w.qs[subblock * (types.nvfp4_subblock_size / 2) ..][0 .. types.nvfp4_subblock_size / 2];
-        const isum = dotNibbleTable16Q8(&tables.kvalues_mxfp4, qs, ab.qs[a_offset..][0..types.nvfp4_subblock_size]);
+    for (0..dtype_mod.nvfp4_block_size / dtype_mod.nvfp4_subblock_size) |subblock| {
+        const ab = &a[(subblock * dtype_mod.nvfp4_subblock_size) / dtype_mod.q8_0_block_size];
+        const a_offset = (subblock * dtype_mod.nvfp4_subblock_size) % dtype_mod.q8_0_block_size;
+        const qs = w.qs[subblock * (dtype_mod.nvfp4_subblock_size / 2) ..][0 .. dtype_mod.nvfp4_subblock_size / 2];
+        const isum = dotNibbleTable16Q8(&tables.kvalues_mxfp4, qs, ab.qs[a_offset..][0..dtype_mod.nvfp4_subblock_size]);
         sum += ue4m3ToF32(w.d[subblock]) * f16BitsToF32(ab.d) * @as(f32, @floatFromInt(isum));
     }
     return sum;
@@ -1544,7 +1544,7 @@ fn ternaryValue(qs: u8, pow3: u8) i32 {
 /// 128-block, so hot and cold are bitwise identical. isum_k is the exact
 /// per-32 integer sum((q-1)*a).
 pub fn dotQ2_0RowQ8_0(wblocks: []const dtype_mod.BlockQ2_0, arow: []const BlockQ8_0) f32 {
-    const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
+    const sub_per_block = dtype_mod.q2_0_block_size / dtype_mod.q8_0_block_size; // 4
     std.debug.assert(arow.len == wblocks.len * sub_per_block);
     var lanes = [4]f32{ 0, 0, 0, 0 };
     for (wblocks, 0..) |*w, bi| {
@@ -1579,7 +1579,7 @@ fn matmulQ2_0RhsRefTile(
     c0: usize,
     c1: usize,
 ) void {
-    const sub_blocks_per_row = rhs.blocks_per_column * (types.q2_0_block_size / types.q8_0_block_size);
+    const sub_blocks_per_row = rhs.blocks_per_column * (dtype_mod.q2_0_block_size / dtype_mod.q8_0_block_size);
     var r = r0;
     while (r < r1) : (r += 1) {
         const arow = lhs_blocks[r * sub_blocks_per_row ..][0..sub_blocks_per_row];
@@ -1593,7 +1593,7 @@ fn matmulQ2_0RhsRefTile(
 pub const matmulQ2_0RhsRefRange = common.RangeFromTile(matmulQ2_0RhsRefTile);
 
 fn dotQ1_0Q8_0(w: *const dtype_mod.BlockQ1_0, a: []const BlockQ8_0) f32 {
-    std.debug.assert(a.len == types.q1_0_block_size / types.q8_0_block_size);
+    std.debug.assert(a.len == dtype_mod.q1_0_block_size / dtype_mod.q8_0_block_size);
     const d0 = f16BitsToF32(w.d);
     var sum: f32 = 0;
     for (a, 0..) |*ab, block_index| {
@@ -1616,7 +1616,7 @@ fn dotQ4_1Q8_1(w: *const dtype_mod.BlockQ4_1, a: *const dtype_mod.BlockQ8_1) f32
     var isum: i32 = 0;
     for (w.qs, 0..) |q, j| {
         isum += @as(i32, q & 0x0f) * @as(i32, a.qs[j]);
-        isum += @as(i32, q >> 4) * @as(i32, a.qs[types.q4_1_block_size / 2 + j]);
+        isum += @as(i32, q >> 4) * @as(i32, a.qs[dtype_mod.q4_1_block_size / 2 + j]);
     }
     const d = f16BitsToF32(w.dm[0]) * f16BitsToF32(a.ds[0]);
     const m = f16BitsToF32(w.dm[1]) * f16BitsToF32(a.ds[1]);
@@ -1632,7 +1632,7 @@ fn dotQ5_0Q8_0(w: *const dtype_mod.BlockQ5_0, a: *const BlockQ8_0) f32 {
         const x0: i32 = @as(i32, (q & 0x0f) | xh0) - 16;
         const x1: i32 = @as(i32, (q >> 4) | xh1) - 16;
         isum += x0 * @as(i32, a.qs[j]);
-        isum += x1 * @as(i32, a.qs[types.q5_0_block_size / 2 + j]);
+        isum += x1 * @as(i32, a.qs[dtype_mod.q5_0_block_size / 2 + j]);
     }
     const d = f16BitsToF32(w.d) * f16BitsToF32(a.d);
     return d * @as(f32, @floatFromInt(isum));
@@ -1647,7 +1647,7 @@ fn dotQ5_1Q8_1(w: *const dtype_mod.BlockQ5_1, a: *const dtype_mod.BlockQ8_1) f32
         const x0: u8 = (q & 0x0f) | xh0;
         const x1: u8 = (q >> 4) | xh1;
         isum += @as(i32, x0) * @as(i32, a.qs[j]);
-        isum += @as(i32, x1) * @as(i32, a.qs[types.q5_1_block_size / 2 + j]);
+        isum += @as(i32, x1) * @as(i32, a.qs[dtype_mod.q5_1_block_size / 2 + j]);
     }
     const d = f16BitsToF32(w.dm[0]) * f16BitsToF32(a.ds[0]);
     const m = f16BitsToF32(w.dm[1]) * f16BitsToF32(a.ds[1]);
@@ -1820,8 +1820,8 @@ const PreparedQ8_0Block = struct {
 };
 
 fn prepareQ8_0Block(a: *const BlockQ8_0) PreparedQ8_0Block {
-    const a_lo_i8: common.Q4V16i8 = @bitCast(a.qs[0 .. types.q4_0_block_size / 2].*);
-    const a_hi_i8: common.Q4V16i8 = @bitCast(a.qs[types.q4_0_block_size / 2 .. types.q4_0_block_size].*);
+    const a_lo_i8: common.Q4V16i8 = @bitCast(a.qs[0 .. dtype_mod.q4_0_block_size / 2].*);
+    const a_hi_i8: common.Q4V16i8 = @bitCast(a.qs[dtype_mod.q4_0_block_size / 2 .. dtype_mod.q4_0_block_size].*);
     return .{
         .lo = @intCast(a_lo_i8),
         .hi = @intCast(a_hi_i8),
@@ -2007,8 +2007,8 @@ fn fillQ4_1Pattern(block: *dtype_mod.BlockQ4_1) void {
 
 fn setQ5_0Value(block: *dtype_mod.BlockQ5_0, index: usize, value: i8) void {
     const encoded: u8 = @intCast(@as(i16, value) + 16);
-    const byte_index = index % (types.q5_0_block_size / 2);
-    if (index < types.q5_0_block_size / 2) {
+    const byte_index = index % (dtype_mod.q5_0_block_size / 2);
+    if (index < dtype_mod.q5_0_block_size / 2) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (encoded & 0x0f);
     } else {
         block.qs[byte_index] = (block.qs[byte_index] & 0x0f) | ((encoded & 0x0f) << 4);
@@ -2025,12 +2025,12 @@ fn fillQ5_0Pattern(block: *dtype_mod.BlockQ5_0) void {
     block.d = f32ToF16Bits(1);
     @memset(&block.qh, 0);
     @memset(&block.qs, 0);
-    for (0..types.q5_0_block_size) |i| setQ5_0Value(block, i, @intCast(@as(i32, @intCast(i % 23)) - 11));
+    for (0..dtype_mod.q5_0_block_size) |i| setQ5_0Value(block, i, @intCast(@as(i32, @intCast(i % 23)) - 11));
 }
 
 fn setQ5_1Value(block: *dtype_mod.BlockQ5_1, index: usize, value: u8) void {
-    const byte_index = index % (types.q5_1_block_size / 2);
-    if (index < types.q5_1_block_size / 2) {
+    const byte_index = index % (dtype_mod.q5_1_block_size / 2);
+    if (index < dtype_mod.q5_1_block_size / 2) {
         block.qs[byte_index] = (block.qs[byte_index] & 0xf0) | (value & 0x0f);
     } else {
         block.qs[byte_index] = (block.qs[byte_index] & 0x0f) | ((value & 0x0f) << 4);
@@ -2047,7 +2047,7 @@ fn fillQ5_1Pattern(block: *dtype_mod.BlockQ5_1) void {
     block.dm = .{ f32ToF16Bits(1), f32ToF16Bits(0) };
     @memset(&block.qh, 0);
     @memset(&block.qs, 0);
-    for (0..types.q5_1_block_size) |i| setQ5_1Value(block, i, @intCast((i * 7) % 32));
+    for (0..dtype_mod.q5_1_block_size) |i| setQ5_1Value(block, i, @intCast((i * 7) % 32));
 }
 
 fn fillQ2KPattern(block: *dtype_mod.BlockQ2_K) void {
@@ -2105,15 +2105,15 @@ fn fillQ3KPattern(block: *dtype_mod.BlockQ3_K) void {
 test "ggml_q1_0 dot and matmul consume loaded blocks" {
     var q1: dtype_mod.BlockQ1_0 = undefined;
     fillQ1_0Pattern(&q1);
-    var q8 = [_]BlockQ8_0{undefined} ** (types.q1_0_block_size / types.q8_0_block_size);
+    var q8 = [_]BlockQ8_0{undefined} ** (dtype_mod.q1_0_block_size / dtype_mod.q8_0_block_size);
     for (&q8) |*block| fillQ8_0Pattern(block);
 
-    var dense_w: [types.q1_0_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.q1_0_block_size]f32 = undefined;
     try dequantizeRowQ1_0Into(&dense_w, &.{q1});
-    var dense_a: [types.q1_0_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.q1_0_block_size]f32 = undefined;
     for (&q8, 0..) |*block, i| {
         for (block.qs, 0..) |v, j| {
-            dense_a[i * types.q8_0_block_size + j] = @as(f32, @floatFromInt(v)) * f16BitsToF32(block.d);
+            dense_a[i * dtype_mod.q8_0_block_size + j] = @as(f32, @floatFromInt(v)) * f16BitsToF32(block.d);
         }
     }
 
@@ -2124,7 +2124,7 @@ test "ggml_q1_0 dot and matmul consume loaded blocks" {
         .allocator = std.testing.allocator,
         .blocks = &rhs_blocks,
         .blocks_per_column = 1,
-        .k = types.q1_0_block_size,
+        .k = dtype_mod.q1_0_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
@@ -2136,15 +2136,15 @@ test "ggml_q1_0 dot and matmul consume loaded blocks" {
 test "ggml_q2_0 dot and matmul consume loaded blocks" {
     var q2: dtype_mod.BlockQ2_0 = undefined;
     fillQ2_0Pattern(&q2);
-    var q8 = [_]BlockQ8_0{undefined} ** (types.q2_0_block_size / types.q8_0_block_size);
+    var q8 = [_]BlockQ8_0{undefined} ** (dtype_mod.q2_0_block_size / dtype_mod.q8_0_block_size);
     for (&q8) |*block| fillQ8_0Pattern(block);
 
-    var dense_w: [types.q2_0_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.q2_0_block_size]f32 = undefined;
     try dequantizeRowQ2_0Into(&dense_w, &.{q2});
-    var dense_a: [types.q2_0_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.q2_0_block_size]f32 = undefined;
     for (&q8, 0..) |*block, i| {
         for (block.qs, 0..) |v, j| {
-            dense_a[i * types.q8_0_block_size + j] = @as(f32, @floatFromInt(v)) * f16BitsToF32(block.d);
+            dense_a[i * dtype_mod.q8_0_block_size + j] = @as(f32, @floatFromInt(v)) * f16BitsToF32(block.d);
         }
     }
 
@@ -2155,7 +2155,7 @@ test "ggml_q2_0 dot and matmul consume loaded blocks" {
         .allocator = std.testing.allocator,
         .blocks = &rhs_blocks,
         .blocks_per_column = 1,
-        .k = types.q2_0_block_size,
+        .k = dtype_mod.q2_0_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
@@ -2170,9 +2170,9 @@ test "ggml_q4_1 dot and matmul consume loaded blocks" {
     var q8: dtype_mod.BlockQ8_1 = undefined;
     fillQ8_1Pattern(&q8);
 
-    var dense_w: [types.q4_1_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.q4_1_block_size]f32 = undefined;
     try dequantizeRowQ4_1Into(&dense_w, &.{q4});
-    var dense_a: [types.q8_1_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.q8_1_block_size]f32 = undefined;
     try dequantizeRowQ8_1Into(&dense_a, &.{q8});
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ4_1Q8_1(&q4, &q8));
@@ -2182,7 +2182,7 @@ test "ggml_q4_1 dot and matmul consume loaded blocks" {
         .allocator = std.testing.allocator,
         .blocks = &rhs_blocks,
         .blocks_per_column = 1,
-        .k = types.q4_1_block_size,
+        .k = dtype_mod.q4_1_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
@@ -2197,9 +2197,9 @@ test "ggml_q5_0 dot and matmul consume loaded blocks" {
     var q8: BlockQ8_0 = undefined;
     fillQ8_0Pattern(&q8);
 
-    var dense_w: [types.q5_0_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.q5_0_block_size]f32 = undefined;
     try dequantizeRowQ5_0Into(&dense_w, &.{q5});
-    var dense_a: [types.q8_0_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.q8_0_block_size]f32 = undefined;
     try q8k.dequantizeRowQ8_0Into(&dense_a, &.{q8});
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ5_0Q8_0(&q5, &q8));
@@ -2209,7 +2209,7 @@ test "ggml_q5_0 dot and matmul consume loaded blocks" {
         .allocator = std.testing.allocator,
         .blocks = &rhs_blocks,
         .blocks_per_column = 1,
-        .k = types.q5_0_block_size,
+        .k = dtype_mod.q5_0_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;
@@ -2224,9 +2224,9 @@ test "ggml_q5_1 dot and matmul consume loaded blocks" {
     var q8: dtype_mod.BlockQ8_1 = undefined;
     fillQ8_1Pattern(&q8);
 
-    var dense_w: [types.q5_1_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.q5_1_block_size]f32 = undefined;
     try dequantizeRowQ5_1Into(&dense_w, &.{q5});
-    var dense_a: [types.q8_1_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.q8_1_block_size]f32 = undefined;
     try dequantizeRowQ8_1Into(&dense_a, &.{q8});
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ5_1Q8_1(&q5, &q8));
@@ -2236,7 +2236,7 @@ test "ggml_q5_1 dot and matmul consume loaded blocks" {
         .allocator = std.testing.allocator,
         .blocks = &rhs_blocks,
         .blocks_per_column = 1,
-        .k = types.q5_1_block_size,
+        .k = dtype_mod.q5_1_block_size,
         .n = 2,
     };
     var out: [2]f32 = undefined;

@@ -28,7 +28,7 @@
 //!   <Weight>    weight/RHS quant - Q8_0, Q4_K, Q5_K, Q6_K (cold: Q4_0, Q2_K, ...)
 //!   <Apack>     RHS column-interleave + SIMD target: x4/x8 -> sdot, x2Mmla -> smmla;
 //!               no suffix = non-interleaved column-major
-//!   Packed      the LHS activations are ALSO int8-packed (e.g. BlockQ8_0x4 LHS)
+//!   Packed      the LHS activations are ALSO int8-packed (e.g. types.BlockQ8_0x4 LHS)
 //!   Padded      tolerates a row count m not a multiple of 4 (masks output writes)
 //!   ...RhsTile  the kernel over an explicit (r0,r1,c0,c1) block
 //!   ...RhsRange thin full-width wrapper (c0=0, c1=n) - the parallel/serial entry
@@ -65,10 +65,10 @@ pub const supports_q4_k_mmla = isa.has_aarch64_i8mm;
 /// top of this; the Q4_K arm picks the smmla pack on aarch64+i8mm targets.
 pub fn PackedQuantRhsFor(comptime dt: DType) type {
     return switch (dt) {
-        .q8_0 => QuantizedMatmulRhsQ8_0x4,
-        .q6_k => QuantizedMatmulRhsQ6_Kx4,
-        .q5_k => QuantizedMatmulRhsQ5_Kx8,
-        .q4_k => if (supports_q4_k_mmla) QuantizedMatmulRhsQ4_Kx2Mmla else QuantizedMatmulRhsQ4_Kx8,
+        .q8_0 => types.QuantizedMatmulRhsQ8_0x4,
+        .q6_k => types.QuantizedMatmulRhsQ6_Kx4,
+        .q5_k => types.QuantizedMatmulRhsQ5_Kx8,
+        .q4_k => if (supports_q4_k_mmla) types.QuantizedMatmulRhsQ4_Kx2Mmla else types.QuantizedMatmulRhsQ4_Kx8,
         else => @compileError("PackedQuantRhsFor: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
     };
 }
@@ -99,68 +99,19 @@ pub fn packRhsAs(
     k: usize,
     blocks_per_row: usize,
 ) !Rhs {
-    if (Rhs == QuantizedMatmulRhsQ8_0x4) return q8_0.packMatmulRhsQ8_0x4(allocator, blocks, n, k, blocks_per_row);
-    if (Rhs == QuantizedMatmulRhsQ6_Kx4) return q6_k.packMatmulRhsQ6_Kx4(allocator, blocks, n, k, blocks_per_row);
-    if (Rhs == QuantizedMatmulRhsQ5_Kx8) return q5_k.packMatmulRhsQ5_Kx8(allocator, blocks, n, k, blocks_per_row);
-    if (Rhs == QuantizedMatmulRhsQ4_Kx4) return q4_k.packMatmulRhsQ4_Kx4(allocator, blocks, n, k, blocks_per_row);
-    if (Rhs == QuantizedMatmulRhsQ4_Kx8) return q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, blocks_per_row);
-    if (Rhs == QuantizedMatmulRhsQ4_Kx2Mmla) return q4_k.packMatmulRhsQ4_Kx2Mmla(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ8_0x4) return q8_0.packMatmulRhsQ8_0x4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ6_Kx4) return q6_k.packMatmulRhsQ6_Kx4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ5_Kx8) return q5_k.packMatmulRhsQ5_Kx8(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ4_Kx4) return q4_k.packMatmulRhsQ4_Kx4(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ4_Kx8) return q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsQ4_Kx2Mmla) return q4_k.packMatmulRhsQ4_Kx2Mmla(allocator, blocks, n, k, blocks_per_row);
     comptime unreachable;
 }
 
-// The interleaved block layouts and the RHS container types are the one
-// layer readers outside src/backend address (`backend.zig` forwards them as
-// `backend.X`); the GGML block structs are `dtype.Block*`. Kernels, encoders
-// and block-size constants are addressed by child module.
-pub const AnyQuantizedMatmulRhs = types.AnyQuantizedMatmulRhs;
-pub const BlockQ4_Kx2Mmla = types.BlockQ4_Kx2Mmla;
-pub const BlockQ4_Kx4 = types.BlockQ4_Kx4;
-pub const BlockQ4_Kx8 = types.BlockQ4_Kx8;
-pub const BlockQ5_Kx8 = types.BlockQ5_Kx8;
-pub const BlockQ6_Kx4 = types.BlockQ6_Kx4;
-pub const BlockQ8_0x4 = types.BlockQ8_0x4;
-pub const BlockQ8_Kx2Mmla = types.BlockQ8_Kx2Mmla;
-pub const BlockQ8_Kx4 = types.BlockQ8_Kx4;
-pub const BlockTQ2_0x4 = types.BlockTQ2_0x4;
-pub const BlockTQ2_0Foldedx4 = types.BlockTQ2_0Foldedx4;
-pub const BlockTQ2_0Folded = types.BlockTQ2_0Folded;
-pub const QuantizedMatmulRhsI8 = types.QuantizedMatmulRhsI8;
-pub const QuantizedMatmulRhsIQ1_M = types.QuantizedMatmulRhsIQ1_M;
-pub const QuantizedMatmulRhsIQ1_S = types.QuantizedMatmulRhsIQ1_S;
-pub const QuantizedMatmulRhsIQ2_S = types.QuantizedMatmulRhsIQ2_S;
-pub const QuantizedMatmulRhsIQ2_XS = types.QuantizedMatmulRhsIQ2_XS;
-pub const QuantizedMatmulRhsIQ2_XXS = types.QuantizedMatmulRhsIQ2_XXS;
-pub const QuantizedMatmulRhsIQ3_S = types.QuantizedMatmulRhsIQ3_S;
-pub const QuantizedMatmulRhsIQ3_XXS = types.QuantizedMatmulRhsIQ3_XXS;
-pub const QuantizedMatmulRhsIQ4_NL = types.QuantizedMatmulRhsIQ4_NL;
-pub const QuantizedMatmulRhsIQ4_XS = types.QuantizedMatmulRhsIQ4_XS;
-pub const QuantizedMatmulRhsMXFP4 = types.QuantizedMatmulRhsMXFP4;
-pub const QuantizedMatmulRhsNVFP4 = types.QuantizedMatmulRhsNVFP4;
-pub const QuantizedMatmulRhsQ1_0 = types.QuantizedMatmulRhsQ1_0;
-pub const QuantizedMatmulRhsQ2_0 = types.QuantizedMatmulRhsQ2_0;
-pub const QuantizedMatmulRhsQ2_K = types.QuantizedMatmulRhsQ2_K;
-pub const QuantizedMatmulRhsQ3_K = types.QuantizedMatmulRhsQ3_K;
-pub const QuantizedMatmulRhsQ4_0 = types.QuantizedMatmulRhsQ4_0;
-pub const QuantizedMatmulRhsQ4_1 = types.QuantizedMatmulRhsQ4_1;
-pub const QuantizedMatmulRhsQ4_K = types.QuantizedMatmulRhsQ4_K;
-pub const QuantizedMatmulRhsQ4_Kx2Mmla = types.QuantizedMatmulRhsQ4_Kx2Mmla;
-pub const QuantizedMatmulRhsQ4_Kx4 = types.QuantizedMatmulRhsQ4_Kx4;
-pub const QuantizedMatmulRhsQ4_Kx8 = types.QuantizedMatmulRhsQ4_Kx8;
-pub const QuantizedMatmulRhsQ5_0 = types.QuantizedMatmulRhsQ5_0;
-pub const QuantizedMatmulRhsQ5_1 = types.QuantizedMatmulRhsQ5_1;
-pub const QuantizedMatmulRhsQ5_K = types.QuantizedMatmulRhsQ5_K;
-pub const QuantizedMatmulRhsQ5_Kx8 = types.QuantizedMatmulRhsQ5_Kx8;
-pub const QuantizedMatmulRhsQ6_K = types.QuantizedMatmulRhsQ6_K;
-pub const QuantizedMatmulRhsQ6_Kx4 = types.QuantizedMatmulRhsQ6_Kx4;
-pub const QuantizedMatmulRhsQ8_0 = types.QuantizedMatmulRhsQ8_0;
-pub const QuantizedMatmulRhsQ8_0x4 = types.QuantizedMatmulRhsQ8_0x4;
-pub const QuantizedMatmulRhsRowsFor = types.QuantizedMatmulRhsRowsFor;
-pub const QuantizedMatmulRhsTQ1_0 = types.QuantizedMatmulRhsTQ1_0;
-pub const QuantizedMatmulRhsTQ2_0 = types.QuantizedMatmulRhsTQ2_0;
-pub const QuantizedRowsFor = types.QuantizedRowsFor;
-pub const QuantizedRowsQ4_0 = types.QuantizedRowsQ4_0;
-pub const QuantizedRowsQ8_0 = types.QuantizedRowsQ8_0;
-pub const QuantizedRowsQ8_1 = types.QuantizedRowsQ8_1;
+/// The K-quant and ternary RHS constructors the loaders call by name
+/// (the model band and the weights band build containers from GGUF rows).
+pub const quantizedMatmulRhsQ5_KFromBlocks = q8k.quantizedMatmulRhsQ5_KFromBlocks;
+pub const quantizedMatmulRhsTQ2_0FromBorrowedBlocks = ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks;
 
 // Output columns computed together per activation chunk: one qa load feeds all
 // i8_col_block columns, and the independent accumulators give the CPU ILP to
@@ -260,12 +211,12 @@ pub fn quantizeRhsBlockwiseI8(
     allocator: Allocator,
     rhs: *const Tensor,
     group_size: usize,
-) !QuantizedMatmulRhsI8 {
+) !types.QuantizedMatmulRhsI8 {
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
-    const gs = QuantizedMatmulRhsI8.effectiveGroupSize(group_size);
-    const num_groups = QuantizedMatmulRhsI8.groupCountForSize(k, gs);
+    const gs = types.QuantizedMatmulRhsI8.effectiveGroupSize(group_size);
+    const num_groups = types.QuantizedMatmulRhsI8.groupCountForSize(k, gs);
 
     const src = try rhs.dataConstChecked();
 
@@ -319,7 +270,7 @@ pub fn quantizeActivationsPerRowI8(qa: []i8, a_scales: []f32, a: []const f32, m:
     }
 }
 
-pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !QuantizedMatmulRhsQ8_0 {
+pub fn quantizeMatmulRhsQ8_0(allocator: Allocator, rhs: *const Tensor) !types.QuantizedMatmulRhsQ8_0 {
     const view = try rhs.rankView(2);
     const k = view.dim(0);
     const n = view.dim(1);
@@ -361,7 +312,7 @@ pub fn dequantizeTensorInto(comptime tensor_dtype: DType, dst: *Tensor, src: *co
 
     const out = try dst.dataChecked();
     const blocks = try src.dataConstChecked();
-    const blocks_per_row = try blockCountForDType(tensor_dtype, cols);
+    const blocks_per_row = try types.blockCountForDType(tensor_dtype, cols);
 
     var row: usize = 0;
     while (row < rows) : (row += 1) {
@@ -385,7 +336,7 @@ pub fn getRowsTensorInto(comptime tensor_dtype: DType, dst: *Tensor, table: *con
 
     const out = try dst.dataChecked();
     const blocks = try table.dataConstChecked();
-    const blocks_per_row = try blockCountForDType(tensor_dtype, cols);
+    const blocks_per_row = try types.blockCountForDType(tensor_dtype, cols);
 
     for (indices, 0..) |index, row| {
         if (index >= rows) return tensor.TensorError.IndexOutOfBounds;
@@ -396,8 +347,6 @@ pub fn getRowsTensorInto(comptime tensor_dtype: DType, dst: *Tensor, table: *con
         );
     }
 }
-
-pub const blockCountForDType = types.blockCountForDType;
 
 /// How many leading rows of an m-row batch the x4-lane-packed LHS kernels
 /// take, per K-quant weight: the padded Q4_K kernel takes every batch of at
@@ -461,13 +410,6 @@ pub fn gemm(comptime g: ops.QuantGemm, out: []f32, lhs: ops.LhsOf(g), rhs: ops.R
     comptime unreachable;
 }
 
-/// The compact (GGUF-native block layout) matmul RHS of one format
-/// (`types.CompactRhs`): the comptime map that lets format-generic dispatch
-/// (the MoE expert tile) construct views and pick kernels without one
-/// hand-written arm per format.
-pub const CompactRhs = types.CompactRhs;
-pub const LanePackedRhs = types.LanePackedRhs;
-
 /// True when `dt` has the batched column-outer compact kernel
 /// (`matmul*RhsCompactColOuter`); q2_k/q3_k stay on the row-outer tile.
 pub fn hasCompactColOuter(comptime dt: DType) bool {
@@ -477,21 +419,21 @@ pub fn hasCompactColOuter(comptime dt: DType) bool {
 /// Row-outer tile over a compact RHS view, by format: the
 /// `.{ .rows, .q8_k, .row_outer }` gemm selection (the MoE expert tile's
 /// entry; `n` must be the view's width).
-pub fn matmulCompactRhsTile(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
+pub fn matmulCompactRhsTile(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const types.CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
     std.debug.assert(view.n == n);
     gemm(.{ .weight = dt, .lhs = .q8_k }, out, qlhs, view, .{ .r0 = r0, .r1 = m, .c0 = c0, .c1 = c1 });
 }
 
 /// Batched column-outer compact kernel (the `hasCompactColOuter` formats):
 /// the `.{ .rows, .q8_k, .col_outer }` gemm selection.
-pub fn matmulCompactColOuter(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
+pub fn matmulCompactColOuter(comptime dt: DType, out: []f32, qlhs: []const dtype_mod.BlockQ8_K, view: *const types.CompactRhs(dt), n: usize, r0: usize, m: usize, c0: usize, c1: usize) void {
     std.debug.assert(view.n == n);
     gemm(.{ .weight = dt, .lhs = .q8_k, .order = .col_outer }, out, qlhs, view, .{ .r0 = r0, .r1 = m, .c0 = c0, .c1 = c1 });
 }
 
 /// Lane-packed (Q8_Kx4 LHS) column-outer compact kernel: the
 /// `.{ .rows, .q8_kx4, .col_outer }` gemm selection.
-pub fn matmulCompactQ8_Kx4ColOuter(comptime dt: DType, out: []f32, lhs_x4: []const types.BlockQ8_Kx4, view: *const CompactRhs(dt), n: usize, m: usize, c0: usize, c1: usize) void {
+pub fn matmulCompactQ8_Kx4ColOuter(comptime dt: DType, out: []f32, lhs_x4: []const types.BlockQ8_Kx4, view: *const types.CompactRhs(dt), n: usize, m: usize, c0: usize, c1: usize) void {
     std.debug.assert(view.n == n);
     gemm(.{ .weight = dt, .lhs = .q8_kx4, .order = .col_outer }, out, lhs_x4, view, .{ .r1 = m, .c0 = c0, .c1 = c1 });
 }
@@ -535,7 +477,7 @@ pub fn dequantizeRowForDType(
 
 /// f32 -> quantized row encoder dispatch (the GGUF quantize-export entry).
 /// The caller supplies the output blocks; `src.len` must be a whole number of
-/// blocks and `dst.len` must match (`blockCountForDType`). Dtypes without an
+/// blocks and `dst.len` must match (`types.blockCountForDType`). Dtypes without an
 /// f32 encoder (and non-quantized dtypes) are a compile error. Inputs are
 /// assumed finite (no NaN/inf), as in ggml's encoders.
 pub fn quantizeRowForDType(
@@ -565,9 +507,9 @@ fn dequantizeKRowInto(
     dst: []f32,
     blocks: []const dtype_mod.Storage(tensor_dtype),
 ) !void {
-    if (dst.len != try types.checkedProduct(blocks.len, types.qk_k_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try types.checkedProduct(blocks.len, dtype_mod.qk_k_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
 
-    var dense_block: [types.qk_k_block_size]f32 = undefined;
+    var dense_block: [dtype_mod.qk_k_block_size]f32 = undefined;
     for (blocks, 0..) |*block, block_index| {
         switch (tensor_dtype) {
             .q2_k => cold.dequantizeBlockQ2_KInto(&dense_block, block),
@@ -578,7 +520,7 @@ fn dequantizeKRowInto(
             .q8_k => q8k.dequantizeBlockQ8_KInto(&dense_block, block),
             else => unreachable,
         }
-        @memcpy(dst[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size], &dense_block);
+        @memcpy(dst[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size], &dense_block);
     }
 }
 

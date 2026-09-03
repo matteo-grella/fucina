@@ -12,9 +12,9 @@ const tensor = @import("../tensor.zig");
 const DType = dtype_mod.DType;
 const Tensor = tensor.Tensor;
 
-const QuantizedMatmulRhsI8 = quant.QuantizedMatmulRhsI8;
-const qk_k_block_size = quant.types.qk_k_block_size;
-const BlockQ8_Kx4 = quant.BlockQ8_Kx4;
+const QuantizedMatmulRhsI8 = quant.types.QuantizedMatmulRhsI8;
+const qk_k_block_size = dtype_mod.qk_k_block_size;
+const BlockQ8_Kx4 = quant.types.BlockQ8_Kx4;
 const quantizeRowsQ8_K = quant.q8k.quantizeRowsQ8_K;
 const packRowsQ8_Kx4 = quant.q8k.packRowsQ8_Kx4;
 const quantizeRowsQ8_Kx4Into = quant.q8k.quantizeRowsQ8_Kx4Into;

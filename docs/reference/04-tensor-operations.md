@@ -31,7 +31,7 @@ Every operation below shares one contract, implemented by the shared tails
   stays catchable apart from those. This is the whole recoverable
   vocabulary of the op surface, and `fucina.Error` is derived from the
   band sets rather than listed by hand: `exec.Error` merges `TensorError`,
-  `backend.quant.QuantizedFormatError` (`InvalidQuantizedLength`), the
+  `backend.quant.types.QuantizedFormatError` (`InvalidQuantizedLength`), the
   runtime's `ExecError` (`WorkPoolUnavailable`, `FloatEnvironmentChanged`,
   `UnsupportedAttentionVariant`) and `OutOfMemory`; `ag.Error` adds
   `AgError`, the engine's state names plus the graph-control names
@@ -1097,7 +1097,7 @@ test "dotTernarySte encodes the latent weight per call" {
   ISA-best layout for its dtype — q8_0→x4, q6_k→x4, q5_k→x8, q4_k→x2mmla on
   aarch64+i8mm targets else x8 (the return type is
   `fucina.PackedRhs(dtype)`); `packRhsAs(ctx, Rhs)` forces a specific
-  container type (`fucina.quant.QuantizedMatmulRhsQ4_Kx8`, ...) instead.
+  container type (`fucina.quant.types.QuantizedMatmulRhsQ4_Kx8`, ...) instead.
 - On f32/f16/bf16 tensors: `packRhs(ctx)` snapshots a rank-2 `[out, contract]`
   weight into the shared f32 output-row-panel layout. f16/bf16 values widen
   once while packing; the caller owns and `deinit()`s the returned

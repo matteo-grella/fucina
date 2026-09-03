@@ -391,12 +391,12 @@ pub const LinearWeight = union(enum) {
                 const n = shape[0];
                 const k = shape[1];
                 if (n % 4 != 0 or k % 256 != 0) return Error.InvalidWeightShape;
-                const src = try blockSlice(backend_quant.BlockTQ2_0Foldedx4, info.data);
+                const src = try blockSlice(backend_quant.types.BlockTQ2_0Foldedx4, info.data);
                 if (src.len != (n / 4) * (k / 256)) return Error.InvalidWeightShape;
                 // Copy (like every dense quant arm): load() has no file
                 // handle, so mmap lifetime cannot be promised here. Still
                 // 4.0625 bpw once — no planes, no x4 packs, no fold pass.
-                const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                const owned = try ctx.allocator().alloc(backend_quant.types.BlockTQ2_0Foldedx4, src.len);
                 errdefer ctx.allocator().free(owned);
                 @memcpy(owned, src);
                 break :blk .{ .tq2_0_fx4 = WeightPtqtpFx4.init(ctx.allocator(), owned, ctx.allocator(), n, k, options.gpu_resident) };

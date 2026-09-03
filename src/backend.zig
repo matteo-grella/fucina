@@ -13,10 +13,6 @@ const std = @import("std");
 const build_options = @import("build_options");
 pub const ops = @import("backend/ops.zig");
 pub const packed_matmul = @import("backend/packed.zig");
-/// The raw quantized module: the research surface (bench, tools, examples)
-/// and the models band reach it through `fucina.internal`; the core bands
-/// use `quant` below.
-pub const quantized_matmul = @import("backend/quant.zig");
 const dtype_mod = @import("dtype.zig");
 const tensor = @import("tensor.zig");
 const thread = @import("thread.zig");
@@ -24,77 +20,15 @@ const thread = @import("thread.zig");
 pub const dtype_info = dtype_mod;
 pub const DType = dtype_mod.DType;
 pub const PackedDenseRhs = packed_matmul.PackedDenseRhs;
-/// The quantized surface the core bands use (exec, moe, store, weights, ag):
-/// the RHS containers, the descriptors, the block-count rule and the entry
-/// points the runtime, the MoE engine and the loaders call. The raw module
-/// behind it (`quantized_matmul`) is backend-private for those bands; the
-/// models band and the apps band may still take it through `fucina.internal`
-/// as the documented escape hatch. `arch-check` enforces the split.
-pub const quant = struct {
-    /// The block-length check every quantized row/pack entry shares.
-    pub const QuantizedFormatError = quantized_matmul.types.QuantizedFormatError;
-    pub const supports_q4_k_mmla = quantized_matmul.supports_q4_k_mmla;
-    pub const QuantizedMatmulRhsI8 = quantized_matmul.QuantizedMatmulRhsI8;
-    pub const QuantizedMatmulRhsQ1_0 = quantized_matmul.QuantizedMatmulRhsQ1_0;
-    pub const QuantizedMatmulRhsQ2_0 = quantized_matmul.QuantizedMatmulRhsQ2_0;
-    pub const QuantizedMatmulRhsQ4_0 = quantized_matmul.QuantizedMatmulRhsQ4_0;
-    pub const QuantizedMatmulRhsQ4_1 = quantized_matmul.QuantizedMatmulRhsQ4_1;
-    pub const QuantizedMatmulRhsQ5_0 = quantized_matmul.QuantizedMatmulRhsQ5_0;
-    pub const QuantizedMatmulRhsQ5_1 = quantized_matmul.QuantizedMatmulRhsQ5_1;
-    pub const QuantizedMatmulRhsQ2_K = quantized_matmul.QuantizedMatmulRhsQ2_K;
-    pub const QuantizedMatmulRhsQ3_K = quantized_matmul.QuantizedMatmulRhsQ3_K;
-    pub const QuantizedMatmulRhsQ4_K = quantized_matmul.QuantizedMatmulRhsQ4_K;
-    pub const QuantizedMatmulRhsQ4_Kx4 = quantized_matmul.QuantizedMatmulRhsQ4_Kx4;
-    pub const QuantizedMatmulRhsQ4_Kx8 = quantized_matmul.QuantizedMatmulRhsQ4_Kx8;
-    pub const QuantizedMatmulRhsQ4_Kx2Mmla = quantized_matmul.QuantizedMatmulRhsQ4_Kx2Mmla;
-    pub const QuantizedMatmulRhsQ5_K = quantized_matmul.QuantizedMatmulRhsQ5_K;
-    pub const QuantizedMatmulRhsQ5_Kx8 = quantized_matmul.QuantizedMatmulRhsQ5_Kx8;
-    pub const QuantizedMatmulRhsQ6_K = quantized_matmul.QuantizedMatmulRhsQ6_K;
-    pub const QuantizedMatmulRhsQ6_Kx4 = quantized_matmul.QuantizedMatmulRhsQ6_Kx4;
-    pub const QuantizedMatmulRhsQ8_0 = quantized_matmul.QuantizedMatmulRhsQ8_0;
-    pub const QuantizedMatmulRhsQ8_0x4 = quantized_matmul.QuantizedMatmulRhsQ8_0x4;
-    pub const QuantizedMatmulRhsIQ1_S = quantized_matmul.QuantizedMatmulRhsIQ1_S;
-    pub const QuantizedMatmulRhsIQ1_M = quantized_matmul.QuantizedMatmulRhsIQ1_M;
-    pub const QuantizedMatmulRhsIQ2_XXS = quantized_matmul.QuantizedMatmulRhsIQ2_XXS;
-    pub const QuantizedMatmulRhsIQ2_XS = quantized_matmul.QuantizedMatmulRhsIQ2_XS;
-    pub const QuantizedMatmulRhsIQ2_S = quantized_matmul.QuantizedMatmulRhsIQ2_S;
-    pub const QuantizedMatmulRhsIQ3_XXS = quantized_matmul.QuantizedMatmulRhsIQ3_XXS;
-    pub const QuantizedMatmulRhsIQ3_S = quantized_matmul.QuantizedMatmulRhsIQ3_S;
-    pub const QuantizedMatmulRhsIQ4_NL = quantized_matmul.QuantizedMatmulRhsIQ4_NL;
-    pub const QuantizedMatmulRhsIQ4_XS = quantized_matmul.QuantizedMatmulRhsIQ4_XS;
-    pub const QuantizedMatmulRhsTQ1_0 = quantized_matmul.QuantizedMatmulRhsTQ1_0;
-    pub const QuantizedMatmulRhsTQ2_0 = quantized_matmul.QuantizedMatmulRhsTQ2_0;
-    pub const QuantizedMatmulRhsMXFP4 = quantized_matmul.QuantizedMatmulRhsMXFP4;
-    pub const QuantizedMatmulRhsNVFP4 = quantized_matmul.QuantizedMatmulRhsNVFP4;
-    pub const AnyQuantizedMatmulRhs = quantized_matmul.AnyQuantizedMatmulRhs;
-    pub const QuantizedRowsQ4_0 = quantized_matmul.QuantizedRowsQ4_0;
-    pub const QuantizedRowsQ8_0 = quantized_matmul.QuantizedRowsQ8_0;
-    pub const PackedMatmulRhsI8 = QuantizedMatmulRhsI8;
-    pub const CompactRhs = quantized_matmul.CompactRhs;
-    pub const LanePackedRhs = quantized_matmul.LanePackedRhs;
-    pub const QuantizedMatmulRhsRowsFor = quantized_matmul.QuantizedMatmulRhsRowsFor;
-    pub const RhsLifetime = quantized_matmul.types.RhsLifetime;
-    pub const RawRhs = quantized_matmul.types.RawRhs;
-    pub const BlockQ8_0x4 = quantized_matmul.BlockQ8_0x4;
-    pub const BlockQ8_Kx4 = quantized_matmul.BlockQ8_Kx4;
-    pub const BlockTQ2_0Foldedx4 = quantized_matmul.BlockTQ2_0Foldedx4;
-    pub const qk_k_block_size = quantized_matmul.types.qk_k_block_size;
-    pub const blockCountForDType = quantized_matmul.blockCountForDType;
-    pub const x4PrefixRows = quantized_matmul.x4PrefixRows;
-    pub const packRhsAs = quantized_matmul.packRhsAs;
-    pub const getRowsTensorInto = quantized_matmul.getRowsTensorInto;
-    pub const dequantizeTensorInto = quantized_matmul.dequantizeTensorInto;
-    pub const quantizeRowForDType = quantized_matmul.quantizeRowForDType;
-    pub const dequantizeRowForDType = quantized_matmul.dequantizeRowForDType;
-    pub const hasCompactColOuter = quantized_matmul.hasCompactColOuter;
-    pub const matmulCompactColOuter = quantized_matmul.matmulCompactColOuter;
-    pub const matmulCompactQ8_Kx4ColOuter = quantized_matmul.matmulCompactQ8_Kx4ColOuter;
-    pub const matmulCompactRhsTile = quantized_matmul.matmulCompactRhsTile;
-    pub const quantizedMatmulRhsQ5_KFromBlocks = quantized_matmul.q8k.quantizedMatmulRhsQ5_KFromBlocks;
-    pub const quantizedMatmulRhsTQ2_0FromBorrowedBlocks = quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromBorrowedBlocks;
-    pub const BlockTQ2_0Folded = quantized_matmul.BlockTQ2_0Folded;
-    pub const BlockTQ2_0x4 = quantized_matmul.BlockTQ2_0x4;
-};
+/// The quantized matmul module (`backend/quant.zig`): its own `pub` surface
+/// is what the core bands use (exec, moe, store, weights, ag): the RHS
+/// containers and descriptors in `quant.types`, the block-count rule, the
+/// pack/dequantize/get-rows entries and the compact tiles the MoE engine
+/// schedules. Its per-format kernel children (`quant.q8k`, `quant.q4_k`,
+/// ...) are the research surface: bench, tools and the models band reach
+/// them, the core bands take every kernel through `kernels` (the
+/// backend-door rule of `arch-check` names the children).
+pub const quant = @import("backend/quant.zig");
 
 /// The one dtype -> packed RHS container map. Dense f32/f16/bf16 weights
 /// share the f32 output-row panel; block-quantized weights take the
@@ -106,7 +40,7 @@ pub const quant = struct {
 pub fn PackedRhsFor(comptime dt: DType) type {
     return switch (dt) {
         .f32, .f16, .bf16 => PackedDenseRhs,
-        else => quantized_matmul.PackedQuantRhsFor(dt),
+        else => quant.PackedQuantRhsFor(dt),
     };
 }
 

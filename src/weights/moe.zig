@@ -87,13 +87,13 @@ pub fn loadMoeRhs(
         // a borrow serves straight from the mapping's clean pages.
         .tq2_0_fx4 => blk: {
             if (out_dim % 4 != 0 or in_dim % 256 != 0) return Error.InvalidWeightShape;
-            const src = try blockSlice(backend_quant.BlockTQ2_0Foldedx4, info.data);
+            const src = try blockSlice(backend_quant.types.BlockTQ2_0Foldedx4, info.data);
             if (src.len != (rows / 4) * (in_dim / 256)) return Error.InvalidWeightShape;
-            var folded: []const backend_quant.BlockTQ2_0Foldedx4 = src;
+            var folded: []const backend_quant.types.BlockTQ2_0Foldedx4 = src;
             var folded_allocator: ?Allocator = null;
             if (!borrow) {
                 gguf.prefetch(info.data);
-                const owned = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, src.len);
+                const owned = try ctx.allocator().alloc(backend_quant.types.BlockTQ2_0Foldedx4, src.len);
                 @memcpy(owned, src);
                 folded = owned;
                 folded_allocator = ctx.allocator();
@@ -130,7 +130,7 @@ pub fn loadMoeRhsPtqtp(
 ) !MoeRhs {
     if (plane_infos.len == 0 or plane_infos.len > 3) return Error.InvalidWeightShape;
     const rows = try std.math.mul(usize, expected_n_expert, expected_out_dim);
-    const bpc = try backend_mod.quant.blockCountForDType(.q8_k, expected_in_dim);
+    const bpc = try backend_mod.quant.types.blockCountForDType(.q8_k, expected_in_dim);
     const blocks_per_plane = try std.math.mul(usize, rows, bpc);
 
     var planes: [3][]const dtype_mod.BlockTQ2_0 = .{ &.{}, &.{}, &.{} };
@@ -159,15 +159,15 @@ pub fn loadMoeRhsPtqtp(
     // condition keeps the two tiers bitwise-identical on every file both
     // can load — a silent 2-pass fallback here would diverge from a
     // streamed run of the same file in final f32 ulps.
-    var folded: []const backend_quant.BlockTQ2_0Foldedx4 = &.{};
+    var folded: []const backend_quant.types.BlockTQ2_0Foldedx4 = &.{};
     var folded_allocator: ?Allocator = null;
     if (tied and plane_infos.len == 2 and expected_out_dim % 4 == 0) {
         const fg = (expected_out_dim / 4) * bpc;
-        const buf = try ctx.allocator().alloc(backend_quant.BlockTQ2_0Foldedx4, expected_n_expert * fg);
+        const buf = try ctx.allocator().alloc(backend_quant.types.BlockTQ2_0Foldedx4, expected_n_expert * fg);
         errdefer ctx.allocator().free(buf);
         const expert_blocks = expected_out_dim * bpc;
         for (0..expected_n_expert) |e| {
-            var views: [2]backend_quant.QuantizedMatmulRhsTQ2_0 = undefined;
+            var views: [2]backend_quant.types.QuantizedMatmulRhsTQ2_0 = undefined;
             for (0..2) |p| {
                 const blocks = planes[p][e * expert_blocks ..][0..expert_blocks];
                 views[p] = try backend_mod.kernels.quantizedMatmulRhsTQ2_0FromBorrowedBlocks(expected_in_dim, expected_out_dim, @constCast(blocks));
@@ -467,7 +467,7 @@ fn copyOrBorrowMoeRhsRows(
     rows: usize,
     in_dim: usize,
     borrow: bool,
-) !backend_quant.QuantizedMatmulRhsRowsFor(dtype) {
+) !backend_quant.types.QuantizedMatmulRhsRowsFor(dtype) {
     const Block = switch (dtype) {
         .iq2_xxs => dtype_mod.BlockIQ2_XXS,
         .iq2_s => dtype_mod.BlockIQ2_S,
@@ -479,7 +479,7 @@ fn copyOrBorrowMoeRhsRows(
     const src = try blockSlice(Block, info.data);
     if (rows == 0 or src.len % rows != 0) return Error.InvalidWeightShape;
     const bpc = src.len / rows;
-    if (try backend_quant.blockCountForDType(.q8_k, in_dim) != bpc) return Error.InvalidWeightShape;
+    if (try backend_quant.types.blockCountForDType(.q8_k, in_dim) != bpc) return Error.InvalidWeightShape;
     if (borrow) {
         return .{ .allocator = null, .blocks = @constCast(src), .blocks_per_column = bpc, .k = in_dim, .n = rows };
     }

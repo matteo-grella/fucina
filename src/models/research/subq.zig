@@ -37,7 +37,7 @@ const subq_kernels = @import("subq_kernels.zig");
 const Allocator = std.mem.Allocator;
 const ExecContext = fucina.ExecContext;
 const Tensor = fucina.internal.tensor_mod.Tensor;
-const qkern = fucina.internal.backend_mod.quantized_matmul;
+const qkern = fucina.internal.backend_mod.quant;
 const BlockQ8_0 = fucina.quant.BlockQ8_0;
 const q8_block = 32;
 

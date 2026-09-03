@@ -330,7 +330,7 @@ pub fn TernarySteDotBackward(comptime left_tags: anytype) type {
         left_shape: [rawRank(left_tags.len)]usize,
         estimated_work: usize,
         // Encoded weight snapshot; owned (freed by deinit).
-        rhs: backend_quant.QuantizedMatmulRhsTQ2_0,
+        rhs: backend_quant.types.QuantizedMatmulRhsTQ2_0,
 
         const Self = @This();
 

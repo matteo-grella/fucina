@@ -42,7 +42,7 @@ pub const ExecError = exec_runtime.ExecError;
 /// and argument validity), the quantized block-length check, `ExecError`
 /// and `OutOfMemory`. Each method keeps its precise inferred set; this
 /// merge is what the bands above build on.
-pub const Error = tensor.TensorError || backend_mod.quant.QuantizedFormatError || ExecError || error{OutOfMemory};
+pub const Error = tensor.TensorError || backend_mod.quant.types.QuantizedFormatError || ExecError || error{OutOfMemory};
 
 pub const RhsLifetime = exec_quant_matmul.RhsLifetime;
 

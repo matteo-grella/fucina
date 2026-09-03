@@ -35,8 +35,8 @@ const ExecContext = fucina.ExecContext;
 const KvCache = kv_cache.KvCache;
 const gguf = fucina.gguf;
 const LinearWeight = weights.LinearWeight;
-const RhsQ6_K = fucina.quant.QuantizedMatmulRhsQ6_Kx4;
-const RhsQ8_0 = fucina.quant.QuantizedMatmulRhsQ8_0x4;
+const RhsQ6_K = fucina.quant.types.QuantizedMatmulRhsQ6_Kx4;
+const RhsQ8_0 = fucina.quant.types.QuantizedMatmulRhsQ8_0x4;
 
 pub const Error = weights.Error || error{
     InvalidConfig,

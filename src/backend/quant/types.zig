@@ -16,20 +16,6 @@ const Tensor = tensor.Tensor;
 // Default W8A8 group length. This matches GGML Q8_0's block length, but the
 // container below is not itself GGML Q8_0.
 pub const default_i8_group_size: usize = 32;
-pub const q1_0_block_size = dtype_mod.q1_0_block_size;
-pub const q2_0_block_size = dtype_mod.q2_0_block_size;
-pub const q4_0_block_size = dtype_mod.q4_0_block_size;
-pub const q4_1_block_size = dtype_mod.q4_1_block_size;
-pub const q5_0_block_size = dtype_mod.q5_0_block_size;
-pub const q5_1_block_size = dtype_mod.q5_1_block_size;
-pub const q8_0_block_size = dtype_mod.q8_0_block_size;
-pub const q8_1_block_size = dtype_mod.q8_1_block_size;
-pub const qk_k_block_size = dtype_mod.qk_k_block_size;
-pub const k_scale_size = dtype_mod.k_scale_size;
-pub const iq4_nl_block_size = dtype_mod.iq4_nl_block_size;
-pub const mxfp4_block_size = dtype_mod.mxfp4_block_size;
-pub const nvfp4_block_size = dtype_mod.nvfp4_block_size;
-pub const nvfp4_subblock_size = dtype_mod.nvfp4_subblock_size;
 
 pub const QuantizedFormatError = error{
     InvalidQuantizedLength,
@@ -93,50 +79,50 @@ pub fn blockCountExact(comptime block_size: usize, len: usize) QuantizedFormatEr
 
 pub const BlockQ8_0x4 = extern struct {
     d: [4]u16,
-    qs: [4 * q8_0_block_size]i8,
+    qs: [4 * dtype_mod.q8_0_block_size]i8,
 };
 pub const BlockQ4_Kx4 = extern struct {
     d: [4]u16,
     dmin: [4]u16,
     scales: [8 * 4]u8,
     mins: [8 * 4]u8,
-    qs: [qk_k_block_size * 4]i8,
+    qs: [dtype_mod.qk_k_block_size * 4]i8,
 };
 pub const BlockQ4_Kx8 = extern struct {
     d: [8]u16,
     dmin: [8]u16,
     scales: [8 * 8]u8,
     mins: [8 * 8]u8,
-    qs: [qk_k_block_size * 4]u8,
+    qs: [dtype_mod.qk_k_block_size * 4]u8,
 };
 pub const BlockQ4_Kx2Mmla = extern struct {
     d: [2]u16,
     dmin: [2]u16,
     scales: [8 * 2]u8,
     mins: [8 * 2]u8,
-    qs: [qk_k_block_size * 2]i8,
+    qs: [dtype_mod.qk_k_block_size * 2]i8,
 };
 pub const BlockQ5_Kx8 = extern struct {
     d: [8]u16,
     dmin: [8]u16,
     scales: [8 * 8]u8,
     mins: [8 * 8]u8,
-    qs: [qk_k_block_size * 8]i8,
+    qs: [dtype_mod.qk_k_block_size * 8]i8,
 };
 pub const BlockQ8_Kx4 = extern struct {
     d: [4]f32,
-    qs: [qk_k_block_size * 4]i8,
-    bsums: [qk_k_block_size / 4]i16,
+    qs: [dtype_mod.qk_k_block_size * 4]i8,
+    bsums: [dtype_mod.qk_k_block_size / 4]i16,
 };
 pub const BlockQ8_Kx2Mmla = extern struct {
     d: [2]f32,
     bsums: [8 * 2]i16,
-    qs: [qk_k_block_size * 2]i8,
+    qs: [dtype_mod.qk_k_block_size * 2]i8,
 };
 pub const BlockQ6_Kx4 = extern struct {
     d: [4]u16,
     scales: [16 * 4]i8,
-    qs: [qk_k_block_size * 4]i8,
+    qs: [dtype_mod.qk_k_block_size * 4]i8,
 };
 
 /// Four TQ2_0 blocks (four RHS rows = output columns) at the same k

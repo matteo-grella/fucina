@@ -69,9 +69,9 @@ pub fn FusedActQuantTask(comptime act: FusedActKind, comptime format: FusedLhsFo
         rows_kernel: bool = true,
         row_group_start: usize,
         row_group_end: usize,
-        x4_blocks: []quantized_matmul.BlockQ8_Kx4 = &.{},
+        x4_blocks: []quantized_matmul.types.BlockQ8_Kx4 = &.{},
         row_blocks: []dtype_mod.BlockQ8_K = &.{},
-        q8_0x4_blocks: []quantized_matmul.BlockQ8_0x4 = &.{},
+        q8_0x4_blocks: []quantized_matmul.types.BlockQ8_0x4 = &.{},
 
         pub fn run(task: *const @This()) void {
             const cols = task.cols;

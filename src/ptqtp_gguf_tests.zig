@@ -692,15 +692,15 @@ test "MoE tie stamp: tied K=2 stacks load with the folded expert pack and fold t
 
     var loaded = (try ptqtp_gguf.maybeLoadMoeRhs(&ctx, &out, "e.weight", in_dim, out_dim, n_expert, false)).?;
     defer loaded.deinit();
-    const bq = fucina.internal.backend_mod.quantized_matmul;
+    const bq = fucina.internal.backend_mod.quant;
     const bpc = in_dim / fucina.ptqtp.block_len;
     const fg = (out_dim / 4) * bpc;
     try std.testing.expectEqual(n_expert * fg, loaded.ptqtp.folded.len);
 
     // The loaded pack is the per-expert fold of the plane row-blocks.
-    var want: [n_expert * fg]bq.BlockTQ2_0Foldedx4 = undefined;
+    var want: [n_expert * fg]bq.types.BlockTQ2_0Foldedx4 = undefined;
     for (0..n_expert) |e| {
-        var views: [2]fucina.internal.backend_mod.quant.QuantizedMatmulRhsTQ2_0 = undefined;
+        var views: [2]fucina.internal.backend_mod.quant.types.QuantizedMatmulRhsTQ2_0 = undefined;
         for ([2][]fucina.quant.BlockTQ2_0{ &p0_blocks, &p1_blocks }, 0..) |plane, p| {
             views[p] = .{
                 .allocator = null,
@@ -777,7 +777,7 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
     // the same solved planes — the fx4 tensor is by construction the bytes
     // that fold produces.
     const allocator = std.testing.allocator;
-    const bq = fucina.internal.backend_mod.quantized_matmul;
+    const bq = fucina.internal.backend_mod.quant;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
@@ -814,12 +814,12 @@ test "native folded MoE (tq2_0_fx4): loadMoeRhs serves the pack bit-identical to
     // fx4 file: ONE base-named pack tensor, no stamps, built by the same
     // fold the loader would run.
     const fg = (t_out / 4) * bpc;
-    const pack = try allocator.alloc(bq.BlockTQ2_0Foldedx4, n_expert * fg);
+    const pack = try allocator.alloc(bq.types.BlockTQ2_0Foldedx4, n_expert * fg);
     defer allocator.free(pack);
     for (0..n_expert) |e| {
         const pb = t_out * bpc;
-        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1[e * pb ..][0..pb]), .blocks_per_column = bpc, .k = t_in, .n = t_out };
-        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2[e * pb ..][0..pb]), .blocks_per_column = bpc, .k = t_in, .n = t_out };
+        var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1[e * pb ..][0..pb]), .blocks_per_column = bpc, .k = t_in, .n = t_out };
+        var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2[e * pb ..][0..pb]), .blocks_per_column = bpc, .k = t_in, .n = t_out };
         try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
     }
     var fx4 = blk: {
@@ -869,7 +869,7 @@ test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout a
     // exactly; the plane sum multiplies an independently rounded f16 —
     // equal math, different ulps).
     const allocator = std.testing.allocator;
-    const bq = fucina.internal.backend_mod.quantized_matmul;
+    const bq = fucina.internal.backend_mod.quant;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
     defer ctx.deinit();
@@ -888,23 +888,23 @@ test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout a
     }
 
     // Per-part packs (the fx4 payloads).
-    var packs: [3][]bq.BlockTQ2_0Foldedx4 = undefined;
+    var packs: [3][]bq.types.BlockTQ2_0Foldedx4 = undefined;
     var packs_built: usize = 0;
     defer for (0..packs_built) |i| allocator.free(packs[i]);
     for (0..3) |i| {
         const pn = parts_n[i];
         const bpr = t_k / 256;
-        packs[i] = try allocator.alloc(bq.BlockTQ2_0Foldedx4, (pn / 4) * bpr);
-        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[i].plane1), .blocks_per_column = bpr, .k = t_k, .n = pn };
-        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[i].plane2), .blocks_per_column = bpr, .k = t_k, .n = pn };
+        packs[i] = try allocator.alloc(bq.types.BlockTQ2_0Foldedx4, (pn / 4) * bpr);
+        var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[i].plane1), .blocks_per_column = bpr, .k = t_k, .n = pn };
+        var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[i].plane2), .blocks_per_column = bpr, .k = t_k, .n = pn };
         try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(packs[i], &v0, &v1);
         packs_built += 1;
     }
 
     // (c) relayout parity for part 0.
     {
-        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[0].plane1), .blocks_per_column = 1, .k = t_k, .n = parts_n[0] };
-        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[0].plane2), .blocks_per_column = 1, .k = t_k, .n = parts_n[0] };
+        var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[0].plane1), .blocks_per_column = 1, .k = t_k, .n = parts_n[0] };
+        var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pairs[0].plane2), .blocks_per_column = 1, .k = t_k, .n = parts_n[0] };
         const from_planes = try bq.ternary.packMatmulRhsTQ2_0FoldedRows(allocator, &v0, &v1);
         defer allocator.free(from_planes);
         const from_x4 = try bq.ternary.packMatmulRhsTQ2_0FoldedRowsFromX4(allocator, packs[0], parts_n[0], 1);
@@ -976,7 +976,7 @@ test "dense fx4 arm: serve and fusion bitwise vs tied sibling planes; relayout a
     var fx4_parts: [3]LinearWeight = undefined;
     var ptq_parts: [3]LinearWeight = undefined;
     for (0..3) |i| {
-        const owned = try allocator.alloc(bq.BlockTQ2_0Foldedx4, packs[i].len);
+        const owned = try allocator.alloc(bq.types.BlockTQ2_0Foldedx4, packs[i].len);
         @memcpy(owned, packs[i]);
         fx4_parts[i] = .{ .tq2_0_fx4 = weights.WeightPtqtpFx4.init(allocator, owned, allocator, parts_n[i], t_k, false) };
         var p1 = try weights.QuantWeight(.tq2_0).fromBlocks(&ctx, .{ parts_n[i], t_k }, pairs[i].plane1);

@@ -29,7 +29,7 @@ const dtype_mod = raw_backend.dtype_info;
 
 const Tensor = raw_backend.Tensor;
 const native = raw_backend.native_impl;
-const qm = raw_backend.quantized_matmul;
+const qm = raw_backend.quant;
 const BlockQ4_K = dtype_mod.BlockQ4_K;
 const BlockQ8_K = dtype_mod.BlockQ8_K;
 const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
@@ -224,14 +224,14 @@ pub fn main(init: std.process.Init) !void {
 
             const dense_iters = @max(iters / 10, 3);
 
-            const ColdCtx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
+            const ColdCtx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.types.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
             const cold = try measure(iters, @max(iters / 20, 2), ColdCtx{ .out = out_cold, .qlhs = qlhs, .rhs = &rhs, .m = m, .n = n }, struct {
                 fn run(c: ColdCtx) void {
                     qm.cold.matmulTableQ8_KRhsRange(.tq2_0, c.out, c.qlhs, c.rhs, c.m, c.n, 0, c.m);
                 }
             }.run);
 
-            const X4Ctx = struct { out: []f32, qlhs: []const BlockQ8_K, packed_x4: []const qm.BlockTQ2_0x4, bpr: usize, m: usize, n: usize };
+            const X4Ctx = struct { out: []f32, qlhs: []const BlockQ8_K, packed_x4: []const qm.types.BlockTQ2_0x4, bpr: usize, m: usize, n: usize };
             const pair = try measurePair(
                 iters,
                 hot_ns,
@@ -252,14 +252,14 @@ pub fn main(init: std.process.Init) !void {
             const hot = pair.a_us;
             const x4 = pair.b_us;
 
-            const F32Ctx = struct { out: []f32, lhs: []const f32, rhs: *const qm.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
+            const F32Ctx = struct { out: []f32, lhs: []const f32, rhs: *const qm.types.QuantizedMatmulRhsTQ2_0, m: usize, n: usize };
             const f32act = try measure(iters, @max(iters / 20, 2), F32Ctx{ .out = out_f32act, .lhs = lhs_vals, .rhs = &rhs, .m = m, .n = n }, struct {
                 fn run(c: F32Ctx) void {
                     qm.ternary.matmulTQ2_0F32RhsRange(c.out, c.lhs, c.rhs, c.m, c.n, 0, c.m);
                 }
             }.run);
 
-            const Q4Ctx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.QuantizedMatmulRhsQ4_K, m: usize, n: usize };
+            const Q4Ctx = struct { out: []f32, qlhs: []const BlockQ8_K, rhs: *const qm.types.QuantizedMatmulRhsQ4_K, m: usize, n: usize };
             const q4 = try measure(iters, @max(iters / 20, 2), Q4Ctx{ .out = out_q4, .qlhs = qlhs, .rhs = &rhs_q4, .m = m, .n = n }, struct {
                 fn run(c: Q4Ctx) void {
                     qm.q4_k.matmulQ4_KRhsTile(c.out, c.qlhs, c.rhs, c.n, 0, c.m, 0, c.n);
@@ -292,7 +292,7 @@ pub fn main(init: std.process.Init) !void {
             // accumulating pass over the second plane) vs ONE folded pass.
             // Correctness is pinned bitwise in ternary_tests.zig; this pair
             // measures only speed (interleaved, medians).
-            const FoldPacks = struct { out: []f32, qlhs: []const BlockQ8_K, a: []const qm.BlockTQ2_0x4, b: []const qm.BlockTQ2_0x4, folded: []const qm.BlockTQ2_0Foldedx4, bpr: usize, m: usize, n: usize };
+            const FoldPacks = struct { out: []f32, qlhs: []const BlockQ8_K, a: []const qm.types.BlockTQ2_0x4, b: []const qm.types.BlockTQ2_0x4, folded: []const qm.types.BlockTQ2_0Foldedx4, bpr: usize, m: usize, n: usize };
             const fold_pair = try measurePair(
                 iters,
                 hot_ns, // reuse the sample buffers
@@ -374,8 +374,8 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
 
     const Worker = struct {
         kind: enum { q4, tq2 },
-        q4_rhs: qm.QuantizedMatmulRhsQ4_K,
-        t_rhs: *const qm.QuantizedMatmulRhsTQ2_0,
+        q4_rhs: qm.types.QuantizedMatmulRhsQ4_K,
+        t_rhs: *const qm.types.QuantizedMatmulRhsTQ2_0,
         qlhs: []const BlockQ8_K,
         out: []f32,
         c0: usize,
@@ -405,7 +405,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
                 var workers: [8]Worker = undefined;
                 var outs: [8][]f32 = undefined;
                 var q4_copies: [8][]dtype_mod.BlockQ4_K = undefined;
-                var t_copies: [8]?qm.QuantizedMatmulRhsTQ2_0 = .{null} ** 8;
+                var t_copies: [8]?qm.types.QuantizedMatmulRhsTQ2_0 = .{null} ** 8;
                 defer for (0..tc) |ti| {
                     allocator.free(outs[ti]);
                     if (std.mem.eql(u8, mode, "indep")) {
@@ -416,7 +416,7 @@ fn teamScaling(allocator: std.mem.Allocator, out: *std.Io.Writer) !void {
                 for (0..tc) |ti| {
                     outs[ti] = try allocator.alloc(f32, n);
                     var my_q4 = q4_blocks;
-                    var my_t: *const qm.QuantizedMatmulRhsTQ2_0 = &rhs_t;
+                    var my_t: *const qm.types.QuantizedMatmulRhsTQ2_0 = &rhs_t;
                     if (std.mem.eql(u8, mode, "indep")) {
                         q4_copies[ti] = try allocator.dupe(dtype_mod.BlockQ4_K, q4_blocks);
                         my_q4 = q4_copies[ti];

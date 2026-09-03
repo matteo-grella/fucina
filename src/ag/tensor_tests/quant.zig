@@ -765,20 +765,20 @@ fn checkFusedSplitSwiGluKQuant(comptime weight_dtype: DType, comptime Rhs: type,
 test "public splitSwiGlu packed Q4_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=13: padded-x4 small path; m=3: rows path; m=68: padded-x4 large path.
     for ([_]usize{ 3, 13, 68 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q4_k, backend_mod.quant.QuantizedMatmulRhsQ4_Kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q4_k, backend_mod.quant.types.QuantizedMatmulRhsQ4_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q5_Kx8 RHS dot matches unfused path bit-exactly" {
     // m=8: exact-x4 path; m=13: rows path; m=130: x4 prefix + 2-row tail.
     for ([_]usize{ 8, 13, 130 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q5_k, backend_mod.quant.QuantizedMatmulRhsQ5_Kx8, m);
+        try checkFusedSplitSwiGluKQuant(.q5_k, backend_mod.quant.types.QuantizedMatmulRhsQ5_Kx8, m);
     }
 }
 
 test "public splitSwiGlu packed Q6_Kx4 RHS dot matches unfused path bit-exactly" {
     for ([_]usize{ 5, 12 }) |m| {
-        try checkFusedSplitSwiGluKQuant(.q6_k, backend_mod.quant.QuantizedMatmulRhsQ6_Kx4, m);
+        try checkFusedSplitSwiGluKQuant(.q6_k, backend_mod.quant.types.QuantizedMatmulRhsQ6_Kx4, m);
     }
 }
 
@@ -926,10 +926,10 @@ test "public f32 Tensor dotTernarySte forward matches manual encode plus kernel"
     defer y.deinit();
     try std.testing.expectEqualSlices(usize, &.{ m, n }, y.asRawTensor().shape.slice());
 
-    var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
+    var rhs = try backend_mod.quant.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
     defer rhs.deinit();
     var expected: [m * n]f32 = undefined;
-    backend_mod.quantized_matmul.ternary.matmulTQ2_0F32RhsRange(&expected, &x_values, &rhs, m, n, 0, m);
+    backend_mod.quant.ternary.matmulTQ2_0F32RhsRange(&expected, &x_values, &rhs, m, n, 0, m);
     try std.testing.expectEqualSlices(f32, &expected, y.asRawTensor().dataConst());
 }
 
@@ -1014,11 +1014,11 @@ test "public f32 Tensor dotTernarySte weight grad is the plain matmul VJP (STE i
 
     // dx flows through the QUANTIZED weight:
     // dx[r][i] = sum_o gy[r][o]·dequant(W_q)[o][i].
-    var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
+    var rhs = try backend_mod.quant.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
     defer rhs.deinit();
     var w_dequant: [n * ternary_k]f32 = undefined;
     for (0..n) |o| {
-        try backend_mod.quantized_matmul.cold.dequantizeRowTQ2_0Into(w_dequant[o * ternary_k ..][0..ternary_k], rhs.columnBlocks(o));
+        try backend_mod.quant.cold.dequantizeRowTQ2_0Into(w_dequant[o * ternary_k ..][0..ternary_k], rhs.columnBlocks(o));
     }
     var gx = (try x.grad(&ctx)).?;
     defer gx.deinit();
@@ -1085,11 +1085,11 @@ test "public f32 Tensor dotTernarySte works under exec scope" {
     defer w.deinit();
 
     // dx flows through the dequantized weight; precompute it once.
-    var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
+    var rhs = try backend_mod.quant.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
     defer rhs.deinit();
     var w_dequant: [n * ternary_k]f32 = undefined;
     for (0..n) |o| {
-        try backend_mod.quantized_matmul.cold.dequantizeRowTQ2_0Into(w_dequant[o * ternary_k ..][0..ternary_k], rhs.columnBlocks(o));
+        try backend_mod.quant.cold.dequantizeRowTQ2_0Into(w_dequant[o * ternary_k ..][0..ternary_k], rhs.columnBlocks(o));
     }
 
     // Two steps with per-iteration scopes: the op's hand-inlined finishOp
@@ -1150,10 +1150,10 @@ test "public f32 Tensor dotTernarySte no-grad result under exec scope is scope-o
     var w = try Tensor(.{ .out, .in }).fromSlice(&ctx, .{ n, ternary_k }, &w_values);
     defer w.deinit();
 
-    var rhs = try backend_mod.quantized_matmul.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
+    var rhs = try backend_mod.quant.ternary.quantizedMatmulRhsTQ2_0FromF32Absmean(allocator, ternary_k, n, &w_values);
     defer rhs.deinit();
     var expected: [m * n]f32 = undefined;
-    backend_mod.quantized_matmul.ternary.matmulTQ2_0F32RhsRange(&expected, &x_values, &rhs, m, n, 0, m);
+    backend_mod.quant.ternary.matmulTQ2_0F32RhsRange(&expected, &x_values, &rhs, m, n, 0, m);
 
     // Constant weight + no-grad x inside a scope: the no-grad branch frees
     // the encoded rhs and the result is adopted by the scope (a borrow — no

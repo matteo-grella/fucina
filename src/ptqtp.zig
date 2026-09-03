@@ -55,7 +55,7 @@ const ExecContext = exec_mod.ExecContext;
 const quant = backend_mod.quant;
 
 pub const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
-pub const Rhs = backend_mod.quant.QuantizedMatmulRhsTQ2_0;
+pub const Rhs = backend_mod.quant.types.QuantizedMatmulRhsTQ2_0;
 
 /// Logical elements per TQ2_0 block — the packed group size.
 pub const block_len: usize = 256;

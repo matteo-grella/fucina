@@ -1010,10 +1010,10 @@ fn dotQ6_KGroupI32(w: *const BlockQ6_K, a: *const BlockQ8_K, comptime chunk: usi
     }
 }
 
-pub fn dequantizeBlockQ6_KInto(dst: *[types.qk_k_block_size]f32, src: *const BlockQ6_K) void {
+pub fn dequantizeBlockQ6_KInto(dst: *[dtype_mod.qk_k_block_size]f32, src: *const BlockQ6_K) void {
     const d = common.f16BitsToF32(src.d);
     var index: usize = 0;
-    while (index < types.qk_k_block_size) : (index += 1) {
+    while (index < dtype_mod.qk_k_block_size) : (index += 1) {
         const scale_index = q6KScaleIndex(index);
         dst[index] = d * @as(f32, @floatFromInt(src.scales[scale_index])) *
             @as(f32, @floatFromInt(q6KValue(src, index)));
@@ -1023,8 +1023,8 @@ pub fn dequantizeBlockQ6_KInto(dst: *[types.qk_k_block_size]f32, src: *const Blo
 /// f32 -> Q6_K encoder for one 256-element block; faithful port of ggml's
 /// quantize_row_q6_K_ref (byte-exact, see quant/encode_golden_test.zig).
 /// Assumes finite input (no NaN/inf); see the encoder contract in q8k.zig.
-pub fn quantizeBlockQ6_KInto(dst: *BlockQ6_K, src: *const [types.qk_k_block_size]f32) void {
-    var L: [types.qk_k_block_size]i8 = undefined;
+pub fn quantizeBlockQ6_KInto(dst: *BlockQ6_K, src: *const [dtype_mod.qk_k_block_size]f32) void {
+    var L: [dtype_mod.qk_k_block_size]i8 = undefined;
     var scales: [16]f32 = undefined;
 
     var max_scale: f32 = 0;
@@ -1065,7 +1065,7 @@ pub fn quantizeBlockQ6_KInto(dst: *BlockQ6_K, src: *const [types.qk_k_block_size
     var ql_offset: usize = 0;
     var qh_offset: usize = 0;
     j = 0;
-    while (j < types.qk_k_block_size) : (j += 128) {
+    while (j < dtype_mod.qk_k_block_size) : (j += 128) {
         var l: usize = 0;
         while (l < 32) : (l += 1) {
             const q1: u8 = @intCast(L[j + l]);
@@ -1086,7 +1086,7 @@ pub fn quantizeRowQ6_KInto(dst: []BlockQ6_K, src: []const f32) !void {
     const block_count = try q8k.qkBlockCount(src.len);
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (dst, 0..) |*block, block_index| {
-        quantizeBlockQ6_KInto(block, src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size]);
+        quantizeBlockQ6_KInto(block, src[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size]);
     }
 }
 
@@ -1136,7 +1136,7 @@ fn fillQ6KPattern(block: *BlockQ6_K) void {
     block.d = common.f32ToF16Bits(1);
     for (&block.scales, 0..) |*scale, i| scale.* = @intCast(@as(i32, @intCast(i % 5)) - 2);
     block.scales[0] = 1;
-    for (0..types.qk_k_block_size) |i| setQ6KValue(block, i, @intCast(@as(i32, @intCast(i % 23)) - 11));
+    for (0..dtype_mod.qk_k_block_size) |i| setQ6KValue(block, i, @intCast(@as(i32, @intCast(i % 23)) - 11));
 }
 
 test "ggml_q6_k dot and matmul consume loaded blocks" {
@@ -1147,15 +1147,15 @@ test "ggml_q6_k dot and matmul consume loaded blocks" {
     var q8: BlockQ8_K = undefined;
     q8k.fillQ8KPattern(&q8);
 
-    var dense_w: [types.qk_k_block_size]f32 = undefined;
+    var dense_w: [dtype_mod.qk_k_block_size]f32 = undefined;
     dequantizeBlockQ6_KInto(&dense_w, &q6);
-    var dense_a: [types.qk_k_block_size]f32 = undefined;
+    var dense_a: [dtype_mod.qk_k_block_size]f32 = undefined;
     q8k.dequantizeBlockQ8_KInto(&dense_a, &q8);
 
     try std.testing.expectEqual(common.dotDense(&dense_w, &dense_a), dotQ6_KQ8_K(&q6, &q8));
 
     var rhs_blocks = [_]BlockQ6_K{ q6, q6 };
-    var qrhs = try q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, types.qk_k_block_size, 2, &rhs_blocks);
+    var qrhs = try q8k.quantizedMatmulRhsQ6_KFromBlocks(allocator, dtype_mod.qk_k_block_size, 2, &rhs_blocks);
     defer qrhs.deinit();
     var out: [2]f32 = undefined;
     matmulQ6_KRhsRange(&out, &.{q8}, &qrhs, 1, 2, 0, 1);

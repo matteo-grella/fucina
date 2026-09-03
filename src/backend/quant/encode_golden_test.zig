@@ -973,7 +973,7 @@ const dtype_mod = @import("../../dtype.zig");
 const qm = @import("../quant.zig");
 
 const types = @import("types.zig");
-const qk_k_block_size = types.qk_k_block_size;
+const qk_k_block_size = dtype_mod.qk_k_block_size;
 
 fn inputVector(index: usize) [qk_k_block_size]f32 {
     var out: [qk_k_block_size]f32 = undefined;

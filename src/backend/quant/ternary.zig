@@ -43,8 +43,8 @@ pub const ternary_col_block: usize = 4;
 // ---------------- encode / decode ----------------
 
 fn tq2_0BlockCount(len: usize) !usize {
-    if (len == 0 or len % types.qk_k_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
-    return len / types.qk_k_block_size;
+    if (len == 0 or len % dtype_mod.qk_k_block_size != 0) return types.QuantizedFormatError.InvalidQuantizedLength;
+    return len / dtype_mod.qk_k_block_size;
 }
 
 /// ggml quantize_row_tq2_0 parity: per-block absmax d (fp16), crumbs store
@@ -55,7 +55,7 @@ pub fn quantizeRowTQ2_0Into(dst: []BlockTQ2_0, src: []const f32) !void {
     if (dst.len != block_count) return types.QuantizedFormatError.InvalidQuantizedLength;
 
     for (dst, 0..) |*block, block_index| {
-        const x = src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
+        const x = src[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size];
         var amax: f32 = 0;
         for (x) |v| amax = @max(amax, @abs(v));
 
@@ -86,13 +86,13 @@ pub fn quantizeRowTQ2_0ScaledInto(dst: []BlockTQ2_0, src: []const f32, d: f32) !
 
     const id: f32 = 1.0 / d;
     for (dst, 0..) |*block, block_index| {
-        const x = src[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
+        const x = src[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size];
         block.d = common.f32ToF16Bits(d);
         encodeCrumbs(block, x, id);
     }
 }
 
-fn encodeCrumbs(block: *BlockTQ2_0, x: *const [types.qk_k_block_size]f32, id: f32) void {
+fn encodeCrumbs(block: *BlockTQ2_0, x: *const [dtype_mod.qk_k_block_size]f32, id: f32) void {
     for (0..2) |group| {
         const base = group * 128;
         for (0..32) |m| {
@@ -977,12 +977,12 @@ inline fn q2_0CodeDot(codes: Q2_0Codes, a: *const dtype_mod.BlockQ8_0) i32 {
 /// same shuffle/shift machinery as the matmul kernels. Feeds the BLAS
 /// prefill panels, where the scalar decoder would dominate the GEMM.
 pub fn dequantizeRowQ2_0FastInto(dst: []f32, src: []const dtype_mod.BlockQ2_0) !void {
-    if (dst.len != try types.checkedProduct(src.len, types.q2_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
+    if (dst.len != try types.checkedProduct(src.len, dtype_mod.q2_0_block_size)) return types.QuantizedFormatError.InvalidQuantizedLength;
     for (src, 0..) |*block, block_index| {
         const d: @Vector(32, f32) = @splat(common.f16BitsToF32(block.d));
         const qs: QKV32u8 = block.qs;
-        const out = dst[block_index * types.q2_0_block_size ..][0..types.q2_0_block_size];
-        inline for (0..types.q2_0_block_size / 32) |k| {
+        const out = dst[block_index * dtype_mod.q2_0_block_size ..][0..dtype_mod.q2_0_block_size];
+        inline for (0..dtype_mod.q2_0_block_size / 32) |k| {
             const codes: @Vector(32, i32) = @intCast(q2_0Codes32(qs, k * 8));
             const w: @Vector(32, f32) = @floatFromInt(codes - @as(@Vector(32, i32), @splat(1)));
             out[k * 32 ..][0..32].* = w * d;
@@ -1027,7 +1027,7 @@ inline fn q2_0MicroTile(
     d1s: *const [q2_0_row_block_max][q2_0_bsum_cache_subs]f32,
     cached: bool,
 ) void {
-    const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
+    const sub_per_block = dtype_mod.q2_0_block_size / dtype_mod.q8_0_block_size; // 4
     const blocks_per_row = rhs.blocks_per_column;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
 
@@ -1097,7 +1097,7 @@ pub fn matmulQ2_0RhsTile(
     c0: usize,
     c1: usize,
 ) void {
-    const sub_per_block = types.q2_0_block_size / types.q8_0_block_size; // 4
+    const sub_per_block = dtype_mod.q2_0_block_size / dtype_mod.q8_0_block_size; // 4
     const blocks_per_row = rhs.blocks_per_column;
     const sub_blocks_per_row = blocks_per_row * sub_per_block;
     const cached = sub_blocks_per_row <= q2_0_bsum_cache_subs;
@@ -1138,10 +1138,10 @@ pub fn matmulQ2_0RhsTile(
 /// the encoders, rejected by es.addTernaryParam — reads as +1 here vs +2 on
 /// the int8 code-dot path (garbage in, differently-shaped garbage out).
 pub fn dotTQ2_0F32(wblocks: []const BlockTQ2_0, x: []const f32) f32 {
-    std.debug.assert(x.len == wblocks.len * types.qk_k_block_size);
+    std.debug.assert(x.len == wblocks.len * dtype_mod.qk_k_block_size);
     var total: f32 = 0;
     for (wblocks, 0..) |*w, block_index| {
-        const xb = x[block_index * types.qk_k_block_size ..][0..types.qk_k_block_size];
+        const xb = x[block_index * dtype_mod.qk_k_block_size ..][0..dtype_mod.qk_k_block_size];
         var acc: common.QKV4f32 = @splat(0);
         inline for ([_]usize{ 0, 32 }) |j| {
             inline for (0..4) |lane| {

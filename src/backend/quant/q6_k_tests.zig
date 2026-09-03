@@ -21,7 +21,7 @@ test "Q6_Kx4 paired gate/up tile matches two independent tiles" {
     const k = 512;
     const n = 8;
     const m = 5;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     const gate_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(gate_blocks);
@@ -90,7 +90,7 @@ test "Q6_K compact-vs-packed cross-layout matmul is bit-identical at decode shap
     const allocator = std.testing.allocator;
     const k = 512;
     const n = 16; // x4-multiple (packed-layout requirement); four column groups
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     var prng = std.Random.DefaultPrng.init(0x36d8be51f04a97c2);
     const random = prng.random();
@@ -128,7 +128,7 @@ test "Q6_K column-outer matmul matches row-outer tile" {
     const k = 512;
     const n = 8;
     const m = 17;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -165,7 +165,7 @@ test "Q6_K lane-packed Q8_Kx4 col-outer is bit-identical on the same activations
     const k = 512;
     const n = 9;
     const m = 16; // multiple of 4 so packRowsQ8_Kx4 applies (no padding)
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -201,7 +201,7 @@ test "Q6_K packRowsQ8_Kx4PaddedInto + lane-packed col-outer matches row-outer ti
     const k = 768;
     const n = 7;
     const m = 13; // not a multiple of 4
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -244,7 +244,7 @@ test "Q6_K col-outer kernels: split column ranges are bit-identical to full rang
     const n = 512; // two 256-column phase chunks
     const split = 256;
     const m = 5;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {
@@ -462,7 +462,7 @@ test "ggml_q6_kx4 matmul entry points match the scalar-arm reference" {
     const k = 512;
     const n = 8;
     const m = 6; // 1 full row block + 2 tail rows
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
 
     const gate_blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(gate_blocks);
@@ -570,7 +570,7 @@ test "ggml_q6_kx4 matmul entry points match the scalar-arm reference" {
 fn packBlockQ8_Kx4(rows: *const [4]dtype_mod.BlockQ8_K) types.BlockQ8_Kx4 {
     var dst: types.BlockQ8_Kx4 = undefined;
     inline for (0..4) |row| dst.d[row] = rows[row].d;
-    for (0..types.qk_k_block_size / 4) |feature_group| {
+    for (0..dtype_mod.qk_k_block_size / 4) |feature_group| {
         inline for (0..4) |row| {
             inline for (0..4) |lane| {
                 dst.qs[feature_group * 16 + row * 4 + lane] = rows[row].qs[feature_group * 4 + lane];
@@ -700,7 +700,7 @@ test "q6_k row-outer tile matches the scalar row dot bit-exactly" {
     const k = 512;
     const n = 3;
     const m = 2;
-    const bpc = k / types.qk_k_block_size;
+    const bpc = k / dtype_mod.qk_k_block_size;
     const blocks = try allocator.alloc(dtype_mod.BlockQ6_K, n * bpc);
     defer allocator.free(blocks);
     for (blocks, 0..) |*b, bi| {

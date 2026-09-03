@@ -12,7 +12,7 @@ const TensorF16 = raw.TensorOf(.f16);
 const gpu = raw.gpu_impl;
 const native = raw.native_impl;
 const vector = raw.vector_impl;
-const qm = raw.quantized_matmul;
+const qm = raw.quant;
 
 var io: std.Io = undefined;
 
@@ -250,7 +250,7 @@ fn benchQuant(
     const m = shape.m;
     const n = shape.n;
     const k = shape.k;
-    const blocks_per_row = try qm.blockCountForDType(dtype, k);
+    const blocks_per_row = try qm.types.blockCountForDType(dtype, k);
     const resident = gpu.allocResidentBytes(n * blocks_per_row * @sizeOf(Block)) orelse return error.GpuResidentAllocationFailed;
     defer gpu.freeResidentBytes(resident);
     const blocks: []Block = @alignCast(std.mem.bytesAsSlice(Block, resident));
@@ -338,7 +338,7 @@ fn benchQuant(
 fn cpuPackedQuant(comptime dtype: raw.DType, allocator: std.mem.Allocator, out: *Tensor, a: *const Tensor, packed_rhs: anytype, blocks: []const raw.dtype_info.Storage(dtype), m: usize, n: usize, k: usize, config: native.ParallelConfig) !void {
     if (comptime dtype == .q5_k) {
         if (m < 4) {
-            const rhs = qm.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.types.qk_k_block_size };
+            const rhs = qm.types.QuantizedMatmulRhsQ5_K{ .allocator = null, .blocks = blocks, .k = k, .n = n, .blocks_per_column = k / qm.types.qk_k_block_size };
             return native.matmulQuantizedRhs(config, .q5_k, allocator, out, a, &rhs, m, n, k);
         }
     }

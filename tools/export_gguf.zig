@@ -86,7 +86,7 @@ const optim = fucina.optim;
 const ptqtp = fucina.ptqtp;
 const ptqtp_gguf = fucina.ptqtp_gguf;
 const safetensors = fucina.safetensors;
-const bq = fucina.internal.backend_mod.quantized_matmul;
+const bq = fucina.internal.backend_mod.quant;
 
 const DtypeMode = enum { verbatim, f32, f16, bf16, q8_0, q4_k, q5_k, q6_k, tq2_0 };
 
@@ -839,8 +839,8 @@ fn quantizeTensorStreamNative(
     defer pair.deinit(ctx.allocator());
 
     const bpr = cols / 256;
-    var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1), .blocks_per_column = bpr, .k = cols, .n = rows };
-    var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2), .blocks_per_column = bpr, .k = cols, .n = rows };
+    var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1), .blocks_per_column = bpr, .k = cols, .n = rows };
+    var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2), .blocks_per_column = bpr, .k = cols, .n = rows };
     const pack = try bq.ternary.packMatmulRhsTQ2_0Foldedx4(allocator, &v0, &v1);
     defer allocator.free(pack);
     const pack_bytes = std.mem.sliceAsBytes(pack);
@@ -877,7 +877,7 @@ fn quantizeExpertStackStreamNative(
     const bpc = in_dim / 256;
     const fg = (out_dim / 4) * bpc;
 
-    const pack = try allocator.alloc(bq.BlockTQ2_0Foldedx4, n_expert * fg);
+    const pack = try allocator.alloc(bq.types.BlockTQ2_0Foldedx4, n_expert * fg);
     defer allocator.free(pack);
     const values = try allocator.alloc(f32, out_dim * in_dim);
     defer allocator.free(values);
@@ -894,8 +894,8 @@ fn quantizeExpertStackStreamNative(
         if (release_pages) gguf.release(slice);
         var pair = try ptqtp.quantizeMatrix(ctx, values, out_dim, in_dim, options);
         defer pair.deinit(ctx.allocator());
-        var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
-        var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
+        var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane1), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
+        var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(pair.plane2), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
         try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack[e * fg ..][0..fg], &v0, &v1);
         rel_sum += pair.stats.rel_frob_err;
         rel_max = @max(rel_max, pair.stats.rel_frob_err);

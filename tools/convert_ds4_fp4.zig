@@ -125,7 +125,7 @@ fn selftest() !void {
     recodeGroupMxfp4(packed_bytes[0..16], scales[0], &blocks[0]);
     recodeGroupMxfp4(packed_bytes[16..32], scales[1], &blocks[1]);
     var via_ggml: [64]f32 = undefined;
-    try fucina.internal.backend_mod.quantized_matmul.cold.dequantizeRowMXFP4Into(&via_ggml, &blocks);
+    try fucina.internal.backend_mod.quant.cold.dequantizeRowMXFP4Into(&via_ggml, &blocks);
     if (!std.mem.eql(u8, std.mem.sliceAsBytes(&fresh), std.mem.sliceAsBytes(&via_ggml))) return error.SelftestFailed;
 }
 
@@ -896,7 +896,7 @@ fn repackNative(
     dst_path: []const u8,
     stdout: *std.Io.Writer,
 ) !void {
-    const bq = fucina.internal.backend_mod.quantized_matmul;
+    const bq = fucina.internal.backend_mod.quant;
 
     var src = try gguf.File.loadMmapAuto(allocator, io, src_path);
     defer src.deinit();
@@ -935,7 +935,7 @@ fn repackNative(
     }
     if (stack_count == 0) return error.NoExpertStacks;
 
-    const pack_buf = try allocator.alloc(bq.BlockTQ2_0Foldedx4, max_pack_bytes / @sizeOf(bq.BlockTQ2_0Foldedx4));
+    const pack_buf = try allocator.alloc(bq.types.BlockTQ2_0Foldedx4, max_pack_bytes / @sizeOf(bq.types.BlockTQ2_0Foldedx4));
     defer allocator.free(pack_buf);
 
     var out_file = try std.Io.Dir.cwd().createFile(io, dst_path, .{});
@@ -968,8 +968,8 @@ fn repackNative(
                 // The rows container carries mutable blocks; the pack never
                 // writes them, so the @constCast borrow of mmap bytes is
                 // sound (same note as exec/moe.zig tq2_0View).
-                var v0 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p0_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
-                var v1 = bq.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p1_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
+                var v0 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p0_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
+                var v1 = bq.types.QuantizedMatmulRhsTQ2_0{ .allocator = null, .blocks = @constCast(p1_blocks[e * plane_blocks ..][0..plane_blocks]), .blocks_per_column = bpc, .k = in_dim, .n = out_dim };
                 try bq.ternary.packMatmulRhsTQ2_0Foldedx4Into(pack_buf[e * fg ..][0..fg], &v0, &v1);
             }
             try streamer.writeTensorData(std.mem.sliceAsBytes(pack_buf[0 .. n_expert * fg]));

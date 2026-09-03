@@ -57,12 +57,12 @@ const rng = fucina.rng;
 const ExecContext = fucina.ExecContext;
 const Tensor = fucina.Tensor;
 const backend = fucina.internal.backend_mod;
-const quant = backend.quantized_matmul;
+const quant = backend.quant;
 
 const Allocator = std.mem.Allocator;
 const BlockTQ2_0 = es.BlockTQ2_0;
 const BlockQ8_K = fucina.quant.BlockQ8_K;
-const Rhs = backend.quant.QuantizedMatmulRhsTQ2_0;
+const Rhs = backend.quant.types.QuantizedMatmulRhsTQ2_0;
 
 const hidden = 256; // minimum TQ2_0 contract dim (one 256-crumb block per row)
 const n_classes = 2;

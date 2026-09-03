@@ -15,7 +15,7 @@ const q8_0 = @import("q8_0.zig");
 const Tensor = tensor.Tensor;
 
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
-const q8_0_block_size = types.q8_0_block_size;
+const q8_0_block_size = dtype_mod.q8_0_block_size;
 
 test "ggml_q8_0 quantize and dequantize match GGML block semantics" {
     var src: [q8_0_block_size]f32 = undefined;
@@ -214,7 +214,7 @@ test "ggml_q8_0x4 packed ColsFirst dual-row path matches plain matmul" {
 // and the f32 expression shape); on x86 hosts the same tests execute the real
 // vpdpbusd / vpmaddubsw+vpsignb instructions.
 
-fn fillRandomBlockQ8_0x4(block: *qm.BlockQ8_0x4, random: std.Random, allow_m128: bool) void {
+fn fillRandomBlockQ8_0x4(block: *qm.types.BlockQ8_0x4, random: std.Random, allow_m128: bool) void {
     for (&block.d) |*d| d.* = common.f32ToF16Bits(0.25 + random.float(f32));
     for (&block.qs) |*q| {
         if (allow_m128) {
@@ -257,7 +257,7 @@ fn expectVec4BitEqual(expected: common.QKV4f32, got: common.QKV4f32) !void {
 // (lhs_full, lhs_act, rhs) triple. lhs_full exercises the unrestricted arms
 // (VNNI bias form, widening) incl. -128; lhs_act stays in the [-127,127]
 // activation domain the AVX2 sign-trick arm documents.
-fn checkPackedArms(lhs_full: *const qm.BlockQ8_0x4, lhs_act: *const qm.BlockQ8_0x4, rhs: *const qm.BlockQ8_0x4, acc0: [4]common.QKV4f32) !void {
+fn checkPackedArms(lhs_full: *const qm.types.BlockQ8_0x4, lhs_act: *const qm.types.BlockQ8_0x4, rhs: *const qm.types.BlockQ8_0x4, acc0: [4]common.QKV4f32) !void {
     var ref_full = acc0;
     q8_0.accumulateQ8_0x4PackedScalar(lhs_full, rhs, &ref_full);
     var ref_act = acc0;
@@ -295,9 +295,9 @@ test "ggml_q8_0x4 packed SIMD arms match the scalar arm bit-exactly" {
 
     var iter: usize = 0;
     while (iter < 200) : (iter += 1) {
-        var lhs_full: qm.BlockQ8_0x4 = undefined;
-        var lhs_act: qm.BlockQ8_0x4 = undefined;
-        var rhs: qm.BlockQ8_0x4 = undefined;
+        var lhs_full: qm.types.BlockQ8_0x4 = undefined;
+        var lhs_act: qm.types.BlockQ8_0x4 = undefined;
+        var rhs: qm.types.BlockQ8_0x4 = undefined;
         fillRandomBlockQ8_0x4(&lhs_full, random, true);
         fillRandomBlockQ8_0x4(&lhs_act, random, false);
         fillRandomBlockQ8_0x4(&rhs, random, true);
@@ -307,9 +307,9 @@ test "ggml_q8_0x4 packed SIMD arms match the scalar arm bit-exactly" {
     // Edge blocks: all -128 / all +127 / alternating extremes on the weight
     // side; the activation side pinned to its clamped extremes. Covers the
     // VNNI bias-correction maxima and the sign-trick |rhs|=128 corner.
-    var lhs_full: qm.BlockQ8_0x4 = undefined;
-    var lhs_act: qm.BlockQ8_0x4 = undefined;
-    var rhs: qm.BlockQ8_0x4 = undefined;
+    var lhs_full: qm.types.BlockQ8_0x4 = undefined;
+    var lhs_act: qm.types.BlockQ8_0x4 = undefined;
+    var rhs: qm.types.BlockQ8_0x4 = undefined;
     for (&lhs_full.d) |*d| d.* = common.f32ToF16Bits(1.0);
     lhs_act.d = lhs_full.d;
     rhs.d = lhs_full.d;
@@ -337,7 +337,7 @@ test "ggml_q8_0x4 plain-lhs SIMD arms match the scalar arm bit-exactly" {
     while (iter < 200) : (iter += 1) {
         var lhs_full: BlockQ8_0 = undefined;
         var lhs_act: BlockQ8_0 = undefined;
-        var rhs: qm.BlockQ8_0x4 = undefined;
+        var rhs: qm.types.BlockQ8_0x4 = undefined;
         fillRandomBlockQ8_0(&lhs_full, random, true);
         fillRandomBlockQ8_0(&lhs_act, random, false);
         fillRandomBlockQ8_0x4(&rhs, random, true);
@@ -356,7 +356,7 @@ test "ggml_q8_0x4 plain-lhs SIMD arms match the scalar arm bit-exactly" {
 
     // Edges: weights all -128 against activation extremes ±127.
     var lhs_act: BlockQ8_0 = undefined;
-    var rhs: qm.BlockQ8_0x4 = undefined;
+    var rhs: qm.types.BlockQ8_0x4 = undefined;
     lhs_act.d = common.f32ToF16Bits(1.0);
     for (&rhs.d) |*d| d.* = common.f32ToF16Bits(1.0);
     for (&rhs.qs) |*q| q.* = -128;
@@ -397,7 +397,7 @@ test "ggml_q8_0x4 packed matmul entry points match the scalar-arm reference" {
     var rhs_dense = try Tensor.fromSlice(allocator, &.{ n, k }, rhs_values);
     defer rhs_dense.deinit();
 
-    const lhs_packed = try allocator.alloc(qm.BlockQ8_0x4, (m / 4) * blocks_per_row);
+    const lhs_packed = try allocator.alloc(qm.types.BlockQ8_0x4, (m / 4) * blocks_per_row);
     defer allocator.free(lhs_packed);
     try q8_0.quantizeRowsQ8_0x4PaddedInto(lhs_packed, &lhs);
 

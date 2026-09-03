@@ -127,7 +127,7 @@ fn buildTinyDenseLayer(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4
 
 fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn {
     const allocator = ctx.allocator();
-    const qm = backend_mod.quantized_matmul;
+    const qm = backend_mod.quant;
     const hidden = cfg.hidden_size;
     const n_expert = cfg.num_experts;
     const n_ff = cfg.moe_intermediate_size;
@@ -145,11 +145,11 @@ fn buildTinyMoe(ctx: *ExecContext, cfg: gemma4.Config, seed: u64) !gemma4.MoeFfn
     var post_norm_2 = try randVector(ctx, rng.at(seed, 4), .embed, hidden);
     errdefer post_norm_2.deinit();
 
-    const gate = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ6_Kx4, 0);
+    const gate = try allocator.alloc(fucina.quant.types.QuantizedMatmulRhsQ6_Kx4, 0);
     errdefer allocator.free(gate);
-    const up = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ6_Kx4, 0);
+    const up = try allocator.alloc(fucina.quant.types.QuantizedMatmulRhsQ6_Kx4, 0);
     errdefer allocator.free(up);
-    const down = try allocator.alloc(fucina.quant.QuantizedMatmulRhsQ8_0x4, 0);
+    const down = try allocator.alloc(fucina.quant.types.QuantizedMatmulRhsQ8_0x4, 0);
     errdefer allocator.free(down);
 
     const down_scale = try allocator.alloc(f32, n_expert);

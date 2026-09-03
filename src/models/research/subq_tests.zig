@@ -241,9 +241,9 @@ test "subq q8_0 packed format matches a dequantized-oracle at tau 0" {
     for (0..q_heads) |head_i| {
         const query = fx.q[head_i * d ..][0..d];
         var q_q8: [16]fucina.quant.BlockQ8_0 = undefined;
-        try @import("fucina").internal.backend_mod.quantized_matmul.q8k.quantizeRowQ8_0Into(q_q8[0..bpr], query);
+        try @import("fucina").internal.backend_mod.quant.q8k.quantizeRowQ8_0Into(q_q8[0..bpr], query);
         var qdeq: [d]f32 = undefined;
-        try @import("fucina").internal.backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(&qdeq, q_q8[0..bpr]);
+        try @import("fucina").internal.backend_mod.quant.q8k.dequantizeRowQ8_0Into(&qdeq, q_q8[0..bpr]);
         var z: f64 = 0;
         var want: [d]f64 = @splat(0);
         // Exact rows: outside [sink, seal_end) read from the f16 cache with
@@ -264,8 +264,8 @@ test "subq q8_0 packed format matches a dequantized-oracle at tau 0" {
         var krow: [d]f32 = undefined;
         var vrow: [d]f32 = undefined;
         for (0..n_packed) |row| {
-            try @import("fucina").internal.backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(&krow, plan.packed_k_q8[row * bpr ..][0..bpr]);
-            try @import("fucina").internal.backend_mod.quantized_matmul.q8k.dequantizeRowQ8_0Into(&vrow, plan.packed_v_q8[row * bpr ..][0..bpr]);
+            try @import("fucina").internal.backend_mod.quant.q8k.dequantizeRowQ8_0Into(&krow, plan.packed_k_q8[row * bpr ..][0..bpr]);
+            try @import("fucina").internal.backend_mod.quant.q8k.dequantizeRowQ8_0Into(&vrow, plan.packed_v_q8[row * bpr ..][0..bpr]);
             var dot: f64 = 0;
             for (0..d) |i| dot += @as(f64, qdeq[i]) * @as(f64, krow[i]);
             const w = @exp(beta * dot);
