@@ -3,6 +3,7 @@
 //! the ag FloatTensor struct; aliased back onto it in ../../tensor.zig.
 
 const tensor_mod = @import("../../../tensor.zig");
+const typed_creation = @import("../typed/creation.zig");
 const exec_mod = @import("../../../exec.zig");
 const tag_ops = @import("../../../tag_ops.zig");
 const rng = @import("../../../rng.zig");
@@ -18,65 +19,25 @@ pub fn Ops(comptime Self: type) type {
         const tensor_rank = Self.tensor_rank;
         const tag_count = Self.tag_count;
         const ag_tensor = Self.ag_root;
+        /// The constructors the float branch shares with the typed branches.
+        const typed = typed_creation.Ops(Self);
+        pub const constant = typed.constant;
+        pub const fromTensor = typed.fromTensor;
+        pub const fromSlice = typed.fromSlice;
+        pub const fromBorrowedConstSlice = typed.fromBorrowedConstSlice;
+        pub const empty = typed.empty;
+        pub const zeros = typed.zeros;
+        pub const ones = typed.ones;
+        pub const emptyLike = typed.emptyLike;
+        pub const zerosLike = typed.zerosLike;
+        pub const onesLike = typed.onesLike;
         const Tensor = ag_tensor.Tensor;
-
-        /// Consumes `value` on success; on error, ownership stays with the caller.
-        pub fn constant(ctx: *ExecContext, value: RawTensor) !Self {
-            _ = ctx;
-            var v = value;
-            try validateTensorRank(.f32, tags, &v);
-            return .{ .value = v };
-        }
-
-        pub fn fromTensor(ctx: *ExecContext, value: RawTensor) !Self {
-            return try Self.constant(ctx, value);
-        }
-
-        pub fn fromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromSlice(.f32, raw_shape, values);
-            errdefer value.deinit();
-            return try Self.constant(ctx, value);
-        }
 
         /// Wrap caller-owned mutable storage as a no-grad constant tensor.
         /// The returned tensor borrows `values`; callers must keep that slice
         /// alive and unmoved until the tensor is deinitialized.
         pub fn fromBorrowedSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []f32) !Self {
             var value = try ctx.fromBorrowedSlice(.f32, raw_shape, values);
-            errdefer value.deinit();
-            return try Self.constant(ctx, value);
-        }
-
-        /// Zero-copy wrap caller-owned READ-ONLY storage (e.g. mmap'd const GGUF
-        /// weights) as a no-grad constant tensor, so callers no longer scatter
-        /// `@constCast` to turn const file data into a tensor view. The tensor
-        /// BORROWS `values`: the slice must outlive the tensor, stay unmoved, and
-        /// MUST NOT be mutated through `.data()`. The single internal `@constCast`
-        /// is sound only under that read-only contract — use `fromSlice` (which
-        /// copies into owned storage) if you need a writable buffer.
-        pub fn fromBorrowedConstSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const f32) !Self {
-            var value = try ctx.fromBorrowedSlice(.f32, raw_shape, @constCast(values));
-            errdefer value.deinit();
-            return try Self.constant(ctx, value);
-        }
-
-        /// Allocate an uninitialized no-grad tensor of the tag-implied rank.
-        pub fn empty(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.empty(.f32, &raw_shape);
-            errdefer value.deinit();
-            return try Self.constant(ctx, value);
-        }
-
-        /// Allocate a zero-filled no-grad tensor.
-        pub fn zeros(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.zeros(.f32, &raw_shape);
-            errdefer value.deinit();
-            return try Self.constant(ctx, value);
-        }
-
-        /// Allocate a one-filled no-grad tensor.
-        pub fn ones(ctx: *ExecContext, raw_shape: [tensor_rank]usize) !Self {
-            var value = try ctx.ones(.f32, &raw_shape);
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }
@@ -235,21 +196,6 @@ pub fn Ops(comptime Self: type) type {
         // shape (strided views included). Like every constructor the result
         // is a fresh owned NO-GRAD constant — `self`'s grad state does not
         // carry over — and is never scope-owned.
-
-        /// `empty` with `self`'s shape: uninitialized storage.
-        pub fn emptyLike(self: *const Self, ctx: *ExecContext) !Self {
-            return Self.empty(ctx, self.shape());
-        }
-
-        /// `zeros` with `self`'s shape.
-        pub fn zerosLike(self: *const Self, ctx: *ExecContext) !Self {
-            return Self.zeros(ctx, self.shape());
-        }
-
-        /// `ones` with `self`'s shape.
-        pub fn onesLike(self: *const Self, ctx: *ExecContext) !Self {
-            return Self.ones(ctx, self.shape());
-        }
 
         /// `full` with `self`'s shape, filled with `fill_value`.
         pub fn fullLike(self: *const Self, ctx: *ExecContext, fill_value: f32) !Self {
