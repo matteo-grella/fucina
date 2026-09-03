@@ -30,7 +30,6 @@ pub const Runtime = struct {                 // src/exec/runtime.zig
     buffers: BufferPool,
     tuning: tuning.Overrides,
     work_pool: thread.Pool,          // + work_pool_ready, work_pool_failed, work_pool_mutex
-    dot_backward_worker: thread.OneShotWorker, // + ready flag, mutex
     scopes: ScopeStack,              // the context's own exec-scope stack
     fp_env_at_init: ?fpenv.Environment,
 };
@@ -58,7 +57,6 @@ substrate fields are internal but observable, reached as `ctx.rt.<field>`:
 | `rt.parallel_pool` | `std.atomic.Value(?*thread.Pool)` | at `init` (null); published by `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig), [§9.2](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#92-the-kernel-interface-and-the-kernel-contract-srcbackendzig-srcbackendnativezig)) |
 | `rt.buffers` | `BufferPool` | at `init` ([§6.5](06-the-execution-runtime-execcontext-and-the-memory-model.md#65-bufferpool-transient-reuse-and-scratch-leases-srcexecbuffer_poolzig)) |
 | `rt.work_pool` | `thread.Pool` | lazily, on first `tryWorkPool` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
-| `rt.dot_backward_worker` | `thread.OneShotWorker` | lazily, on first `dotBackwardWorker` ([§6.6](06-the-execution-runtime-execcontext-and-the-memory-model.md#66-the-worker-team-srcthreadzig-srcparallelzig)) |
 | `rt.scopes` | `ScopeStack` (entries + open depth) | at `init`, empty ([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig)) |
 | `quant_dot_gpu_disabled` | `std.atomic.Value(u32)` | at `init`, zero; the open `disableQuantDotGpu` scopes ([§5.5](05-automatic-differentiation.md)) |
 
@@ -105,7 +103,6 @@ pub fn bufferEntry(comptime dtype: DType, buffer: *BufferOf(dtype)) ScopeEntry
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool
 pub fn workPool(self: *ExecContext) ?*thread.Pool
 pub fn pc(self: *const ExecContext) backend.ParallelConfig
-pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 pub fn pinRowwiseNumerics(self: *ExecContext) RowwiseNumericsScope
 pub fn rowwiseNumericsPinned(self: *const ExecContext) bool
 pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void
@@ -584,9 +581,9 @@ turn spawns its worker threads only on the first parallel dispatch. A
 context that only ever runs small/serial ops never starts a thread. Every
 pool-taking kernel call reads the published team through `pc()`, a
 `ParallelConfig{ .pool = ... }` snapshot taken per call (acquire load), so
-a kernel dispatched from another thread (dot-backward's `OneShotWorker`)
-while a lazy `tryWorkPool` retry publishes the pool also sees `Pool.init`'s
-writes.
+a kernel dispatched from another thread (a backward branch spawned on the
+executor) while a lazy `tryWorkPool` retry publishes the pool also sees
+`Pool.init`'s writes.
 
 A `Pool.init` failure is latched (`work_pool_failed`): the context logs one
 warning and every later `tryWorkPool` returns `error.WorkPoolUnavailable`
@@ -597,7 +594,6 @@ kernels serially for the rest of its life.
 pub fn tryWorkPool(self: *ExecContext) !*thread.Pool   // creates on first call; latched on failure
 pub fn workPool(self: *ExecContext) ?*thread.Pool      // tryWorkPool catch null
 pub fn pc(self: *const ExecContext) backend.ParallelConfig // { .pool = parallel_pool.load(.acquire) }
-pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker
 ```
 
 The team (`BarrierPool` in `src/thread.zig`) is spin-then-park: after each
@@ -628,8 +624,8 @@ overrides the worker half of the guard (out-of-range values are treated as
 unset); the join fallback is never disabled. On
 macOS, workers and dispatcher pin to performance-core QoS
 (`pthread_set_qos_class_self_np`); elsewhere the pin compiles to nothing.
-`dotBackwardWorker` is a single lazily-started `OneShotWorker` used to
-overlap the two branches of matmul backward on native-BLAS builds ([§5](05-automatic-differentiation.md), [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)).
+The two branches of a contraction backward overlap as one executor task
+(`spawnWg`) on native-BLAS builds ([§5](05-automatic-differentiation.md), [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)).
 
 Thread-count knobs, in precedence order:
 
@@ -858,8 +854,8 @@ What is thread-safe inside a context:
 - **The BufferPool**: both arms are mutex-guarded, `outstanding` is atomic,
   and buffer/slab release hooks run on whatever thread drops the last
   reference (storage refcounts are atomic).
-- **Lazy initialization**: `tryWorkPool` and `dotBackwardWorker` are
-  mutex-guarded and idempotent; a failed pool init is latched, not retried.
+- **Lazy initialization**: `tryWorkPool` is mutex-guarded and idempotent; a
+  failed pool init is latched, not retried.
 
 What is not:
 

@@ -47,8 +47,9 @@ pub const Runtime = struct {
     /// `ctx.allocator()`.
     allocator: Allocator,
     /// The worker team as published to kernel dispatch (`pc` snapshots it).
-    /// Atomic: kernels may dispatch on other threads (dot-backward's
-    /// `OneShotWorker`) while a lazy `tryWorkPool` retry publishes the pool;
+    /// Atomic: kernels may dispatch on other threads (a backward branch
+    /// spawned on the executor) while a lazy `tryWorkPool` retry publishes
+    /// the pool;
     /// release/acquire so a racing first observer also sees `Pool.init`'s
     /// writes.
     parallel_pool: std.atomic.Value(?*thread.Pool) = .init(null),
@@ -63,9 +64,6 @@ pub const Runtime = struct {
     /// the failed init on each dispatch (one warning is logged).
     work_pool_failed: bool = false,
     work_pool_mutex: thread.Mutex = .{},
-    dot_backward_worker: thread.OneShotWorker,
-    dot_backward_worker_ready: bool = false,
-    dot_backward_worker_mutex: thread.Mutex = .{},
     /// The context's own exec-scope stack. Scope traffic on a thread that
     /// has installed a recompute frame (`installScopeStack`, the
     /// checkpoint backward) goes to that frame instead.
@@ -176,7 +174,6 @@ pub fn init(self: *ExecContext, allocator: Allocator) void {
             .allocator = undefined,
             .buffers = undefined,
             .work_pool = undefined,
-            .dot_backward_worker = undefined,
             .fp_env_at_init = fpenv.get(),
         },
     };
@@ -215,9 +212,6 @@ pub fn setTuning(self: *ExecContext, overrides: tuning.Overrides) void {
 
 pub fn deinit(self: *ExecContext) void {
     self.decode_scratch.deinit(self.rt.allocator);
-    if (self.rt.dot_backward_worker_ready) {
-        self.rt.dot_backward_worker.deinit();
-    }
     if (self.rt.work_pool_ready) {
         setWorkPool(self, null);
         self.rt.work_pool.deinit();
@@ -334,7 +328,7 @@ pub fn rowwiseNumericsPinned(self: *const ExecContext) bool {
 }
 
 // ------------------------------------------------------------------
-// Worker team + one-shot dot-backward worker.
+// Worker team.
 // ------------------------------------------------------------------
 
 /// The error a latched pool-init failure reports on every later request.
@@ -505,21 +499,6 @@ pub fn parallelMap(
         if (self.dispatchRangeCapped(Task, "start", "end", base, n, 1 + n / min_len, Task.run)) return;
     }
     runRange(context, 0, n);
-}
-
-fn tryDotBackwardWorker(self: *ExecContext) !*thread.OneShotWorker {
-    self.rt.dot_backward_worker_mutex.lock();
-    defer self.rt.dot_backward_worker_mutex.unlock();
-
-    if (!self.rt.dot_backward_worker_ready) {
-        try self.rt.dot_backward_worker.init();
-        self.rt.dot_backward_worker_ready = true;
-    }
-    return &self.rt.dot_backward_worker;
-}
-
-pub fn dotBackwardWorker(self: *ExecContext) ?*thread.OneShotWorker {
-    return tryDotBackwardWorker(self) catch null;
 }
 
 // ------------------------------------------------------------------

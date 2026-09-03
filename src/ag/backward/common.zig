@@ -8,6 +8,7 @@ const exec_mod = @import("../../exec.zig");
 const tag_ops = @import("../../tag_ops.zig");
 const tags_mod = @import("../../tags.zig");
 const core = @import("../core.zig");
+const thread = @import("../../thread.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -193,15 +194,16 @@ pub fn cloneInverseRopeTable(allocator: std.mem.Allocator, table: *const exec_mo
 }
 
 /// The two-operand contraction backward: `record.backwardLeft` on the
-/// calling thread while `record.backwardRight` runs on the context's
-/// dot-backward worker, when both operands need a gradient and the worker
-/// is free (`core.parallel_dot_backward_branches`); otherwise the two run
-/// in order. An error in either branch surfaces after both have joined.
+/// calling thread while `record.backwardRight` runs as one task on the
+/// context's work pool, when both operands need a gradient and the pool
+/// takes the spawn (`core.parallel_dot_backward_branches`); otherwise the
+/// two run in order. An error in either branch surfaces after both have
+/// joined.
 pub fn runContractionBranches(record: anytype, ctx: *ExecContext, gy: *const RawTensor, left_out: *?RawTensor, right_out: *?RawTensor, need_left: bool, need_right: bool) !void {
     const Record = @TypeOf(record.*);
     if (comptime core.parallel_dot_backward_branches) {
         if (need_left and need_right) {
-            if (ctx.dotBackwardWorker()) |worker| {
+            if (ctx.workPool()) |pool| {
                 const RightTask = struct {
                     record: *const Record,
                     ctx: *ExecContext,
@@ -209,20 +211,20 @@ pub fn runContractionBranches(record: anytype, ctx: *ExecContext, gy: *const Raw
                     out: *?RawTensor,
                     err: ?anyerror = null,
 
-                    fn run(ptr: *anyopaque) void {
-                        const task: *@This() = @ptrCast(@alignCast(ptr));
+                    fn run(task: *@This()) void {
                         task.record.backwardRight(task.ctx, task.gy, task.out) catch |err| {
                             task.err = err;
                         };
                     }
                 };
                 var right = RightTask{ .record = record, .ctx = ctx, .gy = gy, .out = right_out };
-                if (worker.start(RightTask.run, &right)) {
+                var wait_group: thread.WaitGroup = .{};
+                if (pool.trySpawnWg(&wait_group, RightTask.run, .{&right})) {
                     record.backwardLeft(ctx, gy, left_out) catch |err| {
-                        worker.wait();
+                        pool.waitAndWork(&wait_group);
                         return err;
                     };
-                    worker.wait();
+                    pool.waitAndWork(&wait_group);
                     if (right.err) |err| return err;
                     return;
                 }

@@ -677,8 +677,9 @@ reads it through `ctx.pc()`. `ExecContext.deinit` unpublishes (stores
 instantiated once an op is actually big enough to split. `thread.zig` also
 provides `Mutex`/`Condition` (thin `std.Io` wrappers), `WaitGroup`,
 `ThreadSafeAllocator` (mutex-guarded child allocator), `Chain`, and
-`OneShotWorker` — a single persistent futex-parked thread used by
-dot-backward to overlap the two gradient GEMMs ([§5](05-automatic-differentiation.md)).
+`OneShotWorker` — a dedicated futex-parked single-job thread, the expert
+store's demand-miss disk reader (`src/store/expert_store.zig`); compute-side
+branch parallelism goes through `spawnWg` ([§5](05-automatic-differentiation.md)).
 
 ## 9.9 GPU offload (`src/backend/gpu.zig`, `metal.zig`, `cuda.zig`)
 

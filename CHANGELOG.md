@@ -25,6 +25,11 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- The contraction backward's right branch runs as one task on the work
+  pool (`Pool.spawnWg`) instead of on a dedicated thread: the runtime's
+  `dot_backward_worker` and `ExecContext.dotBackwardWorker` are gone, and
+  `thread.OneShotWorker` remains the expert store's blocking-I/O reader
+  only.
 - The two-operand contraction backward split (left branch on the calling
   thread, right branch on the dot-backward worker) is one helper,
   `ag/backward/common.zig` `runContractionBranches`, used by the einsum/dot

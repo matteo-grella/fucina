@@ -111,6 +111,11 @@ pub const Chain = struct {
     }
 };
 
+/// A dedicated single-job thread with a futex handshake: `start` hands it
+/// one job, `wait` joins it, and the thread parks between jobs. The expert
+/// store's demand-miss readers run on these (blocking disk reads that must
+/// not occupy the compute executor); compute-side branch parallelism goes
+/// through `Pool.spawnWg` instead.
 pub const OneShotWorker = struct {
     threaded: Io.Threaded = undefined,
     io: Io = undefined,

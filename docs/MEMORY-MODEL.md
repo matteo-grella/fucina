@@ -68,7 +68,7 @@ The pool has **two arms sharing one byte budget** (`cached_bytes` /
 `max_cached_bytes`):
 
 - **The f32 arm** — a free list of `*storage.Buffer`. `ctx.empty(.f32, ...)`
-  acquires from it (`src/exec/runtime.zig:534-540`). In an LLM forward
+  acquires from it (`src/exec/runtime.zig:513-519`). In an LLM forward
   essentially all transient activations are f32 (every matmul/linear/norm/add
   output is a default-dtype `FloatTensor`), so this arm covers the hot path.
 - **The byte-slab arm** — a free list of 64-byte-aligned, 4096-byte-rounded raw
@@ -141,7 +141,7 @@ substantive axes (in addition to the view/KV constraint in §3):
    pool reclaims a buffer the instant a transient dies; per-block peak live set
    is only ~6–12 tensors (`attnBlock`/`ffnBlock`, `src/models/gemma/model.zig:964/:1059`),
    and the residual stream is a single carried `x` advanced via `ctx.replace`
-   (which frees the old buffer each layer, `src/exec/runtime.zig:786`). An arena frees
+   (which frees the old buffer each layer, `src/exec/runtime.zig:765`). An arena frees
    nothing until reset, so a forward balloons to roughly `n_layer ×` the
    activation footprint — strictly worse than the pool, whose steady-state
    retention is bounded by the actual peak transient set

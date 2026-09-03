@@ -256,8 +256,8 @@ and ternary-STE-dot records). Node-level spawning is
 additionally gated at comptime by the engine's `parallel_dot_backward_branches` (`src/ag/core.zig`)
 (native backend with BLAS, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)) — on scalar or no-BLAS builds every node runs
 inline on the calling thread. (`DotBackward` and `AddDotBackward`
-additionally parallelize their two contraction branches internally, via
-the context's dot-backward worker: one split, `runContractionBranches` in
+additionally parallelize their two contraction branches internally, the
+right branch as one work-pool task: one split, `runContractionBranches` in
 `src/ag/backward/common.zig`.)
 `backwardGradSerial` forces `pool = null` so the whole pass is node-serial
 regardless; kernel-level `parallelChunks` parallelism *inside* a VJP is

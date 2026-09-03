@@ -222,7 +222,6 @@ pub const ExecContext = struct {
     pub const tryWorkPool = exec_runtime.tryWorkPool;
     pub const workPool = exec_runtime.workPool;
     pub const pc = exec_runtime.pc;
-    pub const dotBackwardWorker = exec_runtime.dotBackwardWorker;
     pub const dispatchRange = exec_runtime.dispatchRange;
     pub const dispatchRangeOr = exec_runtime.dispatchRangeOr;
     pub const dispatchRangeCapped = exec_runtime.dispatchRangeCapped;
