@@ -98,7 +98,7 @@ const BlockQ4_K = dtype_mod.BlockQ4_K;
 const BlockQ8_K = dtype_mod.BlockQ8_K;
 const BlockQ8_0 = dtype_mod.BlockQ8_0;
 const BlockTQ2_0 = dtype_mod.BlockTQ2_0;
-const qk_k_block_size = quant.types.qk_k_block_size;
+const qk_k_block_size = dtype_mod.qk_k_block_size;
 
 var failures: usize = 0;
 var fnv: u64 = 0xcbf29ce484222325;
