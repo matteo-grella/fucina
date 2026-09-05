@@ -72,10 +72,14 @@ pub const Work = struct {
     /// Wait until the submitted command has stopped touching its inputs
     /// (the input-use relationship, `storage.waitUnused`).  A command still
     /// pending is completed host-visibly, so a later host read of its
-    /// output stays possible; an output already discarded or failed counts
-    /// as finished — an input reader needs the command over, not its result.
+    /// output stays possible; an output already discarded counts as
+    /// finished — an input reader needs the command over, not its result.
+    /// A failed completion is fatal here as at the host-read boundary: a
+    /// provider keeps its input registrations when the failure left the
+    /// device activity unproven, and the host must not overwrite what the
+    /// device may still read.
     pub fn ensureFinished(self: *Work) void {
-        _ = self.complete(true, .input_release);
+        if (!self.complete(true, .input_release)) @panic("asynchronous accelerator operation failed");
     }
 
     pub fn discard(self: *Work) void {

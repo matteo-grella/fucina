@@ -901,7 +901,9 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
         /// quiescent (a context, wait, copy or synchronize call failed):
         /// the device may still be touching this command's slot, its
         /// dependencies' outputs and its pinned host inputs, so `destroy`
-        /// leaks them instead of recycling them.
+        /// leaks them instead of recycling them, and the inputs keep their
+        /// reader registrations (a mutable host access to them is fatal,
+        /// `Work.ensureFinished`) instead of being cleared as on success.
         quarantined: bool = false,
 
         const Self = @This();
@@ -913,13 +915,15 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
 
         fn finish(ctx_opaque: *anyopaque, copy_to_host: bool) bool {
             const self: *Self = @ptrCast(@alignCast(ctx_opaque));
-            defer {
-                self.a_buffer.clearPendingUse(&self.work);
-                if (self.b_buffer) |buffer| buffer.clearPendingUse(&self.work);
-            }
             const ok = self.fence(copy_to_host);
-            if (!ok) self.quarantined = true;
-            return ok;
+            if (!ok) {
+                self.quarantined = true;
+                return false;
+            }
+            // Only a proven fence releases the inputs to host mutation.
+            self.a_buffer.clearPendingUse(&self.work);
+            if (self.b_buffer) |buffer| buffer.clearPendingUse(&self.work);
+            return true;
         }
 
         /// The completion body: true only once the compute stream has been
