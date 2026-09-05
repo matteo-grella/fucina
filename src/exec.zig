@@ -181,6 +181,11 @@ pub const ExecContext = struct {
     /// The substrate's allocator (`rt.allocator`, thread-safe): the public
     /// forwarding accessor — allocate and free through `ctx.allocator()`.
     pub fn allocator(self: *const ExecContext) Allocator {
+        // The pin check (`Runtime`): the allocator interface must still
+        // point into THIS context's substrate; a context copied or moved
+        // after `init` fails here on first use in a safety build instead
+        // of allocating through a stale frame.
+        std.debug.assert(self.rt.allocator.ptr == @as(*anyopaque, @ptrCast(@constCast(&self.rt.thread_safe_allocator))));
         return self.rt.allocator;
     }
     pub const checkFloatEnvironment = exec_runtime.checkFloatEnvironment;

@@ -72,7 +72,11 @@ pub const BufferPool = struct {
     }
 
     pub fn deinit(self: *BufferPool) void {
-        std.debug.assert(self.outstanding.load(.acquire) == 0);
+        // Checked in every build mode: an outstanding pooled buffer holds a
+        // pointer to this pool and would reclaim into freed memory on its
+        // release, so tearing down under it is a use-after-free, not a
+        // leak. The context must outlive every tensor it allocated.
+        if (self.outstanding.load(.acquire) != 0) @panic("BufferPool.deinit: pooled buffers still outstanding (a tensor outlived its ExecContext)");
         for (self.free_list.items) |buffer| {
             buffer.destroy();
         }

@@ -245,7 +245,7 @@ inference frame helper is unchanged.
   context alive holds up to `max_cached_bytes` of cache. `ExecContext.deinit`
   frees everything.
 - **`acquire`/`acquireSlab` release the mutex before allocating** a fresh
-  buffer/slab on the miss path (`src/exec/buffer_pool.zig:87-108/:210-230`). Correct
+  buffer/slab on the miss path (`src/exec/buffer_pool.zig:91-112/:204-224`). Correct
   today (the new buffer is not yet shared, `outstanding` is atomic), but any
   future change touching shared pool state in that window must re-take the lock.
 - **Typed pooled buffers must never be marked stable-lifetime GPU RHS.** The
