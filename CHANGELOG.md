@@ -307,6 +307,48 @@ this point; earlier history is `git log`.
 
 ### Fixed
 
+- Backward over a deep graph overflowed the stack: preparation, drain,
+  inline execution and the release cascade recursed per node (a 10k-node
+  chain segfaulted in every build mode, and freeing a 200k-node chain did
+  in Debug). The engine walks explicit intrusive worklists
+  (`GradState.next`, no allocation): preparation and drain over the
+  reachable graph, one ready queue per executing thread (the driving
+  thread after each seed, every spawned task), and a per-thread release
+  cascade for parents whose last reference drops inside a record's deinit.
+  Execution order (depth-first, operand order) is unchanged, so
+  accumulation order and bitwise results are too. A 50k-node chain runs
+  and frees in the test suite.
+- A failed backward left the incoming gradient on an interior node whose
+  VJP threw (or whose scratch failed), so a retry accumulated the fresh
+  contribution onto the stale value. Every interior node now releases its
+  gradient on every exit of its backward. A VJP that consumes its saved
+  state in place before a fallible step (`linearCrossEntropy`'s logits
+  body) calls `core.consumeRecord`, which marks the graph consumed, so a
+  failure past that point makes the retry fail at the preflight with
+  `error.BackwardAlreadyRun` instead of replaying over destroyed logits.
+- A dense packed matmul (`PackedDenseRhs`) requested with
+  `placement = .cpu` could still run on the accelerator: the CPU kernel
+  made its own GPU attempt. The one accelerator attempt of a packed matmul
+  is the exec seam's (`offload.gemmPackedDense`), under the request's
+  placement; the kernel below it never dispatches to the device.
+- `fromBorrowedConstSlice` storage could be overwritten by a consuming op:
+  the borrow cast the constness away and the in-place ownership check saw
+  only a unique, contiguous buffer, so `takeScaleNoGrad` on a unique
+  handle wrote through the read-only slice (an mmap'd file included). The
+  buffer is marked `read_only` (`storage.Buffer.read_only`,
+  `Buffer.fromBorrowedConstSlice`, raw `Tensor.fromBorrowedConstSlice`,
+  `ExecContext.fromBorrowedConstSlice`) and `canTakeInPlace` refuses it,
+  so the consuming ops copy.
+- The widen-once f32 weight shadow (`FUCINA_CPU_F32_SHADOW`) survived
+  mutation of the weight, so an in-place update left later eligible GEMMs
+  reading stale values. A mutable host access (`Buffer.waitMutable`, every
+  `data()`) drops the shadow; the next eligible GEMM re-widens.
+- `Work.ensureFinished` (the input side of a submitted accelerator
+  command) treated a failed completion as finished; CUDA cleared the
+  inputs' reader registrations even when its fence had failed. The input
+  wait is now fatal on a failed completion, as the host-read boundary is,
+  and CUDA clears the registrations only after a proven fence, so a
+  quarantined command's inputs stay protected from host overwrites.
 - A backward over a graph built on top of an already-consumed output
   (`z.backward()`, then `y = 3·z`, `y.backward()`) silently compounded z's
   retained result gradient with the new contribution and propagated the
