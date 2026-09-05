@@ -260,14 +260,23 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// acquired it, whichever buffer's side frees it.
         ///
         /// Takes `*const`: the wait entries move only the slots' atomics,
-        /// so a read-only accessor fences without a cast; the one cast
-        /// lives here.
+        /// so a read-only accessor fences without a cast; the casts live
+        /// in the two wait entries.
         pub fn waitReady(self: *const Self) void {
             if (comptime !has_accelerator) return;
-            const atomics: *Self = @constCast(self);
-            while (atomics.accel.pending_work.acquire()) |work| {
+            if (!self.accel.pending_work.hasPending()) return;
+            completePendingWork(@constCast(self));
+        }
+
+        /// The completion loop of `waitReady`, kept out of line: the wait
+        /// entries are inlined into every data accessor, and only the bare
+        /// empty check belongs there. Inlining this loop too grew every
+        /// accessor's footprint enough to cost the Metal train-step forward
+        /// 4 ms (5%) with no slot work involved.
+        noinline fn completePendingWork(self: *Self) void {
+            while (self.accel.pending_work.acquire()) |work| {
                 work.ensureHost();
-                _ = atomics.accel.pending_work.clear(work);
+                _ = self.accel.pending_work.clear(work);
                 work.release();
             }
         }
@@ -305,12 +314,18 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// second provider-specific fence protocol.
         pub fn waitUnused(self: *const Self) void {
             if (comptime !has_accelerator) return;
-            const atomics: *Self = @constCast(self);
-            while (atomics.accel.pending_use.acquire()) |work| {
+            if (!self.accel.pending_use.hasPending()) return;
+            finishPendingUses(@constCast(self));
+        }
+
+        /// The completion loop of `waitUnused`, out of line for the same
+        /// reason as `completePendingWork`.
+        noinline fn finishPendingUses(self: *Self) void {
+            while (self.accel.pending_use.acquire()) |work| {
                 work.ensureFinished();
                 // Provider finish normally cleared it. Keep this fallback so
                 // a Work implementation cannot leave a stale token.
-                _ = atomics.accel.pending_use.clear(work);
+                _ = self.accel.pending_use.clear(work);
                 work.release();
             }
         }
