@@ -445,8 +445,14 @@ pub fn supportsForwardFloatMath(comptime dtype: DType) bool {
     };
 }
 
+/// The dtypes whose facade tensors carry a gradient slot: f32 (the
+/// differentiable branch) and the 16-bit leaves. f64 has forward float
+/// math (`supportsForwardFloatMath`) but no gradient.
 pub fn supportsGrad(comptime dtype: DType) bool {
-    return supportsForwardFloatMath(dtype);
+    return switch (dtype) {
+        .f16, .bf16, .f32 => true,
+        else => false,
+    };
 }
 
 /// Comptime guard of the forward float ops: the dtype must be one the

@@ -21,6 +21,8 @@ test "dtype maps scalar and accumulator storage" {
     try std.testing.expect(Accumulator(.f64) == f64);
     try std.testing.expectEqual(@as(u16, 0x3f80), one(.bf16));
     try std.testing.expect(supportsGrad(.f32));
+    try std.testing.expect(supportsGrad(.bf16));
+    try std.testing.expect(!supportsGrad(.f64));
     try std.testing.expect(!supportsGrad(.u16));
     try std.testing.expect(computeDType(.matmul, .bf16) == .f32);
     try std.testing.expect(outputDType(.matmul, .bf16) == .bf16);

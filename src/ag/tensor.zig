@@ -253,12 +253,13 @@ pub fn caps(comptime tensor_dtype: DType) Caps {
         .quant_ops = true,
     };
     // Typed float (f16/bf16/f64): forward float math; a live gradient
-    // slot on the 16-bit leaves only (f64 training is unsupported).
+    // slot on the 16-bit leaves only (`dtype.supportsGrad`: f64 training
+    // is unsupported).
     if (dtype_mod.supportsForwardFloatMath(tensor_dtype)) return .{
         .lifetime = true,
         .scalar_item = true,
         .leaf_decls = true,
-        .grad_slot = tensor_dtype != .f64,
+        .grad_slot = dtype_mod.supportsGrad(tensor_dtype),
         .views = true,
         .typed_constants = true,
         .typed_math_core = true,
