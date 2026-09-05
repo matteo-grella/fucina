@@ -6,6 +6,7 @@ const exec_mod = @import("../exec.zig");
 const optim = @import("../optim.zig");
 const ag_tensor = @import("tensor.zig");
 const checkpoint_mod = @import("checkpoint.zig");
+const control = @import("control.zig");
 
 const Allocator = std.mem.Allocator;
 const ExecContext = exec_mod.ExecContext;
@@ -307,6 +308,32 @@ fn snapshotGradsTwoLayers(ctx: *ExecContext, model: *const Model, x: anytype) ![
 
 fn freeGrads(allocator: Allocator, grads: []const []f32) void {
     for (grads) |s| allocator.free(s);
+}
+
+test "checkpoint under noGrad records nothing" {
+    // The one grad-recording policy: under `noGrad` a checkpoint is the
+    // plain block call, like any other op — no backward node, no retained
+    // input views, an output without gradient state.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var model = try Model.initRandom(&ctx, 11);
+    defer model.deinit();
+    var x = try makeInput(&ctx, 12);
+    defer x.deinit();
+    try std.testing.expect(x.requiresGrad());
+
+    var scope = control.noGrad();
+    defer scope.close();
+    var h1 = try checkpoint(&ctx, Blocks.layer1, .{ &x, &model.w1, &model.b1 });
+    defer h1.deinit();
+    try std.testing.expect(!h1.requiresGrad());
+    try std.testing.expectError(error.NoGradientGraph, h1.backward(&ctx));
 }
 
 test "checkpointed middle layer matches plain backward bitwise (unscoped)" {

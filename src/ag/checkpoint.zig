@@ -105,10 +105,14 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
     const facade_types = comptime reflect.facadeTypes(Inputs, "checkpoint", input_pointer);
     const n = facade_types.len;
 
+    // The one grad-recording policy of every op tail: an operand wants
+    // gradients AND grad mode is on (`noGrad` turns a checkpoint into the
+    // plain no-grad block call, as it does any other op).
     var any_grad = false;
     inline for (0..n) |i| {
         if (inputs[i].requiresGrad()) any_grad = true;
     }
+    any_grad = plumbing.recordsGrad(any_grad);
 
     // Snapshot the inputs for the recompute before running the block: the
     // backward node stores refcounted views of the input values plus the
