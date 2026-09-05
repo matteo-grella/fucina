@@ -28,6 +28,7 @@
 const std = @import("std");
 const dtype_mod = @import("../dtype.zig");
 const ops = @import("ops.zig");
+const quant_types = @import("quant/types.zig");
 
 /// GEMM operand orientation, as the provider kernels take it.
 pub const Orient = ops.MatmulKind;
@@ -63,7 +64,37 @@ pub const QuantFormat = enum {
             .tq2_0_folded => comptime dtype_mod.blockSize(.tq2_0),
         };
     }
+
+    /// Bytes a kernel reads from each RHS row start for `k` columns (a
+    /// whole number of blocks: `k % kMultiple() == 0`); null when the
+    /// count does not fit.
+    pub fn rowBytes(self: QuantFormat, k: usize) ?usize {
+        const blocks = k / self.kMultiple();
+        const block_bytes: usize = switch (self) {
+            inline .q8_0, .q4_k, .q5_k, .q6_k, .tq2_0 => |f| comptime @sizeOf(dtype_mod.Storage(@field(dtype_mod.DType, @tagName(f)))),
+            .tq2_0_folded => @sizeOf(quant_types.BlockTQ2_0Folded),
+        };
+        return std.math.mul(usize, blocks, block_bytes) catch null;
+    }
 };
+
+/// The byte extent a quantized-RHS request implies — `batch` matrices
+/// `nb02` apart, each `n` rows `nb01` apart, each read for `rowBytes(k)`
+/// — lies inside `req.rhs`. Every dispatch takes this before touching the
+/// bytes: the RHS descriptor is caller geometry over a caller slice, and
+/// a device read past the slice is a silent out-of-bounds fetch on the
+/// wrapped or copied pages, not a fault. `batch` is the matrix count the
+/// caller will address (the grouped entry passes its highest expert + 1).
+pub fn quantRhsInBounds(req: QuantGemmRequest, batch: usize) bool {
+    if (batch == 0 or req.n == 0) return false;
+    const row = req.format.rowBytes(req.k) orelse return false;
+    if (row == 0 or row > req.nb01) return false;
+    const rows = std.math.mul(usize, req.n - 1, req.nb01) catch return false;
+    const matrix = std.math.add(usize, rows, row) catch return false;
+    const batches = std.math.mul(usize, batch - 1, req.nb02) catch return false;
+    const extent = std.math.add(usize, batches, matrix) catch return false;
+    return extent <= req.rhs.len;
+}
 
 /// One dense GEMM description: `c[m,n] = op(a)·op(b)` under `orient`,
 /// optionally strided-batched — a `batch` above 1 is ONE dispatch with

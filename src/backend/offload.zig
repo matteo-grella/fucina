@@ -114,6 +114,7 @@ pub fn gemmQuant(comptime fmt: QuantFormat, rhs_bytes: []const u8, cacheable: bo
         .n = n,
         .k = k,
     };
+    if (!gpu_provider.quantRhsInBounds(req, 1)) return false;
     if (cacheable and gpu.gemmQuantNtAsync(req, input, out)) return true;
 
     const in_data = input.dataConst();
@@ -158,6 +159,7 @@ pub fn gemmQuantSharedInput(comptime fmt: QuantFormat, rhs_bytes: []const u8, ca
         .n = n,
         .k = k,
     };
+    if (!gpu_provider.quantRhsInBounds(req, batch_count)) return false;
     if (cacheable and gpu.gemmQuantNtAsync(req, input, out)) return true;
     const in_data = input.dataConst();
     const in_elems = std.math.mul(usize, m, k) catch return false;
@@ -298,7 +300,7 @@ pub const QMoeSession = struct {
         _ = self;
         if (comptime !enabled) return false;
         if (!supportsQuantAt(fmt)) return false;
-        return gpu.gemmQGroupedNt(.{
+        const req: gpu_provider.QuantGemmRequest = .{
             .format = fmt,
             .rhs = rhs_bytes,
             .rhs_cacheable = cacheable,
@@ -307,7 +309,14 @@ pub const QMoeSession = struct {
             .m = 0, // rows live in the tile table
             .n = n,
             .k = k,
-        }, tiles);
+        };
+        var experts: usize = 0;
+        for (tiles) |tile| {
+            if (tile.expert < 0) return false;
+            experts = @max(experts, @as(usize, @intCast(tile.expert)) + 1);
+        }
+        if (!gpu_provider.quantRhsInBounds(req, experts)) return false;
+        return gpu.gemmQGroupedNt(req, tiles);
     }
 
     pub fn end(self: *QMoeSession) void {
