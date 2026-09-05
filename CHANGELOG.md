@@ -305,6 +305,69 @@ this point; earlier history is `git log`.
   `innerDim`/`outputDim` methods (no callers) are gone. `ag.isPackedRhsType`
   reads the container's `pack`.
 
+### Fixed
+
+- A backward over a graph built on top of an already-consumed output
+  (`z.backward()`, then `y = 3·z`, `y.backward()`) silently compounded z's
+  retained result gradient with the new contribution and propagated the
+  sum (x received 10 where a fresh graph gives 8). The preparation now
+  preflights every reachable state for a completed pass and fails with
+  `error.BackwardAlreadyRun` before any gradient moves, unwinding the
+  scheduling state it installed.
+- A failed backward could strand pending counters below a node that was
+  scheduled with no gradient (a VJP that left an operand empty, or a
+  contribution that failed upstream); the next pass over the same graph
+  then stopped at the stranded state and reported success with missing
+  gradients. Every node the pass reaches now releases its operands'
+  counters, scratch-allocation failures included, and a failed pass drops
+  its outputs' partial gradients, so no non-leaf keeps a gradient from it
+  and the graph is re-runnable as documented. `GradState.setGrad` is one
+  swap under the mutex (the displaced gradient is released outside it).
+- `checkpoint` recorded a backward node under `noGrad`; it now follows the
+  one grad-recording policy of every op tail (no node, no retained input
+  views, an output without gradient state).
+- The accelerator lifetime slots of a storage buffer (`pending_work`,
+  `pending_use`) are one `WorkSlot` type: a Work reference behind a claim,
+  read only through `acquire()` (a retained reference) and mutated only
+  under the same claim. The reader slot's wait (`waitUnused`, every
+  mutable host access of a buffer a submitted command reads) loaded the
+  pointer bare, so the output side of the same command could complete and
+  free the Work under it — a use-after-free for a mutator racing a reader
+  of the output; the CUDA provider's device-input lookups had the same
+  load-then-dereference gap. The wait also accepts a Work whose output was
+  already discarded (the command is over) instead of treating it as a host
+  read of a dropped result. Storage no longer exposes the bare pointer
+  (`pending()`): `hasPending()` observes, `acquirePending()` retains.
+- CUDA: a completion that failed before the compute stream was proven
+  quiescent (a context, wait, copy or synchronize call failed) recycled the
+  command's async slot and released its operands anyway. Such a command is
+  now quarantined: its slot stays busy (an exhausted queue falls back to
+  the CPU path), and the holder, its dependencies and its input references
+  are leaked rather than handed to memory the device may still touch.
+  `freeResidentBytes` likewise leaks the device range when the stream
+  fence fails instead of freeing it.
+- A quantized-RHS accelerator request (`tryMatmulQuantRhs`, the
+  shared-input and grouped-MoE forms) is checked against the byte extent
+  its geometry implies (`batch·nb02 + n·nb01 + row bytes` inside the RHS
+  slice, `nb01` at least one row) before any dispatch; a short slice is a
+  refusal (the caller's CPU path), not a device read past the wrapped or
+  copied pages.
+- 2-D conv, conv backward, fold/unfold and pool geometry computed
+  `extent + 2·pad` unchecked, so a padding that wraps could pass the window
+  checks with a plausible size; the padded extent is checked
+  (`error.InvalidShape`), as conv1d already did. `sliceStep` checks
+  `start + (length − 1)·step` the same way.
+- `dtype.supportsGrad` is the facade's gradient-slot predicate (`.f16`,
+  `.bf16`, `.f32`); it included `.f64`, which the facade never gives a
+  gradient slot. The facade capability table now derives from it.
+- `BufferPool.deinit` panics in every build mode when pooled buffers are
+  still outstanding (a tensor outlived its `ExecContext`): the release of
+  such a buffer reclaims into the freed pool, so the debug-only assert was
+  a use-after-free in release builds. `ExecContext.allocator()` asserts the
+  pin invariant (the allocator interface points into this context's own
+  substrate) in safety builds, so a context copied or moved after `init`
+  fails on first use.
+
 ## 0.4.0 - 2026-08-27
 
 ### Added
