@@ -247,3 +247,140 @@ test "failed output seeding leaves the graph re-runnable" {
         backwardGradOne(&ctx, y, &y_value),
     );
 }
+
+test "backward rejects a consumed output reached as an interior node" {
+    // z = 2x, backward(z); then y = 3z, backward(y). z's retained result
+    // gradient (1) would compound with y's contribution (3) and propagate
+    // 2·4 = 8 into x on top of the 2 already there (10, not the 8 a fresh
+    // graph would give). The second pass must fail before any gradient
+    // moves and leave the scheduling state clean.
+    const ScaleToParentBackward = struct {
+        parents: [1]?*GradState,
+        factor: f32,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const x = try GradState.leaf(ctx.allocator());
+    defer x.release();
+    const z = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{x}, .factor = 2 });
+    defer z.release();
+    var z_value = try ctx.scalar(.f32, 0);
+    defer z_value.deinit();
+
+    try backwardGradOne(&ctx, z, &z_value);
+    var gx = (try x.gradClone(ctx.allocator())).?;
+    defer gx.deinit();
+    try std.testing.expectEqual(@as(f32, 2), gx.item());
+
+    const y = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{z}, .factor = 3 });
+    defer y.release();
+    var y_value = try ctx.scalar(.f32, 0);
+    defer y_value.deinit();
+
+    try std.testing.expectError(core.AgError.BackwardAlreadyRun, backwardGradOne(&ctx, y, &y_value));
+
+    // Untouched: x's gradient, z's result gradient, and the scheduling
+    // state of every node the preparation reached.
+    var gx_after = (try x.gradClone(ctx.allocator())).?;
+    defer gx_after.deinit();
+    try std.testing.expectEqual(@as(f32, 2), gx_after.item());
+    var gz = (try z.gradClone(ctx.allocator())).?;
+    defer gz.deinit();
+    try std.testing.expectEqual(@as(f32, 1), gz.item());
+    try std.testing.expect((try y.gradClone(ctx.allocator())) == null);
+    for ([_]*GradState{ x, z, y }) |state| {
+        try std.testing.expectEqual(@as(u32, 0), state.pending_grads.load(.acquire));
+        try std.testing.expectEqual(@as(u8, 0), state.state.load(.acquire)); // .idle
+    }
+    try std.testing.expect(!y.backward_done);
+    try std.testing.expect(!y.pass_output);
+}
+
+test "a node reached without a gradient releases its whole subgraph" {
+    // top -> mid -> deep -> x. mid's VJP delivers nothing on the first
+    // pass, so deep is scheduled with no gradient: it must still release
+    // deep's operand counters (x), or the retry over the repaired graph
+    // stops at the stranded state and reports success with x untouched.
+    const ScaleToParentBackward = struct {
+        parents: [1]?*GradState,
+        factor: f32,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+    const SwitchableBackward = struct {
+        parents: [1]?*GradState,
+        deliver: bool,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (self.deliver and core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item());
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const x = try GradState.leaf(ctx.allocator());
+    defer x.release();
+    const deep = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{x}, .factor = 2 });
+    defer deep.release();
+    const mid = try core.createNode(ctx.allocator(), SwitchableBackward{ .parents = .{deep}, .deliver = false });
+    defer mid.release();
+    const top = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{mid}, .factor = 5 });
+    defer top.release();
+    var top_value = try ctx.scalar(.f32, 0);
+    defer top_value.deinit();
+
+    try std.testing.expectError(core.AgError.MissingBackwardGradient, backwardGradOne(&ctx, top, &top_value));
+
+    // Every reachable state is back to idle with a zero counter, no
+    // non-leaf holds a gradient (the failed pass dropped top's seed), and
+    // the graph is unconsumed.
+    for ([_]*GradState{ x, deep, mid, top }) |state| {
+        try std.testing.expectEqual(@as(u32, 0), state.pending_grads.load(.acquire));
+        try std.testing.expectEqual(@as(u8, 0), state.state.load(.acquire)); // .idle
+    }
+    for ([_]*GradState{ deep, mid, top }) |state| {
+        try std.testing.expect((try state.gradClone(ctx.allocator())) == null);
+    }
+    try std.testing.expect((try x.gradClone(ctx.allocator())) == null);
+    try std.testing.expect(!top.backward_done);
+    try std.testing.expect(!top.pass_output);
+
+    // Repair the VJP and retry over the SAME graph: the gradient reaches x.
+    const mid_record: *SwitchableBackward = @ptrCast(@alignCast(mid.grad_fn.?.ptr));
+    mid_record.deliver = true;
+    try backwardGradOne(&ctx, top, &top_value);
+    var gx = (try x.gradClone(ctx.allocator())).?;
+    defer gx.deinit();
+    try std.testing.expectEqual(@as(f32, 10), gx.item());
+}

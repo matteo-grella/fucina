@@ -284,13 +284,19 @@ backward over the same states stop at their `.pending` check and report
 success with missing gradients — so a seeding failure (as in the snippet
 above) leaves zero scheduling debris and the same graph runs correctly once
 the seed is supplied (`src/ag/core_tests.zig`, "failed output seeding leaves
-the graph re-runnable"). When a VJP fails mid-pass, the engine deinits any
-gradients it produced, releases the pending counters of the failing node's
-operands (returning them to `idle`), records the first error, drains all
-in-flight tasks, and returns that error. Re-runnability restores
-*scheduling* state, not values: gradient contributions delivered before the
-failure remain accumulated — call `zeroGrad` on the leaves before retrying
-if exact values matter.
+the graph re-runnable"). When a VJP fails mid-pass, or leaves an operand
+without a gradient, the engine deinits any gradients it produced, records
+the first error, drains all in-flight tasks, and returns that error. Every
+node the pass reached is released: a node scheduled with nothing to
+propagate releases its own operands' counters in turn, so the whole
+subgraph below a failure returns to `idle` with zero counters
+(`src/ag/core_tests.zig`, "a node reached without a gradient releases its
+whole subgraph"), and the outputs' partial gradients are dropped, so no
+non-leaf keeps a gradient from a failed pass (a retry re-seeds a scalar
+output implicitly; a non-scalar output is re-seeded by `backwardWithGrad`).
+Re-runnability restores *scheduling* state, not leaf values: contributions
+delivered to the leaves before the failure remain accumulated — call
+`zeroGrad` on the leaves before retrying if exact values matter.
 
 **Interior gradients live only as long as they are needed.** Gradients
 accumulate in every `GradState` they touch, but an interior result's
@@ -305,8 +311,13 @@ another). To read any other interior gradient, pass that tensor as an
 additional output.
 
 **One backward per graph.** A completed pass marks its outputs consumed,
-and a repeated `backward`/`backwardWithGrad` over them fails with
-`error.BackwardAlreadyRun` before any scheduling state is installed;
+and a later pass that reaches a consumed state fails with
+`error.BackwardAlreadyRun` before any gradient moves — a repeated
+`backward`/`backwardWithGrad` over the same output, and equally a backward
+over a newer graph built on top of it (`y = 3·z` after `z.backward()`:
+z's retained result gradient would compound with y's contribution and
+propagate the sum). The check is a preflight over the whole reachable
+graph, and its scheduling state is unwound again when it fails.
 `zeroGrad` resets gradients, not the consumed graph. Only a *completed*
 pass consumes: the failed-seeding retry above stays re-runnable, and a leaf
 output (a bare variable) has no graph to consume and is never marked. The

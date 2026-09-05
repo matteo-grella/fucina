@@ -241,18 +241,20 @@ pub const GradState = struct {
     pending_grads: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     grad_mutex: thread.Mutex = .{},
     /// Set once a backward pass with this state as an OUTPUT completes.
-    /// The pass leaves its gradient contributions accumulated in every
-    /// interior state of the graph, so a second pass over the same graph
-    /// would compound them; `backwardGradImpl` rejects a marked output with
-    /// `AgError.BackwardAlreadyRun` before installing any scheduling state.
-    /// Leaves (`grad_fn == null`) are never marked — they have no graph to
-    /// consume. Touched only on the thread driving the pass, never from
-    /// pool tasks, so it needs no synchronization.
+    /// The pass leaves the output's gradient in place as a result, so a
+    /// later pass reaching this state — as an output again or as an
+    /// interior node of a newer graph — would compound it and propagate
+    /// the sum; `backwardGradImpl` rejects a marked state anywhere in the
+    /// reachable graph with `AgError.BackwardAlreadyRun` before any
+    /// gradient moves. Leaves (`grad_fn == null`) are never marked — they
+    /// have no graph to consume. Touched only on the thread driving the
+    /// pass, never from pool tasks, so it needs no synchronization.
     backward_done: bool = false,
-    /// Set on the outputs a backward pass was asked for. Their gradients
-    /// are results and stay readable after the pass; every other interior
+    /// Set on the outputs of the pass in flight. Their gradients are
+    /// results and stay readable after the pass; every other interior
     /// gradient is released as soon as its own backward has consumed it
-    /// (leaves have no backward and keep theirs for the optimizer).
+    /// (leaves have no backward and keep theirs for the optimizer). A
+    /// failed pass clears it again together with the outputs' gradients.
     pass_output: bool = false,
     /// Reference count. Every owner holds exactly one reference: a facade
     /// handle, a consumer record (one per operand slot, taken by
@@ -301,11 +303,14 @@ pub const GradState = struct {
         }
     }
 
+    /// Replace the stored gradient with `grad` (taking ownership); one
+    /// swap under the mutex, the displaced gradient released outside it.
     pub fn setGrad(self: *GradState, grad: Tensor) void {
-        self.zeroGrad();
         self.grad_mutex.lock();
-        defer self.grad_mutex.unlock();
+        var displaced = self.grad;
         self.grad = grad;
+        self.grad_mutex.unlock();
+        if (displaced) |*g| g.deinit();
     }
 
     pub fn gradClone(self: *GradState, allocator: Allocator) !?Tensor {
@@ -330,16 +335,51 @@ pub const GradState = struct {
         return self.grad != null;
     }
 
-    fn prepareBackwardPass(self: *GradState) void {
+    /// Install the pass's scheduling state: one pending count per
+    /// consumer (and per requested output), `.pending` on first reach, the
+    /// operands recursively. Also the preflight: a reachable state that a
+    /// completed pass already consumed (`backward_done`) sets `consumed`,
+    /// and the caller unwinds the whole preparation with
+    /// `drainBackwardPass` instead of seeding.
+    fn prepareBackwardPass(self: *GradState, consumed: *bool) void {
         _ = self.pending_grads.fetchAdd(1, .monotonic);
         if (!self.compareState(.idle, .pending)) {
             return;
         }
+        if (self.backward_done) consumed.* = true;
 
         if (self.grad_fn) |function| {
             for (function.operands()) |operand| {
-                if (operand) |state| state.prepareBackwardPass();
+                if (operand) |state| state.prepareBackwardPass(consumed);
             }
+        }
+    }
+
+    /// Undo one `prepareBackwardPass` contribution without moving any
+    /// gradient: drop this state's pending count and, once it reaches
+    /// zero, return the state to `.idle` and drain its operands the same
+    /// way. Mirrors the preparation exactly, so a prepared graph unwinds
+    /// to its pre-pass scheduling state.
+    fn drainBackwardPass(self: *GradState) void {
+        if (!self.finishGradContributionReady()) return;
+        if (!self.compareState(.pending, .idle)) return;
+        if (self.grad_fn) |function| {
+            for (function.operands()) |operand| {
+                if (operand) |state| state.drainBackwardPass();
+            }
+        }
+    }
+
+    /// The pending counts of this node's operands, delivered without a
+    /// gradient: the tail of a node that runs with nothing to propagate,
+    /// and of one that failed before it could. An operand whose count
+    /// reaches zero is scheduled as usual — it propagates whatever other
+    /// consumers delivered, or drains its own operands the same way — so
+    /// no counter is left installed below a node that did not run.
+    fn releaseOperands(self: *GradState, engine: *GradEngine) void {
+        const function = self.grad_fn orelse return;
+        for (function.operands()) |operand| {
+            if (operand) |state| state.finishGradContribution(engine);
         }
     }
 
@@ -449,11 +489,23 @@ pub const GradState = struct {
         self.grad_mutex.lock();
         const gy = if (self.grad) |*g| g else null;
         self.grad_mutex.unlock();
-        const local_gy = gy orelse return;
+        // Scheduled with no gradient (every consumer delivered nothing —
+        // a missing VJP output, or a failed contribution upstream): there
+        // is nothing to propagate, but the operands were counted at
+        // preparation and are released here, or their counters would
+        // stay installed and the next pass over this graph would stop at
+        // them and report success with missing gradients.
+        const local_gy = gy orelse {
+            self.releaseOperands(engine);
+            return;
+        };
 
         var gxs_scratch: SmallSlice(?Tensor, 8) = .{};
         defer gxs_scratch.deinit(engine.allocator);
-        const gxs = try gxs_scratch.init(engine.allocator, operands.len);
+        const gxs = gxs_scratch.init(engine.allocator, operands.len) catch |err| {
+            self.releaseOperands(engine);
+            return err;
+        };
         @memset(gxs, null);
         defer {
             for (gxs) |*gx| {
@@ -477,7 +529,12 @@ pub const GradState = struct {
 
         var ready_scratch: SmallSlice(*GradState, 8) = .{};
         defer ready_scratch.deinit(engine.allocator);
-        const ready = try ready_scratch.init(engine.allocator, operands.len);
+        const ready = ready_scratch.init(engine.allocator, operands.len) catch |err| {
+            // The produced gradients go with the scratch (the defer above);
+            // the operands are still released.
+            self.releaseOperands(engine);
+            return err;
+        };
         var ready_len: usize = 0;
 
         var missing_backward_gradient = false;
@@ -700,11 +757,23 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
         if (output.backward_done) return AgError.BackwardAlreadyRun;
         seed.* = try output.prepareOutputSeed(ctx, output_value);
     }
+
+    // Preparation is a transaction: install the counters over the whole
+    // reachable graph, and if any reachable state was consumed by an
+    // earlier completed pass (a previous output built into a newer graph:
+    // its retained gradient would compound with the new contribution and
+    // propagate the sum), unwind them all and fail before any gradient
+    // moves.
+    var consumed = false;
+    for (outputs) |output| {
+        output.prepareBackwardPass(&consumed);
+    }
+    if (consumed) {
+        for (outputs) |output| output.drainBackwardPass();
+        return AgError.BackwardAlreadyRun;
+    }
     for (outputs) |output| output.pass_output = true;
 
-    for (outputs) |output| {
-        output.prepareBackwardPass();
-    }
     for (outputs, seeds) |output, *seed| {
         const owned = seed.*;
         seed.* = null;
@@ -712,12 +781,24 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
     }
 
     engine.waitAll();
-    if (engine.takeError()) |err| return err;
+    if (engine.takeError()) |err| {
+        // The failed pass leaves no gradient on any non-leaf: every interior
+        // node that ran released its own, every node that did not run was
+        // drained, and the outputs' partial results are dropped here (a
+        // retry seeds them afresh; a non-scalar output is re-seeded by its
+        // caller). Leaves keep the contributions delivered before the
+        // failure; the graph itself stays unconsumed and re-runnable.
+        for (outputs) |output| {
+            output.pass_output = false;
+            if (output.grad_fn != null) output.zeroGrad();
+        }
+        return err;
+    }
 
-    // The completed pass consumed the graph: interior states retain their
-    // accumulated gradients, so re-running over the same graph would compound
-    // them (one backward per graph; see docs/reference/05-automatic-differentiation.md). Failed passes
-    // stay unmarked and re-runnable; leaf outputs have no graph to consume.
+    // The completed pass consumed the graph: its outputs keep their
+    // gradients as results, so a later pass reaching them would compound
+    // (one backward per graph; see docs/reference/05-automatic-differentiation.md).
+    // Leaf outputs have no graph to consume.
     for (outputs) |output| {
         if (output.grad_fn != null) output.backward_done = true;
     }

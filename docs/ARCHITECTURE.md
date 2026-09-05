@@ -723,10 +723,13 @@ Backward execution (`backwardGrad`/`backwardGradSerial` in `ag/core.zig`):
   pre-seeded outputs are respected without an implicit `+1` on top. Scalar
   outputs whose gradient appears only mid-pass still accumulate their own
   seed.
-- Marks outputs consumed once their pass completes: interior states retain
-  their accumulated gradients, so a repeat backward over the same graph would
-  compound them — it fails with `AgError.BackwardAlreadyRun` instead (failed
-  passes stay unmarked and re-runnable).
+- Marks outputs consumed once their pass completes: they keep their
+  gradients as results, so a later pass reaching a consumed state — as an
+  output again or as an interior node of a newer graph — would compound it;
+  the preparation preflights the whole reachable graph and fails with
+  `AgError.BackwardAlreadyRun` before any gradient moves. Failed passes stay
+  unmarked and re-runnable: every reachable state returns to idle with a
+  zero counter, and no non-leaf keeps a gradient.
 - Recursively discovers dependencies, uses per-state pending-gradient
   counters for shared branches, and schedules a state only when all
   downstream contributions are present.
