@@ -384,3 +384,179 @@ test "a node reached without a gradient releases its whole subgraph" {
     defer gx.deinit();
     try std.testing.expectEqual(@as(f32, 10), gx.item());
 }
+
+test "backward and teardown of a deep chain use a bounded stack" {
+    // 50k nodes in one chain: preparation, execution and the release
+    // cascade all walk explicit worklists, so graph depth is not a
+    // call-stack resource (the recursive engine overflowed near 10k).
+    const PassThrough = struct {
+        parents: [1]?*GradState,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item());
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const depth = 50_000;
+    const x = try GradState.leaf(ctx.allocator());
+    defer x.release();
+    var top: *GradState = x.retain();
+    for (0..depth) |_| {
+        const next = try core.createNode(ctx.allocator(), PassThrough{ .parents = .{top} });
+        top.release();
+        top = next;
+    }
+    var top_value = try ctx.scalar(.f32, 0);
+    defer top_value.deinit();
+
+    try backwardGradOne(&ctx, top, &top_value);
+    var gx = (try x.gradClone(ctx.allocator())).?;
+    defer gx.deinit();
+    try std.testing.expectEqual(@as(f32, 1), gx.item());
+    // The last handle frees the whole chain: the cascade, not recursion.
+    top.release();
+}
+
+test "a throwing interior VJP leaves no gradient behind for the retry" {
+    // top -> mid -> x, mid's VJP fails on the first pass. mid received its
+    // gradient before failing; the retry must not accumulate the fresh
+    // contribution onto that stale value (x would receive 5·(5+5) = 50
+    // instead of 5·5 = 25).
+    const ScaleToParentBackward = struct {
+        parents: [1]?*GradState,
+        factor: f32,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+    const ThrowOnceBackward = struct {
+        parents: [1]?*GradState,
+        throws: bool,
+
+        const Self = @This();
+        const Failure = error{VjpFailed};
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (self.throws) return Failure.VjpFailed;
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item());
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const x = try GradState.leaf(ctx.allocator());
+    defer x.release();
+    const mid = try core.createNode(ctx.allocator(), ThrowOnceBackward{ .parents = .{x}, .throws = true });
+    defer mid.release();
+    const top = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{mid}, .factor = 5 });
+    defer top.release();
+    var top_value = try ctx.scalar(.f32, 0);
+    defer top_value.deinit();
+
+    try std.testing.expectError(ThrowOnceBackward.Failure.VjpFailed, backwardGradOne(&ctx, top, &top_value));
+    for ([_]*GradState{ x, mid, top }) |state| {
+        try std.testing.expectEqual(@as(u32, 0), state.pending_grads.load(.acquire));
+        try std.testing.expectEqual(@as(u8, 0), state.state.load(.acquire)); // .idle
+    }
+    // No non-leaf keeps a gradient from the failed pass: not the output,
+    // and not the node whose VJP threw after receiving its gradient.
+    try std.testing.expect((try mid.gradClone(ctx.allocator())) == null);
+    try std.testing.expect((try top.gradClone(ctx.allocator())) == null);
+    try std.testing.expect((try x.gradClone(ctx.allocator())) == null);
+
+    const mid_record: *ThrowOnceBackward = @ptrCast(@alignCast(mid.grad_fn.?.ptr));
+    mid_record.throws = false;
+    try backwardGradOne(&ctx, top, &top_value);
+    var gx = (try x.gradClone(ctx.allocator())).?;
+    defer gx.deinit();
+    try std.testing.expectEqual(@as(f32, 5), gx.item());
+}
+
+test "a failing VJP that consumed its saved state marks the graph consumed" {
+    // A record whose body consumes its saved tensors in place calls
+    // `consumeRecord` before its first fallible step. When that step
+    // fails, the pass fails as usual, but the graph must not be retryable:
+    // the retry fails at the preflight, before any gradient moves.
+    const ConsumingBackward = struct {
+        parents: [1]?*GradState,
+
+        const Self = @This();
+        const Failure = error{ConsumedThenFailed};
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            _ = ctx;
+            _ = gy;
+            _ = out;
+            core.consumeRecord(self);
+            return Failure.ConsumedThenFailed;
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+    const ScaleToParentBackward = struct {
+        parents: [1]?*GradState,
+        factor: f32,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) !void {
+            if (core.needs(self, 0)) out[0] = try ctx.scalar(.f32, gy.item() * self.factor);
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const x = try GradState.leaf(ctx.allocator());
+    defer x.release();
+    const consuming = try core.createNode(ctx.allocator(), ConsumingBackward{ .parents = .{x} });
+    defer consuming.release();
+    const top = try core.createNode(ctx.allocator(), ScaleToParentBackward{ .parents = .{consuming}, .factor = 3 });
+    defer top.release();
+    var top_value = try ctx.scalar(.f32, 0);
+    defer top_value.deinit();
+
+    try std.testing.expectError(ConsumingBackward.Failure.ConsumedThenFailed, backwardGradOne(&ctx, top, &top_value));
+    for ([_]*GradState{ x, consuming, top }) |state| {
+        try std.testing.expectEqual(@as(u32, 0), state.pending_grads.load(.acquire));
+        try std.testing.expectEqual(@as(u8, 0), state.state.load(.acquire)); // .idle
+    }
+    try std.testing.expect(consuming.backward_done);
+    try std.testing.expect(!top.backward_done);
+
+    try std.testing.expectError(core.AgError.BackwardAlreadyRun, backwardGradOne(&ctx, top, &top_value));
+    try std.testing.expect((try x.gradClone(ctx.allocator())) == null);
+    try std.testing.expect((try top.gradClone(ctx.allocator())) == null);
+}

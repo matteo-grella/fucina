@@ -247,8 +247,11 @@ pub const GradState = struct {
     /// the sum; `backwardGradImpl` rejects a marked state anywhere in the
     /// reachable graph with `AgError.BackwardAlreadyRun` before any
     /// gradient moves. Leaves (`grad_fn == null`) are never marked — they
-    /// have no graph to consume. Touched only on the thread driving the
-    /// pass, never from pool tasks, so it needs no synchronization.
+    /// have no graph to consume. Written by the driving thread between
+    /// passes and, through `consumeRecord`, by a VJP inside a pass (from a
+    /// pool task at most); read only by the next pass's preflight, after
+    /// `waitAll` has joined every task, so it needs no synchronization of
+    /// its own.
     backward_done: bool = false,
     /// Set on the outputs of the pass in flight. Their gradients are
     /// results and stay readable after the pass; every other interior
@@ -263,6 +266,10 @@ pub const GradState = struct {
     /// a scope while pool tasks of a finished backward are still unwinding
     /// their own handles.
     refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
+    /// The `Worklist` link: a state sits on at most one engine worklist at
+    /// a time (a pass's preparation or drain, one executing thread's ready
+    /// queue, or the release cascade), never on two.
+    next: ?*GradState = null,
 
     pub fn leaf(allocator: Allocator) !*GradState {
         const self = try allocator.create(GradState);
@@ -281,9 +288,25 @@ pub const GradState = struct {
     /// directly, an interior node through its record vtable (which also
     /// releases the node's operand references). `self` is dangling after
     /// the last release; a handle that still holds a reference may keep
-    /// using it.
+    /// using it. The cascade is iterative: a parent whose last reference
+    /// drops inside a record's deinit joins this thread's release worklist
+    /// instead of freeing recursively, so a chain of any depth tears down
+    /// on a bounded stack.
     pub fn release(self: *GradState) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (release_cascade) |cascade| {
+            cascade.push(self);
+            return;
+        }
+        var cascade: Worklist = .{};
+        release_cascade = &cascade;
+        defer release_cascade = null;
+        self.destroy();
+        while (cascade.pop()) |state| state.destroy();
+    }
+
+    /// Free a state whose last reference dropped.
+    fn destroy(self: *GradState) void {
         self.zeroGrad();
         if (self.grad_fn) |function| {
             // Frees the whole co-allocated node, self included.
@@ -335,39 +358,52 @@ pub const GradState = struct {
         return self.grad != null;
     }
 
-    /// Install the pass's scheduling state: one pending count per
-    /// consumer (and per requested output), `.pending` on first reach, the
-    /// operands recursively. Also the preflight: a reachable state that a
-    /// completed pass already consumed (`backward_done`) sets `consumed`,
-    /// and the caller unwinds the whole preparation with
-    /// `drainBackwardPass` instead of seeding.
-    fn prepareBackwardPass(self: *GradState, consumed: *bool) void {
-        _ = self.pending_grads.fetchAdd(1, .monotonic);
-        if (!self.compareState(.idle, .pending)) {
-            return;
-        }
-        if (self.backward_done) consumed.* = true;
-
-        if (self.grad_fn) |function| {
+    /// Install the pass's scheduling state over the graph reachable from
+    /// `outputs`: one pending count per consumer (and per requested
+    /// output), `.pending` on first reach, the operands through an
+    /// explicit worklist — the depth of the graph is not a call-stack
+    /// resource. Also the preflight: a reachable state that a completed
+    /// pass already consumed (`backward_done`) sets `consumed`, and the
+    /// caller unwinds the whole preparation with `drainBackwardPass`
+    /// instead of seeding.
+    fn prepareBackwardPass(outputs: []const *GradState, consumed: *bool) void {
+        var reached: Worklist = .{};
+        for (outputs) |output| output.enterPass(&reached, consumed);
+        while (reached.pop()) |state| {
+            const function = state.grad_fn orelse continue;
             for (function.operands()) |operand| {
-                if (operand) |state| state.prepareBackwardPass(consumed);
+                if (operand) |parent| parent.enterPass(&reached, consumed);
             }
         }
     }
 
-    /// Undo one `prepareBackwardPass` contribution without moving any
-    /// gradient: drop this state's pending count and, once it reaches
-    /// zero, return the state to `.idle` and drain its operands the same
-    /// way. Mirrors the preparation exactly, so a prepared graph unwinds
-    /// to its pre-pass scheduling state.
-    fn drainBackwardPass(self: *GradState) void {
-        if (!self.finishGradContributionReady()) return;
-        if (!self.compareState(.pending, .idle)) return;
-        if (self.grad_fn) |function| {
+    fn enterPass(self: *GradState, reached: *Worklist, consumed: *bool) void {
+        _ = self.pending_grads.fetchAdd(1, .monotonic);
+        if (!self.compareState(.idle, .pending)) return;
+        if (self.backward_done) consumed.* = true;
+        reached.push(self);
+    }
+
+    /// Undo `prepareBackwardPass` without moving any gradient: drop each
+    /// reached state's pending count and, once it reaches zero, return
+    /// the state to `.idle` and continue into its operands. Mirrors the
+    /// preparation exactly, so a prepared graph unwinds to its pre-pass
+    /// scheduling state.
+    fn drainBackwardPass(outputs: []const *GradState) void {
+        var drained: Worklist = .{};
+        for (outputs) |output| output.leavePass(&drained);
+        while (drained.pop()) |state| {
+            const function = state.grad_fn orelse continue;
             for (function.operands()) |operand| {
-                if (operand) |state| state.drainBackwardPass();
+                if (operand) |parent| parent.leavePass(&drained);
             }
         }
+    }
+
+    fn leavePass(self: *GradState, drained: *Worklist) void {
+        if (!self.finishGradContributionReady()) return;
+        if (!self.compareState(.pending, .idle)) return;
+        drained.push(self);
     }
 
     /// The pending counts of this node's operands, delivered without a
@@ -376,10 +412,10 @@ pub const GradState = struct {
     /// reaches zero is scheduled as usual — it propagates whatever other
     /// consumers delivered, or drains its own operands the same way — so
     /// no counter is left installed below a node that did not run.
-    fn releaseOperands(self: *GradState, engine: *GradEngine) void {
+    fn releaseOperands(self: *GradState, engine: *GradEngine, ready: *Worklist) void {
         const function = self.grad_fn orelse return;
         for (function.operands()) |operand| {
-            if (operand) |state| state.finishGradContribution(engine);
+            if (operand) |state| state.finishGradContribution(engine, ready);
         }
     }
 
@@ -402,16 +438,16 @@ pub const GradState = struct {
     /// from `prepareOutputSeed`. A scalar output whose gradient appeared only
     /// MID-pass (an earlier output's backward already reached it) still
     /// accumulates its own seed on top here.
-    fn assignOutputGradient(self: *GradState, engine: *GradEngine, seed: ?Tensor) !void {
+    fn assignOutputGradient(self: *GradState, engine: *GradEngine, seed: ?Tensor, ready: *Worklist) !void {
         if (seed) |owned| {
-            return self.accGradOwned(engine, owned);
+            return self.accGradOwned(engine, owned, ready);
         }
-        self.finishGradContribution(engine);
+        self.finishGradContribution(engine, ready);
     }
 
-    fn accGradOwned(self: *GradState, engine: *GradEngine, gx: Tensor) !void {
-        if (try self.accGradOwnedReady(engine, gx)) {
-            engine.scheduleReady(self);
+    fn accGradOwned(self: *GradState, engine: *GradEngine, gx: Tensor, ready: *Worklist) !void {
+        if (try self.accGradOwnedReady(engine, gx, ready)) {
+            engine.scheduleReady(self, ready);
         }
     }
 
@@ -434,10 +470,10 @@ pub const GradState = struct {
     /// means this was the last contribution and the caller must schedule the
     /// node. On error the contribution is released AND still counted (the
     /// entry-time check), so a failing pass never strands a nonzero counter.
-    fn accGradOwnedReady(self: *GradState, engine: *GradEngine, gx: Tensor) !bool {
+    fn accGradOwnedReady(self: *GradState, engine: *GradEngine, gx: Tensor, ready: *Worklist) !bool {
         const counted_at_entry = self.loadState() != .idle;
         self.accumulateOwned(engine, gx) catch |err| {
-            if (counted_at_entry and self.finishGradContributionReady()) engine.scheduleReady(self);
+            if (counted_at_entry and self.finishGradContributionReady()) engine.scheduleReady(self, ready);
             return err;
         };
         if (self.loadState() != .idle) return self.finishGradContributionReady();
@@ -468,9 +504,9 @@ pub const GradState = struct {
         if (!moved) owned.deinit();
     }
 
-    fn finishGradContribution(self: *GradState, engine: *GradEngine) void {
+    fn finishGradContribution(self: *GradState, engine: *GradEngine, ready: *Worklist) void {
         if (self.finishGradContributionReady()) {
-            engine.scheduleReady(self);
+            engine.scheduleReady(self, ready);
         }
     }
 
@@ -480,7 +516,10 @@ pub const GradState = struct {
         return old == 1;
     }
 
-    fn executeBackward(self: *GradState, engine: *GradEngine) !void {
+    /// Run this node's VJP over its accumulated gradient and deliver the
+    /// operand gradients; operands whose last contribution arrived go onto
+    /// `ready`, the executing thread's worklist (never run inline here).
+    fn executeBackward(self: *GradState, engine: *GradEngine, ready: *Worklist) !void {
         defer self.storeState(.idle);
 
         const function = self.grad_fn orelse return;
@@ -496,14 +535,23 @@ pub const GradState = struct {
         // stay installed and the next pass over this graph would stop at
         // them and report success with missing gradients.
         const local_gy = gy orelse {
-            self.releaseOperands(engine);
+            self.releaseOperands(engine, ready);
             return;
         };
+        // An interior gradient has no consumer once this node's backward
+        // has been attempted: release it on every exit (the VJP ran, or
+        // failed, or its scratch did), so the backward's memory is a
+        // moving window rather than a second copy of the forward, and no
+        // failed pass leaves a stale gradient that a retry would compound.
+        // Pass outputs keep theirs (they are results). The successors
+        // scheduled below run after this returns, so the release precedes
+        // the descent.
+        defer if (!self.pass_output) self.zeroGrad();
 
         var gxs_scratch: SmallSlice(?Tensor, 8) = .{};
         defer gxs_scratch.deinit(engine.allocator);
         const gxs = gxs_scratch.init(engine.allocator, operands.len) catch |err| {
-            self.releaseOperands(engine);
+            self.releaseOperands(engine, ready);
             return err;
         };
         @memset(gxs, null);
@@ -522,17 +570,17 @@ pub const GradState = struct {
                     owned.deinit();
                     gx.* = null;
                 }
-                if (operand) |state| state.finishGradContribution(engine);
+                if (operand) |state| state.finishGradContribution(engine, ready);
             }
             return err;
         };
 
         var ready_scratch: SmallSlice(*GradState, 8) = .{};
         defer ready_scratch.deinit(engine.allocator);
-        const ready = ready_scratch.init(engine.allocator, operands.len) catch |err| {
+        const ready_states = ready_scratch.init(engine.allocator, operands.len) catch |err| {
             // The produced gradients go with the scratch (the defer above);
             // the operands are still released.
-            self.releaseOperands(engine);
+            self.releaseOperands(engine, ready);
             return err;
         };
         var ready_len: usize = 0;
@@ -543,26 +591,20 @@ pub const GradState = struct {
             const state = operand orelse continue;
             if (gx.*) |owned| {
                 gx.* = null;
-                if (state.accGradOwnedReady(engine, owned) catch |err| blk: {
+                if (state.accGradOwnedReady(engine, owned, ready) catch |err| blk: {
                     if (first_error == null) first_error = err;
                     break :blk false;
                 }) {
-                    ready[ready_len] = state;
+                    ready_states[ready_len] = state;
                     ready_len += 1;
                 }
             } else {
-                state.finishGradContribution(engine);
+                state.finishGradContribution(engine, ready);
                 missing_backward_gradient = true;
             }
         }
 
-        // An interior gradient has no consumer once this node's backward
-        // has run: release it here instead of at scope close, so the
-        // backward's memory is a moving window rather than a second copy
-        // of the forward. Pass outputs keep theirs (they are results).
-        if (!self.pass_output) self.zeroGrad();
-
-        engine.scheduleReadyBatch(ready[0..ready_len]);
+        engine.scheduleReadyBatch(ready_states[0..ready_len], ready);
         if (first_error) |err| return err;
         if (missing_backward_gradient) return AgError.MissingBackwardGradient;
     }
@@ -620,32 +662,42 @@ pub const GradEngine = struct {
         self.waitAll();
     }
 
-    fn scheduleReady(self: *GradEngine, state: *GradState) void {
-        self.scheduleReadyMode(state, false);
+    /// Hand a state whose last contribution arrived to an executing
+    /// thread: the caller's worklist (its loop runs the state next), or a
+    /// pool task when the batch scheduler chose to spawn it.
+    fn scheduleReady(self: *GradEngine, state: *GradState, ready: *Worklist) void {
+        self.scheduleReadyMode(state, false, ready);
     }
 
-    fn scheduleReadyBatch(self: *GradEngine, states: []const *GradState) void {
-        var async_candidates: usize = 0;
-        for (states) |state| {
-            if (self.isAsyncCandidate(state)) async_candidates += 1;
-        }
-
-        var async_to_spawn = if (async_candidates > 1) async_candidates - 1 else 0;
-        for (states) |state| {
-            const spawn = async_to_spawn > 0 and self.isAsyncCandidate(state);
-            if (spawn) async_to_spawn -= 1;
-            self.scheduleReadyMode(state, spawn);
+    /// The operands one node readied, in operand order. Every async
+    /// candidate but the last is spawned; the rest go onto `ready`,
+    /// pushed in reverse so the LIFO worklist pops them in operand order —
+    /// the depth-first order the recursive scheduler had, kept so the
+    /// accumulation order of shared states (and bitwise results) does not
+    /// move.
+    fn scheduleReadyBatch(self: *GradEngine, states: []const *GradState, ready: *Worklist) void {
+        var inline_candidate_seen = false;
+        var i = states.len;
+        while (i > 0) {
+            i -= 1;
+            const state = states[i];
+            var spawn = false;
+            if (self.isAsyncCandidate(state)) {
+                spawn = inline_candidate_seen;
+                inline_candidate_seen = true;
+            }
+            self.scheduleReadyMode(state, spawn, ready);
         }
     }
 
-    fn scheduleReadyMode(self: *GradEngine, state: *GradState, allow_async: bool) void {
+    fn scheduleReadyMode(self: *GradEngine, state: *GradState, allow_async: bool, ready: *Worklist) void {
         if (!state.compareState(.pending, .ongoing)) {
             return;
         }
         if (allow_async and self.isAsyncCandidate(state)) {
             if (self.pool.?.trySpawnWg(&self.wait_group, runGradBackwardTask, .{ self, state })) return;
         }
-        runGradBackwardTask(self, state);
+        ready.push(state);
     }
 
     fn isAsyncCandidate(self: *const GradEngine, state: *const GradState) bool {
@@ -683,11 +735,62 @@ pub const GradEngine = struct {
     }
 };
 
+/// One executing thread's loop, entered by a spawned task with the state
+/// it was given: runs it and every state its execution readies onto this
+/// thread's worklist, to exhaustion. An explicit stack in place of
+/// recursion, so the depth of the graph is not a call-stack resource.
 fn runGradBackwardTask(engine: *GradEngine, state: *GradState) void {
-    state.executeBackward(engine) catch |err| {
-        state.storeState(.idle);
-        engine.recordError(err);
-    };
+    var ready: Worklist = .{};
+    ready.push(state);
+    runReady(engine, &ready);
+}
+
+fn runReady(engine: *GradEngine, ready: *Worklist) void {
+    while (ready.pop()) |state| {
+        state.executeBackward(engine, ready) catch |err| {
+            state.storeState(.idle);
+            engine.recordError(err);
+        };
+    }
+}
+
+/// An intrusive LIFO of states threaded through `GradState.next`: the
+/// engine's worklists (a pass's preparation and drain, one executing
+/// thread's ready queue, the release cascade) allocate nothing, and a
+/// state sits on at most one of them at a time.
+const Worklist = struct {
+    head: ?*GradState = null,
+
+    fn push(self: *Worklist, state: *GradState) void {
+        std.debug.assert(state.next == null);
+        state.next = self.head;
+        self.head = state;
+    }
+
+    fn pop(self: *Worklist) ?*GradState {
+        const state = self.head orelse return null;
+        self.head = state.next;
+        state.next = null;
+        return state;
+    }
+};
+
+/// The release cascade of the thread inside a `GradState.destroy`: parents
+/// whose last reference drops there join it instead of freeing
+/// recursively (see `GradState.release`).
+threadlocal var release_cascade: ?*Worklist = null;
+
+/// A VJP whose body consumes its saved state irreversibly (an in-place
+/// consumption of a saved tensor) calls this BEFORE the first step that
+/// can fail: the graph can no longer replay through this record, so its
+/// state is marked consumed and a retry after a failure fails at the
+/// preflight (`BackwardAlreadyRun`) before any gradient moves, instead of
+/// running the record again over destroyed state. `record` is the typed
+/// record inside its `BackwardNode`.
+pub fn consumeRecord(record: anytype) void {
+    const Record = @TypeOf(record.*);
+    const node: *BackwardNode(Record) = @fieldParentPtr("record", record);
+    node.state.backward_done = true;
 }
 
 /// Stack-or-heap scratch: `init` returns a `len`-item slice backed by the
@@ -765,19 +868,22 @@ fn backwardGradImpl(ctx: *ExecContext, outputs: []const *GradState, output_value
     // propagate the sum), unwind them all and fail before any gradient
     // moves.
     var consumed = false;
-    for (outputs) |output| {
-        output.prepareBackwardPass(&consumed);
-    }
+    GradState.prepareBackwardPass(outputs, &consumed);
     if (consumed) {
-        for (outputs) |output| output.drainBackwardPass();
+        GradState.drainBackwardPass(outputs);
         return AgError.BackwardAlreadyRun;
     }
     for (outputs) |output| output.pass_output = true;
 
+    // Each output's subgraph runs to exhaustion on the driving thread's
+    // worklist before the next output is seeded (the order a shared
+    // state's contributions arrive in, kept stable).
+    var ready: Worklist = .{};
     for (outputs, seeds) |output, *seed| {
         const owned = seed.*;
         seed.* = null;
-        output.assignOutputGradient(&engine, owned) catch |err| engine.recordError(err);
+        output.assignOutputGradient(&engine, owned, &ready) catch |err| engine.recordError(err);
+        runReady(&engine, &ready);
     }
 
     engine.waitAll();

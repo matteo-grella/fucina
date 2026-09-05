@@ -730,9 +730,17 @@ Backward execution (`backwardGrad`/`backwardGradSerial` in `ag/core.zig`):
   `AgError.BackwardAlreadyRun` before any gradient moves. Failed passes stay
   unmarked and re-runnable: every reachable state returns to idle with a
   zero counter, and no non-leaf keeps a gradient.
-- Recursively discovers dependencies, uses per-state pending-gradient
-  counters for shared branches, and schedules a state only when all
-  downstream contributions are present.
+- Discovers dependencies, unwinds a refused preparation, executes ready
+  states and tears down released graphs over explicit intrusive worklists
+  (`GradState.next`), never by recursion: graph depth is not a call-stack
+  resource (a 50k-node chain runs and frees in the test suite). Per-state
+  pending-gradient counters cover shared branches; a state is scheduled
+  only when all downstream contributions are present, in the depth-first
+  operand order.
+- A VJP that consumes its saved state in place calls `core.consumeRecord`
+  before its first fallible step, so a failure past it leaves the graph
+  consumed (the retry fails at the preflight) rather than replayable over
+  destroyed state.
 - Uses the `ExecContext` thread pool for async-capable backward records;
   `backwardGradSerial` disables node-level spawning (required by the
   checkpoint recompute's threadlocal nesting guard).

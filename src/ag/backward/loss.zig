@@ -45,9 +45,14 @@ pub fn LinearCrossEntropyBackward(comptime options: exec_mod.CrossEntropyOptions
             const need_x = core.needs(self, 0);
             const need_weight = core.needs(self, 1);
             // The record exclusively owns its saved logits and the VJP
-            // consumes them in place (single-writer ownership).
+            // consumes them in place (single-writer ownership). The
+            // consumption is irreversible, so the graph is marked consumed
+            // before the fallible body: a pass that fails past this point
+            // cannot be retried over destroyed logits, and the retry fails
+            // at the preflight instead.
             if (self.consumed) return AgError.BackwardAlreadyRun;
             self.consumed = true;
+            core.consumeRecord(self);
             var grads = try ctx.linearCrossEntropyBackwardUpstream(
                 &self.x,
                 &self.weight,

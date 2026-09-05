@@ -291,9 +291,17 @@ node the pass reached is released: a node scheduled with nothing to
 propagate releases its own operands' counters in turn, so the whole
 subgraph below a failure returns to `idle` with zero counters
 (`src/ag/core_tests.zig`, "a node reached without a gradient releases its
-whole subgraph"), and the outputs' partial gradients are dropped, so no
-non-leaf keeps a gradient from a failed pass (a retry re-seeds a scalar
+whole subgraph"), every interior node releases its own gradient on every
+exit of its backward — after the VJP ran, threw, or its scratch failed —
+and the outputs' partial gradients are dropped, so no non-leaf keeps a
+gradient from a failed pass (`src/ag/core_tests.zig`, "a throwing interior
+VJP leaves no gradient behind for the retry"; a retry re-seeds a scalar
 output implicitly; a non-scalar output is re-seeded by `backwardWithGrad`).
+The one exception is a VJP that consumed its saved state in place before
+its first fallible step (`linearCrossEntropy`'s in-place logits body): it
+calls `core.consumeRecord` first, which marks its state consumed, so a
+failure past that point leaves the graph unusable and the retry fails at
+the preflight with `error.BackwardAlreadyRun` before any gradient moves.
 Re-runnability restores *scheduling* state, not leaf values: contributions
 delivered to the leaves before the failure remain accumulated — call
 `zeroGrad` on the leaves before retrying if exact values matter.
