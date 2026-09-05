@@ -897,6 +897,12 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
         b_buffer: ?*storage.BufferOf(input_dtype),
         output_registered: bool,
         kind: AsyncWorkKind,
+        /// Set when completion failed before the compute stream was proven
+        /// quiescent (a context, wait, copy or synchronize call failed):
+        /// the device may still be touching this command's slot, its
+        /// dependencies' outputs and its pinned host inputs, so `destroy`
+        /// leaks them instead of recycling them.
+        quarantined: bool = false,
 
         const Self = @This();
         const vtable: accelerator.WorkVTable = .{
@@ -911,6 +917,14 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
                 self.a_buffer.clearPendingUse(&self.work);
                 if (self.b_buffer) |buffer| buffer.clearPendingUse(&self.work);
             }
+            const ok = self.fence(copy_to_host);
+            if (!ok) self.quarantined = true;
+            return ok;
+        }
+
+        /// The completion body: true only once the compute stream has been
+        /// observed past this command (and its host copy, when requested).
+        fn fence(self: *Self, copy_to_host: bool) bool {
             const d = &self.ctx.driver;
             const started = trace.start();
             if (d.cuCtxSetCurrent(self.ctx.context) != 0) return false;
@@ -965,6 +979,17 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
 
         fn destroy(ctx_opaque: *anyopaque) void {
             const self: *Self = @ptrCast(@alignCast(ctx_opaque));
+            if (self.quarantined) {
+                // Nothing proved the device is done with this command. A
+                // recycled slot would let the next upload overwrite operands
+                // a kernel may still read; released inputs would free pinned
+                // host memory a copy may still source. The slot stays busy
+                // (the queue shrinks by one; an exhausted queue falls back to
+                // the CPU path), and the holder, its dependencies and its
+                // input references are leaked with it.
+                std.log.warn("cuda: asynchronous completion failed; quarantining its slot and operands", .{});
+                return;
+            }
             if (self.dep_a) |dep| dep.release();
             if (self.dep_b) |dep| dep.release();
             self.a_buffer.release();
@@ -1558,7 +1583,9 @@ pub fn allocResidentBytes(len: usize) ?[]u8 {
 /// Release bytes returned by `allocResidentBytes`. Safe no-op for slices that
 /// did not come from the resident allocator. Synchronizes the provider stream
 /// before freeing (an in-flight prefetch on the range must not race the free)
-/// and sets the context — release hooks run on arbitrary threads.
+/// and sets the context — release hooks run on arbitrary threads. A fence
+/// that cannot be established leaks the device range instead of freeing
+/// memory a kernel may still read.
 pub fn freeResidentBytes(bytes: []const u8) void {
     if (bytes.len == 0) return;
     const ctx = ctx_ptr orelse return;
@@ -1582,7 +1609,7 @@ pub fn freeResidentBytes(bytes: []const u8) void {
     const dev = dev_base orelse return;
 
     if (ctx.driver.cuCtxSetCurrent(ctx.context) != 0) return;
-    _ = ctx.driver.cuStreamSynchronize(ctx.stream);
+    if (ctx.driver.cuStreamSynchronize(ctx.stream) != 0) return;
     _ = ctx.driver.cuMemFree(@intCast(dev));
 }
 
