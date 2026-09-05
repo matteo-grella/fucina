@@ -329,11 +329,14 @@ pub fn packDenseRhs(
     return packed_matmul.packDenseRhs(allocator, dtype, rhs);
 }
 
-/// f32 [m, k] x the f32 output-row panels -> f32 [m, n]. Explicit
-/// packed-op decision table: GPU always wins; BLAS keeps its established
+/// f32 [m, k] x the f32 output-row panels -> f32 [m, n]. The CPU arms of
+/// the packed-op decision table: BLAS keeps its established
 /// all-dimensions>=16 cells EXCEPT the skinny-m tall-k band, where the
 /// already-packed microkernel is faster than Accelerate; the packed
-/// microkernel also owns the m<16 cliff and every no-BLAS cell.
+/// microkernel also owns the m<16 cliff and every no-BLAS cell. The
+/// accelerator arm is the exec seam's (`offload.gemmPackedDense`), taken
+/// before this kernel under the request's placement — this kernel never
+/// dispatches to the device, so a CPU placement is final.
 fn matmulPackedDense(
     pc: ParallelConfig,
     out: *Tensor,
@@ -346,11 +349,6 @@ fn matmulPackedDense(
     if (rhs.k != k or rhs.n != n) return tensor.TensorError.ShapeMismatch;
     // The reference arm: the scalar panel walk beside the pack constructor.
     if (comptime isa.reference) return packed_matmul.matmulDenseScalar(contiguousData(out, m * n), contiguousDataConst(a, m * k), rhs, m);
-    if (comptime build_options.use_gpu) {
-        if (gpu.shouldUseGpuForRhs(&rhs.rhs, m, n, k)) {
-            if (gpu.gemmF32Async(.trans_b, a, &rhs.rhs, out, m, n, k)) return;
-        }
-    }
     if (comptime build_options.use_blas) {
         if (shouldUseBlas(m, n, k) and !blas.packedDenseKernelPreferred(m, k)) {
             blas.gemm(

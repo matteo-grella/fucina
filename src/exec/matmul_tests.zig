@@ -423,3 +423,41 @@ test "cpu f32 shadow route drops its cache when the weight is mutated" {
     // the tolerance scales with the value.
     for (want.dataConst(), after.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3 * (1 + @abs(w)));
 }
+
+test "dense packed matmul placed on the cpu never reaches the accelerator" {
+    // The one accelerator attempt of a packed matmul is the exec seam's,
+    // under the request's placement; the CPU kernel below it has no
+    // attempt of its own. A GPU build asserts that a CPU-placed request
+    // leaves no submitted device work on its output (a shape the gates
+    // admit); every build checks the result against the auto placement.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const m = 512;
+    const n = 512;
+    const k = 512;
+    const a_data = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_data);
+    const b_data = try allocator.alloc(f32, n * k);
+    defer allocator.free(b_data);
+    var prng = std.Random.DefaultPrng.init(3);
+    const rand = prng.random();
+    for (a_data) |*v| v.* = rand.floatNorm(f32) * 0.1;
+    for (b_data) |*v| v.* = rand.floatNorm(f32) * 0.1;
+    var a = try ctx.fromSlice(.f32, &.{ m, k }, a_data);
+    defer a.deinit();
+    var b = try ctx.fromSlice(.f32, &.{ n, k }, b_data);
+    defer b.deinit();
+    var packed_rhs = try ctx.packDenseMatmulRhs(.f32, &b);
+    defer packed_rhs.deinit();
+
+    var pinned = try ctx.matmulQuant(.{ .plain = &a }, &packed_rhs, .{ .placement = .cpu });
+    defer pinned.deinit();
+    try std.testing.expect(!pinned.buffer.hasPending());
+
+    var auto = try ctx.matmulQuant(.{ .plain = &a }, &packed_rhs, .{});
+    defer auto.deinit();
+    for (pinned.dataConst(), auto.dataConst()) |p, q| try std.testing.expectApproxEqAbs(q, p, 2e-3);
+}

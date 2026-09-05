@@ -397,7 +397,11 @@ width 2k, for `.split_swiglu`); `.rms_norm` is `{ x, weight, eps }`;
 `.gate_up` is `{ gate, up }` (`.geglu_quant`, `q8_0x4` only).
 `placement = .auto` consults the GPU offload seam exactly as the named
 entries did, falling back to the CPU kernels on decline (a lane-packed
-container's `raw` blocks, set by the weight loader, serve the attempt);
+container's `raw` blocks, set by the weight loader, serve the attempt; a
+dense packed panel takes `offload.gemmPackedDense`). That attempt is the
+only one: the CPU kernels below the seam never dispatch to the device, so
+`placement = .cpu` is final for every container class (`src/exec/matmul_tests.zig`,
+"dense packed matmul placed on the cpu never reaches the accelerator");
 an open `pinRowwiseNumerics` scope pins every row to the m == 1 kernels
 context-wide, the K-quant fused engine by forcing its per-row tail kernel
 instead of looping. RHS containers

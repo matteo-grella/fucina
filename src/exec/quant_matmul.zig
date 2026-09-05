@@ -338,22 +338,25 @@ fn matmulQuantBody(self: *ExecContext, out: *Tensor, lhs: Lhs, rhs: anytype, com
     };
     var aa = try self.prepareContiguous(.f32, a);
     defer aa.deinit();
-    // The one accelerator attempt: the compact blocks themselves, or the
-    // raw blocks a lane pack still carries (`RawRhs`); a decline runs the
-    // CPU kernel below.
-    if (comptime opts.placement == .auto and rhsClass(Rhs) != .dense and compactGpuFormat(Rhs.dtype) != null) {
-        const fmt = comptime compactGpuFormat(Rhs.dtype).?;
+    // The one accelerator attempt, made here and only here under the
+    // request's placement: the dense f32 panel, the compact blocks
+    // themselves, or the raw blocks a lane pack still carries (`RawRhs`);
+    // a decline runs the CPU kernel below, which never dispatches to the
+    // device itself.
+    if (comptime opts.placement == .auto) {
         switch (comptime rhsClass(Rhs)) {
-            .compact => {
+            .dense => if (offload.gemmPackedDense(aa.tensor(), &rhs.rhs, out, m, n, k)) return,
+            .compact => if (comptime compactGpuFormat(Rhs.dtype)) |fmt| {
                 const bytes = compactBlocksBytes(rhs);
                 if (std.math.divExact(usize, bytes.len, @max(n, 1)) catch null) |nb01| {
                     if (n != 0 and quantGemmAttempt(fmt, out, bytes, opts.rhs_lifetime, nb01, aa.tensor(), m, n, k, .blocks)) return;
                 }
             },
-            .lane_packed => if (rhs.raw) |raw| {
-                if (n != 0 and quantGemmAttempt(fmt, out, raw.bytes, raw.lifetime, raw.nb01, aa.tensor(), m, n, k, .panels)) return;
+            .lane_packed => if (comptime compactGpuFormat(Rhs.dtype)) |fmt| {
+                if (rhs.raw) |raw| {
+                    if (n != 0 and quantGemmAttempt(fmt, out, raw.bytes, raw.lifetime, raw.nb01, aa.tensor(), m, n, k, .panels)) return;
+                }
             },
-            .dense => comptime unreachable,
         }
     }
     self.enableNativeMatmulPoolForWork(comptime if (rhsClass(Rhs) == .dense) .f32 else Rhs.dtype, m, n, k);

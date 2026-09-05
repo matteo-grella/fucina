@@ -38,6 +38,21 @@ pub const qmoeMinFillForTest = gpu.qmoeMinFillForTest;
 pub const setQmoeMinFillForTest = gpu.setQmoeMinFillForTest;
 
 // ---------------------------------------------------------------------------
+// Dense packed GEMM
+// ---------------------------------------------------------------------------
+
+/// The accelerator arm of a dense packed matmul (`PackedDenseRhs`, the f32
+/// output-row panel `rhs_panel`): the provider's resident-RHS gate, then
+/// the async eager dispatch of `a[m,k] · panelᵀ`. `false` when the provider
+/// declines; the caller runs the CPU packed kernel, which never reaches
+/// the accelerator itself — so a request placed on the CPU stays there.
+pub fn gemmPackedDense(a: *const Tensor, rhs_panel: *const Tensor, out: *Tensor, m: usize, n: usize, k: usize) bool {
+    if (comptime !enabled) return false;
+    if (!gpu.shouldUseGpuForRhs(rhs_panel, m, n, k)) return false;
+    return gpu.gemmF32Async(.trans_b, a, rhs_panel, out, m, n, k);
+}
+
+// ---------------------------------------------------------------------------
 // Quantized GEMM
 // ---------------------------------------------------------------------------
 
