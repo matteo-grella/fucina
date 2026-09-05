@@ -216,7 +216,7 @@ fn benchShape(allocator: std.mem.Allocator, out: anytype, shape: Shape, iters: u
         var routed = try Tensor.zeros(allocator, &.{ m, n });
         defer routed.deinit();
         native.kernels.gemm(.{}, .{}, &routed, &a_tensor, &b_tensor, m, n, k);
-        if (routed.buffer.pending() == null) return error.EligibleResidentOpDidNotRouteToGpu;
+        if (!routed.buffer.hasPending()) return error.EligibleResidentOpDidNotRouteToGpu;
         _ = routed.dataConst();
     }
     // Let CPU BLAS, GPU clocks, and every storage/slot cache reach steady
