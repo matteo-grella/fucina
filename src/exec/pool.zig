@@ -12,6 +12,7 @@ const parallel = @import("../parallel.zig");
 const tensor = @import("../tensor.zig");
 
 const ExecContext = @import("../exec.zig").ExecContext;
+const paddedExtent = @import("conv.zig").paddedExtent;
 
 const Tensor = tensor.Tensor;
 pub const PoolKind = backend_mod.PoolKind;
@@ -19,7 +20,9 @@ const Pool2dDims = backend_mod.Pool2dDims;
 
 fn pool2dDims(h: usize, w: usize, c: usize, kernel: [2]usize, stride: [2]usize, pad: [2]usize) !Pool2dDims {
     if (kernel[0] == 0 or kernel[1] == 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
-    if (h + 2 * pad[0] < kernel[0] or w + 2 * pad[1] < kernel[1]) return tensor.TensorError.ShapeMismatch;
+    const ph = try paddedExtent(h, pad[0]);
+    const pw = try paddedExtent(w, pad[1]);
+    if (ph < kernel[0] or pw < kernel[1]) return tensor.TensorError.ShapeMismatch;
     // A tap must reach the input from every window (ONNX/torch demand
     // pad < kernel; this keeps −inf/zero-count windows unreachable).
     if (pad[0] >= kernel[0] or pad[1] >= kernel[1]) return tensor.TensorError.InvalidShape;
@@ -27,8 +30,8 @@ fn pool2dDims(h: usize, w: usize, c: usize, kernel: [2]usize, stride: [2]usize, 
         .h = h,
         .w = w,
         .c = c,
-        .oh = (h + 2 * pad[0] - kernel[0]) / stride[0] + 1,
-        .ow = (w + 2 * pad[1] - kernel[1]) / stride[1] + 1,
+        .oh = (ph - kernel[0]) / stride[0] + 1,
+        .ow = (pw - kernel[1]) / stride[1] + 1,
         .kh = kernel[0],
         .kw = kernel[1],
         .stride_h = stride[0],

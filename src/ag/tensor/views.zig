@@ -418,7 +418,11 @@ pub fn Ops(comptime Self: type) type {
             const raw = self.asRawTensor();
             const axis_dim = raw.shape.at(slice_axis);
             if (step == 0 or length == 0) return TensorError.InvalidShape;
-            if (start >= axis_dim or start + (length - 1) * step >= axis_dim) return TensorError.InvalidShape;
+            // Checked: a caller-controlled step or length that wraps the
+            // last index must not pass as an in-range view.
+            const span = std.math.mul(usize, length - 1, step) catch return TensorError.InvalidShape;
+            const last = std.math.add(usize, start, span) catch return TensorError.InvalidShape;
+            if (start >= axis_dim or last >= axis_dim) return TensorError.InvalidShape;
             if (self.requiresGrad()) {
                 if (comptime !differentiable) return AgError.UnsupportedGradient;
                 const indices = try ctx.allocator().alloc(usize, length);

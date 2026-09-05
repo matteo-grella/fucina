@@ -215,6 +215,10 @@ test "public Tensor sliceStep strided view with exact gradient" {
     try std.testing.expectError(error.InvalidShape, x.sliceStep(&ctx, .d, 0, 4, 2)); // last lands at 6
     try std.testing.expectError(error.InvalidShape, x.sliceStep(&ctx, .d, 0, 1, 0));
     try std.testing.expectError(error.InvalidShape, x.sliceStep(&ctx, .d, 0, 0, 1));
+    // The last index is computed checked: a step that wraps it back into
+    // range is refused, not accepted as a view.
+    try std.testing.expectError(error.InvalidShape, x.sliceStep(&ctx, .d, 1, 2, std.math.maxInt(usize)));
+    try std.testing.expectError(error.InvalidShape, x.sliceStep(&ctx, .d, 0, 3, std.math.maxInt(usize) / 2 + 1));
 
     // Axis steps compose per-axis on higher ranks.
     const M = Tensor(.{ .row, .col });

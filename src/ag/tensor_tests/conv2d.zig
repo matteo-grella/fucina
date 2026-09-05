@@ -533,3 +533,24 @@ test "public Tensor fold accumulates overlaps with the unfold-adjoint gradient" 
     defer bad_width.deinit();
     try std.testing.expectError(error.ShapeMismatch, bad_width.fold(&ctx, .{ 3, 3 }, .{ 2, 2 }, .{ 1, 1 }, .{ 0, 0 }, .{ .h, .w, .c }));
 }
+
+test "public Tensor conv2d and pool2d refuse a padding that wraps the extent" {
+    // `extent + 2·pad` is checked: a padding whose double wraps to zero
+    // must not pass the window checks as a plausible size (it used to
+    // overflow in safe builds and wrap in release builds).
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    var inp = try Tensor(.{ .h, .w, .cin }).fromSlice(&ctx, .{ 3, 3, 1 }, &.{ 5, 1, 2, 1, 3, 4, 2, 6, 0 });
+    defer inp.deinit();
+    var w = try Tensor(.{ .cout, .kh, .kw, .cinpg }).fromSlice(&ctx, .{ 1, 2, 2, 1 }, &.{ 1, 0, 0, -1 });
+    defer w.deinit();
+    const wrapping_pad = std.math.maxInt(usize) / 2 + 1; // 2·pad == 2^64
+    try std.testing.expectError(error.InvalidShape, inp.conv2d(&ctx, w, null, .{ 1, 1 }, .{ wrapping_pad, 0 }, 1, .{ .oh, .ow, .cout }));
+    try std.testing.expectError(error.InvalidShape, inp.conv2d(&ctx, w, null, .{ 1, 1 }, .{ 0, wrapping_pad }, 1, .{ .oh, .ow, .cout }));
+    try std.testing.expectError(error.InvalidShape, inp.maxPool2d(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ wrapping_pad, 0 }));
+    try std.testing.expectError(error.InvalidShape, inp.avgPool2d(&ctx, .{ 2, 2 }, .{ 2, 2 }, .{ 0, wrapping_pad }));
+}

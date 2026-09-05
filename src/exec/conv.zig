@@ -18,6 +18,16 @@ const ExecContext = @import("../exec.zig").ExecContext;
 
 const Tensor = tensor.Tensor;
 const PreparedTensor = ExecContext.PreparedTensor;
+
+/// `extent + 2·pad`, the padded input extent of a 2-D window geometry;
+/// `InvalidShape` when the sum does not fit (caller-controlled padding
+/// must not wrap into a plausible size). The 2-D conv, fold/unfold and
+/// pool entries take it before any window arithmetic.
+pub fn paddedExtent(extent: usize, pad: usize) tensor.TensorError!usize {
+    const both = std.math.mul(usize, 2, pad) catch return tensor.TensorError.InvalidShape;
+    return std.math.add(usize, extent, both) catch tensor.TensorError.InvalidShape;
+}
+
 /// The one rank/storage-order guard of the 1-D convolution entries: rank 2
 /// with time on axis 0 and channels on axis 1, spelled once; `order` is
 /// the entry's own wording of the layout for its compile error.
@@ -259,9 +269,11 @@ fn conv2dImpl(
     if (groups == 0 or cin % groups != 0 or cout % groups != 0) return tensor.TensorError.ShapeMismatch;
     if (cin_pg != cin / groups) return tensor.TensorError.ShapeMismatch;
     if (stride[0] == 0 or stride[1] == 0) return tensor.TensorError.ShapeMismatch;
-    if (h + 2 * pad[0] < kh or wd + 2 * pad[1] < kw) return tensor.TensorError.ShapeMismatch;
-    const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
-    const ow = (wd + 2 * pad[1] - kw) / stride[1] + 1;
+    const ph = try paddedExtent(h, pad[0]);
+    const pw = try paddedExtent(wd, pad[1]);
+    if (ph < kh or pw < kw) return tensor.TensorError.ShapeMismatch;
+    const oh = (ph - kh) / stride[0] + 1;
+    const ow = (pw - kw) / stride[1] + 1;
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -598,8 +610,10 @@ pub fn conv2dBackwardInput(ctx: *ExecContext, gy: *const Tensor, weight: *const 
     if (w_view.shape[0] != cout) return tensor.TensorError.ShapeMismatch;
     if (groups == 0 or cout % groups != 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
     const cin = cin_pg * groups;
-    if (in_h + 2 * pad[0] < kh or in_w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
-    if ((in_h + 2 * pad[0] - kh) / stride[0] + 1 != oh or (in_w + 2 * pad[1] - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
+    const ph = try paddedExtent(in_h, pad[0]);
+    const pw = try paddedExtent(in_w, pad[1]);
+    if (ph < kh or pw < kw) return tensor.TensorError.InvalidShape;
+    if ((ph - kh) / stride[0] + 1 != oh or (pw - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
 
     var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
@@ -657,8 +671,10 @@ pub fn conv2dBackwardWeight(ctx: *ExecContext, input: *const Tensor, gy: *const 
     const ow = gy_view.shape[1];
     const cout = gy_view.shape[2];
     if (groups == 0 or cin % groups != 0 or cout % groups != 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
-    if (h + 2 * pad[0] < kh or w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
-    if ((h + 2 * pad[0] - kh) / stride[0] + 1 != oh or (w + 2 * pad[1] - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
+    const ph = try paddedExtent(h, pad[0]);
+    const pw = try paddedExtent(w, pad[1]);
+    if (ph < kh or pw < kw) return tensor.TensorError.InvalidShape;
+    if ((ph - kh) / stride[0] + 1 != oh or (pw - kw) / stride[1] + 1 != ow) return tensor.TensorError.ShapeMismatch;
     const cin_pg = cin / groups;
 
     var ii = try ctx.prepareContiguous(.f32, input);
@@ -722,9 +738,11 @@ pub fn unfold(ctx: *ExecContext, input: *const Tensor, kernel: [2]usize, stride:
     const kh = kernel[0];
     const kw = kernel[1];
     if (kh == 0 or kw == 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
-    if (h + 2 * pad[0] < kh or w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
-    const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
-    const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
+    const ph = try paddedExtent(h, pad[0]);
+    const pw = try paddedExtent(w, pad[1]);
+    if (ph < kh or pw < kw) return tensor.TensorError.InvalidShape;
+    const oh = (ph - kh) / stride[0] + 1;
+    const ow = (pw - kw) / stride[1] + 1;
 
     var ii = try ctx.prepareContiguous(.f32, input);
     defer ii.deinit();
@@ -750,12 +768,14 @@ pub fn fold(ctx: *ExecContext, col: *const Tensor, output_size: [2]usize, kernel
     const kh = kernel[0];
     const kw = kernel[1];
     if (kh == 0 or kw == 0 or stride[0] == 0 or stride[1] == 0) return tensor.TensorError.InvalidShape;
-    if (h + 2 * pad[0] < kh or w + 2 * pad[1] < kw) return tensor.TensorError.InvalidShape;
+    const ph = try paddedExtent(h, pad[0]);
+    const pw = try paddedExtent(w, pad[1]);
+    if (ph < kh or pw < kw) return tensor.TensorError.InvalidShape;
     if (col_view.shape[1] % (kh * kw) != 0) return tensor.TensorError.ShapeMismatch;
     const cin = col_view.shape[1] / (kh * kw);
     if (cin == 0) return tensor.TensorError.ShapeMismatch;
-    const oh = (h + 2 * pad[0] - kh) / stride[0] + 1;
-    const ow = (w + 2 * pad[1] - kw) / stride[1] + 1;
+    const oh = (ph - kh) / stride[0] + 1;
+    const ow = (pw - kw) / stride[1] + 1;
     if (col_view.shape[0] != oh * ow) return tensor.TensorError.ShapeMismatch;
 
     var cc = try ctx.prepareContiguous(.f32, col);
