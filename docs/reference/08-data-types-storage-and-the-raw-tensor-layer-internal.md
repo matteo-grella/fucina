@@ -342,11 +342,15 @@ Refcount operations:
 - `setPendingUse()` / `waitUnused()` / `waitMutable()` — track the latest
   submitted GPU reader of this allocation. Const host reads may overlap a
   device read; mutable access waits (`Work.ensureFinished`: the command is
-  completed host-visibly if still pending, and a Work whose output was
-  already discarded counts as finished) so post-call input mutation cannot
-  race Metal zero-copy reads or CUDA async upload. Provider queue order
-  lets the latest token subsume earlier readers. Final release always
-  completes both output and reader work before storage can be recycled.
+  completed host-visibly if still pending, a Work whose output was already
+  discarded counts as finished, and a failed completion is fatal, as at
+  the host-read boundary — CUDA keeps the input registrations of a command
+  whose fence failed) so post-call input mutation cannot race Metal
+  zero-copy reads or CUDA async upload. Provider queue order lets the
+  latest token subsume earlier readers. Final release always completes
+  both output and reader work before storage can be recycled.
+  `waitMutable` also drops the buffer's `HostShadow` (the widen-once f32
+  weight shadow, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)): a derived copy of bytes about to change.
 - `acceleratorResource` — provider mapping metadata tied to this allocation's
   lifetime (Metal's pooled page-wrapper cache; CUDA host page registration).
   It survives ordinary pool release/reacquire and is destroyed with the

@@ -375,3 +375,51 @@ test "cpu f32 shadow route matches the streaming kernels and caches per buffer" 
     defer got_plain.deinit();
     try std.testing.expect(b16_plain.buffer.hostShadow() == null); // gate off, no shadow
 }
+
+test "cpu f32 shadow route drops its cache when the weight is mutated" {
+    if (@import("build_options").use_gpu) return error.SkipZigTest;
+    const tuning = @import("../tuning.zig");
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const m = 5;
+    const n = 7;
+    const k = 33;
+    var prng = std.Random.DefaultPrng.init(7);
+    const rand = prng.random();
+    var a_data: [m * k]f32 = undefined;
+    for (&a_data) |*v| v.* = rand.floatNorm(f32);
+    var b16_data: [n * k]f16 = undefined;
+    for (&b16_data) |*h| h.* = @floatCast(rand.floatNorm(f32) * 0.1);
+    var a = try ctx.fromSlice(.f32, &.{ m, k }, &a_data);
+    defer a.deinit();
+    var b16 = try ctx.fromSlice(.f16, .{ n, k }, &b16_data);
+    defer b16.deinit();
+
+    tuning.setField("cpu_f32_shadow", true);
+    defer tuning.setField("cpu_f32_shadow", null);
+    tuning.setField("cpu_f32_shadow_min_m", 4);
+    defer tuning.setField("cpu_f32_shadow_min_m", null);
+    var first = try ctx.matmulHalfRhs(.f16, &a, &b16);
+    defer first.deinit();
+    try std.testing.expect(b16.buffer.hostShadow() != null);
+
+    // The mutable host boundary invalidates the widened copy: the next
+    // eligible GEMM re-widens from the live bytes instead of reading the
+    // stale shadow.
+    b16.data()[0] = 100;
+    try std.testing.expect(b16.buffer.hostShadow() == null);
+    var after = try ctx.matmulHalfRhs(.f16, &a, &b16);
+    defer after.deinit();
+    try std.testing.expect(b16.buffer.hostShadow() != null);
+    try std.testing.expect(first.dataConst()[0] != after.dataConst()[0]);
+
+    tuning.setField("cpu_f32_shadow", false);
+    var want = try ctx.matmulHalfRhs(.f16, &a, &b16);
+    defer want.deinit();
+    // The streaming arm casts A to f16; the mutated column is large, so
+    // the tolerance scales with the value.
+    for (want.dataConst(), after.dataConst()) |w, g| try std.testing.expectApproxEqAbs(w, g, 2e-3 * (1 + @abs(w)));
+}

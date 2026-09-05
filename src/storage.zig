@@ -344,9 +344,20 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
             }
         }
 
+        /// The mutable host-access boundary: every device reader and
+        /// producer of this allocation is finished, and any host-side
+        /// derived copy of it (`HostShadow`: the widen-once f32 weight
+        /// shadow) is dropped, since the bytes it mirrored are about to
+        /// change. A concurrent reader of the shadow is the same data race
+        /// as a concurrent reader of the bytes themselves.
         pub fn waitMutable(self: *const Self) void {
             self.waitReady();
             self.waitUnused();
+            if (self.host_shadow.load(.acquire) != null) dropHostShadow(@constCast(self));
+        }
+
+        noinline fn dropHostShadow(self: *Self) void {
+            if (self.host_shadow.swap(null, .acq_rel)) |shadow| shadow.destroy();
         }
 
         /// Install a provider cache entry for this backing allocation.  On a

@@ -323,3 +323,27 @@ test "borrowed read-only storage is marked and never taken in place" {
     defer owned.release();
     try std.testing.expect(!owned.read_only);
 }
+
+test "a mutable host access drops the host shadow" {
+    const Probe = struct {
+        var destroys: usize = 0;
+        fn destroy(_: *anyopaque) void {
+            destroys += 1;
+        }
+    };
+    Probe.destroys = 0;
+    var shadow: storage.HostShadow = .{ .ctx = @ptrCast(&Probe.destroys), .destroy_fn = Probe.destroy };
+
+    const buf = try Buffer.fromSlice(std.testing.allocator, &.{ 1, 2, 3 });
+    defer buf.release();
+    try std.testing.expect(buf.setHostShadow(&shadow));
+    // Read-only fences keep the derived copy.
+    buf.waitReady();
+    try std.testing.expect(buf.hostShadow() == &shadow);
+    // The mutable boundary invalidates it: the bytes it mirrored change.
+    buf.waitMutable();
+    try std.testing.expect(buf.hostShadow() == null);
+    try std.testing.expectEqual(@as(usize, 1), Probe.destroys);
+    buf.waitMutable();
+    try std.testing.expectEqual(@as(usize, 1), Probe.destroys);
+}

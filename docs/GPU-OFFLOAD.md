@@ -231,8 +231,10 @@ admission is neutral-to-positive.
 Related CPU-side knob (non-GPU builds only): `FUCINA_CPU_F32_SHADOW=1`
 routes prefill-shaped 16-bit-weight GEMMs (`m >= 32`,
 `FUCINA_CPU_F32_SHADOW_MIN_M`) through the BLAS f32 arm over a widen-once
-f32 shadow cached on the weight's storage (+4 bytes/weight resident;
-weights must not be trained in place). Measured on Qwen3-1.7B-BF16
+f32 shadow cached on the weight's storage (+4 bytes/weight resident). A
+mutable host access to the weight drops the shadow and the next eligible
+GEMM re-widens it, so an in-place update never reads stale values; that
+re-widen per step is why training leaves the flag off. Measured on Qwen3-1.7B-BF16
 self-study (M1 Max + Accelerate): 2.2x end-to-end (28.5 -> 12.7
 s/conversation) with identical per-step losses; at the GEMM level BLAS wins
 1.5-2.5x for m >= 32 while decode stays with the 16-bit streaming kernels
