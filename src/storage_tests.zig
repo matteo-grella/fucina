@@ -79,7 +79,7 @@ test "buffer header carries the accelerator slots only with a provider" {
         // The accessors are inert: nothing is ever pending, no resource exists.
         buf.waitReady();
         buf.waitMutable();
-        try std.testing.expect(buf.pending() == null);
+        try std.testing.expect(!buf.hasPending());
         try std.testing.expect(buf.acceleratorResource(.metal) == null);
     }
 }
@@ -112,11 +112,11 @@ test "waitReady completes a pending work exactly once under concurrent readers" 
     if (comptime !storage.has_accelerator) return error.SkipZigTest;
     // Regression for the parallel-materialize crash: N chunk workers call
     // waitReady on the SAME buffer (copyRangeTo's disjoint-range contract).
-    // Only the claimant may dereference — and thereby free — the Work; the
-    // pre-claim form (load, ensureHost, clear, release) let a loser touch a
-    // Work the winner had already destroyed. The probe Work is heap-owned
-    // and freed by its destroy hook, so a stale dereference lands on freed
-    // memory and trips the safety checks under the old code.
+    // Every reader holds its own retained reference while it completes the
+    // Work; the pre-claim form (load, ensureHost, clear, release) let a
+    // loser touch a Work the winner had already destroyed. The probe Work
+    // is heap-owned and freed by its destroy hook, so a stale dereference
+    // lands on freed memory and trips the safety checks under the old code.
     const accelerator = @import("accelerator.zig");
 
     const counters = struct {
@@ -170,7 +170,128 @@ test "waitReady completes a pending work exactly once under concurrent readers" 
 
     try std.testing.expectEqual(@as(u32, 1), counters.finishes.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), counters.destroys.load(.acquire));
-    try std.testing.expect(buf.pending() == null);
+    try std.testing.expect(!buf.hasPending());
+}
+
+test "waitUnused on an input survives the output side freeing the work" {
+    if (comptime !storage.has_accelerator) return error.SkipZigTest;
+    // The input-use slot's race: a command reads `input` (its
+    // `pending_use`) and produces `output` (its `pending_work`); the
+    // provider's finish clears the input slot and releases that reference,
+    // and the output reader then drops the last one, destroying the Work.
+    // Mutators fencing the input at the same time (`waitMutable`) must
+    // hold their own reference across the completion — the pre-claim form
+    // loaded the pointer bare and could complete a Work the output side
+    // had already freed.
+    const accelerator = @import("accelerator.zig");
+
+    const counters = struct {
+        var finishes = std.atomic.Value(u32).init(0);
+        var destroys = std.atomic.Value(u32).init(0);
+    };
+    counters.finishes.store(0, .release);
+    counters.destroys.store(0, .release);
+
+    const HeapProbe = struct {
+        work: accelerator.Work,
+        allocator: std.mem.Allocator,
+        input: *BufferOf(.f32),
+
+        const vtable: accelerator.WorkVTable = .{ .finish = finish, .destroy = destroy };
+
+        fn finish(ctx: *anyopaque, copy_to_host: bool) bool {
+            _ = copy_to_host;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            // Dwell so the mutators are inside waitUnused while the output
+            // reader completes and frees the Work.
+            sleepMicros(2_000);
+            _ = counters.finishes.fetchAdd(1, .monotonic);
+            // What a provider's finish does: the command is over, the
+            // input's reader token goes.
+            self.input.clearPendingUse(&self.work);
+            return true;
+        }
+        fn destroy(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = counters.destroys.fetchAdd(1, .monotonic);
+            self.allocator.destroy(self);
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    const input = try BufferOf(.f32).fromSlice(allocator, &.{ 1, 2, 3, 4 });
+    defer input.release();
+    const output = try BufferOf(.f32).fromSlice(allocator, &.{ 0, 0, 0, 0 });
+    defer output.release();
+
+    const probe = try allocator.create(HeapProbe);
+    probe.* = .{
+        .work = accelerator.Work.init(.metal, probe, &HeapProbe.vtable),
+        .allocator = allocator,
+        .input = input,
+    };
+    output.setPending(&probe.work);
+    input.setPendingUse(&probe.work);
+
+    const Side = struct {
+        fn readOutput(target: *BufferOf(.f32)) void {
+            target.waitReady();
+        }
+        fn mutateInput(target: *BufferOf(.f32)) void {
+            target.waitMutable();
+        }
+    };
+    var mutators: [7]std.Thread = undefined;
+    for (&mutators) |*t| t.* = try std.Thread.spawn(.{}, Side.mutateInput, .{input});
+    const reader = try std.Thread.spawn(.{}, Side.readOutput, .{output});
+    reader.join();
+    for (mutators) |t| t.join();
+
+    try std.testing.expectEqual(@as(u32, 1), counters.finishes.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), counters.destroys.load(.acquire));
+    try std.testing.expect(!output.hasPending());
+    try std.testing.expect(!input.accel.pending_use.hasPending());
+}
+
+test "waitUnused accepts a work whose output was discarded" {
+    if (comptime !storage.has_accelerator) return error.SkipZigTest;
+    // An output released unread discards its Work; the input's fence must
+    // then return (the command is over), not treat the discard as a host
+    // read of a dropped result.
+    const accelerator = @import("accelerator.zig");
+
+    const Probe = struct {
+        work: accelerator.Work,
+        finishes: u32 = 0,
+
+        const vtable: accelerator.WorkVTable = .{ .finish = finish, .destroy = destroy };
+
+        fn finish(ctx: *anyopaque, copy_to_host: bool) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            std.debug.assert(!copy_to_host);
+            self.finishes += 1;
+            return true;
+        }
+        fn destroy(_: *anyopaque) void {}
+    };
+
+    const allocator = std.testing.allocator;
+    const input = try BufferOf(.f32).fromSlice(allocator, &.{ 1, 2 });
+    defer input.release();
+    const output = try BufferOf(.f32).fromSlice(allocator, &.{ 0, 0 });
+
+    var probe: Probe = undefined;
+    probe = .{ .work = accelerator.Work.init(.metal, &probe, &Probe.vtable) };
+    output.setPending(&probe.work);
+    input.setPendingUse(&probe.work);
+
+    // The provider here never clears the input slot itself: the fallback
+    // clear in waitUnused must do it.
+    output.release();
+    try std.testing.expectEqual(@as(u32, 1), probe.finishes);
+    input.waitMutable();
+    try std.testing.expectEqual(@as(u32, 1), probe.finishes);
+    try std.testing.expect(!input.accel.pending_use.hasPending());
 }
 
 /// Short cross-platform sleep for the dwell above (no std.Thread.sleep in

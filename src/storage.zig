@@ -13,18 +13,87 @@ pub const DType = dtype_mod.DType;
 /// submitted accelerator work or a provider cache entry.
 pub const has_accelerator = build_options.use_gpu;
 
+/// One accelerator Work reference behind a claim. The slot owns exactly
+/// one reference to the Work it holds, and every read that will
+/// dereference the pointer goes through `acquire`, which hands back a
+/// RETAINED reference under the claim; only the boolean observer
+/// `hasPending` reads the pointer bare. The mutators (`install`, `take`,
+/// `clear`) take the same claim and release a displaced or cleared Work
+/// only after dropping it, so no reader can hold a Work whose last
+/// reference another thread is releasing. The pre-claim form (load the
+/// pointer, complete it, clear, release) let a reader on one buffer
+/// dereference a Work that the reader of ANOTHER buffer — the output side
+/// of the same command — had already completed and freed.
+pub const WorkSlot = struct {
+    ptr: std.atomic.Value(?*accelerator.Work) = .init(null),
+    claim: std.atomic.Value(bool) = .init(false),
+
+    /// A Work is held (no dereference; the answer may be stale by the
+    /// time the caller acts on it).
+    pub fn hasPending(self: *const WorkSlot) bool {
+        return self.ptr.load(.acquire) != null;
+    }
+
+    /// The held Work with one reference retained for the caller, who
+    /// releases it; null when the slot is empty (checked bare first, so
+    /// the common empty case takes no claim).
+    pub fn acquire(self: *WorkSlot) ?*accelerator.Work {
+        if (self.ptr.load(.acquire) == null) return null;
+        self.lock();
+        defer self.unlock();
+        const work = self.ptr.load(.monotonic) orelse return null;
+        work.retain();
+        return work;
+    }
+
+    /// Put `work` in the slot, moving one reference from the caller to
+    /// the slot; the displaced Work, if any, comes back with the slot's
+    /// former reference for the caller to release.
+    pub fn install(self: *WorkSlot, work: *accelerator.Work) ?*accelerator.Work {
+        self.lock();
+        defer self.unlock();
+        return self.ptr.swap(work, .acq_rel);
+    }
+
+    /// Empty the slot; the caller receives the slot's reference.
+    pub fn take(self: *WorkSlot) ?*accelerator.Work {
+        if (self.ptr.load(.acquire) == null) return null;
+        self.lock();
+        defer self.unlock();
+        return self.ptr.swap(null, .acq_rel);
+    }
+
+    /// Empty the slot iff it still holds `expected`, releasing the slot's
+    /// reference (after the claim is dropped: a release may complete the
+    /// Work and clear other slots); true when it did.
+    pub fn clear(self: *WorkSlot, expected: *accelerator.Work) bool {
+        {
+            self.lock();
+            defer self.unlock();
+            if (self.ptr.cmpxchgStrong(expected, null, .acq_rel, .acquire) != null) return false;
+        }
+        expected.release();
+        return true;
+    }
+
+    fn lock(self: *WorkSlot) void {
+        while (self.claim.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
+    }
+
+    fn unlock(self: *WorkSlot) void {
+        self.claim.store(false, .release);
+    }
+};
+
 /// The accelerator lifetime slots of a buffer header: the pending output
-/// Work, the latest device reader, the provider cache Resource, and the
-/// completion claim of `waitReady`. Only a compiled-in provider can fill
-/// them, so without one (`has_accelerator == false`) the type is empty:
-/// zero bytes on every buffer, and the accessors below are inert.
+/// Work, the latest device reader, and the provider cache Resource. Only a
+/// compiled-in provider can fill them, so without one
+/// (`has_accelerator == false`) the type is empty: zero bytes on every
+/// buffer, and the accessors below are inert.
 pub const AcceleratorSlots = if (has_accelerator) struct {
-    pending_work: std.atomic.Value(?*accelerator.Work) = .init(null),
-    pending_use: std.atomic.Value(?*accelerator.Work) = .init(null),
+    pending_work: WorkSlot = .{},
+    pending_use: WorkSlot = .{},
     resource: std.atomic.Value(?*accelerator.Resource) = .init(null),
-    /// Exclusive completion claim for `waitReady`: only the claim holder
-    /// may dereference (and release) `pending_work` — see `waitReady`.
-    pending_claim: std.atomic.Value(bool) = .init(false),
 } else struct {};
 
 /// A host-side derived copy tied to one allocation's lifetime (the widen-once
@@ -142,9 +211,8 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
 
         pub fn resetRefs(self: *Self) void {
             if (comptime has_accelerator) {
-                std.debug.assert(self.accel.pending_work.load(.acquire) == null);
-                std.debug.assert(self.accel.pending_use.load(.acquire) == null);
-                std.debug.assert(!self.accel.pending_claim.load(.acquire));
+                std.debug.assert(!self.accel.pending_work.hasPending());
+                std.debug.assert(!self.accel.pending_use.hasPending());
             }
             self.refs.store(1, .release);
         }
@@ -159,55 +227,54 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// final release consumes it.
         pub fn setPending(self: *Self, work: *accelerator.Work) void {
             if (comptime !has_accelerator) unreachable;
-            const old = self.accel.pending_work.cmpxchgStrong(null, work, .release, .acquire);
-            std.debug.assert(old == null);
+            const displaced = self.accel.pending_work.install(work);
+            std.debug.assert(displaced == null);
         }
 
-        pub fn pending(self: *const Self) ?*accelerator.Work {
-            return if (comptime has_accelerator) self.accel.pending_work.load(.acquire) else null;
+        /// A submitted accelerator output is still attached (a bare
+        /// observation: nothing is dereferenced).
+        pub fn hasPending(self: *const Self) bool {
+            return if (comptime has_accelerator) self.accel.pending_work.hasPending() else false;
+        }
+
+        /// The pending output Work with one reference retained for the
+        /// caller (who releases it), or null. The only way to reach the
+        /// Work behind a buffer: a provider that wants to consume the
+        /// device result of an earlier command holds this reference as its
+        /// dependency.
+        pub fn acquirePending(self: *const Self) ?*accelerator.Work {
+            if (comptime !has_accelerator) return null;
+            const atomics: *Self = @constCast(self);
+            return atomics.accel.pending_work.acquire();
         }
 
         /// Block until any pending accelerator output is host-visible.
         ///
         /// Safe under CONCURRENT callers (`copyRangeTo`'s disjoint-range
-        /// contract puts parallel chunk workers here on the same buffer): a
-        /// single claimant dereferences the Work, completes it, clears the
-        /// slot, and drops the buffer's reference; everyone else spins until
-        /// the slot clears — which the claimant does only AFTER the host
-        /// copy is visible. The pre-claim naive form (load → ensureHost →
-        /// clear → release) let a loser dereference a Work the winner had
-        /// already freed.
+        /// contract puts parallel chunk workers here on the same buffer):
+        /// every caller acquires its own retained reference, completes the
+        /// Work (the state machine runs the provider's finish once; the
+        /// others wait on it and return only after the host copy is
+        /// visible), clears the slot if it still holds that Work, and
+        /// drops its reference. The Work outlives every caller that
+        /// acquired it, whichever buffer's side frees it.
         ///
-        /// Takes `*const`: the wait entries move only the atomic fields
-        /// (`pending_work`, `pending_claim`, `pending_use`), so a read-only
-        /// accessor fences without a cast; the one cast lives here.
+        /// Takes `*const`: the wait entries move only the slots' atomics,
+        /// so a read-only accessor fences without a cast; the one cast
+        /// lives here.
         pub fn waitReady(self: *const Self) void {
             if (comptime !has_accelerator) return;
             const atomics: *Self = @constCast(self);
-            while (true) {
-                if (self.accel.pending_work.load(.acquire) == null) return;
-                if (atomics.accel.pending_claim.cmpxchgWeak(false, true, .acq_rel, .acquire) != null) {
-                    std.atomic.spinLoopHint();
-                    continue;
-                }
-                // Re-read under the claim: a previous claimant may have
-                // completed and freed the work after our gate load.
-                const work = self.accel.pending_work.load(.acquire) orelse {
-                    atomics.accel.pending_claim.store(false, .release);
-                    return;
-                };
+            while (atomics.accel.pending_work.acquire()) |work| {
                 work.ensureHost();
-                const displaced = atomics.accel.pending_work.cmpxchgStrong(work, null, .acq_rel, .acquire);
-                std.debug.assert(displaced == null); // sole clearer while claimed
-                atomics.accel.pending_claim.store(false, .release);
+                _ = atomics.accel.pending_work.clear(work);
                 work.release();
-                return;
             }
         }
 
         pub fn discardPending(self: *Self) void {
             if (comptime !has_accelerator) return;
-            const work = self.accel.pending_work.swap(null, .acq_rel) orelse return;
+            const work = self.accel.pending_work.take() orelse return;
             work.discard();
             work.release();
         }
@@ -220,27 +287,31 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         pub fn setPendingUse(self: *Self, work: *accelerator.Work) void {
             if (comptime !has_accelerator) unreachable;
             work.retain();
-            if (self.accel.pending_use.swap(work, .acq_rel)) |old| old.release();
+            if (self.accel.pending_use.install(work)) |old| old.release();
         }
 
         pub fn clearPendingUse(self: *Self, work: *accelerator.Work) void {
             if (comptime !has_accelerator) unreachable;
-            if (self.accel.pending_use.cmpxchgStrong(work, null, .acq_rel, .acquire) == null) work.release();
+            _ = self.accel.pending_use.clear(work);
         }
 
         /// A mutable host accessor is an eager ordering boundary: all device
         /// readers of the old value must be finished before the caller may
-        /// overwrite it. `ensureHost` may also materialize that command's
-        /// output on discrete GPUs; mutation is rare enough that correctness
-        /// is preferable to a second provider-specific fence protocol.
+        /// overwrite it. Same acquire/complete/clear/release shape as
+        /// `waitReady`, on the reader slot: the command is finished
+        /// host-visibly if still pending (its output may be read later),
+        /// and a Work whose output was already discarded counts as
+        /// finished. Mutation is rare enough that this is preferable to a
+        /// second provider-specific fence protocol.
         pub fn waitUnused(self: *const Self) void {
             if (comptime !has_accelerator) return;
             const atomics: *Self = @constCast(self);
-            while (self.accel.pending_use.load(.acquire)) |work| {
-                work.ensureHost();
+            while (atomics.accel.pending_use.acquire()) |work| {
+                work.ensureFinished();
                 // Provider finish normally cleared it. Keep this fallback so
-                // a future Work implementation cannot leave a stale token.
-                atomics.clearPendingUse(work);
+                // a Work implementation cannot leave a stale token.
+                _ = atomics.accel.pending_use.clear(work);
+                work.release();
             }
         }
 

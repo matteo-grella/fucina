@@ -785,7 +785,7 @@ pub fn gemmBatchedF32Async(
     const total_b = std.math.add(usize, std.math.mul(usize, stride_b, batch_count - 1) catch return false, block_b) catch return false;
     const total_c = std.math.add(usize, std.math.mul(usize, stride_c, batch_count - 1) catch return false, block_c) catch return false;
     if (a.offset + total_a > a.buffer.data.len or b.offset + total_b > b.buffer.data.len or out.offset + total_c > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalWork) catch return false;
@@ -882,7 +882,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
     const b_elems = std.math.mul(usize, n, k) catch return false;
     const c_elems = std.math.mul(usize, m, n) catch return false;
     if (a.offset + a_elems > a.buffer.data.len or b.offset + b_elems > b.buffer.data.len or out.offset + c_elems > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalF16Work) catch return false;
@@ -971,7 +971,7 @@ pub fn gemmBf16NtAsync(a: *const Tensor, b: *const TensorBf16, out: *Tensor, m: 
     const b_elems = std.math.mul(usize, n, k) catch return false;
     const c_elems = std.math.mul(usize, m, n) catch return false;
     if (a.offset + a_elems > a.buffer.data.len or b.offset + b_elems > b.buffer.data.len or out.offset + c_elems > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
 
@@ -1114,7 +1114,7 @@ pub fn gemmQuantNtAsync(req: QuantGemmRequest, input: *const Tensor, out: *Tenso
     const output_rows = std.math.mul(usize, batch_count, m) catch return false;
     const output_elems = std.math.mul(usize, output_rows, n) catch return false;
     if (input.offset + input_elems > input.buffer.data.len or out.offset + output_elems > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     const holder = std.heap.c_allocator.create(MetalQuantWork) catch return false;
@@ -1918,7 +1918,7 @@ test "metal eager async dense quant Q4_K/Q6_K/Q8_0 uses direct tensor storage" {
             .n = n,
             .k = k,
         }, &input, &out));
-        try std.testing.expect(out.buffer.pending() != null);
+        try std.testing.expect(out.buffer.hasPending());
         input.data()[0] += 100;
         const got = out.dataConst();
         for (0..batch_count) |bi| {
@@ -1961,12 +1961,12 @@ test "metal eager async gemm chains on the queue and synchronizes on host read" 
     // Both calls submit immediately.  `first` is consumed by the second
     // command directly from shared memory; no host wait occurs between them.
     try std.testing.expect(gemmF32Async(.trans_b, &a, &b, &first, m, n, k));
-    try std.testing.expect(first.buffer.pending() != null);
+    try std.testing.expect(first.buffer.hasPending());
     try std.testing.expect(gemmF32Async(.plain, &first, &b, &second, m, k, n));
-    try std.testing.expect(second.buffer.pending() != null);
+    try std.testing.expect(second.buffer.hasPending());
 
     const got = second.dataConst(); // the first unavoidable host boundary
-    try std.testing.expect(second.buffer.pending() == null);
+    try std.testing.expect(!second.buffer.hasPending());
 
     const tmp = try allocator.alloc(f64, m * n);
     defer allocator.free(tmp);
@@ -2023,9 +2023,9 @@ test "metal eager async bf16 NT matches the CPU bf16 reference" {
     var out = try Tensor.zeros(allocator, &.{ m, n });
     defer out.deinit();
     try std.testing.expect(gemmBf16NtAsync(&a, &b, &out, m, n, k));
-    try std.testing.expect(out.buffer.pending() != null);
-    try std.testing.expect(b.buffer.accel.pending_use.load(.acquire) != null);
+    try std.testing.expect(out.buffer.hasPending());
+    try std.testing.expect(b.buffer.accel.pending_use.hasPending());
     for (out.dataConst(), expected) |got, want| try std.testing.expectApproxEqAbs(want, got, 4e-4);
-    try std.testing.expect(out.buffer.pending() == null);
-    try std.testing.expect(b.buffer.accel.pending_use.load(.acquire) == null);
+    try std.testing.expect(!out.buffer.hasPending());
+    try std.testing.expect(!b.buffer.accel.pending_use.hasPending());
 }

@@ -277,7 +277,7 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         data: []Elem,                     // Elem == dtype.Storage(buffer_dtype)
         refs: std.atomic.Value(u32),
         release_hook: Release = .{},      // Release{ .ctx, .run }; run == null means destroy()
-        accel: AcceleratorSlots = .{},      // pending_work / pending_use / resource / pending_claim; an empty struct without -Dgpu
+        accel: AcceleratorSlots = .{},      // pending_work / pending_use (WorkSlot) / resource; an empty struct without -Dgpu
         host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
         pub const dtype = buffer_dtype;
@@ -322,18 +322,29 @@ Refcount operations:
   Only for owners that know no references remain (pool teardown).
 - `waitReady()` / `discardPending()` — complete already-submitted GPU output
   work, respectively making host bytes visible or skipping an unused D2H.
-  `waitReady` is safe under CONCURRENT callers (parallel chunk copies land
-  N readers on one buffer): a single claimant dereferences and releases the
-  Work; everyone else spins until the slot clears, which happens only after
-  the host copy is visible (8-thread regression in `src/storage_tests.zig`).
-  The wait entries take `*const Self` (they move only the atomic fields),
-  so a read-only accessor fences without a cast.
+  Both accelerator slots (`pending_work`, `pending_use`) are a `WorkSlot`:
+  one Work reference behind a claim, read only through `acquire()`, which
+  returns a RETAINED reference, and mutated only under the same claim, so a
+  reader can never hold a Work whose last reference another thread is
+  releasing. `waitReady` is therefore safe under CONCURRENT callers
+  (parallel chunk copies land N readers on one buffer): each completes the
+  Work through its own reference (the state machine runs the provider's
+  finish once and the others return only after the host copy is visible),
+  then clears the slot if it still holds that Work. `hasPending()` is the
+  bare boolean observer; `acquirePending()` the retained handle a provider
+  keeps as the dependency of a command consuming the device result.
+  The wait entries take `*const Self` (they move only the slots' atomics),
+  so a read-only accessor fences without a cast (regressions in
+  `src/storage_tests.zig`: 8 concurrent readers, and input mutators racing
+  the output side that frees the Work).
 - `setPendingUse()` / `waitUnused()` / `waitMutable()` — track the latest
   submitted GPU reader of this allocation. Const host reads may overlap a
-  device read; mutable access waits so post-call input mutation cannot race
-  Metal zero-copy reads or CUDA async upload. Provider queue order lets the
-  latest token subsume earlier readers. Final release always completes both
-  output and reader work before storage can be recycled.
+  device read; mutable access waits (`Work.ensureFinished`: the command is
+  completed host-visibly if still pending, and a Work whose output was
+  already discarded counts as finished) so post-call input mutation cannot
+  race Metal zero-copy reads or CUDA async upload. Provider queue order
+  lets the latest token subsume earlier readers. Final release always
+  completes both output and reader work before storage can be recycled.
 - `acceleratorResource` — provider mapping metadata tied to this allocation's
   lifetime (Metal's pooled page-wrapper cache; CUDA host page registration).
   It survives ordinary pool release/reacquire and is destroyed with the

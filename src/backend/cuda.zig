@@ -371,7 +371,8 @@ pub fn shouldUseGpuF16(m: usize, n: usize, k: usize) bool {
 }
 
 fn tensorHasDeviceStorage(b: anytype) bool {
-    if (b.buffer.pending()) |pending| {
+    if (b.buffer.acquirePending()) |pending| {
+        defer pending.release();
         if (pending.devicePtr(.cuda) != null) return true;
     }
     const ptr = @intFromPtr(b.buffer.data.ptr);
@@ -977,10 +978,15 @@ fn CudaWorkFor(comptime input_dtype: storage.DType) type {
 const CudaWork = CudaWorkFor(.f32);
 const CudaF16Work = CudaWorkFor(.f16);
 
+/// The device address of `x` when its pending producer still holds it on
+/// the device; the acquired Work reference becomes the new command's
+/// dependency (`dep`, released by the command's destroy).
 fn pendingDeviceInput(x: *const Tensor, dep: *?*accelerator.Work) ?api.CUdeviceptr {
-    const work = x.buffer.pending() orelse return null;
-    const base = work.devicePtr(.cuda) orelse return null;
-    work.retain();
+    const work = x.buffer.acquirePending() orelse return null;
+    const base = work.devicePtr(.cuda) orelse {
+        work.release();
+        return null;
+    };
     dep.* = work;
     return @intCast(base + x.offset * @sizeOf(f32));
 }
@@ -1052,7 +1058,7 @@ pub fn gemmBatchedF32Async(
     const total_b = std.math.add(usize, std.math.mul(usize, stride_b, batch_count - 1) catch return false, block_b) catch return false;
     const total_c = std.math.add(usize, std.math.mul(usize, stride_c, batch_count - 1) catch return false, block_c) catch return false;
     if (a.offset + total_a > a.buffer.data.len or b.offset + total_b > b.buffer.data.len or out.offset + total_c > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     if (ctx.blas_handle == null) return false;
@@ -1146,7 +1152,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
     const b_elems = std.math.mul(usize, n, k) catch return false;
     const c_elems = std.math.mul(usize, m, n) catch return false;
     if (a.offset + a_elems > a.buffer.data.len or b.offset + b_elems > b.buffer.data.len or out.offset + c_elems > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     if (ctx.blas_handle == null) return false;
@@ -1795,7 +1801,7 @@ pub fn gemmQuantNtAsync(req: QuantGemmRequest, input: *const Tensor, out: *Tenso
     const output_rows = std.math.mul(usize, batch_count, m) catch return false;
     const output_elems = std.math.mul(usize, output_rows, n) catch return false;
     if (input.offset + input_elems > input.buffer.data.len or out.offset + output_elems > out.buffer.data.len) return false;
-    if (out.buffer.pending() != null) return false;
+    if (out.buffer.hasPending()) return false;
 
     const ctx = context() orelse return false;
     dispatch_lock.lock();
@@ -2756,7 +2762,7 @@ test "cuda eager async dense quant Q4_K/Q5_K/Q6_K/Q8_0 uses direct tensor storag
             .n = n,
             .k = k,
         }, &input, &out));
-        try std.testing.expect(out.buffer.pending() != null);
+        try std.testing.expect(out.buffer.hasPending());
         input.data()[0] += 100;
         const got = out.dataConst();
         for (0..batch_count) |bi| {
@@ -2852,12 +2858,13 @@ test "cuda eager async gemm chains device results and synchronizes on host read"
     defer second.deinit();
 
     try std.testing.expect(gemmF32Async(.trans_b, &a, &b, &first, m, n, k));
-    const producer = first.buffer.pending() orelse return error.TestUnexpectedResult;
+    const producer = first.buffer.acquirePending() orelse return error.TestUnexpectedResult;
+    defer producer.release();
     try std.testing.expect(producer.devicePtr(.cuda) != null);
     try std.testing.expect(gemmF32Async(.plain, &first, &b, &second, m, k, n));
-    try std.testing.expect(second.buffer.pending() != null);
+    try std.testing.expect(second.buffer.hasPending());
     const got = second.dataConst();
-    try std.testing.expect(second.buffer.pending() == null);
+    try std.testing.expect(!second.buffer.hasPending());
 
     const tmp = try allocator.alloc(f64, m * n);
     defer allocator.free(tmp);

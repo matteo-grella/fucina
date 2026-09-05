@@ -57,7 +57,7 @@ pub const Work = struct {
         // A producer may become unreachable without ever being read.  Its
         // device resources still cannot be recycled until the submitted work
         // has stopped touching them.
-        _ = self.complete(false);
+        _ = self.complete(false, .host_read);
         self.vtable.destroy(self.ctx);
     }
 
@@ -66,11 +66,20 @@ pub const Work = struct {
     /// cannot safely replay through the CPU without retaining its whole call
     /// frame (which would be a graph in disguise).
     pub fn ensureHost(self: *Work) void {
-        if (!self.complete(true)) @panic("asynchronous accelerator operation failed");
+        if (!self.complete(true, .host_read)) @panic("asynchronous accelerator operation failed");
+    }
+
+    /// Wait until the submitted command has stopped touching its inputs
+    /// (the input-use relationship, `storage.waitUnused`).  A command still
+    /// pending is completed host-visibly, so a later host read of its
+    /// output stays possible; an output already discarded or failed counts
+    /// as finished — an input reader needs the command over, not its result.
+    pub fn ensureFinished(self: *Work) void {
+        _ = self.complete(true, .input_release);
     }
 
     pub fn discard(self: *Work) void {
-        _ = self.complete(false);
+        _ = self.complete(false, .host_read);
     }
 
     pub fn devicePtr(self: *Work, provider: Provider) ?usize {
@@ -81,7 +90,11 @@ pub const Work = struct {
         };
     }
 
-    fn complete(self: *Work, copy_to_host: bool) bool {
+    /// Who is completing: a reader of the output, or an input's mutator/
+    /// releaser that only needs the command finished.
+    const Waiter = enum { host_read, input_release };
+
+    fn complete(self: *Work, copy_to_host: bool, waiter: Waiter) bool {
         while (true) {
             switch (self.state.load(.acquire)) {
                 .host_ready => return true,
@@ -89,7 +102,7 @@ pub const Work = struct {
                     // A buffer cannot be read after its final release.  Seeing
                     // this on a host-read path would mean the external tensor
                     // lifetime contract was violated.
-                    if (copy_to_host) @panic("accelerator result was discarded before host access");
+                    if (copy_to_host and waiter == .host_read) @panic("accelerator result was discarded before host access");
                     return true;
                 },
                 .failed => return false,
