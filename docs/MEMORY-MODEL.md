@@ -104,7 +104,7 @@ slot (`src/models/text/kv_cache.zig:286-298`).
   values as views the op takes when it builds the record
   (`saved_input = try self.asRawTensor().cloneView()` and friends in
   `src/ag/tensor/elementwise.zig` and `src/ag/tensor/float/matmul.zig`), and
-  `cloneView` bumps the refcount (`src/tensor.zig:190-188`).
+  `cloneView` bumps the refcount (`src/tensor.zig:208-212`).
   Those input buffers therefore **cannot** return to the pool until the tape
   node is destroyed in/after `backward`.
 
@@ -117,7 +117,7 @@ backward, not something an arena would change.
 ## 3. Views are refcounted aliases (the decisive constraint)
 
 Every view operation retains the source buffer and releases it on `deinit`:
-`cloneView` (`src/tensor.zig:190-188`), `viewWithStrides(Offset)`
+`cloneView` (`src/tensor.zig:208-212`), `viewWithStrides(Offset)`
 (`src/tensor.zig:196/:195`), `reshape` (`src/tensor.zig:224`), `broadcastTo`
 (`src/tensor.zig:238`); `narrow` goes through `viewWithStridesOffset`
 (`src/exec/gather_scatter.zig:65-85`). A view's lifetime is independent of its parent's.

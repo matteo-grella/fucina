@@ -197,9 +197,11 @@ Semantics:
   externally) after submitting an op: direct writes through the external
   slice cannot be observed by the storage reader fence.
 - `fromBorrowedConstSlice` borrows **read-only** storage (e.g. mmap'd GGUF
-  weights) without a caller-side `@constCast`. The single internal
-  `@constCast` is sound only under the contract that the data is never
-  mutated through `.data()`; use `fromSlice` if a writable buffer is needed.
+  weights) without a caller-side `@constCast`. The storage is marked
+  read-only: the consuming ops (`takeScaleNoGrad` and the other in-place
+  ownership paths) copy instead of writing through it, and the caller must
+  not mutate it through `.data()`; use `fromSlice` if a writable buffer is
+  needed.
 - `empty` returns uninitialized, buffer-pool-backed storage ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)); `zeros`,
   `ones`, `full`, `scalar` initialize it.
 - The `*Like` forms are instance sugar over the same constructors

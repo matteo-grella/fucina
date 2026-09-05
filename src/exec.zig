@@ -248,6 +248,7 @@ pub const ExecContext = struct {
     pub const scalar = exec_runtime.scalar;
     pub const fromSlice = exec_runtime.fromSlice;
     pub const fromBorrowedSlice = exec_runtime.fromBorrowedSlice;
+    pub const fromBorrowedConstSlice = exec_runtime.fromBorrowedConstSlice;
     pub const fromStorageSlice = exec_runtime.fromStorageSlice;
     pub const fromBorrowedStorageSlice = exec_runtime.fromBorrowedStorageSlice;
     pub const replace = exec_runtime.replace;

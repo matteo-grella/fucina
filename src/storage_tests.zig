@@ -311,3 +311,15 @@ fn sleepMicros(us: u64) void {
         },
     }
 }
+
+test "borrowed read-only storage is marked and never taken in place" {
+    const allocator = std.testing.allocator;
+    const values = [_]f32{ 1, 2, 3 };
+    const buf = try Buffer.fromBorrowedConstSlice(allocator, &values);
+    defer buf.release();
+    try std.testing.expect(buf.read_only);
+    try std.testing.expectEqual(@intFromPtr(&values), @intFromPtr(buf.data.ptr));
+    const owned = try Buffer.fromSlice(allocator, &values);
+    defer owned.release();
+    try std.testing.expect(!owned.read_only);
+}

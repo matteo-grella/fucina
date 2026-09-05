@@ -466,3 +466,24 @@ test "public Tensor tril triu bandPart with exact mask gradients" {
     defer btl.deinit();
     try expectCloseSlices(&.{ 1, 0, 3, 4, 5, 0, 7, 8 }, try btl.dataConst(), 0);
 }
+
+test "public Tensor consuming ops copy read-only borrowed storage" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const T = Tensor(.{ .batch, .d });
+    const data = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var t = try T.fromBorrowedConstSlice(&ctx, .{ 2, 3 }, &data);
+    // A unique handle over borrowed read-only bytes: the in-place ownership
+    // fast path must refuse it and the consuming op copies instead of
+    // writing through the const slice.
+    try std.testing.expect(!t.asRawTensor().canTakeInPlace());
+    var scaled = try t.takeScaleNoGrad(&ctx, 2);
+    defer scaled.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 4, 6, 8, 10, 12 }, scaled.asRawTensor().dataConst());
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4, 5, 6 }, &data);
+    try std.testing.expect(@intFromPtr(scaled.asRawTensor().dataConst().ptr) != @intFromPtr(&data));
+}

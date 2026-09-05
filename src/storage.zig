@@ -120,6 +120,11 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// responsibility for the data and this header; `run == null` means
         /// the plain `destroy`.
         release_hook: Release = .{},
+        /// Borrowed read-only data (`fromBorrowedConstSlice`: an mmap'd
+        /// file, a caller's const slice): never written through this
+        /// buffer. The in-place ownership fast paths (`Tensor.canTakeInPlace`)
+        /// refuse it, so a consuming op copies instead of overwriting.
+        read_only: bool = false,
         accel: AcceleratorSlots = .{},
         host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
@@ -169,6 +174,15 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// header is destroyed when the last reference drops.
         pub fn fromBorrowedSlice(allocator: Allocator, values: []Elem) !*Self {
             return fromBorrowedSliceWithRelease(allocator, values, .{ .run = releaseBorrowed });
+        }
+
+        /// `fromBorrowedSlice` over READ-ONLY data: the one place the
+        /// constness is cast away, recorded on the header (`read_only`)
+        /// so no ownership fast path writes through it.
+        pub fn fromBorrowedConstSlice(allocator: Allocator, values: []const Elem) !*Self {
+            const self = try fromBorrowedSlice(allocator, @constCast(values));
+            self.read_only = true;
+            return self;
         }
 
         /// Borrowed data with a release hook that owns the cleanup of both the

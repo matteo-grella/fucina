@@ -49,10 +49,11 @@ pub fn Ops(comptime Self: type) type {
 
         /// Zero-copy wrap caller-owned READ-ONLY typed storage as a no-grad
         /// constant tensor without `@constCast` at the call site. Read-only
-        /// borrow: `values` must outlive the tensor and must not be mutated
-        /// (see the f32 `fromBorrowedConstSlice` contract).
+        /// borrow: `values` must outlive the tensor; the storage is marked
+        /// read-only, so the consuming ops (`takeScaleNoGrad` and the other
+        /// in-place ownership paths) copy instead of writing through it.
         pub fn fromBorrowedConstSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
-            var value = try ctx.fromBorrowedSlice(dtype, raw_shape, @constCast(rawValues(values)));
+            var value = try ctx.fromBorrowedConstSlice(dtype, raw_shape, rawValues(values));
             errdefer value.deinit();
             return try Self.constant(ctx, value);
         }

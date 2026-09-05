@@ -490,6 +490,14 @@ pub fn fromBorrowedSlice(self: *ExecContext, comptime dtype: DType, shape: anyty
     return tensor.TensorOf(dtype).fromBorrowedSlice(self.rt.allocator, dims.slice(), values);
 }
 
+/// `fromBorrowedSlice` over read-only data: the storage is marked
+/// read-only, so the in-place ownership paths copy instead of writing
+/// through it.
+pub fn fromBorrowedConstSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Scalar(dtype)) !tensor.TensorOf(dtype) {
+    const dims = try Shape.from(shape);
+    return tensor.TensorOf(dtype).fromBorrowedConstSlice(self.rt.allocator, dims.slice(), values);
+}
+
 pub fn fromStorageSlice(self: *ExecContext, comptime dtype: DType, shape: anytype, values: []const dtype_mod.Storage(dtype)) !tensor.TensorOf(dtype) {
     const dims = try Shape.from(shape);
     if (try shape_mod.storageElementCount(dtype, dims.slice()) != values.len) return tensor.TensorError.InvalidDataLength;

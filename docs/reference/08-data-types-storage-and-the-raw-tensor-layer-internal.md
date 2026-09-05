@@ -277,6 +277,7 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         data: []Elem,                     // Elem == dtype.Storage(buffer_dtype)
         refs: std.atomic.Value(u32),
         release_hook: Release = .{},      // Release{ .ctx, .run }; run == null means destroy()
+        read_only: bool = false,          // fromBorrowedConstSlice: never taken in place (canTakeInPlace is false)
         accel: AcceleratorSlots = .{},      // pending_work / pending_use (WorkSlot) / resource; an empty struct without -Dgpu
         host_shadow: std.atomic.Value(?*HostShadow) = .init(null),
 
@@ -301,6 +302,7 @@ Constructors (all return `!*Self` with `refs == 1`):
 | `createWithRelease(allocator, len, hook: Release)` | owned | `hook.run(hook.ctx orelse self, self)` |
 | `fromSlice(allocator, values)` | owned copy of `values` | `destroy()` |
 | `fromBorrowedSlice(allocator, values)` | **aliases** caller memory | destroy header only; caller keeps the bytes |
+| `fromBorrowedConstSlice(allocator, values: []const Elem)` | aliases read-only caller memory; sets `read_only` (the one internal `@constCast`) | destroy header only |
 | `fromBorrowedSliceWithRelease(allocator, values, hook: Release)` | aliases | `hook.run(hook.ctx orelse self, self)` — full cleanup duty for the data and the header |
 
 `Release` is the buffer's hook descriptor: `.{ .ctx = ?*anyopaque, .run = fn (*anyopaque, *Self) void }`;
@@ -474,6 +476,7 @@ raw-layer work.
 | `zeros(allocator, shape)` / `ones(allocator, shape)` | scalar only (compile error otherwise) | fresh owned buffer, filled |
 | `fromSlice(allocator, shape, values: []const Scalar)` | scalar only | owned copy; `InvalidDataLength` unless `values.len == elementCount(shape)` |
 | `fromBorrowedSlice(allocator, shape, values: []Scalar)` | scalar only | aliases caller memory (borrowed buffer; caller keeps ownership of the bytes and must outlive the tensor) |
+| `fromBorrowedConstSlice(allocator, shape, values: []const Scalar)` | scalar only | aliases read-only caller memory; the buffer is `read_only`, so `canTakeInPlace` is false and the consuming ops copy |
 | `fromStorageSlice(allocator, shape, values: []const Element)` | any | owned copy in storage elements; for block dtypes `values.len` must equal `storageElementCount` |
 | `fromBorrowedStorageSlice(allocator, shape, values: []Element)` | any | borrowed, in storage elements |
 | `fromOwnedBuffer(buffer, shape)` | any | **consumes one reference** to `buffer`; the caller must not release that reference after success — `deinit` does. Accepts oversized buffers (`data.len >= storageElementCount`), which is how pooled buffers are wrapped; `InvalidDataLength` if too small. On error the reference stays with the caller |

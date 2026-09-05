@@ -359,7 +359,11 @@ pub fn detach(self: *const Self, ctx: *ExecContext) !Self    // no-grad view of 
 - `data()` refuses mutable access on a grad-carrying tensor with
   `error.MutableDataRequiresNoGrad` (mutating a recorded value would
   invalidate the graph); `dataConst()`/`item()`/`copyTo()` are always
-  allowed.
+  allowed. The refusal covers the handle, not the storage: a record saves
+  views of every operand, no-grad constants included (`y = x * c` saves a
+  view of `c`), so a constant or a `detach`ed alias that shares storage
+  with a saved operand must not be mutated between the forward and its
+  backward — the tape reads the current bytes, not a snapshot.
 
 Direct gradient state access goes through the public `grad_state` field
 (`?*GradState`); its methods are thread-safe under the per-state mutex:

@@ -134,6 +134,19 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             return initFromBuffer(tensor_dtype, buffer, shape, 0);
         }
 
+        /// `fromBorrowedSlice` over read-only data: the buffer is marked
+        /// `read_only`, so the in-place ownership paths copy instead of
+        /// writing through it.
+        pub fn fromBorrowedConstSlice(allocator: Allocator, shape: []const usize, values: []const ScalarElem) !Self {
+            comptime if (!is_scalar_dtype) @compileError("fromBorrowedConstSlice is only defined for scalar tensor dtypes");
+            const size = try shape_mod.elementCount(shape);
+            if (size != values.len) return TensorError.InvalidDataLength;
+
+            const buffer = try Buffer.fromBorrowedConstSlice(allocator, values);
+            errdefer buffer.release();
+            return initFromBuffer(tensor_dtype, buffer, shape, 0);
+        }
+
         pub fn fromBorrowedSlice(allocator: Allocator, shape: []const usize, values: []ScalarElem) !Self {
             comptime if (!is_scalar_dtype) @compileError("fromBorrowedSlice is only defined for scalar tensor dtypes");
             const size = try shape_mod.elementCount(shape);
@@ -288,8 +301,10 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         // Safe only when the caller owns exclusive access to this Tensor value.
         // The refcount proves no other retained Tensor aliases the buffer now; it
         // is not a lock against another thread retaining the same Tensor later.
+        // Read-only backing (`fromBorrowedConstSlice`) is never taken: a
+        // consuming op copies it instead of writing through it.
         pub fn canTakeInPlace(self: *const Self) bool {
-            return self.offset == 0 and self.isContiguous() and self.buffer.isUnique();
+            return !self.buffer.read_only and self.offset == 0 and self.isContiguous() and self.buffer.isUnique();
         }
 
         /// Recoverable mutable element view: `error.UnsupportedView` on a

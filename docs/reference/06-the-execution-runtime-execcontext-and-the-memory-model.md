@@ -426,6 +426,7 @@ Copy-in from caller data:
 | `fromSlice(dtype, shape, values)` | copy `[]const Scalar(dtype)` into pooled storage |
 | `fromStorageSlice(dtype, shape, values)` | copy `[]const Storage(dtype)` (block-quantized payloads, [§10](10-quantization.md)) |
 | `fromBorrowedSlice(dtype, shape, values)` | **zero-copy** wrap of caller-owned `[]Scalar(dtype)`; the tensor borrows — keep the slice alive and unmoved until the tensor's `deinit`, which frees only the header |
+| `fromBorrowedConstSlice(dtype, shape, values: []const Scalar(dtype))` | the read-only form: the storage is marked `read_only`, so the in-place ownership paths (`canTakeInPlace`) copy instead of writing through it |
 | `fromBorrowedStorageSlice(dtype, shape, values)` | zero-copy wrap of `[]Storage(dtype)`, same borrow contract |
 
 Copy/materialize existing tensors:
