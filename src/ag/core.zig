@@ -29,6 +29,11 @@ pub const AgError = error{
     UnsupportedGradient,
     /// `data()` on a tensor that requires gradients.
     MutableDataRequiresNoGrad,
+    /// A backward reached a record whose saved value (an operand view, a
+    /// constant included, or the saved output) was mutated through a
+    /// mutable host access after the forward: the VJP would differentiate
+    /// values other than the ones the forward computed with.
+    SavedValueMutated,
     /// `backward` on a tensor with no recorded graph (a recomputed
     /// checkpoint output without one included).
     NoGradientGraph,
@@ -120,9 +125,60 @@ pub fn initNode(node: anytype, allocator: Allocator, record: anytype) *GradState
     node.state = .{
         .allocator = allocator,
         .grad_fn = .{ .ptr = &node.record, .vtable = &Record.vtable },
+        .saved_generation = savedGenerationSum(&node.record),
     };
     retainParents(Record.vtable.operands(&node.record));
     return &node.state;
+}
+
+/// The sum of the storage generations of every raw tensor a record holds:
+/// its tensor fields, and the tensors inside its nested structs,
+/// optionals, arrays and slices (pointers are not followed — a pointee is
+/// not the record's saved value). Generations only grow, so any mutation
+/// of any saved storage strictly raises the sum; captured by `initNode`
+/// and compared before the VJP runs (`recordVTable`).
+fn savedGenerationSum(record: anytype) u64 {
+    var sum: u64 = 0;
+    addSavedGenerations(&sum, record);
+    return sum;
+}
+
+fn addSavedGenerations(sum: *u64, ptr: anytype) void {
+    const T = @TypeOf(ptr.*);
+    if (comptime !holdsRawTensor(T)) return;
+    if (comptime isRawTensor(T)) {
+        sum.* += ptr.buffer.generation.load(.monotonic);
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| inline for (s.fields) |f| addSavedGenerations(sum, &@field(ptr.*, f.name)),
+        .optional => if (ptr.*) |*inner| addSavedGenerations(sum, inner),
+        .array => for (ptr) |*item| addSavedGenerations(sum, item),
+        .pointer => for (ptr.*) |*item| addSavedGenerations(sum, item),
+        else => {},
+    }
+}
+
+/// A raw tensor value (`tensor.TensorOf(dtype)`): the saved-view type of
+/// every record.
+fn isRawTensor(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasField(T, "buffer") and @hasField(T, "shape") and
+        @hasField(T, "strides") and @hasField(T, "offset") and @hasDecl(T, "dtype");
+}
+
+/// Whether a value of `T` can hold a raw tensor by value (through structs,
+/// optionals, arrays and slices); the walk skips everything else.
+fn holdsRawTensor(comptime T: type) bool {
+    if (isRawTensor(T)) return true;
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| for (s.fields) |f| {
+            if (holdsRawTensor(f.type)) break true;
+        } else false,
+        .optional => |o| holdsRawTensor(o.child),
+        .array => |a| holdsRawTensor(a.child),
+        .pointer => |p| p.size == .slice and holdsRawTensor(p.child),
+        else => false,
+    };
 }
 
 /// The exec-scope entry for the reference a handle holds on `state`
@@ -200,6 +256,12 @@ pub fn recordVTable(comptime Record: type) BackwardFunction.VTable {
 
         fn backward(ptr: *anyopaque, ctx: *ExecContext, gy: *const Tensor, out: []?Tensor) anyerror!void {
             const self: *Record = @ptrCast(@alignCast(ptr));
+            // The saved values must be the ones the forward computed with:
+            // a mutation of any saved storage since `initNode` (through
+            // any handle, a constant or a detached alias included) is
+            // refused here rather than differentiated.
+            const node: *BackwardNode(Record) = @fieldParentPtr("record", self);
+            if (savedGenerationSum(self) != node.state.saved_generation) return AgError.SavedValueMutated;
             return Record.vjp(self, ctx, gy, out);
         }
 
@@ -270,6 +332,9 @@ pub const GradState = struct {
     /// a time (a pass's preparation or drain, one executing thread's ready
     /// queue, or the release cascade), never on two.
     next: ?*GradState = null,
+    /// The sum of the storage generations of the record's saved tensors
+    /// at `initNode` (`savedGenerationSum`); zero on a leaf.
+    saved_generation: u64 = 0,
 
     pub fn leaf(allocator: Allocator) !*GradState {
         const self = try allocator.create(GradState);

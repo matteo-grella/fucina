@@ -276,6 +276,7 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         allocator: Allocator,
         data: []Elem,                     // Elem == dtype.Storage(buffer_dtype)
         refs: std.atomic.Value(u32),
+        generation: std.atomic.Value(u32), // mutation generation: +1 per mutable host access (waitMutable); the autograd saved-value check (§5.3)
         release_hook: Release = .{},      // Release{ .ctx, .run }; run == null means destroy()
         read_only: bool = false,          // fromBorrowedConstSlice: never taken in place (canTakeInPlace is false)
         accel: AcceleratorSlots = .{},      // pending_work / pending_use (WorkSlot) / resource; an empty struct without -Dgpu

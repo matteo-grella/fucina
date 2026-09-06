@@ -320,3 +320,56 @@ test "every parallel.zig policy leaf appears in the reference threshold table" {
         }
     }
 }
+
+test "public facade refuses backward over a mutated saved constant" {
+    // y = x * c saves a view of the constant c. Mutating c through any
+    // handle over its storage after the forward (its own data(), or a
+    // detached alias's) advances the storage generation, and backward
+    // refuses to run the VJP over values the forward never saw.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const V = Tensor(.{.d});
+    var x = try V.variableFromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer x.deinit();
+    var c = try V.fromSlice(&ctx, .{2}, &.{ 3, 4 });
+    defer c.deinit();
+
+    var y = try x.mul(&ctx, &c);
+    defer y.deinit();
+    (try c.data())[0] = 100;
+    var loss = try y.sumAll(&ctx);
+    defer loss.deinit();
+    try std.testing.expectError(error.SavedValueMutated, loss.backward(&ctx));
+
+    // A fresh forward over the mutated constant differentiates it as it
+    // is now; a mutation of an unrelated constant is no concern of the
+    // graph; and a mutation after the pass is free.
+    var unrelated = try V.fromSlice(&ctx, .{2}, &.{ 7, 8 });
+    defer unrelated.deinit();
+    var y2 = try x.mul(&ctx, &c);
+    defer y2.deinit();
+    (try unrelated.data())[1] = 0;
+    var loss2 = try y2.sumAll(&ctx);
+    defer loss2.deinit();
+    try loss2.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 100, 4 }, try gx.dataConst());
+    (try c.data())[1] = 5;
+
+    // A detached alias shares the storage: mutating through it is the
+    // same mutation.
+    x.zeroGrad();
+    var y3 = try x.mul(&ctx, &c);
+    defer y3.deinit();
+    var alias = try c.detach(&ctx);
+    defer alias.deinit();
+    (try alias.data())[0] = 1;
+    var loss3 = try y3.sumAll(&ctx);
+    defer loss3.deinit();
+    try std.testing.expectError(error.SavedValueMutated, loss3.backward(&ctx));
+}

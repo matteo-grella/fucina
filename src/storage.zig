@@ -116,6 +116,12 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         allocator: Allocator,
         data: []Elem,
         refs: std.atomic.Value(u32),
+        /// The mutation generation: advanced by every mutable host access
+        /// (`waitMutable`, the boundary every `data()` crosses). A saved
+        /// view records the generation of its storage at save time; the
+        /// autograd engine refuses to run a VJP over a saved value whose
+        /// storage moved on (`AgError.SavedValueMutated`). Only ever grows.
+        generation: std.atomic.Value(u32) = .init(0),
         /// Runs once at refs == 0 in place of `destroy`, with full cleanup
         /// responsibility for the data and this header; `run == null` means
         /// the plain `destroy`.
@@ -358,7 +364,9 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         pub fn waitMutable(self: *const Self) void {
             self.waitReady();
             self.waitUnused();
-            if (self.host_shadow.load(.acquire) != null) dropHostShadow(@constCast(self));
+            const atomics: *Self = @constCast(self);
+            _ = atomics.generation.fetchAdd(1, .monotonic);
+            if (self.host_shadow.load(.acquire) != null) dropHostShadow(atomics);
         }
 
         noinline fn dropHostShadow(self: *Self) void {

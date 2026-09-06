@@ -160,6 +160,7 @@ pub const AgError = error{
     BackwardAlreadyRun,         // a second backward over a graph or single-use record
     UnsupportedGradient,        // a no-grad-only entry touched a grad-requiring tensor
     MutableDataRequiresNoGrad,  // data() on a tensor that requires gradients
+    SavedValueMutated,          // a saved operand/output was mutated after the forward (see 5.3)
     NoGradientGraph,            // backward on a tensor with no recorded graph
     ActiveExecScopeUnsupported, // an owning op called on a scope-owned borrow
 };
@@ -359,11 +360,15 @@ pub fn detach(self: *const Self, ctx: *ExecContext) !Self    // no-grad view of 
 - `data()` refuses mutable access on a grad-carrying tensor with
   `error.MutableDataRequiresNoGrad` (mutating a recorded value would
   invalidate the graph); `dataConst()`/`item()`/`copyTo()` are always
-  allowed. The refusal covers the handle, not the storage: a record saves
-  views of every operand, no-grad constants included (`y = x * c` saves a
-  view of `c`), so a constant or a `detach`ed alias that shares storage
-  with a saved operand must not be mutated between the forward and its
-  backward — the tape reads the current bytes, not a snapshot.
+  allowed. The refusal covers the handle; the storage is covered by the
+  mutation generation: a record saves views of every operand, no-grad
+  constants included (`y = x * c` saves a view of `c`), and captures the
+  generation of each saved storage; every mutable host access (`data()`
+  on any handle over that storage, a constant or a `detach`ed alias
+  included) advances it, and a backward that reaches a record whose
+  saved storage moved on fails with `error.SavedValueMutated` before the
+  VJP runs, instead of differentiating values the forward never saw
+  (`src/fucina_tests.zig`). Mutation after the pass is free.
 
 Direct gradient state access goes through the public `grad_state` field
 (`?*GradState`); its methods are thread-safe under the per-state mutex:

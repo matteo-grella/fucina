@@ -741,6 +741,13 @@ Backward execution (`backwardGrad`/`backwardGradSerial` in `ag/core.zig`):
   before its first fallible step, so a failure past it leaves the graph
   consumed (the retry fails at the preflight) rather than replayable over
   destroyed state.
+- Refuses to run a VJP over a saved value that was mutated after the
+  forward (`AgError.SavedValueMutated`): every record captures, at
+  creation, the sum of the storage mutation generations of the raw
+  tensors it holds (found by comptime reflection over its fields, nested
+  structs, optionals, arrays and slices), and `recordVTable` compares
+  before the VJP; `storage.Buffer.generation` advances on every mutable
+  host access, whichever handle crosses it.
 - Uses the `ExecContext` thread pool for async-capable backward records;
   `backwardGradSerial` disables node-level spawning (required by the
   checkpoint recompute's threadlocal nesting guard).
