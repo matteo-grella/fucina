@@ -1533,7 +1533,12 @@ detection stack):
 - `conv2d(ctx, weight, bias, stride, padding, groups, out_tags)` — `weight`
   rank-4 `[Cout, kH, kW, Cin/groups]`, `bias` is `null` or rank-1 `[Cout]`;
   result `[oH, oW, Cout]` tagged `out_tags`. Differentiable in all tensor
-  operands.
+  operands. Routes (all bit-identical in values): 1×1 stride-1 unpadded
+  dense convs are one GEMM; other `groups == 1` convs are im2col + GEMM
+  (or the Winograd route for 3×3 stride-1, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md));
+  depthwise (`groups == Cin == Cout`) takes the channel-vectorized
+  tap-major kernel (`conv2dDepthwiseInto`); every other grouped shape runs
+  the direct kernel.
 - `conv2dRelu(...)` — conv2d with the relu fused into the epilogue on the
   no-grad path (identical values to `conv2d` then `relu`; on the Winograd
   route it folds into the output transform). Falls back to the

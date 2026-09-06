@@ -1078,6 +1078,84 @@ pub fn conv2dInto(
     conv2dRangeRows(o, in, wt, bias, d, 0, d.oh);
 }
 
+const DepthwiseCtx = struct {
+    out: []f32,
+    in: []const f32,
+    taps: []const f32,
+    bias: ?[]const f32,
+    d: Conv2dDims,
+};
+
+fn runDepthwiseRows(c: DepthwiseCtx, oh_start: usize, oh_end: usize) void {
+    conv2dDepthwiseRangeRows(c.out, c.in, c.taps, c.bias, c.d, oh_start, oh_end);
+}
+
+/// Depthwise conv2d (`groups == cin == cout`, one input channel per group)
+/// over a TAP-MAJOR weight `taps[(ky·KW + kx)·C + c]` (the exec domain
+/// repacks the `[C, KH, KW, 1]` weight once per call). Vectorized across
+/// the contiguous channel axis: every output position starts from its bias
+/// and accumulates its taps in the same `(ky, kx)` order as
+/// `conv2dRangeRows`, per channel lane, multiply then add (no fused
+/// multiply-add), so the result is bit-identical to the direct kernel.
+/// The tap bounds are evaluated once per position instead of once per
+/// output channel. Parallel over output rows like `conv2dInto`.
+pub fn conv2dDepthwiseInto(
+    pc: ParallelConfig,
+    out: *Tensor,
+    input: *const Tensor,
+    taps: []const f32,
+    bias: ?[]const f32,
+    d: Conv2dDims,
+) void {
+    if (comptime isa.reference) return scalar.conv2dDepthwiseInto(out, input, taps, bias, d);
+    const o = out.data();
+    const in = input.dataConst();
+    if (pc.pool) |pool| {
+        const work = d.oh * d.ow * d.cout * d.kh * d.kw;
+        const tc = common.generalConvThreadCount(d.oh, work);
+        if (tc > 1) {
+            tile.forRange(pool, DepthwiseCtx, .{ .out = o, .in = in, .taps = taps, .bias = bias, .d = d }, d.oh, tc, runDepthwiseRows);
+            return;
+        }
+    }
+    conv2dDepthwiseRangeRows(o, in, taps, bias, d, 0, d.oh);
+}
+
+fn conv2dDepthwiseRangeRows(out: []f32, in: []const f32, taps: []const f32, bias: ?[]const f32, d: Conv2dDims, oh_start: usize, oh_end: usize) void {
+    const c = d.cin;
+    var oh: usize = oh_start;
+    while (oh < oh_end) : (oh += 1) {
+        var ow: usize = 0;
+        while (ow < d.ow) : (ow += 1) {
+            const o = out[(oh * d.ow + ow) * c ..][0..c];
+            if (bias) |b| @memcpy(o, b[0..c]) else @memset(o, 0);
+            var ky: usize = 0;
+            while (ky < d.kh) : (ky += 1) {
+                const ih_s = @as(isize, @intCast(oh * d.stride_h + ky)) - @as(isize, @intCast(d.pad_h));
+                if (ih_s < 0 or ih_s >= @as(isize, @intCast(d.h))) continue;
+                const ih: usize = @intCast(ih_s);
+                var kx: usize = 0;
+                while (kx < d.kw) : (kx += 1) {
+                    const iw_s = @as(isize, @intCast(ow * d.stride_w + kx)) - @as(isize, @intCast(d.pad_w));
+                    if (iw_s < 0 or iw_s >= @as(isize, @intCast(d.w))) continue;
+                    const iw: usize = @intCast(iw_s);
+                    const in_row = in[(ih * d.w + iw) * c ..][0..c];
+                    const w_tap = taps[(ky * d.kw + kx) * c ..][0..c];
+                    var ci: usize = 0;
+                    while (ci + vector_len <= c) : (ci += vector_len) {
+                        const iv: Vf32 = in_row[ci..][0..vector_len].*;
+                        const wv: Vf32 = w_tap[ci..][0..vector_len].*;
+                        var acc: Vf32 = o[ci..][0..vector_len].*;
+                        acc += iv * wv;
+                        o[ci..][0..vector_len].* = acc;
+                    }
+                    while (ci < c) : (ci += 1) o[ci] += in_row[ci] * w_tap[ci];
+                }
+            }
+        }
+    }
+}
+
 const Im2colCtx = struct {
     col: []f32,
     in: []const f32,
@@ -2000,6 +2078,39 @@ pub const scalar = struct {
     ) void {
         const in_per_group = in_channels / groups;
         groupedCausalConv1dBackwardWeightRange(out.data(), input.dataConst(), gy.dataConst(), state, seq, in_channels, out_channels, taps, dilation, groups, 0, taps * in_per_group);
+    }
+
+    /// Scalar reference of the depthwise entry: the same tap-major walk,
+    /// one channel at a time.
+    pub fn conv2dDepthwiseInto(
+        out: *Tensor,
+        input: *const Tensor,
+        taps: []const f32,
+        bias: ?[]const f32,
+        d: Conv2dDims,
+    ) void {
+        const o = out.data();
+        const in = input.dataConst();
+        const c = d.cin;
+        for (0..d.oh) |oh| {
+            for (0..d.ow) |ow| {
+                const dst = o[(oh * d.ow + ow) * c ..][0..c];
+                for (0..c) |ci| dst[ci] = if (bias) |b| b[ci] else 0;
+                for (0..d.kh) |ky| {
+                    const ih_s = @as(isize, @intCast(oh * d.stride_h + ky)) - @as(isize, @intCast(d.pad_h));
+                    if (ih_s < 0 or ih_s >= @as(isize, @intCast(d.h))) continue;
+                    const ih: usize = @intCast(ih_s);
+                    for (0..d.kw) |kx| {
+                        const iw_s = @as(isize, @intCast(ow * d.stride_w + kx)) - @as(isize, @intCast(d.pad_w));
+                        if (iw_s < 0 or iw_s >= @as(isize, @intCast(d.w))) continue;
+                        const iw: usize = @intCast(iw_s);
+                        const in_row = in[(ih * d.w + iw) * c ..][0..c];
+                        const w_tap = taps[(ky * d.kw + kx) * c ..][0..c];
+                        for (0..c) |ci| dst[ci] += in_row[ci] * w_tap[ci];
+                    }
+                }
+            }
+        }
     }
 
     /// Scalar reference conv2d (channel-last [H,W,Cin] -> [OH,OW,Cout] with

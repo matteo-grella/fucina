@@ -76,6 +76,7 @@ pub const kernels = struct {
     pub const causalDepthwiseConv1dBackwardKernelInto = vector.conv.causalDepthwiseConv1dBackwardKernelInto;
     pub const causalConv1dInto = vector.conv.causalConv1dInto;
     pub const conv2dInto = vector.conv.conv2dInto;
+    pub const conv2dDepthwiseInto = vector.conv.conv2dDepthwiseInto;
     pub const conv2dBackwardInputInto = vector.conv.conv2dBackwardInputInto;
     pub const conv2dBackwardWeightInto = vector.conv.conv2dBackwardWeightInto;
     pub const im2colInto = vector.conv.im2colInto;

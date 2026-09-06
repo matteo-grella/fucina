@@ -583,3 +583,70 @@ test "col2im1d backward: hand-computed gather transpose + rejects short gy" {
     try std.testing.expectError(tensor.TensorError.ShapeMismatch, ctx.col2im1dBackward(&short_gy, 2, 1, 2, 2, 0));
     try std.testing.expectError(tensor.TensorError.InvalidShape, ctx.col2im1dBackward(&gy, 2, 1, 2, 0, 0));
 }
+
+test "conv2d: the depthwise route is bitwise the direct kernel" {
+    // groups == cin == cout with one input channel per group takes the
+    // channel-vectorized tap-major kernel; over strides, padding, tap
+    // shapes, bias and odd channel counts (vector tails) its output is
+    // bit-identical to the generic direct kernel it replaces.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    const kernels = backend_mod.kernels;
+
+    const Case = struct { h: usize, w: usize, c: usize, kh: usize, kw: usize, stride: [2]usize, pad: [2]usize, bias: bool };
+    const cases = [_]Case{
+        .{ .h = 7, .w = 9, .c = 5, .kh = 3, .kw = 3, .stride = .{ 1, 1 }, .pad = .{ 1, 1 }, .bias = true },
+        .{ .h = 8, .w = 8, .c = 13, .kh = 3, .kw = 3, .stride = .{ 2, 2 }, .pad = .{ 1, 1 }, .bias = false },
+        .{ .h = 6, .w = 5, .c = 64, .kh = 5, .kw = 3, .stride = .{ 1, 2 }, .pad = .{ 2, 0 }, .bias = true },
+        .{ .h = 9, .w = 4, .c = 17, .kh = 2, .kw = 2, .stride = .{ 2, 1 }, .pad = .{ 0, 1 }, .bias = false },
+        .{ .h = 12, .w = 12, .c = 32, .kh = 3, .kw = 3, .stride = .{ 1, 1 }, .pad = .{ 1, 1 }, .bias = true },
+    };
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    for (cases) |cs| {
+        const in_data = try allocator.alloc(f32, cs.h * cs.w * cs.c);
+        defer allocator.free(in_data);
+        for (in_data) |*v| v.* = rand.floatNorm(f32);
+        const w_data = try allocator.alloc(f32, cs.c * cs.kh * cs.kw);
+        defer allocator.free(w_data);
+        for (w_data) |*v| v.* = rand.floatNorm(f32) * 0.5;
+        const b_data = try allocator.alloc(f32, cs.c);
+        defer allocator.free(b_data);
+        for (b_data) |*v| v.* = rand.floatNorm(f32);
+
+        var input = try ctx.fromSlice(.f32, .{ cs.h, cs.w, cs.c }, in_data);
+        defer input.deinit();
+        var weight = try ctx.fromSlice(.f32, .{ cs.c, cs.kh, cs.kw, 1 }, w_data);
+        defer weight.deinit();
+        var bias = try ctx.fromSlice(.f32, .{cs.c}, b_data);
+        defer bias.deinit();
+
+        // The depthwise route through the public entry.
+        var got = try ctx.conv2d(&input, &weight, if (cs.bias) &bias else null, cs.stride, cs.pad, cs.c);
+        defer got.deinit();
+
+        // The generic direct kernel on the same geometry.
+        const oh = (cs.h + 2 * cs.pad[0] - cs.kh) / cs.stride[0] + 1;
+        const ow = (cs.w + 2 * cs.pad[1] - cs.kw) / cs.stride[1] + 1;
+        var want = try ctx.empty(.f32, .{ oh, ow, cs.c });
+        defer want.deinit();
+        kernels.conv2dInto(ctx.pc(), &want, &input, &weight, if (cs.bias) b_data else null, .{
+            .h = cs.h,
+            .w = cs.w,
+            .cin = cs.c,
+            .oh = oh,
+            .ow = ow,
+            .cout = cs.c,
+            .kh = cs.kh,
+            .kw = cs.kw,
+            .stride_h = cs.stride[0],
+            .stride_w = cs.stride[1],
+            .pad_h = cs.pad[0],
+            .pad_w = cs.pad[1],
+            .groups = cs.c,
+        });
+        try std.testing.expectEqualSlices(f32, want.dataConst(), got.dataConst());
+    }
+}

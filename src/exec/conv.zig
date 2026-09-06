@@ -395,6 +395,43 @@ fn conv2dImpl(
         return out_3d;
     }
 
+    const dims: backend_mod.Conv2dDims = .{
+        .h = h,
+        .w = wd,
+        .cin = cin,
+        .oh = oh,
+        .ow = ow,
+        .cout = cout,
+        .kh = kh,
+        .kw = kw,
+        .stride_h = stride[0],
+        .stride_w = stride[1],
+        .pad_h = pad[0],
+        .pad_w = pad[1],
+        .groups = groups,
+    };
+
+    // Depthwise (groups == cin == cout, one input channel per group): the
+    // channel-vectorized kernel over a tap-major repack of the weight
+    // (`[KH·KW, C]`, one small pooled scratch per call). Bit-identical to
+    // the direct kernel below (same tap order, same f32 arithmetic).
+    if (groups == cin and cout == cin and cin_pg == 1) {
+        var taps = try ctx.empty(.f32, .{ kh * kw, cin });
+        defer taps.deinit();
+        const src = ww.tensor().dataConst();
+        const dst = taps.data();
+        const tap_count = kh * kw;
+        for (0..tap_count) |t| {
+            for (0..cin) |c| dst[t * cin + c] = src[c * tap_count + t];
+        }
+        var out = try ctx.empty(.f32, .{ oh, ow, cout });
+        errdefer out.deinit();
+        ctx.enableNativeVectorPoolForWork(oh * ow * cout * tap_count, parallel.vector_elementwise_len_threshold);
+        kernels.conv2dDepthwiseInto(ctx.pc(), &out, ii.tensor(), taps.dataConst(), bias_slice, dims);
+        if (fused_relu) reluInPlace(ctx, &out);
+        return out;
+    }
+
     var out = try ctx.empty(.f32, .{ oh, ow, cout });
     errdefer out.deinit();
     // Enable the worker pool so conv2d threads over output rows when the conv
