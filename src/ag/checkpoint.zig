@@ -155,9 +155,11 @@ fn checkpointImpl(ctx: *ExecContext, comptime block: anytype, extra: anytype, in
         }
 
         // The block result is an op result, so the inner scope owns it (along
-        // with everything else the block built); it is not deinited here.
+        // with everything else the block built); it is not deinited here. A
+        // retained view keeps its storage alive past the scope close — the
+        // same bytes, no copy — while every other block intermediate goes.
         const out = try callBlock(block, ctx, extra, &consts);
-        break :value try out.value.clone(ctx.allocator());
+        break :value try out.value.cloneView();
     };
     errdefer out_value.deinit();
 
@@ -335,12 +337,14 @@ fn CheckpointBackward(comptime block: anytype, comptime Extra: type, comptime In
             out_state.setGrad(try gy.cloneView());
             try core.backwardGradSerial(ctx, &.{out_state}, &.{recomputed.asRawTensor()});
 
-            // Deep-copy the input gradients out of the recompute-local leaf
-            // states: they must survive the scope close below. On error the
-            // engine deinits any slots already filled (core.executeBackward).
+            // Retain views of the input gradients out of the recompute-local
+            // leaf states: the views keep the accumulators' storage alive
+            // past the scope close below (no copy; the states themselves
+            // die with the scope). On error the engine deinits any slots
+            // already filled (core.executeBackward).
             inline for (0..n) |i| {
                 if (core.needs(self, i)) {
-                    out[i] = (try rewrapped[i].grad_state.?.gradClone(ctx.allocator())) orelse
+                    out[i] = (try rewrapped[i].grad_state.?.gradView()) orelse
                         return AgError.MissingBackwardGradient;
                 }
             }

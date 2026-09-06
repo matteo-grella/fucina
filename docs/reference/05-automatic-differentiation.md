@@ -493,8 +493,9 @@ pub fn checkpointWithContext(ctx: *ExecContext, comptime block: anytype,
 
 Recompute-in-backward: the forward run executes `block` on grad-free
 constants inside an inner exec scope and retains only refcounted views of
-the block **inputs** plus one deep copy of the block **output** — every
-intermediate is freed the moment the scope closes. When gradients reach the
+the block **inputs** and of the block **output** (the output's storage
+survives the scope through that view; no copy) — every other intermediate
+is freed the moment the scope closes. When gradients reach the
 checkpoint node during backward, the block is re-run on the stored input
 views to rebuild the subgraph, the incoming gradient is installed on the
 recomputed output with `setGrad` (which is why pre-seeded outputs are never

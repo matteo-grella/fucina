@@ -93,10 +93,10 @@ pub fn Ops(comptime Self: type) type {
                 if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = matmul_dtype, .tags = out_tags }), ctx, value, self.requiresGrad() or other_ptr.requiresGrad());
                 if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(out_tags, ctx, value);
                 const Record = Matmul2DBackward(kind == .trans_b);
-                var saved_left = try self.asRawTensor().cloneView();
-                errdefer saved_left.deinit();
-                var saved_right = try other_ptr.asRawTensor().cloneView();
-                errdefer saved_right.deinit();
+                var saved_left = try saveOperandFor(other_ptr.grad_state, self.asRawTensor());
+                errdefer if (saved_left) |*v| v.deinit();
+                var saved_right = try saveOperandFor(self.grad_state, other_ptr.asRawTensor());
+                errdefer if (saved_right) |*v| v.deinit();
                 return finishOp(out_tags, ctx, value, Record{
                     .parents = .{ self.grad_state, other_ptr.grad_state },
                     .left = saved_left,
@@ -108,15 +108,27 @@ pub fn Ops(comptime Self: type) type {
             if (comptime !differentiable) return finishTypedNoGrad(Tensor(.{ .dtype = matmul_dtype, .tags = out_tags }), ctx, value, self.requiresGrad() or other_ptr.requiresGrad());
             if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(out_tags, ctx, value);
             const Record = BmmBackward(kind);
-            var saved_left = try self.asRawTensor().cloneView();
-            errdefer saved_left.deinit();
-            var saved_right = try other_ptr.asRawTensor().cloneView();
-            errdefer saved_right.deinit();
+            var saved_left = try saveOperandFor(other_ptr.grad_state, self.asRawTensor());
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right = try saveOperandFor(self.grad_state, other_ptr.asRawTensor());
+            errdefer if (saved_right) |*v| v.deinit();
             return finishOp(out_tags, ctx, value, Record{
                 .parents = .{ self.grad_state, other_ptr.grad_state },
                 .left = saved_left,
                 .right = saved_right,
+                .left_shape = self.asRawTensor().shape,
+                .right_shape = other_ptr.asRawTensor().shape,
             });
+        }
+
+        /// The operand save of a contraction record: an operand's value is
+        /// read only by the OTHER operand's gradient, so it is retained
+        /// only when that operand (`reader`) requires one — `x · constant`
+        /// retains nothing of `x`, and a large activation is not pinned
+        /// past its last use by a weight that never trains.
+        fn saveOperandFor(reader: ?*core.GradState, operand: *const RawTensor) !?RawTensor {
+            if (reader == null) return null;
+            return try operand.cloneView();
         }
 
         pub fn dot(self: *const Self, ctx: *ExecContext, other: anytype, comptime contract_tag: Tag) !Tensor(dotResultTags(tags, TensorObject(@TypeOf(other)).axis_tags, contract_tag)) {
@@ -174,10 +186,10 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
             const Record = DotBackward(tags, other_tags, contract_tag);
-            var saved_left = try self.asRawTensor().cloneView();
-            errdefer saved_left.deinit();
-            var saved_right = try other_ptr.asRawTensor().cloneView();
-            errdefer saved_right.deinit();
+            var saved_left = try saveOperandFor(other_ptr.grad_state, self.asRawTensor());
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right = try saveOperandFor(self.grad_state, other_ptr.asRawTensor());
+            errdefer if (saved_right) |*v| v.deinit();
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{ self.grad_state, other_ptr.grad_state },
                 .left_shape = rawShapeArray(tags, self.asRawTensor()),
@@ -223,10 +235,10 @@ pub fn Ops(comptime Self: type) type {
             const wants_grad = self.requiresGrad() or a_ptr.requiresGrad() or b_ptr.requiresGrad();
             if (!recordsGrad(wants_grad)) return finishNoGrad(tags, ctx, value);
             const Record = AddDotBackward(tags, left_tags, right_tags, contract_tag);
-            var saved_left = try a_ptr.asRawTensor().cloneView();
-            errdefer saved_left.deinit();
-            var saved_right = try b_ptr.asRawTensor().cloneView();
-            errdefer saved_right.deinit();
+            var saved_left = try saveOperandFor(b_ptr.grad_state, a_ptr.asRawTensor());
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right = try saveOperandFor(a_ptr.grad_state, b_ptr.asRawTensor());
+            errdefer if (saved_right) |*v| v.deinit();
             return finishOp(tags, ctx, value, Record{
                 .parents = .{ self.grad_state, a_ptr.grad_state, b_ptr.grad_state },
                 .estimated_work = Record.workEstimate(a_ptr.grad_state, b_ptr.grad_state, a_ptr.asRawTensor(), b_ptr.asRawTensor()),
@@ -295,10 +307,10 @@ pub fn Ops(comptime Self: type) type {
             errdefer value.deinit();
             if (!recordsGrad(self.requiresGrad() or other_ptr.requiresGrad())) return finishNoGrad(result_tags, ctx, value);
             const Record = EinsumBackward(tags, other_tags, result_tags);
-            var saved_left = try self.asRawTensor().cloneView();
-            errdefer saved_left.deinit();
-            var saved_right = try other_ptr.asRawTensor().cloneView();
-            errdefer saved_right.deinit();
+            var saved_left = try saveOperandFor(other_ptr.grad_state, self.asRawTensor());
+            errdefer if (saved_left) |*v| v.deinit();
+            var saved_right = try saveOperandFor(self.grad_state, other_ptr.asRawTensor());
+            errdefer if (saved_right) |*v| v.deinit();
             return finishOp(result_tags, ctx, value, Record{
                 .parents = .{ self.grad_state, other_ptr.grad_state },
                 .left_shape = rawShapeArray(tags, self.asRawTensor()),

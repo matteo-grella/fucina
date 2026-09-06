@@ -5,6 +5,7 @@ const std = @import("std");
 const backend_quant = @import("../../backend.zig").quant;
 const backend_kernels = @import("../../backend.zig").kernels;
 const tensor_mod = @import("../../tensor.zig");
+const Shape = @import("../../shape.zig").Shape;
 const dtype_mod = @import("../../dtype.zig");
 const exec_mod = @import("../../exec.zig");
 const parallel = @import("../../parallel.zig");
@@ -29,73 +30,81 @@ const tagsDifference = common.tagsDifference;
 const expandGradientToTags = common.expandGradientToTags;
 const runContractionBranches = common.runContractionBranches;
 
+/// Each operand's gradient reads the OTHER operand, so a record saves an
+/// operand only when the other one requires a gradient (`x · constant`
+/// retains nothing of `x`); the ops fill `left`/`right` by that rule.
 pub fn Matmul2DBackward(comptime trans_b: bool) type {
     return struct {
         parents: [2]?*GradState,
-        left: RawTensor,
-        right: RawTensor,
+        left: ?RawTensor,
+        right: ?RawTensor,
 
         const Self = @This();
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (core.needs(self, 0)) {
                 out[0] = if (comptime trans_b)
-                    try ctx.matmul(.f32, .plain, gy, &self.right)
+                    try ctx.matmul(.f32, .plain, gy, &self.right.?)
                 else
-                    try ctx.matmul(.f32, .trans_b, gy, &self.right);
+                    try ctx.matmul(.f32, .trans_b, gy, &self.right.?);
             }
             if (core.needs(self, 1)) {
                 out[1] = if (comptime trans_b)
-                    try ctx.matmul(.f32, .trans_a, gy, &self.left)
+                    try ctx.matmul(.f32, .trans_a, gy, &self.left.?)
                 else
-                    try ctx.matmul(.f32, .trans_a, &self.left, gy);
+                    try ctx.matmul(.f32, .trans_a, &self.left.?, gy);
             }
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
-            self.left.deinit();
-            self.right.deinit();
+            if (self.left) |*value| value.deinit();
+            if (self.right) |*value| value.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);
     };
 }
 
+/// Same save rule as `Matmul2DBackward`; the operand shapes are kept
+/// apart from the saved values (a gradient's broadcast reduction needs its
+/// own operand's shape, which may be the unsaved side).
 pub fn BmmBackward(comptime kind: exec_mod.BmmKind) type {
     return struct {
         parents: [2]?*GradState,
-        left: RawTensor,
-        right: RawTensor,
+        left: ?RawTensor,
+        right: ?RawTensor,
+        left_shape: Shape,
+        right_shape: Shape,
 
         const Self = @This();
 
         pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
             if (core.needs(self, 0)) {
                 var full = switch (kind) {
-                    .plain => try ctx.bmm(.f32, .trans_b, gy, &self.right),
-                    .trans_a => try ctx.bmm(.f32, .trans_b, &self.right, gy),
-                    .trans_b => try ctx.bmm(.f32, .plain, gy, &self.right),
+                    .plain => try ctx.bmm(.f32, .trans_b, gy, &self.right.?),
+                    .trans_a => try ctx.bmm(.f32, .trans_b, &self.right.?, gy),
+                    .trans_b => try ctx.bmm(.f32, .plain, gy, &self.right.?),
                 };
                 defer full.deinit();
-                out[0] = try ctx.reduceBroadcast(&full, self.left.shape.slice());
+                out[0] = try ctx.reduceBroadcast(&full, self.left_shape.slice());
             }
 
             if (core.needs(self, 1)) {
                 var full = switch (kind) {
-                    .plain => try ctx.bmm(.f32, .trans_a, &self.left, gy),
-                    .trans_a => try ctx.bmm(.f32, .plain, &self.left, gy),
-                    .trans_b => try ctx.bmm(.f32, .trans_a, gy, &self.left),
+                    .plain => try ctx.bmm(.f32, .trans_a, &self.left.?, gy),
+                    .trans_a => try ctx.bmm(.f32, .plain, &self.left.?, gy),
+                    .trans_b => try ctx.bmm(.f32, .trans_a, gy, &self.left.?),
                 };
                 defer full.deinit();
-                out[1] = try ctx.reduceBroadcast(&full, self.right.shape.slice());
+                out[1] = try ctx.reduceBroadcast(&full, self.right_shape.slice());
             }
         }
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
-            self.left.deinit();
-            self.right.deinit();
+            if (self.left) |*value| value.deinit();
+            if (self.right) |*value| value.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -126,8 +135,10 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
         left_shape: [rawRank(left_tags.len)]usize,
         right_shape: [rawRank(right_tags.len)]usize,
         estimated_work: usize,
-        left_value: RawTensor,
-        right_value: RawTensor,
+        /// Saved only when the OTHER operand requires a gradient (the
+        /// `Matmul2DBackward` rule).
+        left_value: ?RawTensor,
+        right_value: ?RawTensor,
 
         const Self = @This();
 
@@ -136,13 +147,13 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
         }
 
         pub fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &self.right_value, left_recover_tags);
+            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, right_tags, &self.right_value.?, left_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(left_recover_tags, left_tags, &grad, self.left_shape);
         }
 
         pub fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value, right_recover_tags);
+            var grad = try tag_ops.taggedEinsum(.f32, out_tags, gy, ctx, left_tags, &self.left_value.?, right_recover_tags);
             defer grad.deinit();
             out.* = try expandGradientToTags(right_recover_tags, right_tags, &grad, self.right_shape);
         }
@@ -176,8 +187,8 @@ pub fn EinsumBackward(comptime left_tags: anytype, comptime right_tags: anytype,
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
-            self.left_value.deinit();
-            self.right_value.deinit();
+            if (self.left_value) |*value| value.deinit();
+            if (self.right_value) |*value| value.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);
@@ -194,8 +205,9 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
     return struct {
         parents: [3]?*GradState,
         estimated_work: usize,
-        left_value: RawTensor,
-        right_value: RawTensor,
+        /// Saved only when the OTHER factor requires a gradient.
+        left_value: ?RawTensor,
+        right_value: ?RawTensor,
 
         const Self = @This();
 
@@ -212,11 +224,11 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
         }
 
         pub fn backwardLeft(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, right_tags, &self.right_value, left_tags);
+            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, right_tags, &self.right_value.?, left_tags);
         }
 
         pub fn backwardRight(self: *const Self, ctx: *ExecContext, gy: *const RawTensor, out: *?RawTensor) !void {
-            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, left_tags, &self.left_value, right_tags);
+            out.* = try tag_ops.taggedEinsum(.f32, base_tags, gy, ctx, left_tags, &self.left_value.?, right_tags);
         }
 
         pub fn workEstimate(left_parent: ?*GradState, right_parent: ?*GradState, left: *const RawTensor, right: *const RawTensor) usize {
@@ -232,8 +244,8 @@ pub fn AddDotBackward(comptime base_tags: anytype, comptime left_tags: anytype, 
 
         pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
             _ = allocator;
-            self.left_value.deinit();
-            self.right_value.deinit();
+            if (self.left_value) |*value| value.deinit();
+            if (self.right_value) |*value| value.deinit();
         }
 
         pub const vtable = core.recordVTable(Self);

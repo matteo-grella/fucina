@@ -338,3 +338,55 @@ test "every composed op differentiates unscoped exactly as it does under an exec
     try expectUnscopedMatchesScoped(&ctx, RC, .{ 3, 4 }, &m34, Losses.slice);
     try expectUnscopedMatchesScoped(&ctx, Tensor(.{ .s, .i }), .{ 2, 3 }, &m23, Losses.einsumMany);
 }
+
+test "records retain only the operands the requested derivatives read" {
+    // Each operand's gradient reads the OTHER operand, so `x * c` and
+    // `x · w` with a constant `c`/`w` save the constant (dx reads it) and
+    // nothing of `x` (no derivative reads it): the record holds no
+    // reference on x's storage. With both operands variables both are saved.
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const Mat = Tensor(.{ .r, .k });
+    const Wt = Tensor(.{ .n, .k });
+    var x = try Mat.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer x.deinit();
+    var c = try Mat.fromSlice(&ctx, .{ 2, 2 }, &.{ 5, 6, 7, 8 });
+    defer c.deinit();
+    var w = try Wt.fromSlice(&ctx, .{ 3, 2 }, &.{ 1, 0, 0, 1, 1, 1 });
+    defer w.deinit();
+    const refs = struct {
+        fn of(t: anytype) u32 {
+            return t.asRawTensor().buffer.refs.load(.acquire);
+        }
+    };
+    try std.testing.expectEqual(@as(u32, 1), refs.of(&x));
+
+    var y = try x.mul(&ctx, &c);
+    defer y.deinit();
+    try std.testing.expectEqual(@as(u32, 1), refs.of(&x)); // not saved
+    try std.testing.expectEqual(@as(u32, 2), refs.of(&c)); // saved for dx
+
+    var d = try x.dot(&ctx, &w, .k);
+    defer d.deinit();
+    try std.testing.expectEqual(@as(u32, 1), refs.of(&x));
+    try std.testing.expectEqual(@as(u32, 2), refs.of(&w));
+
+    var v = try Mat.variableFromSlice(&ctx, .{ 2, 2 }, &.{ 1, 1, 1, 1 });
+    defer v.deinit();
+    var both = try x.mul(&ctx, &v);
+    defer both.deinit();
+    try std.testing.expectEqual(@as(u32, 2), refs.of(&x));
+    try std.testing.expectEqual(@as(u32, 2), refs.of(&v));
+
+    // The gradients are the usual ones.
+    var s1 = try y.sumAll(&ctx);
+    defer s1.deinit();
+    try s1.backward(&ctx);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 5, 6, 7, 8 }, try gx.dataConst());
+}

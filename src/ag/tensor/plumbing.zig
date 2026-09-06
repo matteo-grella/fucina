@@ -194,10 +194,16 @@ pub fn Mod(comptime ag_tensor: type) type {
         /// success; on error it stays with the caller.
         fn finishPointwise(comptime op: PointwiseOp, comptime OutT: type, comptime left_tags: anytype, comptime right_tags: anytype, comptime result_tags: anytype, ctx: *ExecContext, value: RawTensor, left_parent: ?*GradState, right_parent: ?*GradState, left_tensor: *const RawTensor, right_tensor: *const RawTensor) !OutT {
             const Record = PointwiseBackward(op, left_tags, right_tags, result_tags);
-            const saves = comptime (op == .mul or op == .div or op == .max or op == .min);
-            var saved_left: ?RawTensor = if (saves) try left_tensor.cloneView() else null;
+            // Each derivative reads only the operands it needs, so a record
+            // saves only those: mul's dx reads the right operand and dy the
+            // left; div's dx reads the right, dy both; max/min's winner
+            // masks read both. `x * constant` retains nothing of `x`.
+            const reads_both = comptime (op == .max or op == .min);
+            const save_left = reads_both or ((comptime (op == .mul or op == .div)) and right_parent != null);
+            const save_right = reads_both or (comptime op == .div) or ((comptime op == .mul) and left_parent != null);
+            var saved_left: ?RawTensor = if (save_left) try left_tensor.cloneView() else null;
             errdefer if (saved_left) |*v| v.deinit();
-            var saved_right: ?RawTensor = if (saves) try right_tensor.cloneView() else null;
+            var saved_right: ?RawTensor = if (save_right) try right_tensor.cloneView() else null;
             errdefer if (saved_right) |*v| v.deinit();
             return finishOp(OutT.axis_tags, ctx, value, Record{
                 .parents = .{ left_parent, right_parent },
