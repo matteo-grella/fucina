@@ -466,10 +466,14 @@ fn matmulTransB2DViaShadow(
 }
 
 /// Mixed-precision `a[m,k] x b[n,k]^T -> f32 [m,n]` over a 16-bit weight
-/// (`dtype` is `.f16` or `.bf16`; f32 accumulation). The f16 arm casts the
-/// LHS to f16 for the f16-operand streaming kernel; the bf16 arm keeps the
-/// LHS f32 (the kernel widens the bf16 RHS in-register), so only
-/// contiguity is prepared. Deliberately no default BLAS arm: sgemm would
+/// (`dtype` is `.f16` or `.bf16`). The f16 arm casts the LHS to f16 for
+/// the f16-operand streaming kernel; the bf16 arm keeps the LHS f32 (the
+/// kernel widens the bf16 RHS in-register), so only contiguity is
+/// prepared. The accumulator is the kernel's (`vector/gemm.zig`): f32 for
+/// the bf16 arm everywhere and for the f16 arm off aarch64; f16 for the
+/// f16 arm on aarch64 (native `fmla.8h`, docs/reference/09). The opt-in
+/// shadow arm below accumulates in f32 over the exactly widened weight
+/// and does not round the activations to f16. Deliberately no default BLAS arm: sgemm would
 /// need both operands widened to f32, and a PER-CALL RHS widen alone costs
 /// an order of magnitude more than the streaming kernels' whole GEMM at
 /// LLM shapes (bench-f16gemm: lm-head 4.6 ms pooled vs ~50 ms of widen); a
