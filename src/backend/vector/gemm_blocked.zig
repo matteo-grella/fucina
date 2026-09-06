@@ -198,7 +198,14 @@ fn gemmBlockedImpl(
     defer workspace_lock.unlock();
 
     const threads = @max(@as(usize, 1), parallel.cpuThreadCount(parallel.vector_max_threads));
-    const num_ic_blocks = (m + params.mc - 1) / params.mc;
+    // The row block follows the row count and the team: small-m shapes
+    // split by ic block alone left most participants idle (253 rows at
+    // mc = 128 are two blocks for ten), so the block shrinks until every
+    // participant has one. 253x1024x1024 NT on an M1 Max: 155 -> 368
+    // GF/s; shapes whose blocks already cover the team keep `params.mc`
+    // (2048^3 at mc = 32 would lose 597 -> 355).
+    const mc = blockRowsFor(params.mc, m, threads);
+    const num_ic_blocks = (m + mc - 1) / mc;
 
     var jc: usize = 0;
     while (jc < n) : (jc += params.nc) {
@@ -237,7 +244,7 @@ fn gemmBlockedImpl(
                     .nc_eff = nc_eff,
                     .pc = pc,
                     .kc_eff = kc_eff,
-                    .mc = params.mc,
+                    .mc = mc,
                     .num_j_chunks = num_j_chunks,
                     .num_nr_panels = num_nr_panels,
                     .cell_start = ti * num_cells / task_count,
@@ -276,6 +283,16 @@ const BlockedTask = struct {
     cell_end: usize,
     accumulate: bool,
 };
+
+/// The row block for `m` rows over `threads` participants: `mc` when its
+/// blocks already cover the team, else the smallest `mr`-aligned block
+/// that does (never below one microkernel row panel).
+fn blockRowsFor(mc: usize, m: usize, threads: usize) usize {
+    if ((m + mc - 1) / mc >= threads) return mc;
+    const per_thread = (m + threads - 1) / threads;
+    const aligned = ((per_thread + mr - 1) / mr) * mr;
+    return @max(mr, @min(mc, aligned));
+}
 
 fn taskRunner(comptime orient: Orientation) fn (*const BlockedTask) void {
     return struct {

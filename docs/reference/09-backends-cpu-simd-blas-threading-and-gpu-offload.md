@@ -482,7 +482,13 @@ Within the pure-Zig tier there are two paths:
   `mr = 8, nr = 12` on aarch64 (24 four-wide accumulators), `mr = 6,
   nr = 2·vector_len` elsewhere. Default `BlockParams`: `kc = 128` (aarch64) /
   `512` (x86, `x86_default_kc`), `mc = 128`, `nc = 1024`, bounded by
-  `kc_max = 512`, `mc_max = 256`, `nc_max = 1024`;
+  `kc_max = 512`, `mc_max = 256`, `nc_max = 1024`. The row block follows
+  the row count and the team (`blockRowsFor`): when `ceil(m / mc)` blocks
+  would not cover the participants, `mc` shrinks to the smallest
+  `mr`-aligned block that does, so a 253-row shape splits into eight
+  blocks for ten participants instead of two (253×1024×1024 NT on an M1
+  Max: 155 → 368 GF/s; 2048³, whose blocks already cover the team, keeps
+  `mc = 128`);
   `gemmBlockedWithParams` **panics** on out-of-bounds params (they would
   overrun the static workspace, and the bench sweep feeds runtime params in
   ReleaseFast where asserts vanish). Because backend kernels must stay
