@@ -577,7 +577,10 @@ pub fn e8m0ToF32Half(x: u8) f32 {
 }
 
 pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
-    if (comptime isa.has_neon) {
+    // Guarded on dotprod (not just aarch64), the same way smmlaI8x16 below is
+    // guarded on i8mm: ARMv8.0-A cores are aarch64 but have no FEAT_DotProd,
+    // and the assembler rejects `sdot` for them. They take the portable path.
+    if (comptime isa.has_aarch64_dotprod) {
         var out = acc;
         asm ("sdot %[out].4s, %[a].16b, %[b].16b"
             : [out] "+w" (out),
@@ -590,7 +593,7 @@ pub fn sdotI8x16(acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
 }
 
 pub fn sdotI8x16Lane(comptime lane: comptime_int, acc: QKV4i32, a: QKV16i8, b: QKV16i8) QKV4i32 {
-    if (comptime isa.has_neon) {
+    if (comptime isa.has_aarch64_dotprod) {
         var out = acc;
         asm ("sdot %[out].4s, %[a].16b, %[b].4b[" ++ std.fmt.comptimePrint("{d}", .{lane}) ++ "]"
             : [out] "+w" (out),

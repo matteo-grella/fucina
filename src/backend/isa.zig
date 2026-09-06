@@ -20,11 +20,18 @@ const build_options = @import("build_options");
 pub const is_aarch64 = builtin.cpu.arch == .aarch64;
 pub const is_x86_64 = builtin.cpu.arch == .x86_64;
 
-/// NEON with FEAT_DotProd (`sdot`): the aarch64 baseline this repo assumes.
-/// Every aarch64 arm emits `sdot` ungated (LLVM's asm parser does not
-/// feature-check inline asm), so pre-v8.2 cores without DotProd are outside
-/// the supported set; there is no portable aarch64 fallback.
+/// Baseline ARMv8.0-A NEON: `tbl`, `fcvtns`, `fcvtas` — every aarch64 core
+/// has these, so the arms guarded by this flag are unconditional on the
+/// architecture.
 pub const has_neon = is_aarch64;
+
+/// FEAT_DotProd (`sdot`). Separate from `has_neon` because it is an ARMv8.2-A
+/// feature: ARMv8.0-A cores (Cortex-A53/A57/A72 — the Raspberry Pi 4 and
+/// Compute Module 4 among them) are aarch64 but have no `sdot`, and the
+/// assembler rejects the instruction for those targets rather than letting a
+/// binary reach the field, so an ungated arm is a build failure there. Those
+/// cores take the `portable` tier and the exact-integer `*Portable` twins.
+pub const has_aarch64_dotprod = is_aarch64 and std.Target.aarch64.featureSetHas(builtin.cpu.features, .dotprod);
 
 /// SMMLA is a separate AArch64 feature from SDOT; Apple M1-class CPUs have
 /// FEAT_DotProd but not FEAT_I8MM, so the MMLA arms stay gated on it.
@@ -90,7 +97,7 @@ pub const tier: Tier = if (reference)
     .scalar
 else if (has_aarch64_i8mm)
     .neon_i8mm
-else if (has_neon)
+else if (has_aarch64_dotprod)
     .neon_sdot
 else if (has_x86_vnni_ymm)
     .x86_vnni
@@ -102,10 +109,12 @@ else
 test "tier agrees with the capability booleans" {
     switch (tier) {
         .scalar => try std.testing.expect(reference),
-        .neon_i8mm => try std.testing.expect(!reference and has_neon and has_aarch64_i8mm),
-        .neon_sdot => try std.testing.expect(!reference and has_neon and !has_aarch64_i8mm),
-        .x86_vnni => try std.testing.expect(!reference and !has_neon and has_x86_vnni_ymm),
-        .x86_avx2 => try std.testing.expect(!reference and !has_neon and !has_x86_vnni_ymm and has_x86_avx2),
-        .portable => try std.testing.expect(!reference and !has_neon and !has_x86_avx2),
+        .neon_i8mm => try std.testing.expect(!reference and has_aarch64_i8mm),
+        .neon_sdot => try std.testing.expect(!reference and has_aarch64_dotprod and !has_aarch64_i8mm),
+        .x86_vnni => try std.testing.expect(!reference and !is_aarch64 and has_x86_vnni_ymm),
+        .x86_avx2 => try std.testing.expect(!reference and !is_aarch64 and !has_x86_vnni_ymm and has_x86_avx2),
+        // aarch64 without FEAT_DotProd lands here alongside every non-NEON,
+        // non-AVX2 target: no int8-dot instruction to reach for.
+        .portable => try std.testing.expect(!reference and !has_aarch64_dotprod and !has_x86_vnni_ymm and !has_x86_avx2),
     }
 }
