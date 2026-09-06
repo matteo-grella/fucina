@@ -23,8 +23,44 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+### Added
+
+- `packMatmulRhs(.tq2_0)` builds the 4-column-interleaved ternary
+  container (`QuantizedMatmulRhsTQ2_0x4`, `PackedRhs(.tq2_0)`), the
+  sdot-lane kernel the PTQTP loader already used privately, now behind
+  the public packed-RHS entries (`matmulQuant`, `dotPacked`): bitwise the
+  compact kernel, about 10% faster at decode widths; `n % 4 == 0`.
+- The typed f64 GEMM takes `cblas_dgemm` on BLAS builds, on the same
+  cells as the f32 sgemm arm (`m, n, k ≥ 16`).
+
 ### Changed
 
+- The blocked f32 GEMM derives its row block from the row count and the
+  team: when `ceil(m / mc)` blocks would leave participants idle, `mc`
+  shrinks to the smallest `mr`-aligned block that covers them.
+  253×1024×1024 NT on an M1 Max: 155 → 368 GF/s (2.4×) through the
+  blocked kernel, and `bench-gemm`'s dispatch column follows (148 → 416
+  GF/s); 2048³ keeps `mc = 128` and its throughput.
+- A mutable access or an in-place op on read-only storage
+  (`fromBorrowedConstSlice`) fails with `error.ReadOnlyStorage`
+  (`TensorError`, so `fucina.Error`): `data()`, `addScaledInPlace`,
+  `addAxisVectorInPlace` and the exec in-place entries check the storage
+  first. The constructor's constness is now enforced, not a caller
+  obligation.
+- Backward records save only the operands a requested derivative reads:
+  mul's dx reads the right operand and dy the left, div's dx the right and
+  dy both, and every contraction (`matmul`, `dot`, `einsum`, `addDot`,
+  batched forms) reads the OTHER operand, so `x · constant` retains
+  nothing of `x` (a 1024×4096 activation is no longer pinned by a weight
+  that never trains). Checkpoint keeps a retained view of the block output
+  and hands back views of the recomputed gradients instead of copies.
+- The elementwise maps `where`, `maskedFill`, `compare`, `compareScalar`,
+  `logical`, `logicalNot`, `addScalar`, `powScalar`, the casts and the
+  typed (f16/bf16/f64/integer) binary kernels split over the pool above
+  the elementwise threshold, like the f32 maps; each element depends only
+  on its own inputs, so the split is bitwise the serial loop.
+- The cumprod backward of a row containing a zero is O(n) (division-free
+  Horner forms) instead of the O(n²) expansion; torch semantics unchanged.
 - A backward that reaches a record whose saved value was mutated after
   the forward fails with `error.SavedValueMutated` (`AgError`, so
   `fucina.Error`) before the VJP runs, instead of differentiating values
