@@ -461,3 +461,39 @@ test "dense packed matmul placed on the cpu never reaches the accelerator" {
     defer auto.deinit();
     for (pinned.dataConst(), auto.dataConst()) |p, q| try std.testing.expectApproxEqAbs(q, p, 2e-3);
 }
+
+test "f64 plain matmul matches the f64 reference at BLAS shapes" {
+    // The typed f64 family's dgemm arm (BLAS builds) and the vector kernel
+    // (the rest) agree with a naive f64 loop to double precision.
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const m = 48;
+    const k = 40;
+    const n = 56;
+    const a_data = try allocator.alloc(f64, m * k);
+    defer allocator.free(a_data);
+    const b_data = try allocator.alloc(f64, k * n);
+    defer allocator.free(b_data);
+    var prng = std.Random.DefaultPrng.init(64);
+    const rand = prng.random();
+    for (a_data) |*v| v.* = rand.floatNorm(f64);
+    for (b_data) |*v| v.* = rand.floatNorm(f64);
+    var a = try ctx.fromSlice(.f64, &.{ m, k }, a_data);
+    defer a.deinit();
+    var b = try ctx.fromSlice(.f64, &.{ k, n }, b_data);
+    defer b.deinit();
+
+    var out = try ctx.matmul(.f64, .plain, &a, &b);
+    defer out.deinit();
+    const got = out.dataConst();
+    for (0..m) |i| {
+        for (0..n) |j| {
+            var acc: f64 = 0;
+            for (0..k) |p| acc += a_data[i * k + p] * b_data[p * n + j];
+            try std.testing.expectApproxEqAbs(acc, got[i * n + j], 1e-12 * (1 + @abs(acc)));
+        }
+    }
+}

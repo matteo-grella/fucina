@@ -1,4 +1,5 @@
-//! The CBLAS provider seam: the one `extern fn cblas_sgemm`, the vendor
+//! The CBLAS provider seam: the `extern fn cblas_sgemm`/`cblas_dgemm`
+//! pair, the vendor
 //! thread-count setters, the once-only thread configuration, and the MKL
 //! nested-scope serialization live here, behind two call spellings
 //! (`gemm` over an `ops.MatmulKind` orientation with derived leading
@@ -38,6 +39,23 @@ extern fn cblas_sgemm(
     ldb: c_int,
     beta: f32,
     c: [*]f32,
+    ldc: c_int,
+) void;
+
+extern fn cblas_dgemm(
+    order: c_int,
+    trans_a: c_int,
+    trans_b: c_int,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: f64,
+    a: [*]const f64,
+    lda: c_int,
+    b: [*]const f64,
+    ldb: c_int,
+    beta: f64,
+    c: [*]f64,
     ldc: c_int,
 ) void;
 
@@ -101,6 +119,38 @@ pub fn gemm(
     if (comptime !available) unreachable;
     ensureThreadsConfigured();
     cblas_sgemm(
+        cblas_row_major,
+        cblasTrans(kind == .trans_a),
+        cblasTrans(kind == .trans_b),
+        cDim(m),
+        cDim(n),
+        cDim(k),
+        1.0,
+        a.ptr,
+        cDim(ldA(kind, m, k)),
+        b.ptr,
+        cDim(ldB(kind, n, k)),
+        beta,
+        c.ptr,
+        cDim(n),
+    );
+}
+
+/// The f64 twin of `gemm` (`cblas_dgemm`): the typed f64 GEMM family's
+/// BLAS arm, `beta` 0 stores and 1 accumulates.
+pub fn gemmF64(
+    kind: ops.MatmulKind,
+    m: usize,
+    n: usize,
+    k: usize,
+    a: []const f64,
+    b: []const f64,
+    beta: f64,
+    c: []f64,
+) void {
+    if (comptime !available) unreachable;
+    ensureThreadsConfigured();
+    cblas_dgemm(
         cblas_row_major,
         cblasTrans(kind == .trans_a),
         cblasTrans(kind == .trans_b),

@@ -262,7 +262,8 @@ pub fn dot(
 /// async GPU GEMM overwrites its destination and has no accumulate seam)
 /// -> BLAS (beta = 1 for accumulate) -> the vector kernels; the
 /// mixed-precision `.trans_b` streams route GPU -> vector; the typed NN
-/// family is vector-only.
+/// family is vector-only except f64, which takes the BLAS dgemm arm on
+/// the sgemm cells.
 pub fn gemm(
     pc: ParallelConfig,
     comptime g: ops.Gemm,
@@ -304,6 +305,25 @@ pub fn gemm(
         if (comptime build_options.use_gpu and !isa.reference) {
             if (gpu.shouldUseGpuBf16ForRhs(b, m, n, k)) {
                 if (gpu.gemmBf16NtAsync(a, b, out, m, n, k)) return;
+            }
+        }
+    } else if (comptime g.a == .f64 and g.b == .f64 and g.out == .f64 and !isa.reference) {
+        // The f64 family's BLAS arm (dgemm), the same cells as the f32
+        // sgemm arm; the vector f64 kernel keeps the small cells and the
+        // no-BLAS builds.
+        if (comptime build_options.use_blas) {
+            if (shouldUseBlas(m, n, k)) {
+                blas.gemmF64(
+                    g.kind,
+                    m,
+                    n,
+                    k,
+                    vector_common.contiguousDataConstOf(.f64, a, m * k),
+                    vector_common.contiguousDataConstOf(.f64, b, k * n),
+                    if (g.accumulate) 1.0 else 0.0,
+                    vector_common.contiguousDataOf(.f64, out, m * n),
+                );
+                return;
             }
         }
     }

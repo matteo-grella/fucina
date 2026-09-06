@@ -425,6 +425,8 @@ in a fixed order, each tier compiled in only when its build flag is set:
    depends on the GPU.
 2. **BLAS** (`-Dblas≠none`): if `shouldUseBlas(m, n, k)` — all of `m, n, k ≥
    16` and each dimension fits in `c_int` — the call goes to `cblas_sgemm`
+   (the typed f64 family takes `cblas_dgemm` on the same cells; f16/bf16
+   stay on the streaming kernels)
    (row-major, `alpha = 1`, `beta = 0`, overwrite). `gemmBatched` requires
    `batch_count > 1` on top and loops `cblas_sgemm` per matrix.
 3. **Pure-Zig vector GEMM** otherwise.
