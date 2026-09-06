@@ -878,6 +878,22 @@ fn releaseAsyncSlot(slot: *AsyncSlot) void {
     slot.busy = false;
 }
 
+/// The rollback of a failed submission: both work streams synchronized,
+/// so nothing enqueued before the failure still touches the slot, the
+/// dependencies' outputs or the pinned inputs, and the caller may recycle
+/// them and fall back to the CPU. False when the fence itself failed: the
+/// device activity is unproven, and the resources are quarantined exactly
+/// as a failed completion's (`CudaWorkFor.destroy`) — the slot stays busy,
+/// the holder and its dependency references leak.
+fn rollbackFence(ctx: *Ctx) bool {
+    const d = &ctx.driver;
+    const upload_ok = d.cuStreamSynchronize(ctx.upload_stream) == 0;
+    const compute_ok = d.cuStreamSynchronize(ctx.stream) == 0;
+    if (upload_ok and compute_ok) return true;
+    std.log.warn("cuda: rollback fence failed after a failed submission; quarantining its slot and operands", .{});
+    return false;
+}
+
 const AsyncWorkKind = enum { f32, f16, quant };
 
 fn CudaWorkFor(comptime input_dtype: storage.DType) type {
@@ -1103,9 +1119,7 @@ pub fn gemmBatchedF32Async(
     var dep_b: ?*accelerator.Work = null;
     var copy_queued = false;
     var success = false;
-    defer if (!success) {
-        _ = ctx.driver.cuStreamSynchronize(ctx.upload_stream);
-        _ = ctx.driver.cuStreamSynchronize(ctx.stream);
+    defer if (!success and rollbackFence(ctx)) {
         if (dep_a) |dep| dep.release();
         if (dep_b) |dep| dep.release();
         releaseAsyncSlot(slot);
@@ -1195,9 +1209,7 @@ pub fn gemmF16NtAsync(a: *const TensorF16, b: *const TensorF16, out: *Tensor, m:
     };
     var copy_queued = false;
     var success = false;
-    defer if (!success) {
-        _ = ctx.driver.cuStreamSynchronize(ctx.upload_stream);
-        _ = ctx.driver.cuStreamSynchronize(ctx.stream);
+    defer if (!success and rollbackFence(ctx)) {
         releaseAsyncSlot(slot);
         std.heap.c_allocator.destroy(holder);
     };
@@ -1848,9 +1860,7 @@ pub fn gemmQuantNtAsync(req: QuantGemmRequest, input: *const Tensor, out: *Tenso
     var dep_input: ?*accelerator.Work = null;
     var copy_queued = false;
     var success = false;
-    defer if (!success) {
-        _ = d.cuStreamSynchronize(ctx.upload_stream);
-        _ = d.cuStreamSynchronize(ctx.stream);
+    defer if (!success and rollbackFence(ctx)) {
         if (dep_input) |dep| dep.release();
         releaseAsyncSlot(slot);
         std.heap.c_allocator.destroy(holder);
@@ -1998,6 +2008,10 @@ pub const QMoeStage = gpu_provider.QMoeStage;
 // Panels: pinned host (the CPU gather/GeGLU/scatter targets — models-tier code
 // is unchanged) + device twins; `gemmQGroupedNt` crosses PCIe once per
 // direction per dispatch. Sizes recorded by the last `qmoeStage` call.
+/// Set when a grouped-MoE rollback fence failed: the process-global
+/// staging panels may still be written by the device, so `qmoeStage`
+/// declines for the rest of the process (the CPU path runs).
+var qmoe_quarantined = false;
 var qmoe_in_host: ?[*]f32 = null;
 var qmoe_in_cap: usize = 0;
 var qmoe_out_host: ?[*]f32 = null;
@@ -2029,6 +2043,7 @@ fn ensurePinned(d: *const api.Driver, ptr: *?[*]f32, cap: *usize, bytes: usize) 
 /// `qmoe_lock` across the whole stage/dispatch/readback sequence. Null when
 /// the GPU or the kernel module is unavailable.
 pub fn qmoeStage(in_bytes: usize, out_bytes: usize) ?QMoeStage {
+    if (qmoe_quarantined) return null;
     const ctx = context() orelse return null;
     if (ensureKernels(ctx) == null) return null;
     const d = &ctx.driver;
@@ -2071,9 +2086,18 @@ pub fn gemmQGroupedNt(req: QuantGemmRequest, tiles: []const QMMTile) bool {
     var queued = false;
     var success = false;
     defer if (!success and queued) {
-        _ = d.cuStreamSynchronize(ctx.upload_stream);
-        _ = d.cuStreamSynchronize(ctx.stream);
-        _ = d.cuStreamSynchronize(ctx.transfer_stream);
+        // The staged panels are process-global and reused by the next
+        // stage: a rollback fence that cannot be established leaves the
+        // device possibly still writing them, so the grouped arm is retired
+        // for the rest of the process (`qmoeStage` declines; the CPU path
+        // runs) instead of handing the panels out again.
+        const fenced = d.cuStreamSynchronize(ctx.upload_stream) == 0 and
+            d.cuStreamSynchronize(ctx.stream) == 0 and
+            d.cuStreamSynchronize(ctx.transfer_stream) == 0;
+        if (!fenced) {
+            std.log.warn("cuda: grouped-MoE rollback fence failed; retiring the staged panels", .{});
+            qmoe_quarantined = true;
+        }
     };
 
     const timer = trace.start();
