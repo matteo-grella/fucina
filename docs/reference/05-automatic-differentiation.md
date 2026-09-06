@@ -456,10 +456,10 @@ in `src/ag/control.zig`'s own test. Scopes nest arbitrarily;
 
 While disabled, every op takes the identical forward path but skips backward
 record creation even when operands are variables — the standard evaluation
-mode wrapper. `customVjp` honors it too. `checkpoint` does **not**: it keys
-on its inputs' `requiresGrad` alone, so a checkpoint call inside a `noGrad`
-scope still records its backward node (the block body itself always runs
-grad-free; only the outer node is affected).
+mode wrapper. `customVjp` and `checkpoint` honor it the same way: a
+checkpoint call inside a `noGrad` scope is the plain block call — no
+backward node, no retained input views, an output without gradient state
+(`src/ag/checkpoint_tests.zig`, "checkpoint under noGrad records nothing").
 
 ```zig
 test "noGrad suppresses recording" {

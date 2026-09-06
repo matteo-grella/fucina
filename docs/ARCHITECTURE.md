@@ -95,10 +95,15 @@ block-quantized dtypes store `[]Storage(dtype)` blocks over the last logical
 axis.
 
 The `.f32` public tensor branch is the differentiable autograd tensor.
-Non-`f32` scalar public tensors are constant typed tensors: storage, tags,
-views, broadcasting, gather, narrow/slice, concat, and slice/row updates.
-Floating non-`f32` tensors also expose forward-only math; integer and bool
-tensors do not expose float math. Block-quantized public tensors are constant
+Non-`f32` scalar public tensors are typed tensors: storage, tags, views,
+broadcasting, gather, narrow/slice, concat, and slice/row updates. Floating
+non-`f32` tensors also expose forward-only math (typed ops never record);
+the 16-bit floats (`f16`, `bf16`) are additionally trainable leaves: a
+variable of either dtype carries an f32 gradient slot, and gradients reach
+it through the recorded `to(.f32)` cast (`dtype.supportsGrad`, the one
+operation/dtype contract: [docs/reference/03](reference/03-tensors-types-construction-and-data-access.md)).
+`f64`, integer and bool tensors are constants; integer and bool tensors do
+not expose float math. Block-quantized public tensors are constant
 inference tensors: loaded-block construction, `to(.f32)`, embedding-style
 `getRows`, and f32 x quantized-RHS tagged dot/matmul when the RHS is stored as
 `[free, contract]` — no generic pointwise math, softmax, norms, or autograd.
