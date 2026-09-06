@@ -487,3 +487,24 @@ test "public Tensor consuming ops copy read-only borrowed storage" {
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4, 5, 6 }, &data);
     try std.testing.expect(@intFromPtr(scaled.asRawTensor().dataConst().ptr) != @intFromPtr(&data));
 }
+
+test "public Tensor mutable access to read-only borrowed storage is refused" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    const T = Tensor(.{.d});
+    const data = [_]f32{ 1, 2, 3 };
+    var t = try T.fromBorrowedConstSlice(&ctx, .{3}, &data);
+    defer t.deinit();
+    var other = try T.fromSlice(&ctx, .{3}, &.{ 1, 1, 1 });
+    defer other.deinit();
+
+    try std.testing.expectError(error.ReadOnlyStorage, t.data());
+    try std.testing.expectError(error.ReadOnlyStorage, t.addScaledInPlace(&ctx, &other, 1));
+    try std.testing.expectError(error.ReadOnlyStorage, t.addAxisVectorInPlace(&ctx, &.{ 1, 1, 1 }, .d));
+    // The const data is untouched and readable.
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, try t.dataConst());
+}

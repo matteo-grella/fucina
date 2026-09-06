@@ -38,6 +38,9 @@ pub const TensorError = shape_mod.ShapeError || error{
     UnsupportedView,
     EmptySelection,
     DivisionByZero,
+    /// A mutable access or an in-place op on read-only storage
+    /// (`fromBorrowedConstSlice`: an mmap'd file, a caller's const slice).
+    ReadOnlyStorage,
 };
 
 /// `a * b` as a data length, `InvalidDataLength` on overflow.
@@ -322,12 +325,22 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             return !self.buffer.read_only and self.offset == 0 and self.isContiguous() and self.buffer.isUnique();
         }
 
+        /// The one writable-storage check of the public mutation
+        /// boundaries: `dataChecked` and the in-place exec entries take it
+        /// first, so read-only storage (`fromBorrowedConstSlice`) is never
+        /// written through the checked API.
+        pub fn requireWritable(self: *const Self) TensorError!void {
+            if (self.buffer.read_only) return TensorError.ReadOnlyStorage;
+        }
+
         /// Recoverable mutable element view: `error.UnsupportedView` on a
-        /// non-contiguous view. The public facade's `data` reaches storage
-        /// only through this pair, so the panicking fast path below never
-        /// surfaces through the public API.
+        /// non-contiguous view, `error.ReadOnlyStorage` on read-only
+        /// storage. The public facade's `data` reaches storage only through
+        /// this pair, so the panicking fast path below never surfaces
+        /// through the public API.
         pub fn dataChecked(self: *Self) ![]Elem {
             if (!self.isContiguous()) return TensorError.UnsupportedView;
+            try self.requireWritable();
             self.buffer.waitMutable();
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }
@@ -344,6 +357,10 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
         /// takes `dataChecked`, and the public facade always does.
         pub fn data(self: *Self) []Elem {
             self.requireContiguousData();
+            // Kernels write only the outputs they allocated and the targets
+            // the checked entries admitted; read-only storage here is a
+            // library bug, not a caller error.
+            std.debug.assert(!self.buffer.read_only);
             self.buffer.waitMutable();
             return self.buffer.data[self.offset .. self.offset + self.storageLen()];
         }

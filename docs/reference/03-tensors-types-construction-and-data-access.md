@@ -204,10 +204,11 @@ Semantics:
   until an op reads the tensor; take a fresh `data()` after that.
 - `fromBorrowedConstSlice` borrows **read-only** storage (e.g. mmap'd GGUF
   weights) without a caller-side `@constCast`. The storage is marked
-  read-only: the consuming ops (`takeScaleNoGrad` and the other in-place
-  ownership paths) copy instead of writing through it, and the caller must
-  not mutate it through `.data()`; use `fromSlice` if a writable buffer is
-  needed.
+  read-only: `data()` and the in-place ops (`addScaledInPlace`,
+  `addAxisVectorInPlace`, …) fail with `error.ReadOnlyStorage`, and the
+  consuming ops (`takeScaleNoGrad` and the other in-place ownership paths)
+  copy instead of writing through it; use `fromSlice` if a writable buffer
+  is needed.
 - `empty` returns uninitialized, buffer-pool-backed storage ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)); `zeros`,
   `ones`, `full`, `scalar` initialize it.
 - The `*Like` forms are instance sugar over the same constructors

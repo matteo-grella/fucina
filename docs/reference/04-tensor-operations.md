@@ -21,7 +21,8 @@ Every operation below shares one contract, implemented by the shared tails
   not carry is a **compile error**, never a runtime error. Shape problems the
   type system cannot see (mismatched dims, bad lengths) are recoverable
   `TensorError`s (`ShapeMismatch`, `InvalidShape`, `InvalidDataLength`,
-  `IndexOutOfBounds`, integer division's `DivisionByZero`); a non-shape
+  `IndexOutOfBounds`, integer division's `DivisionByZero`, a mutable access
+  or in-place op on read-only storage — `ReadOnlyStorage`); a non-shape
   argument failing its own validity check (a dropout `p` outside `[0, 1)`,
   a non-positive `softcap` cap, `clamp` with `min > max`, a Huber `delta`
   that is not positive and finite, a negative standardize `eps`, `topk`

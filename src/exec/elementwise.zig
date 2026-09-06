@@ -755,15 +755,21 @@ pub fn logicalNot(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Ten
     defer xx.deinit();
     var out = try ctx.empty(.bool, x.shape.slice());
     errdefer out.deinit();
-    for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
-        dst.* = !dtype_mod.isTruthy(dtype, xv);
-    }
+    const Task = struct {
+        x: []const dtype_mod.Scalar(dtype),
+        out: []bool,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.out[start..end]) |xv, *dst| dst.* = !dtype_mod.isTruthy(dtype, xv);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xx.tensor().dataConst(), .out = out.data() }, Task.run);
     return out;
 }
 
 pub fn addScaledInPlace(ctx: *ExecContext, target: *Tensor, source: *const Tensor, scalar_value: f32) !void {
     try tensor.requireSameShape(target, source);
     if (!target.isContiguous()) return tensor.TensorError.UnsupportedView;
+    try target.requireWritable();
 
     var ss = try ctx.prepareContiguous(.f32, source);
     defer ss.deinit();
@@ -778,6 +784,7 @@ pub fn addAxisVectorInPlace(ctx: *ExecContext, comptime rank: usize, comptime op
 
     const view = try target.rankView(rank);
     if (!target.isContiguous()) return tensor.TensorError.UnsupportedView;
+    try target.requireWritable();
     const axis_dim = view.shape[axis];
     if (row_vector.len != axis_dim) return tensor.TensorError.InvalidDataLength;
     if (productAfterAxis(rank, view.shape, axis) != 1) return tensor.TensorError.UnsupportedView;
@@ -1434,6 +1441,7 @@ pub fn elementwiseInPlace(
 ) !void {
     try tensor.requireSameShape(target, other);
     if (!target.isContiguous()) return tensor.TensorError.UnsupportedView;
+    try target.requireWritable();
 
     if (other.isContiguous()) {
         if (target.len() <= small_in_place_elementwise_len) {

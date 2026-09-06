@@ -118,7 +118,7 @@ backward, not something an arena would change.
 
 Every view operation retains the source buffer and releases it on `deinit`:
 `cloneView` (`src/tensor.zig:208-212`), `viewWithStrides(Offset)`
-(`src/tensor.zig:196/:195`), `reshape` (`src/tensor.zig:224`), `broadcastTo`
+(`src/tensor.zig:230/:234`), `reshape` (`src/tensor.zig:260`), `broadcastTo`
 (`src/tensor.zig:250`); `narrow` goes through `viewWithStridesOffset`
 (`src/exec/gather_scatter.zig:65-85`). A view's lifetime is independent of its parent's.
 

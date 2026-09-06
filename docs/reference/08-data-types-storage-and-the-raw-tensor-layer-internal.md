@@ -434,6 +434,7 @@ pub const max_rank = 8;
 pub const TensorError = error{
     ShapeMismatch, InvalidShape, InvalidDataLength, IndexOutOfBounds, UnsupportedView,
     EmptySelection, DivisionByZero,
+    ReadOnlyStorage,            // a mutable access or in-place op on fromBorrowedConstSlice storage
 };
 
 pub const Shape = struct {

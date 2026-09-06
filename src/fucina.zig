@@ -134,7 +134,8 @@ pub const GradcheckResult = ag.GradcheckResult;
 /// The shape/data error domain every tensor-producing call draws from:
 /// `ShapeMismatch`, `InvalidShape`, `InvalidArgument` (non-shape argument
 /// validity), `InvalidDataLength`, `IndexOutOfBounds`, `UnsupportedView`,
-/// `EmptySelection`, `DivisionByZero`.
+/// `EmptySelection`, `DivisionByZero`, `ReadOnlyStorage` (a mutable access
+/// or in-place op on `fromBorrowedConstSlice` storage).
 pub const TensorError = tensor.TensorError;
 /// The public error vocabulary, derived from the band sets: `ag.Error` =
 /// `exec.Error` (`TensorError`, `backend.quant.types.QuantizedFormatError`,
