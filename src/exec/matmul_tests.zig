@@ -536,4 +536,30 @@ test "tq2_0 lane-packed x4 container matches the compact route bitwise" {
     var x4 = try ctx.matmulQuant(.{ .plain = &a }, &packed_rhs, .{ .placement = .cpu });
     defer x4.deinit();
     try std.testing.expectEqualSlices(f32, rows.dataConst(), x4.dataConst());
+
+    // A shape wide and tall enough for the pool's tile split: the column
+    // tiles land on the pack's 4-column groups, and the split stays
+    // bitwise the compact route.
+    const big_n = 512;
+    const big_m = 96;
+    const big_w = try allocator.alloc(f32, big_n * k);
+    defer allocator.free(big_w);
+    for (big_w, 0..) |*w, i| w.* = @floatFromInt(@as(i32, @intCast((i * 13) % 5)) - 2);
+    var big_owned = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, big_n, big_w);
+    defer big_owned.deinit();
+    var big_tensor = try ctx.fromStorageSlice(.tq2_0, .{ big_n, k }, big_owned.blocks);
+    defer big_tensor.deinit();
+    var big_packed = try ctx.packMatmulRhs(.tq2_0, &big_tensor);
+    defer big_packed.deinit();
+    var big_compact = try ctx.compactMatmulRhs(.tq2_0, &big_tensor);
+    const big_a_data = try allocator.alloc(f32, big_m * k);
+    defer allocator.free(big_a_data);
+    for (big_a_data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 5) % 9)) - 4)) * 0.5;
+    var big_a = try ctx.fromSlice(.f32, &.{ big_m, k }, big_a_data);
+    defer big_a.deinit();
+    var big_rows = try ctx.matmulQuant(.{ .plain = &big_a }, &big_compact, .{ .placement = .cpu });
+    defer big_rows.deinit();
+    var big_x4 = try ctx.matmulQuant(.{ .plain = &big_a }, &big_packed, .{ .placement = .cpu });
+    defer big_x4.deinit();
+    try std.testing.expectEqualSlices(f32, big_rows.dataConst(), big_x4.dataConst());
 }
