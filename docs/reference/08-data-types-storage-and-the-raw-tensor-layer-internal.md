@@ -350,7 +350,10 @@ Refcount operations:
   latest token subsume earlier readers. Final release always completes
   both output and reader work before storage can be recycled.
   `waitMutable` also drops the buffer's `HostShadow` (the widen-once f32
-  weight shadow, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)): a derived copy of bytes about to change.
+  weight shadow, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)): a derived copy of bytes about to change. The boundary is
+  the only observation point: a write through a slice retained across an
+  op that read the buffer, or through an external borrow, bypasses both
+  the fence and the invalidation — take a fresh mutable access first.
 - `acceleratorResource` — provider mapping metadata tied to this allocation's
   lifetime (Metal's pooled page-wrapper cache; CUDA host page registration).
   It survives ordinary pool release/reacquire and is destroyed with the

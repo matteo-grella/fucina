@@ -192,10 +192,16 @@ Semantics:
 - `fromSlice` **copies** `values` into context-owned storage.
 - `fromBorrowedSlice` **borrows** caller-owned mutable storage zero-copy:
   the slice must stay alive and unmoved until the tensor's `deinit`;
-  mutations of the backing slice are visible through the tensor. On a GPU
-  build, mutate through the tensor's `data()` boundary (or synchronize
-  externally) after submitting an op: direct writes through the external
-  slice cannot be observed by the storage reader fence.
+  mutations of the backing slice are visible through the tensor. The
+  tensor's `data()` is the mutable boundary and the only point where the
+  runtime observes a mutation: on a GPU build, mutate through it (or
+  synchronize externally) after submitting an op, since a direct write
+  through the external slice cannot be observed by the storage reader
+  fence; with the widen-once f32 weight shadow on (`FUCINA_CPU_F32_SHADOW`,
+  [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)), the same
+  direct write leaves a cached shadow stale until the next `data()`. The
+  rule holds for a slice from `data()` itself: it is a write target only
+  until an op reads the tensor; take a fresh `data()` after that.
 - `fromBorrowedConstSlice` borrows **read-only** storage (e.g. mmap'd GGUF
   weights) without a caller-side `@constCast`. The storage is marked
   read-only: the consuming ops (`takeScaleNoGrad` and the other in-place

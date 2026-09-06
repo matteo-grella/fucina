@@ -60,7 +60,12 @@ pub fn Ops(comptime Self: type) type {
 
         /// Mutable element view of a contiguous tensor. Refused on a tensor
         /// that requires gradients (`error.MutableDataRequiresNoGrad`): the
-        /// autograd tape assumes values are not mutated behind it.
+        /// autograd tape assumes values are not mutated behind it. The call
+        /// is the mutable boundary: the runtime observes mutation here
+        /// (device readers are fenced, derived copies such as the widen-once
+        /// weight shadow are dropped), never through the slice itself — a
+        /// slice retained across an op that read this tensor is stale as a
+        /// write target; take a fresh `data()` first.
         pub fn data(self: *Self) ![]Elem {
             if (comptime has_grad) {
                 if (self.requiresGrad()) return AgError.MutableDataRequiresNoGrad;

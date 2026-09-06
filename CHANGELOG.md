@@ -342,7 +342,11 @@ this point; earlier history is `git log`.
 - The widen-once f32 weight shadow (`FUCINA_CPU_F32_SHADOW`) survived
   mutation of the weight, so an in-place update left later eligible GEMMs
   reading stale values. A mutable host access (`Buffer.waitMutable`, every
-  `data()`) drops the shadow; the next eligible GEMM re-widens.
+  `data()`) drops the shadow; the next eligible GEMM re-widens. The
+  boundary is the only observation point: a write through a slice retained
+  across an eligible GEMM, or through an external `fromBorrowedSlice`
+  borrow, bypasses it and the shadow stays stale until the next `data()`,
+  as the GPU reader fence already required.
 - `Work.ensureFinished` (the input side of a submitted accelerator
   command) treated a failed completion as finished; CUDA cleared the
   inputs' reader registrations even when its fence had failed. The input

@@ -232,9 +232,15 @@ Related CPU-side knob (non-GPU builds only): `FUCINA_CPU_F32_SHADOW=1`
 routes prefill-shaped 16-bit-weight GEMMs (`m >= 32`,
 `FUCINA_CPU_F32_SHADOW_MIN_M`) through the BLAS f32 arm over a widen-once
 f32 shadow cached on the weight's storage (+4 bytes/weight resident). A
-mutable host access to the weight drops the shadow and the next eligible
-GEMM re-widens it, so an in-place update never reads stale values; that
-re-widen per step is why training leaves the flag off. Measured on Qwen3-1.7B-BF16
+mutable host access to the weight (`data()`, the boundary every in-place
+kernel and optimizer step crosses) drops the shadow and the next eligible
+GEMM re-widens it, so an update made through the boundary is never read
+stale; that re-widen per step is why training leaves the flag off. The
+boundary is the only observation point: a write through a slice retained
+across an eligible GEMM, or through an external `fromBorrowedSlice`
+borrow, is not observed and the shadow stays stale until the next
+`data()` — the rule the GPU reader fence already imposes
+(docs/reference/03). Measured on Qwen3-1.7B-BF16
 self-study (M1 Max + Accelerate): 2.2x end-to-end (28.5 -> 12.7
 s/conversation) with identical per-step losses; at the GEMM level BLAS wins
 1.5-2.5x for m >= 32 while decode stays with the 16-bit streaming kernels

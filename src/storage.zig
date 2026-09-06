@@ -348,8 +348,13 @@ pub fn BufferOf(comptime buffer_dtype: DType) type {
         /// producer of this allocation is finished, and any host-side
         /// derived copy of it (`HostShadow`: the widen-once f32 weight
         /// shadow) is dropped, since the bytes it mirrored are about to
-        /// change. A concurrent reader of the shadow is the same data race
-        /// as a concurrent reader of the bytes themselves.
+        /// change. The boundary is the only observation point: a write
+        /// through a slice retained across an op that read the buffer, or
+        /// through an external borrow (`fromBorrowedSlice`), bypasses it —
+        /// neither the reader fence nor the shadow can see it, so such a
+        /// write must be preceded by a fresh mutable access. A concurrent
+        /// reader of the shadow is the same data race as a concurrent
+        /// reader of the bytes themselves.
         pub fn waitMutable(self: *const Self) void {
             self.waitReady();
             self.waitUnused();
