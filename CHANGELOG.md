@@ -25,6 +25,22 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- A backward that reaches a record whose saved value was mutated after
+  the forward fails with `error.SavedValueMutated` (`AgError`, so
+  `fucina.Error`) before the VJP runs, instead of differentiating values
+  the forward never saw. Storage carries a mutation generation
+  (`Buffer.generation`, advanced by every mutable host access); every
+  record captures the generation of each raw tensor it saves (operand
+  views, constants included, and the saved output) at creation, and the
+  engine compares before running its VJP. Mutating a constant or a
+  `detach`ed alias between forward and backward, which silently produced
+  the wrong gradient, is now an error; mutation after the pass is free.
+- `customVjp` no longer infers ownership of `extra` from a `deinit` on
+  its type. `extra` is borrowed by value unless the Spec declares
+  `pub fn deinitExtra(extra: *Extra, allocator: std.mem.Allocator) void`,
+  which `customVjp` calls exactly once (after a forward that records
+  nothing, or with the backward record). Rewrite: a Spec whose extra type
+  had a `deinit` adds `pub fn deinitExtra(extra: *Extra, allocator: Allocator) void { extra.deinit(allocator); }`.
 - Muon's Newton-Schulz fixups (the Frobenius scale, `b·G + c·Q`, `a·X + BX`)
   are `parallelMap` maps between the GEMMs instead of serial loops; the same
   expression per element, so bitwise the old step for any part count. One
@@ -307,6 +323,25 @@ this point; earlier history is `git log`.
 
 ### Fixed
 
+- Geometry overflow leaked `std.math`'s `error.Overflow` out of public
+  methods (`viewWithStrides`, `conv1d`/`convTranspose1d` and the other 1-D
+  conv entries, `concat`, `pad`, the batched matmul's batch product, the
+  rope table), a name outside `fucina.Error`, so a wrapper over the
+  advertised union did not compile. Shape arithmetic above the raw layer
+  goes through `tensor.shapeSum`/`shapeProduct` (`error.InvalidShape`);
+  a view whose extent wraps is `error.InvalidDataLength`, as one past the
+  buffer's end. A test in `src/fucina_tests.zig` checks representative
+  `Tensor`/`ExecContext` method error sets against `fucina.Error`.
+- CUDA: the rollback of a failed submission ignored the result of its
+  stream fences and recycled the slot, the dependency references and the
+  holder regardless. A rollback fence that fails now quarantines them
+  exactly as a failed completion does (`rollbackFence`); the grouped-MoE
+  staging panels, which are process-global, are retired for the process
+  when their rollback fence fails (`qmoeStage` declines, the CPU path
+  runs).
+- `matmulHalfRhs` documented f32 accumulation for both 16-bit arms; the
+  f16 arm accumulates in f16 on aarch64 (the native `fmla.8h` policy of
+  `vector/gemm.zig`). The doc comment states the kernel's policy per arm.
 - Backward over a deep graph overflowed the stack: preparation, drain,
   inline execution and the release cascade recursed per node (a 10k-node
   chain segfaulted in every build mode, and freeing a 200k-node chain did
