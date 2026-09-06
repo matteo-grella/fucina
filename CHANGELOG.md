@@ -35,12 +35,13 @@ this point; earlier history is `git log`.
 
 ### Changed
 
-- The blocked f32 GEMM derives its row block from the row count and the
-  team: when `ceil(m / mc)` blocks would leave participants idle, `mc`
-  shrinks to the smallest `mr`-aligned block that covers them.
+- The blocked f32 GEMM on aarch64 derives its row block from the row
+  count and the team: when `ceil(m / mc)` blocks would leave participants
+  idle, `mc` shrinks to the smallest `mr`-aligned block that covers them.
   253×1024×1024 NT on an M1 Max: 155 → 368 GF/s (2.4×) through the
   blocked kernel, and `bench-gemm`'s dispatch column follows (148 → 416
-  GF/s); 2048³ keeps `mc = 128` and its throughput.
+  GF/s); 2048³ keeps `mc = 128` and its throughput. Other ISAs, whose
+  column chunks already cover small `m`, are unchanged.
 - A mutable access or an in-place op on read-only storage
   (`fromBorrowedConstSlice`) fails with `error.ReadOnlyStorage`
   (`TensorError`, so `fucina.Error`): `data()`, `addScaledInPlace`,
@@ -58,7 +59,8 @@ this point; earlier history is `git log`.
   `logical`, `logicalNot`, `addScalar`, `powScalar`, the casts and the
   typed (f16/bf16/f64/integer) binary kernels split over the pool above
   the elementwise threshold, like the f32 maps; each element depends only
-  on its own inputs, so the split is bitwise the serial loop.
+  on its own inputs, so the split is bitwise the serial loop. The internal
+  kernel `elementwiseContiguousIntoTyped` takes `pc: ParallelConfig` first.
 - The cumprod backward of a row containing a zero is O(n) (division-free
   Horner forms) instead of the O(n²) expansion; torch semantics unchanged.
 - A backward that reaches a record whose saved value was mutated after

@@ -198,13 +198,15 @@ fn gemmBlockedImpl(
     defer workspace_lock.unlock();
 
     const threads = @max(@as(usize, 1), parallel.cpuThreadCount(parallel.vector_max_threads));
-    // The row block follows the row count and the team: small-m shapes
-    // split by ic block alone left most participants idle (253 rows at
-    // mc = 128 are two blocks for ten), so the block shrinks until every
-    // participant has one. 253x1024x1024 NT on an M1 Max: 155 -> 368
-    // GF/s; shapes whose blocks already cover the team keep `params.mc`
-    // (2048^3 at mc = 32 would lose 597 -> 355).
-    const mc = blockRowsFor(params.mc, m, threads);
+    // aarch64 keeps the ic-block-only split (no column chunks), so small-m
+    // shapes left most participants idle (253 rows at mc = 128 are two
+    // blocks for ten): there the row block shrinks until every participant
+    // has one. 253x1024x1024 NT on an M1 Max: 155 -> 368 GF/s; shapes
+    // whose blocks already cover the team keep `params.mc` (2048^3 at
+    // mc = 32 would lose 597 -> 355). Other ISAs cover small m with the
+    // column chunks below and keep `params.mc` — unmeasured here, so
+    // unchanged.
+    const mc = if (comptime isa.is_aarch64) blockRowsFor(params.mc, m, threads) else params.mc;
     const num_ic_blocks = (m + mc - 1) / mc;
 
     var jc: usize = 0;
