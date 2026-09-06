@@ -93,6 +93,15 @@ fn elementwiseParts(len: usize) usize {
     return parallel.partsForChunk(len, parallel.vector_elementwise_len_threshold);
 }
 
+/// The pool split of a same-shape map: `run(task, start, end)` over
+/// `[0, len)`, one part per elementwise chunk (serial below the
+/// threshold). Every element depends only on its own inputs, so the split
+/// is bitwise the serial loop.
+fn mapChunked(ctx: *ExecContext, len: usize, task: anytype, comptime run: fn (@TypeOf(task), usize, usize) void) void {
+    ctx.enableNativeVectorPoolForWork(len, parallel.vector_elementwise_len_threshold);
+    ctx.forRange(len, elementwiseParts(len), task, run);
+}
+
 /// Copy the first `inner`-long row of `out` into every row after it.
 fn replicateRow(ctx: *ExecContext, out: []f32, inner: usize) void {
     const rows = out.len / inner;
@@ -535,7 +544,15 @@ pub fn addScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tens
     const xp = xx.tensor();
     var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), out.data()) |value, *dst| dst.* = value + scalar_value;
+    const Task = struct {
+        x: []const dtype_mod.Scalar(compute),
+        out: []dtype_mod.Scalar(compute),
+        s: f32,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.out[start..end]) |value, *dst| dst.* = value + t.s;
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xp.dataConst(), .out = out.data(), .s = scalar_value }, Task.run);
     return ctx.storeAs(compute, dtype, out);
 }
 
@@ -546,7 +563,15 @@ pub fn powScalar(ctx: *ExecContext, comptime dtype: DType, x: *const tensor.Tens
     const xp = xx.tensor();
     var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), out.data()) |value, *dst| dst.* = std.math.pow(f32, value, exponent);
+    const Task = struct {
+        x: []const dtype_mod.Scalar(compute),
+        out: []dtype_mod.Scalar(compute),
+        e: f32,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.out[start..end]) |value, *dst| dst.* = std.math.pow(f32, value, t.e);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xp.dataConst(), .out = out.data(), .e = exponent }, Task.run);
     return ctx.storeAs(compute, dtype, out);
 }
 
@@ -572,9 +597,18 @@ pub fn where(
     const xp = xx.tensor();
     var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), cc.tensor().dataConst(), yy.tensor().dataConst(), out.data()) |xv, cv, yv, *dst| {
-        dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) xv else yv;
-    }
+    const Task = struct {
+        x: []const dtype_mod.Scalar(compute),
+        c: []const dtype_mod.Scalar(cond_dtype),
+        y: []const dtype_mod.Scalar(compute),
+        out: []dtype_mod.Scalar(compute),
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.c[start..end], t.y[start..end], t.out[start..end]) |xv, cv, yv, *dst| {
+                dst.* = if (dtype_mod.isTruthy(cond_dtype, cv)) xv else yv;
+            }
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xp.dataConst(), .c = cc.tensor().dataConst(), .y = yy.tensor().dataConst(), .out = out.data() }, Task.run);
     return ctx.storeAs(compute, dtype, out);
 }
 
@@ -596,9 +630,18 @@ pub fn maskedFill(
     const xp = xx.tensor();
     var out = try ctx.empty(compute, xp.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), mm.tensor().dataConst(), out.data()) |xv, mv, *dst| {
-        dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) value else xv;
-    }
+    const Task = struct {
+        x: []const dtype_mod.Scalar(compute),
+        m: []const dtype_mod.Scalar(mask_dtype),
+        out: []dtype_mod.Scalar(compute),
+        v: f32,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.m[start..end], t.out[start..end]) |xv, mv, *dst| {
+                dst.* = if (dtype_mod.isTruthy(mask_dtype, mv)) t.v else xv;
+            }
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xp.dataConst(), .m = mm.tensor().dataConst(), .out = out.data(), .v = value }, Task.run);
     return ctx.storeAs(compute, dtype, out);
 }
 
@@ -624,9 +667,15 @@ pub fn compare(
     const ap = aa.tensor();
     var out = try ctx.empty(.bool, ap.shape.slice());
     errdefer out.deinit();
-    for (ap.dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = backend_ops.compareScalar(op, av, bv);
-    }
+    const Task = struct {
+        a: []const dtype_mod.Scalar(compute),
+        b: []const dtype_mod.Scalar(compute),
+        out: []bool,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.a[start..end], t.b[start..end], t.out[start..end]) |av, bv, *dst| dst.* = backend_ops.compareScalar(op, av, bv);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .a = ap.dataConst(), .b = bb.tensor().dataConst(), .out = out.data() }, Task.run);
     return out;
 }
 
@@ -654,9 +703,15 @@ pub fn compareScalar(
     const xp = xx.tensor();
     var out = try ctx.empty(.bool, xp.shape.slice());
     errdefer out.deinit();
-    for (xp.dataConst(), out.data()) |xv, *dst| {
-        dst.* = backend_ops.compareScalar(op, xv, scalar_value);
-    }
+    const Task = struct {
+        x: []const dtype_mod.Scalar(compute),
+        out: []bool,
+        s: CompareScalar(dtype),
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.out[start..end]) |xv, *dst| dst.* = backend_ops.compareScalar(op, xv, t.s);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xp.dataConst(), .out = out.data(), .s = scalar_value }, Task.run);
     return out;
 }
 
@@ -690,9 +745,15 @@ fn compareInt(
     defer bb.deinit();
     var out = try ctx.empty(.bool, a.shape.slice());
     errdefer out.deinit();
-    for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        dst.* = intCompare(op, av, bv);
-    }
+    const Task = struct {
+        a: []const dtype_mod.Scalar(dtype),
+        b: []const dtype_mod.Scalar(dtype),
+        out: []bool,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.a[start..end], t.b[start..end], t.out[start..end]) |av, bv, *dst| dst.* = intCompare(op, av, bv);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .a = aa.tensor().dataConst(), .b = bb.tensor().dataConst(), .out = out.data() }, Task.run);
     return out;
 }
 
@@ -711,9 +772,15 @@ fn compareIntScalar(
     defer xx.deinit();
     var out = try ctx.empty(.bool, x.shape.slice());
     errdefer out.deinit();
-    for (xx.tensor().dataConst(), out.data()) |xv, *dst| {
-        dst.* = intCompare(op, xv, scalar_value);
-    }
+    const Task = struct {
+        x: []const dtype_mod.Scalar(dtype),
+        out: []bool,
+        s: dtype_mod.Scalar(dtype),
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.x[start..end], t.out[start..end]) |xv, *dst| dst.* = intCompare(op, xv, t.s);
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .x = xx.tensor().dataConst(), .out = out.data(), .s = scalar_value }, Task.run);
     return out;
 }
 
@@ -737,15 +804,23 @@ pub fn logical(
     defer bb.deinit();
     var out = try ctx.empty(.bool, a.shape.slice());
     errdefer out.deinit();
-    for (aa.tensor().dataConst(), bb.tensor().dataConst(), out.data()) |av, bv, *dst| {
-        const at = dtype_mod.isTruthy(a_dtype, av);
-        const bt = dtype_mod.isTruthy(b_dtype, bv);
-        dst.* = switch (op) {
-            .l_and => at and bt,
-            .l_or => at or bt,
-            .l_xor => at != bt,
-        };
-    }
+    const Task = struct {
+        a: []const dtype_mod.Scalar(a_dtype),
+        b: []const dtype_mod.Scalar(b_dtype),
+        out: []bool,
+        fn run(t: @This(), start: usize, end: usize) void {
+            for (t.a[start..end], t.b[start..end], t.out[start..end]) |av, bv, *dst| {
+                const at = dtype_mod.isTruthy(a_dtype, av);
+                const bt = dtype_mod.isTruthy(b_dtype, bv);
+                dst.* = switch (op) {
+                    .l_and => at and bt,
+                    .l_or => at or bt,
+                    .l_xor => at != bt,
+                };
+            }
+        }
+    };
+    mapChunked(ctx, out.len(), Task{ .a = aa.tensor().dataConst(), .b = bb.tensor().dataConst(), .out = out.data() }, Task.run);
     return out;
 }
 
@@ -1256,7 +1331,7 @@ fn elementwiseRankTyped(
     var out = try ctx.empty(output_dtype, shape);
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(out.len(), parallel.vector_elementwise_len_threshold);
-    kernels.elementwiseContiguousIntoTyped(dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
+    kernels.elementwiseContiguousIntoTyped(ctx.pc(), dtype, op, &out, aa.tensor(), bb.tensor(), out.len());
     return out;
 }
 

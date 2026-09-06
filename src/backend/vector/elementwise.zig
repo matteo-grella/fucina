@@ -165,7 +165,11 @@ fn typedVectorizes(comptime dtype: DType) bool {
     };
 }
 
+/// The typed binary map, split over the pool like the f32 `mapContiguous`
+/// (each element depends only on its own inputs, so the split is bitwise
+/// the serial loop).
 pub fn elementwiseContiguousIntoTyped(
+    pc: ParallelConfig,
     comptime dtype: DType,
     comptime op: ops.ElementwiseOp,
     out: *tensor.TensorOf(dtype_mod.outputDType(.pointwise, dtype)),
@@ -174,11 +178,26 @@ pub fn elementwiseContiguousIntoTyped(
     len: usize,
 ) void {
     if (comptime isa.reference) return scalar.elementwiseContiguousIntoTyped(dtype, op, out, a, b, len);
-    const x = common.contiguousDataConstOf(dtype, a, len);
-    const y = common.contiguousDataConstOf(dtype, b, len);
-    const z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len);
-    if (comptime typedVectorizes(dtype)) return primitives.vecBinary(dtype, op, z, x, y);
-    elementwiseSlicesTyped(dtype, op, z, x, y);
+    const Ctx = struct {
+        z: []dtype_mod.Scalar(dtype_mod.outputDType(.pointwise, dtype)),
+        x: []const dtype_mod.Scalar(dtype),
+        y: []const dtype_mod.Scalar(dtype),
+
+        fn run(c: @This(), start: usize, end: usize) void {
+            if (comptime typedVectorizes(dtype)) return primitives.vecBinary(dtype, op, c.z[start..end], c.x[start..end], c.y[start..end]);
+            elementwiseSlicesTyped(dtype, op, c.z[start..end], c.x[start..end], c.y[start..end]);
+        }
+    };
+    const c: Ctx = .{
+        .z = common.contiguousDataOf(dtype_mod.outputDType(.pointwise, dtype), out, len),
+        .x = common.contiguousDataConstOf(dtype, a, len),
+        .y = common.contiguousDataConstOf(dtype, b, len),
+    };
+    if (pc.pool) |pool| {
+        const thread_count = elementwiseThreadCount(len);
+        if (thread_count > 1) return tile.forRange(pool, Ctx, c, len, thread_count, Ctx.run);
+    }
+    Ctx.run(c, 0, len);
 }
 
 pub fn scaleInto(pc: ParallelConfig, out: *Tensor, a: *const Tensor, scalar_value: f32) !void {

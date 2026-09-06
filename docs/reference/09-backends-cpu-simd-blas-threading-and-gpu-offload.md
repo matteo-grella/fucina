@@ -206,7 +206,7 @@ test "kernel interface inventory" {
         if (info.is_generic) generic_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 167), kernel_count);
-    try std.testing.expectEqual(@as(usize, 109), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 108), pool_free_count);
     try std.testing.expectEqual(@as(usize, 27), generic_count);
 }
 ```

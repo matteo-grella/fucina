@@ -12,6 +12,7 @@ const std = @import("std");
 const backend_mod = @import("../backend.zig");
 const dtype_mod = @import("../dtype.zig");
 const tensor = @import("../tensor.zig");
+const parallel = @import("../parallel.zig");
 const ensureForwardFloatMath = dtype_mod.requireForwardFloatMath;
 
 const ExecContext = @import("../exec.zig").ExecContext;
@@ -47,25 +48,25 @@ pub fn cast(
     var out = try ctx.empty(target_dtype, x.shape.slice());
     errdefer out.deinit();
     const output = out.data();
-    if (comptime source_dtype == .f32 and target_dtype == .f16) {
-        castF32ToF16(output, input);
-        return out;
-    }
-    if (comptime source_dtype == .f16 and target_dtype == .f32) {
-        castF16ToF32(output, input);
-        return out;
-    }
-    if (comptime source_dtype == .f32 and target_dtype == .bf16) {
-        castF32ToBf16(output, input);
-        return out;
-    }
-    if (comptime source_dtype == .bf16 and target_dtype == .f32) {
-        castBf16ToF32(output, input);
-        return out;
-    }
-    for (output, input) |*dst, value| {
-        dst.* = dtype_mod.castScalar(source_dtype, target_dtype, value);
-    }
+    // The cast is a map (each element from its own input), split over the
+    // pool above the elementwise threshold — bitwise the serial pass.
+    const Task = struct {
+        output: @TypeOf(output),
+        input: @TypeOf(input),
+
+        fn run(t: @This(), start: usize, end: usize) void {
+            const dst = t.output[start..end];
+            const src = t.input[start..end];
+            if (comptime source_dtype == .f32 and target_dtype == .f16) return castF32ToF16(dst, src);
+            if (comptime source_dtype == .f16 and target_dtype == .f32) return castF16ToF32(dst, src);
+            if (comptime source_dtype == .f32 and target_dtype == .bf16) return castF32ToBf16(dst, src);
+            if (comptime source_dtype == .bf16 and target_dtype == .f32) return castBf16ToF32(dst, src);
+            for (dst, src) |*d, value| d.* = dtype_mod.castScalar(source_dtype, target_dtype, value);
+        }
+    };
+    const len = output.len;
+    ctx.enableNativeVectorPoolForWork(len, parallel.vector_elementwise_len_threshold);
+    ctx.forRange(len, parallel.partsForChunk(len, parallel.vector_elementwise_len_threshold), Task{ .output = output, .input = input }, Task.run);
     return out;
 }
 

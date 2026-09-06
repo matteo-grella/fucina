@@ -727,7 +727,7 @@ fn benchTypedElementwise(comptime tensor_dtype: DType, allocator: std.mem.Alloca
     }.run;
     const NativeRunner = struct {
         fn run(o: *OutputTensor, lhs: *const TypedTensor, rhs: *const TypedTensor, len: usize) void {
-            native.kernels.elementwiseContiguousIntoTyped(tensor_dtype, .add, o, lhs, rhs, len);
+            native.kernels.elementwiseContiguousIntoTyped(.{}, tensor_dtype, .add, o, lhs, rhs, len);
         }
     }.run;
 
