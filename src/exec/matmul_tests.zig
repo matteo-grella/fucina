@@ -497,3 +497,43 @@ test "f64 plain matmul matches the f64 reference at BLAS shapes" {
         }
     }
 }
+
+test "tq2_0 lane-packed x4 container matches the compact route bitwise" {
+    // `packMatmulRhs(.tq2_0)` builds the 4-column-interleaved container the
+    // sdot-lane kernel consumes; its output is bitwise the compact `.rows`
+    // kernel's (the x4 kernel's contract), through the same public
+    // `matmulQuant` entry.
+    const quant = backend_mod.quant;
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const k = 512;
+    const n = 8;
+    const m = 3;
+    const weights = try allocator.alloc(f32, n * k);
+    defer allocator.free(weights);
+    for (weights, 0..) |*w, i| w.* = @floatFromInt(@as(i32, @intCast((i * 7) % 5)) - 2);
+    var owned = try quant.ternary.quantizedMatmulRhsTQ2_0FromF32(allocator, k, n, weights);
+    defer owned.deinit();
+    var rhs_tensor = try ctx.fromStorageSlice(.tq2_0, .{ n, k }, owned.blocks);
+    defer rhs_tensor.deinit();
+
+    var packed_rhs = try ctx.packMatmulRhs(.tq2_0, &rhs_tensor);
+    defer packed_rhs.deinit();
+    try std.testing.expect(@TypeOf(packed_rhs) == quant.types.QuantizedMatmulRhsTQ2_0x4);
+    var compact_rhs = try ctx.compactMatmulRhs(.tq2_0, &rhs_tensor);
+
+    const a_data = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_data);
+    for (a_data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(@as(i32, @intCast((i * 3) % 11)) - 5)) * 0.25;
+    var a = try ctx.fromSlice(.f32, &.{ m, k }, a_data);
+    defer a.deinit();
+
+    var rows = try ctx.matmulQuant(.{ .plain = &a }, &compact_rhs, .{ .placement = .cpu });
+    defer rows.deinit();
+    var x4 = try ctx.matmulQuant(.{ .plain = &a }, &packed_rhs, .{ .placement = .cpu });
+    defer x4.deinit();
+    try std.testing.expectEqualSlices(f32, rows.dataConst(), x4.dataConst());
+}

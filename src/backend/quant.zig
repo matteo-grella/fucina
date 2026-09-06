@@ -69,6 +69,7 @@ pub fn PackedQuantRhsFor(comptime dt: DType) type {
         .q6_k => types.QuantizedMatmulRhsQ6_Kx4,
         .q5_k => types.QuantizedMatmulRhsQ5_Kx8,
         .q4_k => if (supports_q4_k_mmla) types.QuantizedMatmulRhsQ4_Kx2Mmla else types.QuantizedMatmulRhsQ4_Kx8,
+        .tq2_0 => types.QuantizedMatmulRhsTQ2_0x4,
         else => @compileError("PackedQuantRhsFor: no packed matmul RHS layout for dtype ." ++ @tagName(dt)),
     };
 }
@@ -105,6 +106,7 @@ pub fn packRhsAs(
     if (Rhs == types.QuantizedMatmulRhsQ4_Kx4) return q4_k.packMatmulRhsQ4_Kx4(allocator, blocks, n, k, blocks_per_row);
     if (Rhs == types.QuantizedMatmulRhsQ4_Kx8) return q4_k.packMatmulRhsQ4_Kx8(allocator, blocks, n, k, blocks_per_row);
     if (Rhs == types.QuantizedMatmulRhsQ4_Kx2Mmla) return q4_k.packMatmulRhsQ4_Kx2Mmla(allocator, blocks, n, k, blocks_per_row);
+    if (Rhs == types.QuantizedMatmulRhsTQ2_0x4) return ternary.packMatmulRhsTQ2_0x4FromBlocks(allocator, blocks, n, k, blocks_per_row);
     comptime unreachable;
 }
 

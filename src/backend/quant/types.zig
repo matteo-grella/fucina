@@ -183,6 +183,10 @@ pub fn PackedBlock(comptime dt: DType, comptime pack: RhsPack) type {
             .x4 => BlockQ6_Kx4,
             else => @compileError("no ." ++ @tagName(pack) ++ " pack for q6_k"),
         },
+        .tq2_0 => switch (pack) {
+            .x4 => BlockTQ2_0x4,
+            else => @compileError("no ." ++ @tagName(pack) ++ " pack for tq2_0"),
+        },
         else => @compileError("no lane pack for dtype ." ++ @tagName(dt)),
     };
 }
@@ -341,6 +345,10 @@ pub const QuantizedRowsQ4_0 = struct {
 pub const QuantizedMatmulRhsQ8_0 = CompactRhs(.q8_0);
 
 pub const QuantizedMatmulRhsQ8_0x4 = LanePackedRhs(.q8_0, .x4);
+/// The 4-column-interleaved ternary pack (`ternary.packMatmulRhsTQ2_0x4`):
+/// the sdot-lane kernel over it is bitwise the compact kernel and ~10%
+/// faster at decode widths.
+pub const QuantizedMatmulRhsTQ2_0x4 = LanePackedRhs(.tq2_0, .x4);
 
 pub const QuantizedMatmulRhsQ4_0 = CompactRhs(.q4_0);
 

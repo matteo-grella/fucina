@@ -760,7 +760,7 @@ pub fn matmulPacked(
         return vector.matmul_quant.scalar.matmulPacked(allocator, out, a, rhs, m, n, k);
     if (comptime Rhs.pack == .x4 and Rhs.dtype == .q8_0)
         return matmulPackedQ8_0x4(pc, allocator, out, a, rhs, m, n, k);
-    if (comptime Rhs.pack == .x4 and (Rhs.dtype == .q4_k or Rhs.dtype == .q6_k))
+    if (comptime Rhs.pack == .x4 and (Rhs.dtype == .q4_k or Rhs.dtype == .q6_k or Rhs.dtype == .tq2_0))
         return matmulQuantRows(pc, comptime .{ .weight = Rhs.dtype, .rhs = .x4, .lhs = .q8_k }, allocator, out, a, rhs, m, n, k);
     if (comptime Rhs.pack == .x8)
         return matmul2DQuantizedRhsQ8_Kx4Prefix(pc, comptime .{ .weight = Rhs.dtype, .rhs = .x8, .lhs = .q8_kx4 }, allocator, out, a, rhs, m, n, k);

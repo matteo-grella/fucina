@@ -388,6 +388,21 @@ pub fn packMatmulRhsTQ2_0x4(allocator: Allocator, rhs: *const types.QuantizedMat
     return out;
 }
 
+/// `packMatmulRhsTQ2_0x4` from raw `[n, k]` row blocks into the owned
+/// lane-packed container (`quant.packRhs`'s TQ2_0 arm; `n % 4 == 0`).
+pub fn packMatmulRhsTQ2_0x4FromBlocks(allocator: Allocator, blocks: []const BlockTQ2_0, n: usize, k: usize, blocks_per_row: usize) !types.QuantizedMatmulRhsTQ2_0x4 {
+    const compact = try quantizedMatmulRhsTQ2_0FromBorrowedBlocks(k, n, blocks);
+    std.debug.assert(compact.blocks_per_column == blocks_per_row);
+    const groups = try packMatmulRhsTQ2_0x4(allocator, &compact);
+    return .{ .allocator = allocator, .blocks = groups, .k = k, .n = n, .blocks_per_group = blocks_per_row };
+}
+
+/// The x4 tile over the lane-packed container: the `.{ .tq2_0, .x4, .q8_k }`
+/// selection of the kernel table.
+fn matmulTQ2_0X4ContainerTile(out: []f32, lhs_blocks: []const dtype_mod.BlockQ8_K, rhs: *const types.QuantizedMatmulRhsTQ2_0x4, n: usize, r0: usize, r1: usize, c0: usize, c1: usize) void {
+    matmulTQ2_0X4RhsTile(out, lhs_blocks, rhs.blocks, rhs.blocks_per_group, n, r0, r1, c0, c1);
+}
+
 /// Hot-kernel twin over the column-interleaved x4 pack: identical exact
 /// integer block dots (lane arrangement cannot change an i32 sum) and the
 /// identical per-column f32 sequence — sums[c] += (d_c * a.d) * (dot_c -
@@ -1201,6 +1216,7 @@ test {
 /// f32 activations, and the Q2_0 row tile over Q8_0 activations.
 pub const kernels = .{
     .{ .g = ops.QuantGemm{ .weight = .tq2_0, .rhs = .rows, .lhs = .q8_k, .order = .row_outer }, .tile = matmulTQ2_0RhsTile },
+    .{ .g = ops.QuantGemm{ .weight = .tq2_0, .rhs = .x4, .lhs = .q8_k, .order = .row_outer }, .tile = matmulTQ2_0X4ContainerTile },
     .{ .g = ops.QuantGemm{ .weight = .tq2_0, .rhs = .rows, .lhs = .f32, .order = .row_outer }, .tile = matmulTQ2_0F32RhsTile },
     .{ .g = ops.QuantGemm{ .weight = .q2_0, .rhs = .rows, .lhs = .q8_0, .order = .row_outer }, .tile = matmulQ2_0RhsTile },
 };

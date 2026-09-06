@@ -327,12 +327,13 @@ out so the innermost loop feeds the target's int8 dot instruction
 
 ```zig
 pub fn PackedRhs(comptime dt: DType) type   // dense panel or ISA-best quantized layout
-pub const QuantizedMatmulRhsQ8_0x4;         // + Q4_Kx4, Q4_Kx8, Q4_Kx2Mmla, Q5_Kx8, Q6_Kx4
+pub const QuantizedMatmulRhsQ8_0x4;         // + Q4_Kx4, Q4_Kx8, Q4_Kx2Mmla, Q5_Kx8, Q6_Kx4, TQ2_0x4
 pub const supports_q4_k_mmla: bool;         // aarch64 + i8mm target feature
 ```
 
 `PackedRhs(dt)` (the backend's `PackedRhsFor`) maps f32/f16/bf16 to the
-`PackedDenseRhs` f32 panel, q8_0→x4, q6_k→x4, q5_k→x8, and q4_k→x2mmla on
+`PackedDenseRhs` f32 panel, q8_0→x4, q6_k→x4, q5_k→x8, tq2_0→x4 (the
+sdot-lane ternary pack, bitwise the compact kernel, `n % 4 == 0`), and q4_k→x2mmla on
 aarch64+i8mm targets, x8 otherwise. Each container owns its snapshot
 (`PackedDenseRhs.rhs` or quantized blocks), holds `k`/`n`, and carries a
 comptime `dtype` that `dotPacked` dispatches on (the Q4_K x8/x2mmla split is
