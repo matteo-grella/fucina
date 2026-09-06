@@ -320,9 +320,10 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
             const gxd = gx.data();
 
             // Zero-free rows use the O(n) reverse-scan closed form
-            // grad_i = (Σ_{j≥i} g_j·y_j)/x_i; rows containing a zero fall
-            // back to the exact division-free O(n²) expansion
-            // grad_i = Σ_{j≥i} g_j·Π_{k≤j, k≠i} x_k (torch semantics).
+            // grad_i = (Σ_{j≥i} g_j·y_j)/x_i; rows containing a zero take
+            // the division-free O(n) Horner forms below (torch semantics,
+            // the same exact products as the expanded
+            // grad_i = Σ_{j≥i} g_j·Π_{k≤j, k≠i} x_k, one pass each way).
             const axis_dim = source_shape[axis];
             const geo = shape_mod.AxisGeometry.of(rank, source_shape, axis);
             for (0..geo.outer) |outer_i| {
@@ -345,16 +346,32 @@ pub fn CumprodBackward(comptime source_tags: anytype, comptime axis: usize) type
                             gxd[offset] = suffix / x[offset];
                         }
                     } else {
-                        for (0..axis_dim) |i| {
-                            var prefix: f32 = 1;
-                            for (0..i) |k| prefix *= x[base + k * geo.inner + inner_i];
-                            var run = prefix;
-                            var acc = g[base + i * geo.inner + inner_i] * run;
-                            for (i + 1..axis_dim) |j| {
-                                run *= x[base + j * geo.inner + inner_i];
-                                acc += g[base + j * geo.inner + inner_i] * run;
-                            }
-                            gxd[base + i * geo.inner + inner_i] = acc;
+                        // With z the first zero: every product through a
+                        // position past z holds x_z = 0, so those gradients
+                        // are 0; grad_z = P_z · T with P_z = Π_{k<z} x_k =
+                        // y_{z-1} and T = Σ_{j≥z} g_j Π_{z<k≤j} x_k (Horner
+                        // from the end, vanishing past a second zero); and
+                        // for i < z, grad_i = P_i · S_i with
+                        // S_i = g_i + x_{i+1} S_{i+1} summed over j < z.
+                        var z: usize = 0;
+                        while (x[base + z * geo.inner + inner_i] != 0) z += 1;
+                        var tail: f32 = 0;
+                        var j: usize = axis_dim;
+                        while (j > z) {
+                            j -= 1;
+                            const offset = base + j * geo.inner + inner_i;
+                            tail = if (j + 1 < axis_dim) g[offset] + x[offset + geo.inner] * tail else g[offset];
+                            if (j > z) gxd[offset] = 0;
+                        }
+                        const z_offset = base + z * geo.inner + inner_i;
+                        gxd[z_offset] = (if (z == 0) @as(f32, 1) else y[z_offset - geo.inner]) * tail;
+                        var s: f32 = 0;
+                        var i: usize = z;
+                        while (i > 0) {
+                            i -= 1;
+                            const offset = base + i * geo.inner + inner_i;
+                            s = if (i + 1 < z) g[offset] + x[offset + geo.inner] * s else g[offset];
+                            gxd[offset] = (if (i == 0) @as(f32, 1) else y[offset - geo.inner]) * s;
                         }
                     }
                 }

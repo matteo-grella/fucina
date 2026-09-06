@@ -537,9 +537,13 @@ returns the scalar `Tensor(.{})`.
   slot, two or more kill the row's gradient.
 - `cumprod(ctx, tag)` — inclusive running product, shape-preserving
   (torch.cumprod); serial per row by default, vectorized under
-  `-Dvector-scan` ([§2.2](02-toolchain-build-and-project-wiring.md#22-build-options-buildzig), the `cumsum` gating). Differentiable: zero-free rows use the
-  O(n) reverse-scan closed form; rows containing a zero fall back to an
-  exact division-free O(n²) expansion (torch semantics).
+  `-Dvector-scan` ([§2.2](02-toolchain-build-and-project-wiring.md#22-build-options-buildzig), the `cumsum` gating). Differentiable, O(n) per row
+  either way: zero-free rows use the reverse-scan closed form
+  `(Σ_{j≥i} g_j·y_j)/x_i`; rows containing a zero use division-free
+  Horner forms (positions past the first zero get 0, the zero's own
+  gradient is the prefix product times a running suffix sum, positions
+  before it a prefix product times a Horner suffix — torch semantics, the
+  same exact products as the expanded form).
 - `segmentSum(ctx, tag, offsets)` — sums CONTIGUOUS index ranges of one
   axis (`torch.segment_reduce("sum")` over sorted segments):
   `out[..., i, ...] = Σ_{j ∈ [offsets[i], offsets[i+1])} x[..., j, ...]`.
