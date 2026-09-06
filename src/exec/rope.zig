@@ -245,8 +245,8 @@ pub fn prepareRopeTable(ctx: *ExecContext, spec: RopeTableSpec) !RopeTable {
         .inv_freq_f64 => |f| if (f.len != pair_count) return tensor.TensorError.InvalidDataLength,
     }
     const position_count = spec.positions.len();
-    const angle_count = try std.math.mul(usize, position_count, pair_count);
-    const values = try ctx.allocator().alloc(f32, try std.math.mul(usize, angle_count, 2));
+    const angle_count = try tensor.shapeProduct(position_count, pair_count);
+    const values = try ctx.allocator().alloc(f32, try tensor.shapeProduct(angle_count, 2));
     errdefer ctx.allocator().free(values);
     const positions_copy = try ctx.allocator().alloc(i32, position_count);
     errdefer ctx.allocator().free(positions_copy);

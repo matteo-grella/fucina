@@ -77,7 +77,7 @@ pub fn narrowAxis(
 
     var out_shape = source.shape;
     out_shape[axis] = length;
-    const offset_delta = try std.math.mul(usize, start, source.strides[axis]);
+    const offset_delta = try tensor.shapeProduct(start, source.strides[axis]);
     return x.viewWithStridesOffset(out_shape[0..], source.strides[0..], offset_delta);
 }
 
@@ -99,7 +99,7 @@ pub fn concatAxis(
         inline for (0..rank) |dim| {
             if (dim != axis and view.shape[dim] != first.shape[dim]) return tensor.TensorError.ShapeMismatch;
         }
-        out_shape[axis] = try std.math.add(usize, out_shape[axis], view.shape[axis]);
+        out_shape[axis] = try tensor.shapeSum(out_shape[axis], view.shape[axis]);
     }
     if (out_shape[axis] == 0) return tensor.TensorError.InvalidShape;
 
@@ -167,7 +167,7 @@ pub fn concatQuantizedRows(
         const view = try input.rankView(2);
         if (view.dim(1) != cols) return tensor.TensorError.ShapeMismatch;
         if (!input.isContiguous()) return tensor.TensorError.UnsupportedView;
-        rows = try std.math.add(usize, rows, view.dim(0));
+        rows = try tensor.shapeSum(rows, view.dim(0));
     }
     if (rows == 0) return tensor.TensorError.InvalidShape;
 
@@ -208,7 +208,7 @@ pub fn pad(
 
     const source = try x.rankView(rank);
     var out_shape = source.shape;
-    out_shape[axis] = try std.math.add(usize, source.shape[axis], try std.math.add(usize, before, after));
+    out_shape[axis] = try tensor.shapeSum(source.shape[axis], try tensor.shapeSum(before, after));
 
     var xx = try ctx.prepareContiguous(dtype, x);
     defer xx.deinit();

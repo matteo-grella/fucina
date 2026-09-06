@@ -373,3 +373,89 @@ test "public facade refuses backward over a mutated saved constant" {
     defer loss3.deinit();
     try std.testing.expectError(error.SavedValueMutated, loss3.backward(&ctx));
 }
+
+test "public method error sets fit fucina.Error" {
+    // Every fallible Tensor/ExecContext method keeps its precise inferred
+    // error set; the exported union is the vocabulary a wrapper may use
+    // to thread any of them upward, so each probe's inferred set must be
+    // a subset of it — a name outside (std.math's Overflow, once leaked
+    // by geometry arithmetic) fails this test at compile time.
+    const V = Tensor(.{.a});
+    const M = Tensor(.{ .a, .b });
+    const W1 = Tensor(.{ .k, .b, .cout });
+    const Probes = struct {
+        fn sliceStep(ctx: *ExecContext, x: *const V) !void {
+            var r = try x.sliceStep(ctx, .a, 0, 1, 1);
+            r.deinit();
+        }
+        fn narrow(ctx: *ExecContext, x: *const V) !void {
+            var r = try x.narrow(ctx, .a, 0, 1);
+            r.deinit();
+        }
+        fn concat(ctx: *ExecContext, x: *const V) !void {
+            var r = try x.concat(ctx, .a, &.{x});
+            r.deinit();
+        }
+        fn pad(ctx: *ExecContext, x: *const V) !void {
+            var r = try x.pad(ctx, .a, 1, 1, 0);
+            r.deinit();
+        }
+        fn dot(ctx: *ExecContext, x: *const M, y: *const M) !void {
+            var r = try x.dot(ctx, y, .b);
+            r.deinit();
+        }
+        fn conv1d(ctx: *ExecContext, x: *const M, w: *const W1) !void {
+            var r = try x.conv1d(ctx, .a, .b, .k, .cout, w, 1, 0, 1, 1);
+            r.deinit();
+        }
+        fn softmax(ctx: *ExecContext, x: *const M) !void {
+            var r = try x.softmax(ctx, .b, .{});
+            r.deinit();
+        }
+        fn mean(ctx: *ExecContext, x: *const M) !void {
+            var r = try x.mean(ctx, .b, .{});
+            r.deinit();
+        }
+        fn transpose(ctx: *ExecContext, x: *const M) !void {
+            var r = try x.transpose(ctx, .{ .b, .a });
+            r.deinit();
+        }
+        fn backward(ctx: *ExecContext, x: *V) !void {
+            try x.backward(ctx);
+        }
+        fn data(x: *V) !void {
+            _ = try x.data();
+        }
+        fn fromSlice(ctx: *ExecContext) !void {
+            var r = try V.fromSlice(ctx, .{2}, &.{ 1, 2 });
+            r.deinit();
+        }
+        fn ctxMatmul(ctx: *ExecContext, x: *const fucina.internal.RawTensor, y: *const fucina.internal.RawTensor) !void {
+            var r = try ctx.matmul(.f32, .plain, x, y);
+            r.deinit();
+        }
+        fn ctxConcat(ctx: *ExecContext, x: *const fucina.internal.RawTensor) !void {
+            var r = try ctx.concatAxis(.f32, 2, &.{ x, x }, 0);
+            r.deinit();
+        }
+    };
+    comptime {
+        @setEvalBranchQuota(20_000);
+        for (@typeInfo(Probes).@"struct".decls) |d| {
+            const F = @TypeOf(@field(Probes, d.name));
+            const ret = @typeInfo(F).@"fn".return_type.?;
+            const set = @typeInfo(ret).error_union.error_set;
+            const names = @typeInfo(set).error_set orelse @compileError(d.name ++ " raises anyerror");
+            for (names) |e| {
+                if (!errorInSet(fucina.Error, e.name)) @compileError("fucina.Error is missing `" ++ e.name ++ "`, raised by " ++ d.name);
+            }
+        }
+    }
+}
+
+fn errorInSet(comptime Set: type, comptime name: []const u8) bool {
+    for (@typeInfo(Set).error_set.?) |e| {
+        if (std.mem.eql(u8, e.name, name)) return true;
+    }
+    return false;
+}

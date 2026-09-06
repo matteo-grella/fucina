@@ -45,6 +45,19 @@ pub fn checkedProduct(a: usize, b: usize) TensorError!usize {
     return std.math.mul(usize, a, b) catch TensorError.InvalidDataLength;
 }
 
+/// `a + b` and `a * b` as shape geometry (an extent, a padded length, a
+/// batch product), `InvalidShape` on overflow: the one spelling of checked
+/// extent arithmetic above the raw layer, so a request that wraps surfaces
+/// through the documented error vocabulary (`fucina.Error`) and never as
+/// `std.math`'s `Overflow`.
+pub fn shapeSum(a: usize, b: usize) TensorError!usize {
+    return std.math.add(usize, a, b) catch TensorError.InvalidShape;
+}
+
+pub fn shapeProduct(a: usize, b: usize) TensorError!usize {
+    return std.math.mul(usize, a, b) catch TensorError.InvalidShape;
+}
+
 /// Type-erased releaser for a heap-retained `*TensorOf(dtype)` handle
 /// (`deinit` then `destroy`), shared by the registries that hold facade
 /// tensors behind `*anyopaque` (`ParamRegistry`, the ES slots).
@@ -226,11 +239,13 @@ pub fn TensorOf(comptime tensor_dtype: DType) type {
             _ = try shape_mod.elementCount(shape);
             if (strides.len != shape.len) return TensorError.InvalidShape;
 
-            const view_offset = try std.math.add(usize, self.offset, offset_delta);
+            // A view whose extent does not fit is out of the buffer's range:
+            // `InvalidDataLength`, like one that reaches past its end.
+            const view_offset = std.math.add(usize, self.offset, offset_delta) catch return TensorError.InvalidDataLength;
             var max_index = view_offset;
             for (shape, strides) |dim, stride| {
-                const span = try std.math.mul(usize, dim - 1, stride);
-                max_index = try std.math.add(usize, max_index, span);
+                const span = std.math.mul(usize, dim - 1, stride) catch return TensorError.InvalidDataLength;
+                max_index = std.math.add(usize, max_index, span) catch return TensorError.InvalidDataLength;
             }
             if (max_index >= self.buffer.data.len) return TensorError.InvalidDataLength;
 

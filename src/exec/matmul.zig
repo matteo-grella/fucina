@@ -156,7 +156,7 @@ pub fn analyzeBmm(comptime kind: BmmKind, a: *const Tensor, b: *const Tensor) !B
         else
             return tensor.TensorError.ShapeMismatch;
         dims_buf[i] = out_dim;
-        num = try std.math.mul(usize, num, out_dim);
+        num = try tensor.shapeProduct(num, out_dim);
     }
 
     const dims_len: u8 = @intCast(dims_len_usize);

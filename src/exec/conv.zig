@@ -819,8 +819,8 @@ pub fn conv1d(
     if (stride == 0 or dilation == 0 or taps == 0 or groups == 0) return tensor.TensorError.InvalidShape;
     if (in_channels % groups != 0 or out_channels % groups != 0) return tensor.TensorError.ShapeMismatch;
     if (weight_view.shape[1] != in_channels / groups) return tensor.TensorError.ShapeMismatch;
-    const span = try std.math.add(usize, try std.math.mul(usize, dilation, taps - 1), 1);
-    const padded = try std.math.add(usize, seq, try std.math.mul(usize, 2, pad));
+    const span = try tensor.shapeSum(try tensor.shapeProduct(dilation, taps - 1), 1);
+    const padded = try tensor.shapeSum(seq, try tensor.shapeProduct(2, pad));
     if (padded < span) return tensor.TensorError.InvalidShape;
     const out_len = (padded - span) / stride + 1;
 
@@ -868,12 +868,12 @@ pub fn col2im1d(
     const col_view = try col.rankView(2);
     const t_in = col_view.shape[0];
     if (out_channels == 0 or taps == 0 or stride == 0 or t_in == 0) return tensor.TensorError.InvalidShape;
-    if (col_view.shape[1] != try std.math.mul(usize, taps, out_channels)) return tensor.TensorError.ShapeMismatch;
-    const upsampled = try std.math.add(usize, try std.math.mul(usize, t_in - 1, stride), taps);
-    const two_pad = try std.math.mul(usize, 2, pad);
+    if (col_view.shape[1] != try tensor.shapeProduct(taps, out_channels)) return tensor.TensorError.ShapeMismatch;
+    const upsampled = try tensor.shapeSum(try tensor.shapeProduct(t_in - 1, stride), taps);
+    const two_pad = try tensor.shapeProduct(2, pad);
     if (upsampled <= two_pad) return tensor.TensorError.InvalidShape;
     const t_out = upsampled - two_pad;
-    const out_len = try std.math.add(usize, t_out, output_pad);
+    const out_len = try tensor.shapeSum(t_out, output_pad);
 
     var cc = try ctx.prepareContiguous(.f32, col);
     defer cc.deinit();
@@ -911,10 +911,10 @@ pub fn convTranspose1d(
     const in_channels = in_view.shape[1];
     const w_view = try weight2.rankView(2);
     if (out_channels == 0 or taps == 0 or stride == 0 or t_in == 0) return tensor.TensorError.InvalidShape;
-    if (w_view.shape[0] != try std.math.mul(usize, taps, out_channels)) return tensor.TensorError.ShapeMismatch;
+    if (w_view.shape[0] != try tensor.shapeProduct(taps, out_channels)) return tensor.TensorError.ShapeMismatch;
     if (w_view.shape[1] != in_channels) return tensor.TensorError.ShapeMismatch;
-    const upsampled = try std.math.add(usize, try std.math.mul(usize, t_in - 1, stride), taps);
-    if (upsampled <= try std.math.mul(usize, 2, pad)) return tensor.TensorError.InvalidShape;
+    const upsampled = try tensor.shapeSum(try tensor.shapeProduct(t_in - 1, stride), taps);
+    if (upsampled <= try tensor.shapeProduct(2, pad)) return tensor.TensorError.InvalidShape;
 
     var bb: ?PreparedTensor = null;
     defer if (bb) |*p| p.deinit();
@@ -962,9 +962,9 @@ pub fn conv1dBackwardInput(
     if (stride == 0 or dilation == 0 or taps == 0 or groups == 0 or seq == 0) return tensor.TensorError.InvalidShape;
     if (weight_view.shape[2] != out_channels) return tensor.TensorError.ShapeMismatch;
     if (out_channels % groups != 0) return tensor.TensorError.ShapeMismatch;
-    const in_channels = try std.math.mul(usize, weight_view.shape[1], groups);
-    const span = try std.math.add(usize, try std.math.mul(usize, dilation, taps - 1), 1);
-    const padded = try std.math.add(usize, seq, try std.math.mul(usize, 2, pad));
+    const in_channels = try tensor.shapeProduct(weight_view.shape[1], groups);
+    const span = try tensor.shapeSum(try tensor.shapeProduct(dilation, taps - 1), 1);
+    const padded = try tensor.shapeSum(seq, try tensor.shapeProduct(2, pad));
     if (padded < span) return tensor.TensorError.InvalidShape;
     if ((padded - span) / stride + 1 != out_len) return tensor.TensorError.ShapeMismatch;
 
@@ -1017,8 +1017,8 @@ pub fn conv1dBackwardWeight(
     const out_channels = grad_view.shape[channel_axis];
     if (stride == 0 or dilation == 0 or taps == 0 or groups == 0 or seq == 0) return tensor.TensorError.InvalidShape;
     if (in_channels % groups != 0 or out_channels % groups != 0) return tensor.TensorError.ShapeMismatch;
-    const span = try std.math.add(usize, try std.math.mul(usize, dilation, taps - 1), 1);
-    const padded = try std.math.add(usize, seq, try std.math.mul(usize, 2, pad));
+    const span = try tensor.shapeSum(try tensor.shapeProduct(dilation, taps - 1), 1);
+    const padded = try tensor.shapeSum(seq, try tensor.shapeProduct(2, pad));
     if (padded < span) return tensor.TensorError.InvalidShape;
     if ((padded - span) / stride + 1 != out_len) return tensor.TensorError.ShapeMismatch;
 
@@ -1063,8 +1063,8 @@ pub fn col2im1dBackward(
     const grad_view = try gy.rankView(2);
     if (out_channels == 0 or taps == 0 or stride == 0 or t_in == 0) return tensor.TensorError.InvalidShape;
     if (grad_view.shape[1] != out_channels) return tensor.TensorError.ShapeMismatch;
-    const upsampled = try std.math.add(usize, try std.math.mul(usize, t_in - 1, stride), taps);
-    const two_pad = try std.math.mul(usize, 2, pad);
+    const upsampled = try tensor.shapeSum(try tensor.shapeProduct(t_in - 1, stride), taps);
+    const two_pad = try tensor.shapeProduct(2, pad);
     if (upsampled <= two_pad) return tensor.TensorError.InvalidShape;
     const t_conv = upsampled - two_pad;
     if (grad_view.shape[0] < t_conv) return tensor.TensorError.ShapeMismatch;
@@ -1072,7 +1072,7 @@ pub fn col2im1dBackward(
     var gg = try ctx.prepareContiguous(.f32, gy);
     defer gg.deinit();
 
-    var out = try ctx.empty(.f32, .{ t_in, try std.math.mul(usize, taps, out_channels) });
+    var out = try ctx.empty(.f32, .{ t_in, try tensor.shapeProduct(taps, out_channels) });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(parallel.saturatedMul3(t_in, out_channels, taps), parallel.vector_elementwise_len_threshold);
     kernels.col2im1dBackwardInto(ctx.pc(), &out, gg.tensor(), t_in, grad_view.shape[0], out_channels, taps, stride, pad);
@@ -1199,7 +1199,7 @@ pub fn groupedCausalConv1dBackwardInput(
     const out_channels = grad_view.shape[channel_axis];
     const taps = weight_view.shape[0];
     if (weight_view.shape[2] != out_channels) return tensor.TensorError.ShapeMismatch;
-    const in_channels = try std.math.mul(usize, weight_view.shape[1], groups);
+    const in_channels = try tensor.shapeProduct(weight_view.shape[1], groups);
     const in_per_group = try validateGroupedCausalConv(null, in_channels, out_channels, taps, dilation, groups);
     if (weight_view.shape[1] != in_per_group) return tensor.TensorError.ShapeMismatch;
 
@@ -1254,8 +1254,8 @@ pub fn groupedCausalConv1dBackwardWeight(
 /// positive.
 fn validateCausalState(state: ?[]const f32, channels: usize, taps: usize, dilation: usize) !void {
     if (taps == 0 or dilation == 0) return tensor.TensorError.InvalidShape;
-    const pad = try std.math.mul(usize, dilation, taps - 1);
-    const expected = try std.math.mul(usize, pad, channels);
+    const pad = try tensor.shapeProduct(dilation, taps - 1);
+    const expected = try tensor.shapeProduct(pad, channels);
     if (state) |values| {
         if (values.len != expected) return tensor.TensorError.InvalidDataLength;
     }
