@@ -200,3 +200,74 @@ test "custom VJP rejects a backward tensor with the wrong input shape" {
 
     try std.testing.expectError(tensor_mod.TensorError.ShapeMismatch, loss.backward(&ctx));
 }
+
+test "custom VJP releases an owned extra through the Spec's deinitExtra exactly once" {
+    // Ownership is the Spec's declaration: a Spec with `deinitExtra` owns
+    // its extra and `customVjp` releases it once — with the backward
+    // record, or right after a forward that records nothing. A `deinit`
+    // on the extra type itself is not consulted.
+    const Counter = struct {
+        var releases: usize = 0;
+    };
+    const Owned = struct {
+        scale: f32,
+        pub fn deinit(_: *@This(), _: std.mem.Allocator) void {
+            @panic("the extra type's own deinit must not be consulted");
+        }
+    };
+    const OwningSpec = struct {
+        pub const Output = Tensor(.{.d});
+
+        pub fn deinitExtra(_: *Owned, _: std.mem.Allocator) void {
+            Counter.releases += 1;
+        }
+
+        pub fn forward(ctx: *ExecContext, extra: Owned, inputs: []const *const RawTensor) !RawTensor {
+            return ctx.scale(.f32, inputs[0], extra.scale);
+        }
+
+        pub fn backward(
+            ctx: *ExecContext,
+            extra: Owned,
+            inputs: []const *const RawTensor,
+            output: *const RawTensor,
+            gy: *const RawTensor,
+            needs_grad: []const bool,
+            out: []?RawTensor,
+        ) !void {
+            _ = inputs;
+            _ = output;
+            if (needs_grad[0]) out[0] = try ctx.scale(.f32, gy, extra.scale);
+        }
+    };
+
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    var ctx: ExecContext = undefined;
+    ctx.init(gpa.allocator());
+    defer ctx.deinit();
+
+    Counter.releases = 0;
+    // A forward that records nothing releases the extra immediately.
+    var c = try Tensor(.{.d}).fromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer c.deinit();
+    var yc = try custom.customVjp(&ctx, OwningSpec, Owned{ .scale = 3 }, .{&c});
+    defer yc.deinit();
+    try std.testing.expectEqual(@as(usize, 1), Counter.releases);
+
+    // A recording forward keeps it until the record is released.
+    var x = try Tensor(.{.d}).variableFromSlice(&ctx, .{2}, &.{ 1, 2 });
+    defer x.deinit();
+    {
+        var y = try custom.customVjp(&ctx, OwningSpec, Owned{ .scale = 3 }, .{&x});
+        defer y.deinit();
+        var loss = try y.sumAll(&ctx);
+        defer loss.deinit();
+        try loss.backward(&ctx);
+        try std.testing.expectEqual(@as(usize, 1), Counter.releases);
+    }
+    try std.testing.expectEqual(@as(usize, 2), Counter.releases);
+    var gx = (try x.grad(&ctx)).?;
+    defer gx.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 3, 3 }, try gx.dataConst());
+}

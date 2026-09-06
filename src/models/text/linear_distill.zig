@@ -112,9 +112,7 @@ const Extra = struct {
     options: Options,
     saved: *Saved,
 
-    /// Called by `customVjp` when the record is released (or right after
-    /// the forward when nothing records).
-    pub fn deinit(self: *Extra, allocator: Allocator) void {
+    fn deinit(self: *Extra, allocator: Allocator) void {
         self.saved.deinit();
         allocator.destroy(self.saved);
     }
@@ -122,6 +120,13 @@ const Extra = struct {
 
 const Spec = struct {
     pub const Output = fucina.Tensor(.{});
+
+    /// The Spec owns its extra (the saved forward state): `customVjp`
+    /// releases it here when the record is released, or right after the
+    /// forward when nothing records.
+    pub fn deinitExtra(extra: *Extra, allocator: Allocator) void {
+        extra.deinit(allocator);
+    }
 
     pub fn forward(ctx: *ExecContext, extra: Extra, inputs: []const *const RawTensor) !RawTensor {
         return forwardImpl(ctx, extra.saved, extra.options, inputs[0], inputs[1]);

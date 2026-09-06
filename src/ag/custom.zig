@@ -70,7 +70,7 @@ pub fn customVjp(ctx: *ExecContext, comptime Spec: type, extra: anytype, inputs:
     if (!any_grad or !control.isGradEnabled()) {
         const out = try finishNoGrad(Spec.Output, ctx, value);
         var owned_extra = extra;
-        releaseExtra(&owned_extra, ctx.allocator());
+        releaseExtra(Spec, &owned_extra, ctx.allocator());
         return out;
     }
 
@@ -142,17 +142,21 @@ fn CustomBackward(comptime Spec: type, comptime Extra: type, comptime Inputs: ty
         pub fn deinitFields(self: *Self, allocator: Allocator) void {
             for (&self.views) |*view| view.deinit();
             self.output.deinit();
-            releaseExtra(&self.extra, allocator);
+            releaseExtra(Spec, &self.extra, allocator);
         }
 
         pub const vtable = core.recordVTable(Self);
     };
 }
 
-/// Runs `Extra.deinit` when the extra type declares one (owned state).
-fn releaseExtra(extra: anytype, allocator: Allocator) void {
-    const Extra = @TypeOf(extra.*);
-    if (comptime @typeInfo(Extra) == .@"struct" and @hasDecl(Extra, "deinit")) extra.deinit(allocator);
+/// The one ownership rule of `extra`: it is borrowed by value unless the
+/// Spec declares `pub fn deinitExtra(extra: *Extra, allocator: Allocator)
+/// void`, in which case the Spec owns it and this releases it — right
+/// after a forward that records nothing, or with the backward record.
+/// Ownership is the Spec's statement, never inferred from a method the
+/// extra type happens to declare.
+fn releaseExtra(comptime Spec: type, extra: anytype, allocator: Allocator) void {
+    if (comptime @hasDecl(Spec, "deinitExtra")) Spec.deinitExtra(extra, allocator);
 }
 
 fn finishNoGrad(comptime Output: type, ctx: *ExecContext, value: RawTensor) !Output {

@@ -667,6 +667,8 @@ const Spec = struct {
                     inputs: []const *const RawTensor,
                     output: *const RawTensor, gy: *const RawTensor,
                     needs_grad: []const bool, out: []?RawTensor) !void { ... }
+    // optional: the Spec OWNS `extra` (saved forward state) and releases it here
+    pub fn deinitExtra(extra: *E, allocator: std.mem.Allocator) void { ... }
 };
 ```
 
@@ -679,8 +681,13 @@ a non-tuple `inputs` are compile errors. Semantics:
   is a plain no-grad tensor and `backward` is never referenced at runtime.
 - Otherwise the node captures refcounted **views** of every input value and
   of the output (cheap, no copies), the input `GradState` pointers as
-  operands, and `extra` **by value** (same lifetime contract as checkpoint's
-  `extra`: pointees must outlive backward).
+  operands, and `extra` **by value**. `extra` is borrowed (pointees must
+  outlive backward, as checkpoint's `extra`) unless the Spec declares
+  `deinitExtra`: then the Spec owns it, and `customVjp` releases it through
+  that hook exactly once — right after a forward that records nothing, or
+  when the backward record is released. Ownership is the Spec's
+  declaration; a `deinit` on the extra type itself means nothing to
+  `customVjp`.
 - At backward time the adapter passes the saved views, the saved output, and
   the upstream `gy`; `backward` must write an *owned* raw tensor into
   `out[i]` for every true `needs_grad[i]` (the engine consumes and deinits
