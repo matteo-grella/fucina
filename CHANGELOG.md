@@ -35,6 +35,15 @@ this point; earlier history is `git log`.
 
 ### Changed
 
+- Depthwise conv2d (`groups == cin == cout`, one input channel per group)
+  takes a channel-vectorized kernel over a tap-major repack of the weight
+  (`conv2dDepthwiseInto`): the tap bounds are evaluated once per output
+  position instead of once per output channel, and the taps accumulate
+  across contiguous channel lanes. Bit-identical to the direct kernel it
+  replaces (same tap order, same f32 multiply-then-add); the direct kernel
+  keeps every other grouped shape. Backward stays on the direct kernels.
+  `bench-conv`'s 56×56×64 3×3 depthwise forward: 388 → 36 µs on an M1
+  Max, 383 → 45 µs on an i9-13950HX (16 pinned threads).
 - The blocked f32 GEMM on aarch64 derives its row block from the row
   count and the team: when `ceil(m / mc)` blocks would leave participants
   idle, `mc` shrinks to the smallest `mr`-aligned block that covers them.
