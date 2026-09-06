@@ -491,7 +491,10 @@ Within the pure-Zig tier there are two paths:
   does, so a 253-row shape splits into eight blocks for ten participants
   instead of two (253×1024×1024 NT on an M1 Max: 155 → 368 GF/s; 2048³,
   whose blocks already cover the team, keeps `mc = 128`); the other ISAs
-  cover small `m` with the column chunks and keep `mc`;
+  cover small `m` with the column chunks and keep `mc` — measured, not
+  assumed: on an i9-13950HX (16 pinned threads, `-Dblas=none`) the same
+  shapes run 700–736 GF/s through the column chunks, and the row-block
+  rule there would cost 8–15% (656–680 GF/s);
   `gemmBlockedWithParams` **panics** on out-of-bounds params (they would
   overrun the static workspace, and the bench sweep feeds runtime params in
   ReleaseFast where asserts vanish). Because backend kernels must stay

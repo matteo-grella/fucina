@@ -41,7 +41,9 @@ this point; earlier history is `git log`.
   253×1024×1024 NT on an M1 Max: 155 → 368 GF/s (2.4×) through the
   blocked kernel, and `bench-gemm`'s dispatch column follows (148 → 416
   GF/s); 2048³ keeps `mc = 128` and its throughput. Other ISAs, whose
-  column chunks already cover small `m`, are unchanged.
+  column chunks already cover small `m`, are unchanged: on an i9-13950HX
+  (`-Dblas=none`, 16 pinned threads) the same shapes run 700–736 GF/s as
+  they are, and the rule would cost 8–15% there.
 - A mutable access or an in-place op on read-only storage
   (`fromBorrowedConstSlice`) fails with `error.ReadOnlyStorage`
   (`TensorError`, so `fucina.Error`): `data()`, `addScaledInPlace`,
