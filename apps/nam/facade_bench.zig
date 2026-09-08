@@ -144,7 +144,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, arg
     try stdout.print("hand-rolled:  {d:.1} us/block  {d:.1} ns/sample  ({d:.1}x headroom)   [second run {d:.1} us/block]\n", .{ ref_a / 1e3, ref_a / per_sample, budget_ns / ref_a, ref_b / 1e3 });
     try stdout.print("facade:       {d:.1} us/block  {d:.1} ns/sample  ({d:.1}x headroom)   input via persistent slot + copyFrom; allocations during the timed run: {d}\n", .{ fac / 1e3, fac / per_sample, budget_ns / fac, allocs_during });
     try stdout.print("facade:       {d:.1} us/block  {d:.1} ns/sample  ({d:.1}x headroom)   input via fromBorrowedConstSlice per block; allocations during the timed run: {d}\n", .{ fac_borrowed / 1e3, fac_borrowed / per_sample, budget_ns / fac_borrowed, allocs_during_borrowed });
-    try stdout.print("facade/hand:  {d:.2}x time (slot), {d:.2}x (borrowed)\n", .{ fac / @min(ref_a, ref_b), fac_borrowed / @min(ref_a, ref_b) });
+    try stdout.print("speedup:      facade is {d:.2}x faster than hand-rolled (slot), {d:.2}x (borrowed)\n", .{ @min(ref_a, ref_b) / fac, @min(ref_a, ref_b) / fac_borrowed });
 
     try convMicrobench(io, allocator, stdout, &ctx, config, blocksize);
     try tanhMicrobench(io, allocator, stdout, &ctx, blocksize);
@@ -487,7 +487,7 @@ fn lstmMicrobench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     reference.process(input, out_ref, total);
     try candidate.process(ctx, input, out_fac, total);
     for (out_ref, out_fac) |r, g| max_abs = @max(max_abs, @abs(r - g));
-    try stdout.print("\nlstm hidden 24 x 1 layer: LstmEngine {d:.0} ns/sample   tensor lstm.Stream {d:.0} ns/sample   ({d:.2}x, max|d|={e:.2})\n", .{ ref_ns, fac_ns, fac_ns / ref_ns, max_abs });
+    try stdout.print("\nlstm hidden 24 x 1 layer: LstmEngine {d:.0} ns/sample   tensor lstm.Stream {d:.0} ns/sample   (tensor is {d:.2}x faster, max|d|={e:.2})\n", .{ ref_ns, fac_ns, ref_ns / fac_ns, max_abs });
     try lstmOpCosts(io, stdout, ctx, config.hidden_size);
 }
 
