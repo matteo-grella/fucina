@@ -25,6 +25,22 @@ this point; earlier history is `git log`.
 
 ### Added
 
+- `causalConv1dStreaming` / `groupedCausalConv1dStreaming`: the inference
+  spelling of the causal conv over a stream — the left context lives in a
+  `fucina.streamconv.CausalState` (a ring of context rows advanced by the
+  op) and the bias is added in the kernel epilogue; chunk by chunk it is
+  bit-identical to the whole-signal `causalConv1d` plus bias. No-grad only.
+- `Tensor.copyFrom(src)`: the mirror of `copyTo`, host data into a
+  persistent contiguous no-grad tensor without a new storage header.
+- The channel-mixing causal conv forward kernel is register-tiled over
+  eight frames with the (tap, in-channel) walk blocked in cache-resident
+  slabs (bitwise independent of tiling, blocking and row split), and the
+  single-channel undilated FIR shape is one vectorized dot per output.
+  Measured on M1 Max at 64-frame blocks against the previous kernel:
+  16→16 k3 21.4 → 1.9 µs per call, 16→16 1×1 6.0 → 0.65 µs, a 2048-tap
+  1→1 FIR 7.3 → 0.57 µs per sample-block; the qwen3tts codec convs
+  (512→1024 k3, 768→768 k7, 192→192 k7, 1024→1536 k7) run on the same
+  kernel — see the assessment record for their before/after.
 - `packMatmulRhs(.tq2_0)` builds the 4-column-interleaved ternary
   container (`QuantizedMatmulRhsTQ2_0x4`, `PackedRhs(.tq2_0)`), the
   sdot-lane kernel the PTQTP loader already used privately, now behind
@@ -34,6 +50,14 @@ this point; earlier history is `git log`.
   cells as the f32 sgemm arm (`m, n, k ≥ 16`).
 
 ### Changed
+
+- The lane kernels with an approximate vector body (`tanh`, `sigmoid`,
+  `silu`, `exp`, `gelu`, `softplus`, the gated pairs, `softcap`) evaluate
+  their array tail through the same lanes instead of the scalar function:
+  values at tail positions of arrays whose length is not a multiple of the
+  vector width move by at most the lane approximation's error (5e-7
+  relative for `tanh`), and every elementwise result is now bitwise
+  independent of chunking and row splits.
 
 - Depthwise conv2d (`groups == cin == cout`, one input channel per group)
   takes a channel-vectorized kernel over a tap-major repack of the weight
