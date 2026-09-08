@@ -1274,3 +1274,89 @@ resumed run must re-pass them identically (the trainers' `TrainerState`
 does not persist them). Quantization
 background and the TQ2_0 layout: [§10](10-quantization.md); design record:
 [TERNARY.md](../TERNARY.md); acceptance demo: `zig build es-ternary-spirals`.
+
+## 11.12 Recurrent layers: the LSTM (`src/rnn.zig`)
+
+`fucina.rnn` is the LSTM written over the facade so that one `step` serves
+training and streaming inference. The semantics are PyTorch's `nn.LSTM`:
+gates i, f, g, o over the concatenated `[x | h]` input,
+`c' = σ(f)·c + σ(i)·tanh(g)`, `h' = σ(o)·tanh(c')`, and a learnable initial
+state `h0`, `c0` per layer. Tags are fixed: `.k` is a step's input axis,
+`.unit` the hidden and gate axis, `.time` the sequence axis; retag views to
+and from your own names.
+
+| Type | Role |
+| --- | --- |
+| `LstmCell` | one layer: `w` `[in + H + 1, 4H]`, `h0`, `c0`; `init` (PyTorch's uniform ±1/sqrt(H), zero state), `fromStacked` (PyTorch's stacked `[4H, in + H]` matrix, bias, state; any views), `step`, `stackedWeight` and `bias` views, `registerParams` |
+| `Lstm` | a stack of cells: `init`, `fromCells`, `forward` (the recorded sequence), `Stream` (per-step inference), `registerParams` |
+| `State` | the `h`, `c` pair one step hands to the next |
+
+**Layout.** A cell stores one `[in + H + 1, 4H]` matrix: PyTorch's stacked
+`[W_ih | W_hh]` transposed, with the summed bias (`b_ih + b_hh`) as the last
+row against a constant-one input the stack owns. The gate pre-activation is
+then a single vector-times-matrix `dot` in the orientation the row kernels
+run fastest, with no separate bias pass; `fromStacked`, `stackedWeight` and
+`bias` are the permuted and narrowed views that convert to and from the
+stacked layout (import copies once; export views are read with `copyTo`).
+
+**One step, two regimes.** Every transient a step makes is released by a
+`defer` right after it is made. Under an open exec scope
+([§6.3](06-the-execution-runtime-execcontext-and-the-memory-model.md#63-exec-scopes-implicit-ownership-for-training-srcexeczig-srcexecruntimezig))
+those releases are no-ops and the scope owns the recorded graph; outside a
+scope the returned state is the caller's and the step runs allocation-free
+once the runtime's pool is warm. `Lstm.forward` requires a scope
+(`error.ExecScopeRequired`) and `Lstm.Stream` refuses one
+(`error.ActiveExecScopeUnsupported`).
+
+**Sequence training.** `forward(ctx, x, .{ .burn_in, .truncate })` runs
+`x` `[T, in]` from the learned initial state and returns the last layer's
+`[T, H]`: the first `burn_in` steps under `noGrad` (the state reaches the
+recorded segment as a value, so `h0`/`c0` get no gradient), then the
+recorded steps in `truncate`-step segments with the state detached between
+them (truncated backpropagation through time; values never change, only
+the gradient horizon). Gradients for the weight, the bias row and the
+initial state are checked against finite differences in `rnn_tests.zig`,
+and streaming is bitwise the windowed forward.
+
+```zig
+test "lstm: a recorded window and the same steps streamed" {
+    const alloc = std.testing.allocator;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(alloc);
+    defer ctx.deinit();
+    const rnn = fucina.rnn;
+
+    var lstm = try rnn.Lstm.init(alloc, &ctx, 1, 4, 1, 7); // in 1, hidden 4, one layer, seed 7
+    defer lstm.deinit();
+    const signal = [_]f32{ 0.5, -0.25, 0.75, 0.1, -0.6, 0.3 };
+
+    // Training: the scope owns every step; burn in two steps, record four.
+    var windowed: [6 * 4]f32 = undefined;
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var x = try rnn.Sequence.fromSlice(&ctx, .{ 6, 1 }, &signal);
+        defer x.deinit();
+        const hs = try lstm.forward(&ctx, &x, .{ .burn_in = 2, .truncate = 0 });
+        var loss = try hs.sumAll(&ctx);
+        try loss.backward(&ctx);
+        try std.testing.expect((try lstm.cells[0].w.grad(&ctx)) != null);
+        try hs.copyTo(&windowed);
+    }
+
+    // Inference: no scope, one sample at a time, the same values.
+    var stream = try rnn.Lstm.Stream.init(alloc, &ctx, &lstm);
+    defer stream.deinit();
+    var x_t = try rnn.Input.zeros(&ctx, .{1});
+    defer x_t.deinit();
+    for (signal, 0..) |v, t| {
+        try x_t.copyFrom(&[_]f32{v});
+        const h = try stream.step(&ctx, &x_t);
+        try std.testing.expectEqualSlices(f32, windowed[t * 4 ..][0..4], try h.dataConst());
+    }
+}
+```
+
+The NAM port (`apps/nam/lstm.zig`) is the reference consumer: the core
+stack plus a linear head, the `.nam` weight stream as views into
+`fromStacked`, and the trainer's window contract on top of `forward`.

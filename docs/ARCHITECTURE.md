@@ -40,7 +40,7 @@ Top-down; a band may depend only on bands at or below it:
 | serving | `src/serving.zig`, `src/serving/**` (the `fucina_serving` module) |
 | models | `src/models.zig`, `src/models/**` (the `fucina_models` module) |
 | facade | `src/fucina.zig` (the `fucina` module root) |
-| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/es/**`, `src/ptqtp.zig`, `src/gguf.zig`, `src/gguf/**`, `src/lora.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
+| ag + training/serialization | `src/ag.zig`, `src/ag/**`, `src/optim.zig`, `src/optim/**`, `src/es.zig`, `src/es/**`, `src/ptqtp.zig`, `src/gguf.zig`, `src/gguf/**`, `src/lora.zig`, `src/rnn.zig`, `src/safetensors.zig`, `src/state_dict.zig`, `src/training_checkpoint.zig`, `src/param_registry.zig`, `src/weights.zig`, `src/weights/**`, `src/gguf_meta.zig`, `src/ptqtp_gguf.zig` (model I/O) |
 | tagged | `src/tag_ops.zig` (tag-ops library) |
 | moe | `src/moe.zig`, `src/moe/**` (the MoE band: the `MoeRhs` expert-stack container, the decode and batched-prefill expert FFN engines, the phase-chain scheduling every family shares, the decode-scratch views family engines carve) |
 | exec | `src/exec.zig`, `src/exec/**` (eager runtime) |
@@ -73,6 +73,8 @@ Top-down; a band may depend only on bands at or below it:
 - Training/persistence namespaces: `optim`, `es`, `lora`, `gguf`, `rng`,
   `parallel`, `ParamRegistry`, `state_dict`, `safetensors`,
   `training_checkpoint`, plus the `ptqtp` trit-plane PTQ namespace.
+- Layers over the facade: `rnn` (the LSTM cell and stack, one `step` for
+  training and streaming).
 
 The root intentionally does not export the raw tensor or raw autograd
 internals. A comptime guard in `src/fucina.zig` makes re-exporting `RawTensor`
@@ -306,7 +308,8 @@ Autograd:
 Training and persistence (see *Training And Persistence*): `src/optim.zig`,
 `src/es.zig`, `src/ptqtp.zig`, `src/param_registry.zig`, `src/state_dict.zig`,
 `src/safetensors.zig`, `src/training_checkpoint.zig`, `src/lora.zig`,
-`src/gguf.zig`.
+`src/gguf.zig`. Layers over the facade: `src/rnn.zig` (the LSTM cell and
+stack, one `step` for training and streaming).
 
 LLM stack (see *LLM Stack*): `src/models.zig` + `src/models/`.
 
@@ -967,6 +970,10 @@ the `src/` root in the `fucina` module; the text runtime lives under
 - `src/lora.zig`: `Adapter(in_tag, out_tag)` over frozen weights; named
   persistence; f32/f16 merge (the fine-tune → merge → quantize → serve loop
   is documented in `TRAINING.md`).
+- `src/rnn.zig`: `LstmCell` / `Lstm` over the facade with PyTorch's gate
+  semantics; one `step` serves the recorded forward (burn-in, truncated
+  BPTT) and the allocation-free `Stream`; stacked-layout import/export
+  views.
 - `src/ptqtp.zig`: post-training quantization to trit-planes — K ∈ {1,2,3}
   ternary planes with per-group scales over packed TQ2_0 (`PTQTP.md`;
   GGUF persistence in `src/ptqtp_gguf.zig`).

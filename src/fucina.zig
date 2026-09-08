@@ -53,6 +53,10 @@ pub const streamconv = @import("streamconv.zig");
 /// LoRA adapters: low-rank deltas over `weights.LinearWeight` plus their
 /// train-time plumbing.
 pub const lora = @import("lora.zig");
+/// Recurrent layers over the facade: the LSTM cell and stack (`rnn.Lstm`)
+/// with one `step` for training and streaming, PyTorch semantics, and
+/// stacked-layout import/export views.
+pub const rnn = @import("rnn.zig");
 /// Optimizers (SGD/AdamW/Muon/APOLLO...) over parameter registries, with
 /// recorded-golden parity tests.
 pub const optim = @import("optim.zig");
@@ -390,6 +394,7 @@ test {
     _ = ptqtp_gguf;
     _ = gguf_meta;
     _ = lora;
+    _ = rnn;
     _ = optim;
     _ = ptqtp;
     _ = rng;

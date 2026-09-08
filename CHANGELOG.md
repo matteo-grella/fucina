@@ -32,6 +32,15 @@ this point; earlier history is `git log`.
   bit-identical to the whole-signal `causalConv1d` plus bias. No-grad only.
 - `Tensor.copyFrom(src)`: the mirror of `copyTo`, host data into a
   persistent contiguous no-grad tensor without a new storage header.
+- `fucina.rnn`: the LSTM over the facade. `LstmCell.step` is one
+  `[x | h | 1] · W` product plus the gate nonlinearities, written once for
+  both the recorded forward (`Lstm.forward` with burn-in and truncated
+  backpropagation through time under an exec scope) and the
+  allocation-free `Lstm.Stream`; PyTorch's gate order and equations, a
+  learnable initial state per layer, and `fromStacked` /
+  `stackedWeight` / `bias` views for PyTorch's stacked `[4H, in + H]`
+  layout. Gradients are checked against finite differences; streaming is
+  bitwise the windowed forward.
 - The f32 `dot` lowering takes a comptime-resolved direct path for the
   plain 2-D case (`[m..., k]` against `[k, n...]` or `[n..., k]`, one
   contracted axis, no batch axis, contiguous operands, non-empty output):
