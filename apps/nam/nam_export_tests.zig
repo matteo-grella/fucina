@@ -22,7 +22,7 @@ test "exported file round-trips through our own loader" {
 
     var model = try train.Trainable.init(allocator, &ctx, train.ModelSpec.tiny, 3);
     defer model.deinit();
-    const weights = try model.extractWeights(allocator);
+    const weights = try model.extractWeights(&ctx, allocator);
     defer allocator.free(weights);
 
     // Render the export to memory through a temp file is io-bound; instead
@@ -77,7 +77,7 @@ test "packed WaveNet export writes a SlimmableContainer loadable at highest qual
     var spec = try train.TrainingSpec.parse("packed");
     var model = try spec.initTrainable(allocator, &ctx, 77);
     defer model.deinit();
-    var snapshot = try model.extractTrainingSnapshot(allocator, null);
+    var snapshot = try model.extractTrainingSnapshot(&ctx, allocator, null);
     defer snapshot.deinit(allocator);
     const packed_snapshot = switch (snapshot) {
         .packed_wavenet => |*s| s,

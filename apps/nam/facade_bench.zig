@@ -480,7 +480,7 @@ fn lstmMicrobench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     const fac_ns = elapsedNs(io, start) / @as(f64, @floatFromInt(total));
     var max_abs: f32 = 0;
     reference.reset();
-    candidate.reset();
+    try candidate.reset();
     reference.process(input, out_ref, total);
     try candidate.process(ctx, input, out_fac, total);
     for (out_ref, out_fac) |r, g| max_abs = @max(max_abs, @abs(r - g));

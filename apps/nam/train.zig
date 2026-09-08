@@ -311,25 +311,19 @@ pub const Trainable = struct {
     }
 
     /// Flat weights in the canonical NAM export order (spec §6.1.2).
-    pub fn extractWeights(self: *const Trainable, allocator: std.mem.Allocator) ![]f32 {
+    pub fn extractWeights(self: *const Trainable, ctx: *ExecContext, allocator: std.mem.Allocator) ![]f32 {
         var out: std.ArrayList(f32) = .empty;
         errdefer out.deinit(allocator);
 
-        for (self.arrays, self.spec.arrays) |*ap, *a| {
-            const c = a.channels;
-            const b = a.channels;
+        for (self.arrays) |*ap| {
             // rechannel: (out, in) row-major == our [C, in] layout.
             try out.appendSlice(allocator, try ap.rechannel_w.dataConst());
             for (ap.layers) |*lp| {
-                // conv: NAM (out, in, k); ours is [k][c][b].
-                const w = try lp.conv_w.dataConst();
-                for (0..b) |o| {
-                    for (0..c) |i| {
-                        for (0..a.kernel_size) |k| {
-                            try out.append(allocator, w[(k * c + i) * b + o]);
-                        }
-                    }
-                }
+                // conv: NAM (out, in, k) is the [b][c][k] view of our [k][c][b]
+                // weight, copied out stride-aware.
+                var nam_order = try lp.conv_w.permuteTo(ctx, .{ .bn, .ch, .tap });
+                defer nam_order.deinit();
+                try appendView(allocator, &out, &nam_order);
                 try out.appendSlice(allocator, try lp.conv_b.dataConst());
                 try out.appendSlice(allocator, try lp.mixin_w.dataConst()); // (out, in) == [B, 1]
                 try out.appendSlice(allocator, try lp.l1_w.dataConst()); // (out, in) == [C, B]
@@ -353,6 +347,15 @@ fn a2ParamFromSlice(comptime T: type, ctx: *ExecContext, shape: anytype, values:
         T.variableFromSlice(ctx, shape, values)
     else
         T.fromSlice(ctx, shape, values);
+}
+
+/// Appends a (possibly strided) view's elements in its logical order.
+fn appendView(allocator: std.mem.Allocator, out: *std.ArrayList(f32), view: anytype) !void {
+    var count: usize = 1;
+    for (view.shape()) |dim| count *= dim;
+    const start = out.items.len;
+    try out.resize(allocator, start + count);
+    try view.copyTo(out.items[start..]);
 }
 
 const A2ConvParams = struct {
@@ -384,17 +387,17 @@ const A2ConvParams = struct {
         const weight_len = taps * in_per_group * out_channels;
         try scratch.resize(allocator, weight_len);
         var idx = cursor.*;
-        for (0..groups) |g| {
-            for (0..out_per_group) |local_o| {
-                const o = g * out_per_group + local_o;
-                for (0..in_per_group) |local_i| {
-                    for (0..taps) |k| {
-                        scratch.items[(k * in_per_group + local_i) * out_channels + o] = weights[idx];
-                        idx += 1;
-                    }
-                }
-            }
+        {
+            // The NAM stream holds each group as (out_per_group, in_per_group,
+            // tap): a rank-4 view of it, permuted to [tap, in_per_group, group,
+            // out_per_group], copies out stride-aware in our layout.
+            var stream_view = try Tensor(.{ .grp, .opg, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ groups, out_per_group, in_per_group, taps }, weights[idx..][0..weight_len]);
+            defer stream_view.deinit();
+            var ours = try stream_view.permuteTo(ctx, .{ .tap, .in_group, .grp, .opg });
+            defer ours.deinit();
+            try ours.copyTo(scratch.items);
         }
+        idx += weight_len;
         var weight = try a2ParamFromSlice(A2ConvWeight, ctx, .{ taps, in_per_group, out_channels }, scratch.items, requires_grad);
         errdefer weight.deinit();
         var bias: ?A2Bias = null;
@@ -449,20 +452,15 @@ const A2ConvParams = struct {
         return false;
     }
 
-    fn appendNamWeights(self: *const A2ConvParams, allocator: std.mem.Allocator, out: *std.ArrayList(f32)) !void {
-        const w = try self.weight.dataConst();
-        const in_per_group = self.in_channels / self.groups;
-        const out_per_group = self.out_channels / self.groups;
-        for (0..self.groups) |g| {
-            for (0..out_per_group) |local_o| {
-                const o = g * out_per_group + local_o;
-                for (0..in_per_group) |local_i| {
-                    for (0..self.taps) |k| {
-                        try out.append(allocator, w[(k * in_per_group + local_i) * self.out_channels + o]);
-                    }
-                }
-            }
-        }
+    fn appendNamWeights(self: *const A2ConvParams, ctx: *ExecContext, allocator: std.mem.Allocator, out: *std.ArrayList(f32)) !void {
+        // Our [tap, in_per_group, out] to the NAM stream's (group,
+        // out_per_group, in_per_group, tap): split `out`, permute, copy out
+        // stride-aware.
+        var grouped = try self.weight.split(ctx, .out, .{ .grp, .opg }, .{ self.groups, self.out_channels / self.groups });
+        defer grouped.deinit();
+        var nam_order = try grouped.permuteTo(ctx, .{ .grp, .opg, .in_group, .tap });
+        defer nam_order.deinit();
+        try appendView(allocator, out, &nam_order);
         if (self.bias) |*b| try out.appendSlice(allocator, try b.dataConst());
     }
 };
@@ -527,8 +525,8 @@ const A2FiLMParams = struct {
         return self.conv.requiresGrad();
     }
 
-    fn appendNamWeights(self: *const A2FiLMParams, allocator: std.mem.Allocator, out: *std.ArrayList(f32)) !void {
-        try self.conv.appendNamWeights(allocator, out);
+    fn appendNamWeights(self: *const A2FiLMParams, ctx: *ExecContext, allocator: std.mem.Allocator, out: *std.ArrayList(f32)) !void {
+        try self.conv.appendNamWeights(ctx, allocator, out);
     }
 };
 
@@ -1161,47 +1159,49 @@ pub const A2Trainable = struct {
         return loss;
     }
 
-    pub fn extractWeights(self: *const A2Trainable, allocator: std.mem.Allocator) ![]f32 {
+    pub fn extractWeights(self: *const A2Trainable, ctx: *ExecContext, allocator: std.mem.Allocator) ![]f32 {
         var out: std.ArrayList(f32) = .empty;
         errdefer out.deinit(allocator);
         for (self.arrays) |*array| {
-            try array.rechannel.appendNamWeights(allocator, &out);
+            try array.rechannel.appendNamWeights(ctx, allocator, &out);
             for (array.layers) |*layer| {
-                try layer.conv.appendNamWeights(allocator, &out);
-                try layer.input_mixin.appendNamWeights(allocator, &out);
-                if (layer.layer1x1) |*conv| try conv.appendNamWeights(allocator, &out);
-                if (layer.head1x1) |*conv| try conv.appendNamWeights(allocator, &out);
-                try appendOptionalFilm(allocator, &out, &layer.conv_pre_film);
-                try appendOptionalFilm(allocator, &out, &layer.conv_post_film);
-                try appendOptionalFilm(allocator, &out, &layer.input_mixin_pre_film);
-                try appendOptionalFilm(allocator, &out, &layer.input_mixin_post_film);
-                try appendOptionalFilm(allocator, &out, &layer.activation_pre_film);
-                try appendOptionalFilm(allocator, &out, &layer.activation_post_film);
-                try appendOptionalFilm(allocator, &out, &layer.layer1x1_post_film);
-                try appendOptionalFilm(allocator, &out, &layer.head1x1_post_film);
+                try layer.conv.appendNamWeights(ctx, allocator, &out);
+                try layer.input_mixin.appendNamWeights(ctx, allocator, &out);
+                if (layer.layer1x1) |*conv| try conv.appendNamWeights(ctx, allocator, &out);
+                if (layer.head1x1) |*conv| try conv.appendNamWeights(ctx, allocator, &out);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.conv_pre_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.conv_post_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.input_mixin_pre_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.input_mixin_post_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.activation_pre_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.activation_post_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.layer1x1_post_film);
+                try appendOptionalFilm(ctx, allocator, &out, &layer.head1x1_post_film);
             }
-            try array.head_rechannel.appendNamWeights(allocator, &out);
+            try array.head_rechannel.appendNamWeights(ctx, allocator, &out);
         }
-        for (self.post_head) |*block| try block.conv.appendNamWeights(allocator, &out);
+        for (self.post_head) |*block| try block.conv.appendNamWeights(ctx, allocator, &out);
         try out.append(allocator, self.head_scale);
         return out.toOwnedSlice(allocator);
     }
 
     pub fn extractWaveNetSnapshot(
         self: *const A2Trainable,
+        ctx: *ExecContext,
         allocator: std.mem.Allocator,
         template_config: *const nam_file.WaveNetConfig,
     ) anyerror!WaveNetSnapshot {
-        const weights = try self.extractWeights(allocator);
+        const weights = try self.extractWeights(ctx, allocator);
         errdefer allocator.free(weights);
         var config = template_config.*;
-        config.condition_dsp = try self.extractConditionDspSnapshot(allocator, template_config.condition_dsp);
+        config.condition_dsp = try self.extractConditionDspSnapshot(ctx, allocator, template_config.condition_dsp);
         errdefer freeConditionDspSnapshot(allocator, config.condition_dsp);
         return .{ .config = config, .weights = weights };
     }
 
     fn extractConditionDspSnapshot(
         self: *const A2Trainable,
+        ctx: *ExecContext,
         allocator: std.mem.Allocator,
         template: ?*const nam_file.ConditionDsp,
     ) anyerror!?*const nam_file.ConditionDsp {
@@ -1213,7 +1213,7 @@ pub const A2Trainable = struct {
         if (dsp.architecture != .wavenet or dsp.config != .wavenet) return error.UnsupportedFeature;
         const out = try allocator.create(nam_file.ConditionDsp);
         errdefer allocator.destroy(out);
-        const child_snapshot = try child.extractWaveNetSnapshot(allocator, &dsp.config.wavenet);
+        const child_snapshot = try child.extractWaveNetSnapshot(ctx, allocator, &dsp.config.wavenet);
         out.* = .{
             .architecture = .wavenet,
             .config = .{ .wavenet = child_snapshot.config },
@@ -1291,8 +1291,8 @@ fn a2LayerRequiresGrad(layer: *const A2LayerParams) bool {
     return false;
 }
 
-fn appendOptionalFilm(allocator: std.mem.Allocator, out: *std.ArrayList(f32), film: *const ?A2FiLMParams) !void {
-    if (film.*) |*f| try f.appendNamWeights(allocator, out);
+fn appendOptionalFilm(ctx: *ExecContext, allocator: std.mem.Allocator, out: *std.ArrayList(f32), film: *const ?A2FiLMParams) !void {
+    if (film.*) |*f| try f.appendNamWeights(ctx, allocator, out);
 }
 
 fn a2Scalar(ctx: *ExecContext, value: f32) !Tensor(.{}) {
@@ -1724,7 +1724,7 @@ pub const PackedTrainable = struct {
         return total;
     }
 
-    pub fn extractPackedSnapshot(self: *const PackedTrainable, allocator: std.mem.Allocator) !PackedSnapshot {
+    pub fn extractPackedSnapshot(self: *const PackedTrainable, ctx: *ExecContext, allocator: std.mem.Allocator) !PackedSnapshot {
         const submodels = try allocator.alloc(WaveNetSnapshot, self.models.len);
         var built: usize = 0;
         errdefer {
@@ -1732,7 +1732,7 @@ pub const PackedTrainable = struct {
             allocator.free(submodels);
         }
         for (self.models, self.configs, 0..) |*model, *config, i| {
-            submodels[i] = try model.extractWaveNetSnapshot(allocator, config);
+            submodels[i] = try model.extractWaveNetSnapshot(ctx, allocator, config);
             built += 1;
         }
         return .{ .submodels = submodels };
@@ -1865,37 +1865,39 @@ pub const ActiveTrainable = union(enum) {
         };
     }
 
-    pub fn extractWeights(self: *const ActiveTrainable, allocator: std.mem.Allocator) ![]f32 {
+    pub fn extractWeights(self: *const ActiveTrainable, ctx: *ExecContext, allocator: std.mem.Allocator) ![]f32 {
         return switch (self.*) {
-            .classic => |*model| model.extractWeights(allocator),
-            .a2 => |*model| model.extractWeights(allocator),
+            .classic => |*model| model.extractWeights(ctx, allocator),
+            .a2 => |*model| model.extractWeights(ctx, allocator),
             .packed_wavenet => error.UnsupportedFeature,
         };
     }
 
     pub fn extractWaveNetSnapshot(
         self: *const ActiveTrainable,
+        ctx: *ExecContext,
         allocator: std.mem.Allocator,
         template_config: *const nam_file.WaveNetConfig,
     ) !WaveNetSnapshot {
         return switch (self.*) {
             .classic => |*model| .{
                 .config = template_config.*,
-                .weights = try model.extractWeights(allocator),
+                .weights = try model.extractWeights(ctx, allocator),
             },
-            .a2 => |*model| model.extractWaveNetSnapshot(allocator, template_config),
+            .a2 => |*model| model.extractWaveNetSnapshot(ctx, allocator, template_config),
             .packed_wavenet => error.UnsupportedFeature,
         };
     }
 
     pub fn extractTrainingSnapshot(
         self: *const ActiveTrainable,
+        ctx: *ExecContext,
         allocator: std.mem.Allocator,
         template_config: ?*const nam_file.WaveNetConfig,
     ) !TrainingSnapshot {
         return switch (self.*) {
-            .classic, .a2 => .{ .wavenet = try self.extractWaveNetSnapshot(allocator, template_config orelse return error.UnsupportedFeature) },
-            .packed_wavenet => |*model| .{ .packed_wavenet = try model.extractPackedSnapshot(allocator) },
+            .classic, .a2 => .{ .wavenet = try self.extractWaveNetSnapshot(ctx, allocator, template_config orelse return error.UnsupportedFeature) },
+            .packed_wavenet => |*model| .{ .packed_wavenet = try model.extractPackedSnapshot(ctx, allocator) },
         };
     }
 };
@@ -2230,7 +2232,7 @@ test "A2 trainable backward matches finite difference through grouped conv and F
 
     var model = try A2Trainable.initFromWaveNet(allocator, &ctx, &config, weights);
     defer model.deinit();
-    const roundtrip = try model.extractWeights(allocator);
+    const roundtrip = try model.extractWeights(&ctx, allocator);
     defer allocator.free(roundtrip);
     try std.testing.expectEqualSlices(f32, weights, roundtrip);
 
@@ -2292,18 +2294,26 @@ fn a2SumLossForWeights(
     return loss.item();
 }
 
+fn sumAbs(ctx: *ExecContext, g: anytype) !f32 {
+    var magnitude = try g.abs(ctx);
+    defer magnitude.deinit();
+    var total = try magnitude.sumAll(ctx);
+    defer total.deinit();
+    return total.item();
+}
+
 fn addA2FilmGradAbs(sum: *f32, film: *?A2FiLMParams, ctx: *ExecContext) !void {
     if (film.*) |*f| {
         var weight_grad = try f.conv.weight.grad(ctx);
         if (weight_grad) |*g| {
             defer g.deinit();
-            for (try g.dataConst()) |v| sum.* += @abs(v);
+            sum.* += try sumAbs(ctx, g);
         }
         if (f.conv.bias) |*bias| {
             var bias_grad = try bias.grad(ctx);
             if (bias_grad) |*g| {
                 defer g.deinit();
-                for (try g.dataConst()) |v| sum.* += @abs(v);
+                sum.* += try sumAbs(ctx, g);
             }
         }
     }

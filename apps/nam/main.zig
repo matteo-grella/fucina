@@ -725,7 +725,7 @@ fn train(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
             opt.zeroGrad();
         }
 
-        var snapshot = try model.extractTrainingSnapshot(allocator, template_config);
+        var snapshot = try model.extractTrainingSnapshot(&ctx, allocator, template_config);
         const val_esr = try validationEsrSnapshot(allocator, &snapshot, splits.val_x, normalized.val_y, nx);
         const epoch_seconds = @as(f64, @floatFromInt(@as(u64, @intCast(nowNs(io) - epoch_start)))) / 1e9;
         const improved = val_esr < best_esr;

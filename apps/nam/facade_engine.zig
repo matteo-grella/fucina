@@ -70,27 +70,25 @@ pub const Conv = struct {
         if (in_channels % groups != 0 or out_channels % groups != 0) return Error.InvalidConvShape;
         const in_per_group = in_channels / groups;
         const out_per_group = out_channels / groups;
-        const permuted = try allocator.alloc(f32, taps * in_per_group * out_channels);
-        defer allocator.free(permuted);
         const bias_len: usize = if (has_bias) out_channels else 0;
+        const weight_len = taps * in_per_group * out_channels;
         var idx = cursor.*;
-        if (idx + permuted.len + bias_len > stream.len) return Error.WeightCountMismatch;
-        for (0..groups) |g| {
-            for (0..out_per_group) |local_o| {
-                const o = g * out_per_group + local_o;
-                for (0..in_per_group) |local_i| {
-                    for (0..taps) |k| {
-                        permuted[(k * in_per_group + local_i) * out_channels + o] = stream[idx];
-                        idx += 1;
-                    }
-                }
-            }
-        }
-        var weight = try GroupedWeight.fromSlice(ctx, .{ taps, in_per_group, out_channels }, permuted);
+        if (idx + weight_len + bias_len > stream.len) return Error.WeightCountMismatch;
+        // The NAM stream holds each group as (out_per_group, in_per_group, tap):
+        // read it as a rank-4 view, permute to [tap, in_per_group, group,
+        // out_per_group], materialize once, and merge (group, out_per_group)
+        // into `out`. No index arithmetic, one copy.
+        var stream_view = try Tensor(.{ .grp, .opg, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ groups, out_per_group, in_per_group, taps }, stream[idx..][0..weight_len]);
+        defer stream_view.deinit();
+        var permuted = try stream_view.permuteTo(ctx, .{ .tap, .in_group, .grp, .opg });
+        defer permuted.deinit();
+        var packed_weight = try permuted.materialize(ctx);
+        defer packed_weight.deinit();
+        var weight = try packed_weight.merge(ctx, .out, .{ .grp, .opg });
         errdefer weight.deinit();
-        const bias = try allocator.alloc(f32, bias_len);
+        idx += weight_len;
+        const bias = try allocator.dupe(f32, stream[idx..][0..bias_len]);
         errdefer allocator.free(bias);
-        @memcpy(bias, stream[idx..][0..bias_len]);
         idx += bias_len;
         const state = try CausalState.init(allocator, in_channels, taps, dilation, chunk_hint);
         cursor.* = idx;
@@ -612,8 +610,11 @@ pub const IrCab = struct {
 };
 
 /// The LSTM runtime composed per sample from facade ops (`models.LstmEngine`'s
-/// counterpart): one `dot` for the stacked gates, four narrowed activations,
-/// the cell/hidden updates as elementwise ops.
+/// counterpart): the step's input is a tensor (`[x | h]` by `concat`), one
+/// `dot` for the stacked gates, four narrowed activations, the cell and
+/// hidden updates as elementwise ops, and the new `h` and `c` ARE the
+/// state: ownership moves from the op outputs into the cell, nothing is
+/// copied. Runs outside any exec scope so those outputs outlive the step.
 pub const Lstm = struct {
     allocator: std.mem.Allocator,
     cells: []Cell,
@@ -623,12 +624,12 @@ pub const Lstm = struct {
     const Cell = struct {
         w: Tensor(.{ .gate, .k }),
         b: []f32,
-        /// Persistent `[x | h]` working vector and cell state, owned
-        /// tensors written through `data()` (no per-sample headers).
-        xh: Tensor(.{.k}),
-        c: Tensor(.{.gate}),
+        /// Trained initial state, restored on `reset`.
         h0: []f32,
         c0: []f32,
+        /// Live state: the previous step's outputs.
+        h: Tensor(.{.h}),
+        c: Tensor(.{.h}),
         input_size: usize,
         hidden: usize,
     };
@@ -641,20 +642,19 @@ pub const Lstm = struct {
         errdefer for (cells[0..built]) |*cell| deinitCell(allocator, cell);
         for (cells, engine.cells) |*cell, *src| {
             const h = src.hidden;
-            const width = src.input_size + h;
-            var w = try Tensor(.{ .gate, .k }).fromSlice(ctx, .{ 4 * h, width }, src.w);
+            var w = try Tensor(.{ .gate, .k }).fromSlice(ctx, .{ 4 * h, src.input_size + h }, src.w);
             errdefer w.deinit();
-            var xh = try Tensor(.{.k}).zeros(ctx, .{width});
-            errdefer xh.deinit();
-            var c = try Tensor(.{.gate}).zeros(ctx, .{h});
-            errdefer c.deinit();
+            var h_t = try Tensor(.{.h}).fromSlice(ctx, .{h}, src.h0);
+            errdefer h_t.deinit();
+            var c_t = try Tensor(.{.h}).fromSlice(ctx, .{h}, src.c0);
+            errdefer c_t.deinit();
             cell.* = .{
                 .w = w,
                 .b = try allocator.dupe(f32, src.b),
-                .xh = xh,
-                .c = c,
                 .h0 = try allocator.dupe(f32, src.h0),
                 .c0 = try allocator.dupe(f32, src.c0),
+                .h = h_t,
+                .c = c_t,
                 .input_size = src.input_size,
                 .hidden = h,
             };
@@ -663,23 +663,21 @@ pub const Lstm = struct {
         const hidden = engine.cells[engine.cells.len - 1].hidden;
         var head_weight = try Tensor(.{ .out, .h }).fromSlice(ctx, .{ engine.head_bias.len, hidden }, engine.head_weight);
         errdefer head_weight.deinit();
-        var self = Lstm{
+        return .{
             .allocator = allocator,
             .cells = cells,
             .head_weight = head_weight,
             .head_bias = try allocator.dupe(f32, engine.head_bias),
         };
-        self.reset();
-        return self;
     }
 
     fn deinitCell(allocator: std.mem.Allocator, cell: *Cell) void {
         cell.w.deinit();
         allocator.free(cell.b);
-        cell.xh.deinit();
-        cell.c.deinit();
         allocator.free(cell.h0);
         allocator.free(cell.c0);
+        cell.h.deinit();
+        cell.c.deinit();
     }
 
     pub fn deinit(self: *Lstm) void {
@@ -690,50 +688,69 @@ pub const Lstm = struct {
         self.* = undefined;
     }
 
-    pub fn reset(self: *Lstm) void {
+    /// Back to the trained initial state.
+    pub fn reset(self: *Lstm) !void {
         for (self.cells) |*cell| {
-            const xh = cell.xh.data() catch unreachable;
-            @memset(xh[0..cell.input_size], 0);
-            @memcpy(xh[cell.input_size..], cell.h0);
-            @memcpy(cell.c.data() catch unreachable, cell.c0);
+            try cell.h.copyFrom(cell.h0);
+            try cell.c.copyFrom(cell.c0);
         }
     }
 
     pub fn processSample(self: *Lstm, ctx: *ExecContext, x: f32) !f32 {
-        const mark = ctx.openExecScope();
-        defer ctx.closeExecScope(mark);
-        const single = [1]f32{x};
-        var input: []const f32 = &single;
+        if (ctx.execScopeActive()) return error.ActiveExecScopeUnsupported;
+        var input = try Tensor(.{.k}).fromSlice(ctx, .{1}, &[_]f32{x});
+        defer input.deinit();
         for (self.cells) |*cell| {
             const h = cell.hidden;
-            const xh = try cell.xh.data();
-            @memcpy(xh[0..cell.input_size], input[0..cell.input_size]);
-            var gates = try cell.w.dot(ctx, &cell.xh, .k);
+            var h_k = try cell.h.withTags(ctx, .{.k});
+            defer h_k.deinit();
+            var xh = try input.concat(ctx, .k, &.{&h_k});
+            defer xh.deinit();
+            var gates = try cell.w.dot(ctx, &xh, .k);
+            defer gates.deinit();
             try gates.addAxisVectorInPlace(ctx, cell.b, .gate);
-            const i_pre = try gates.narrow(ctx, .gate, 0, h);
-            const f_pre = try gates.narrow(ctx, .gate, h, h);
-            const g_pre = try gates.narrow(ctx, .gate, 2 * h, h);
-            const o_pre = try gates.narrow(ctx, .gate, 3 * h, h);
-            const ig = try i_pre.sigmoid(ctx);
-            const fg = try f_pre.sigmoid(ctx);
-            const gg = try g_pre.tanh(ctx);
-            const og = try o_pre.sigmoid(ctx);
-            var c_new = try fg.mul(ctx, &cell.c);
-            const ig_gg = try ig.mul(ctx, &gg);
+            var i_pre = try gates.narrow(ctx, .gate, 0, h);
+            defer i_pre.deinit();
+            var f_pre = try gates.narrow(ctx, .gate, h, h);
+            defer f_pre.deinit();
+            var g_pre = try gates.narrow(ctx, .gate, 2 * h, h);
+            defer g_pre.deinit();
+            var o_pre = try gates.narrow(ctx, .gate, 3 * h, h);
+            defer o_pre.deinit();
+            var ig = try i_pre.sigmoid(ctx);
+            defer ig.deinit();
+            var fg = try f_pre.sigmoid(ctx);
+            defer fg.deinit();
+            var gg = try g_pre.tanh(ctx);
+            defer gg.deinit();
+            var og = try o_pre.sigmoid(ctx);
+            defer og.deinit();
+            // c = f*c + i*g; h = o*tanh(c). The outputs become the state.
+            var fg_h = try fg.withTags(ctx, .{.h});
+            defer fg_h.deinit();
+            var c_new = try fg_h.mul(ctx, &cell.c);
+            errdefer c_new.deinit();
+            var ig_gg = try ig.mul(ctx, &gg);
+            defer ig_gg.deinit();
             try c_new.addScaledInPlace(ctx, &ig_gg, 1.0);
-            try c_new.copyTo(try cell.c.data());
-            const tc = try c_new.tanh(ctx);
-            const h_new = try og.mul(ctx, &tc);
-            // Fresh `data()`: the earlier slice predates the ops that read xh.
-            const xh_out = try cell.xh.data();
-            try h_new.copyTo(xh_out[cell.input_size..]);
-            input = xh_out[cell.input_size..];
+            var tc = try c_new.tanh(ctx);
+            defer tc.deinit();
+            var og_h = try og.withTags(ctx, .{.h});
+            defer og_h.deinit();
+            const h_new = try og_h.mul(ctx, &tc);
+            cell.c.deinit();
+            cell.c = c_new;
+            cell.h.deinit();
+            cell.h = h_new;
+            const next = try cell.h.withTags(ctx, .{.k});
+            input.deinit();
+            input = next;
         }
         const last = &self.cells[self.cells.len - 1];
-        const h_view = try last.xh.narrow(ctx, .k, last.input_size, last.hidden);
-        const h_last = try h_view.withTags(ctx, .{.h});
-        const out = try self.head_weight.dot(ctx, &h_last, .h);
-        return (try out.dataConst())[0] + self.head_bias[0];
+        var out = try self.head_weight.dot(ctx, &last.h, .h);
+        defer out.deinit();
+        try out.addAxisVectorInPlace(ctx, self.head_bias, .out);
+        return out.item();
     }
 
     pub fn process(self: *Lstm, ctx: *ExecContext, input: []const f32, output: []f32, frames: usize) !void {

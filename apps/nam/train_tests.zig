@@ -49,7 +49,7 @@ test "trainable forward matches the streaming engine through export" {
     ctx.closeExecScope(scope);
 
     // Streaming-engine forward through the exported flat weights.
-    const weights = try model.extractWeights(allocator);
+    const weights = try model.extractWeights(&ctx, allocator);
     defer allocator.free(weights);
     var engine_pred: [200]f32 = undefined;
     try renderWeights(allocator, &model.spec, weights, &window, &engine_pred);
@@ -202,7 +202,7 @@ test "A2 WaveNet snapshot owns updated recursive condition DSP weights" {
     }
     try opt.step(&ctx);
 
-    var snapshot = try model.extractWaveNetSnapshot(allocator, &top_config);
+    var snapshot = try model.extractWaveNetSnapshot(&ctx, allocator, &top_config);
     defer snapshot.deinit(allocator);
     const snapshot_dsp = snapshot.config.condition_dsp orelse return error.TestExpectedConditionDsp;
     try std.testing.expectEqual(nam_file.Arch.wavenet, snapshot_dsp.architecture);
@@ -247,7 +247,7 @@ test "A2 training spec initializes, steps, extracts, and renders through shared 
         opt.zeroGrad();
     }
 
-    const weights = try model.extractWeights(allocator);
+    const weights = try model.extractWeights(&ctx, allocator);
     defer allocator.free(weights);
     var config = try spec.makeEngineConfig(allocator);
     defer freeEngineConfig(allocator, &config);
@@ -512,7 +512,7 @@ test "packed WaveNet spec sums submodel losses and extracts slimmable snapshots"
         opt.zeroGrad();
     }
 
-    var snapshot = try model.extractTrainingSnapshot(allocator, null);
+    var snapshot = try model.extractTrainingSnapshot(&ctx, allocator, null);
     defer snapshot.deinit(allocator);
     const packed_snapshot = switch (snapshot) {
         .packed_wavenet => |*s| s,
@@ -547,7 +547,7 @@ test "A2 trainable forward matches the streaming engine on the upstream max fixt
 
     var model = try A2Trainable.initFromWaveNet(allocator, &ctx, &file_model.config.wavenet, file_model.weights);
     defer model.deinit();
-    const roundtrip = try model.extractWeights(allocator);
+    const roundtrip = try model.extractWeights(&ctx, allocator);
     defer allocator.free(roundtrip);
     try std.testing.expectEqualSlices(f32, file_model.weights, roundtrip);
 
