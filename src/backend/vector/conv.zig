@@ -245,18 +245,19 @@ pub fn causalConv1dInto(
     input: *const Tensor,
     weight: *const Tensor,
     state: ?[]const f32,
+    bias: ?[]const f32,
     seq: usize,
     in_channels: usize,
     out_channels: usize,
     taps: usize,
     dilation: usize,
 ) void {
-    if (comptime isa.reference) return scalar.causalConv1dInto(out, input, weight, state, seq, in_channels, out_channels, taps, dilation);
+    if (comptime isa.reference) return scalar.causalConv1dInto(out, input, weight, state, bias, seq, in_channels, out_channels, taps, dilation);
     const output = common.contiguousData(out, seq * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
-    generalForwardRange(output, input_data, weight_data, state, in_channels, out_channels, taps, dilation, 1, 0, seq);
+    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, bias, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    generalForwardRange(output, input_data, weight_data, state, bias, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
 pub fn causalConv1dBackwardInputInto(
@@ -274,7 +275,7 @@ pub fn causalConv1dBackwardInputInto(
     const output = common.contiguousData(out, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const weight_data = common.contiguousDataConst(weight, taps * in_channels * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, null, seq, in_channels, out_channels, taps, dilation, 1)) return;
     generalBackwardInputRange(output, gy_data, weight_data, seq, in_channels, out_channels, taps, dilation, 1, 0, seq);
 }
 
@@ -295,7 +296,7 @@ pub fn causalConv1dBackwardWeightInto(
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const rows = taps * in_channels;
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, 1)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, null, seq, in_channels, out_channels, taps, dilation, 1)) return;
     generalBackwardWeightRange(output, input_data, gy_data, state, seq, in_channels, out_channels, taps, dilation, 1, 0, rows);
 }
 
@@ -305,6 +306,7 @@ pub fn groupedCausalConv1dInto(
     input: *const Tensor,
     weight: *const Tensor,
     state: ?[]const f32,
+    bias: ?[]const f32,
     seq: usize,
     in_channels: usize,
     out_channels: usize,
@@ -312,13 +314,13 @@ pub fn groupedCausalConv1dInto(
     dilation: usize,
     groups: usize,
 ) void {
-    if (comptime isa.reference) return scalar.groupedCausalConv1dInto(out, input, weight, state, seq, in_channels, out_channels, taps, dilation, groups);
+    if (comptime isa.reference) return scalar.groupedCausalConv1dInto(out, input, weight, state, bias, seq, in_channels, out_channels, taps, dilation, groups);
     const output = common.contiguousData(out, seq * out_channels);
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const in_per_group = in_channels / groups;
     const weight_data = common.contiguousDataConst(weight, taps * in_per_group * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
-    generalForwardRange(output, input_data, weight_data, state, in_channels, out_channels, taps, dilation, groups, 0, seq);
+    if (maybeParallelGeneralConv(pc, runGeneralForwardRows, seq, output, input_data, weight_data, null, state, bias, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    generalForwardRange(output, input_data, weight_data, state, bias, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
 pub fn groupedCausalConv1dBackwardInputInto(
@@ -338,7 +340,7 @@ pub fn groupedCausalConv1dBackwardInputInto(
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const in_per_group = in_channels / groups;
     const weight_data = common.contiguousDataConst(weight, taps * in_per_group * out_channels);
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardInputRows, seq, output, &.{}, weight_data, gy_data, null, null, seq, in_channels, out_channels, taps, dilation, groups)) return;
     generalBackwardInputRange(output, gy_data, weight_data, seq, in_channels, out_channels, taps, dilation, groups, 0, seq);
 }
 
@@ -361,7 +363,7 @@ pub fn groupedCausalConv1dBackwardWeightInto(
     const input_data = common.contiguousDataConst(input, seq * in_channels);
     const gy_data = common.contiguousDataConst(gy, seq * out_channels);
     const rows = taps * in_per_group;
-    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, seq, in_channels, out_channels, taps, dilation, groups)) return;
+    if (maybeParallelGeneralConv(pc, runGeneralBackwardWeightRows, rows, output, input_data, &.{}, gy_data, state, null, seq, in_channels, out_channels, taps, dilation, groups)) return;
     generalBackwardWeightRange(output, input_data, gy_data, state, seq, in_channels, out_channels, taps, dilation, groups, 0, rows);
 }
 
@@ -371,6 +373,7 @@ const GeneralConvCtx = struct {
     weight: []const f32,
     gy: []const f32,
     state: ?[]const f32,
+    bias: ?[]const f32,
     seq: usize,
     in_channels: usize,
     out_channels: usize,
@@ -388,6 +391,7 @@ fn maybeParallelGeneralConv(
     weight: []const f32,
     gy: ?[]const f32,
     state: ?[]const f32,
+    bias: ?[]const f32,
     seq: usize,
     in_channels: usize,
     out_channels: usize,
@@ -405,6 +409,7 @@ fn maybeParallelGeneralConv(
         .weight = weight,
         .gy = gy orelse &.{},
         .state = state,
+        .bias = bias,
         .seq = seq,
         .in_channels = in_channels,
         .out_channels = out_channels,
@@ -416,7 +421,7 @@ fn maybeParallelGeneralConv(
 }
 
 fn runGeneralForwardRows(c: GeneralConvCtx, start: usize, end: usize) void {
-    generalForwardRange(c.out, c.input, c.weight, c.state, c.in_channels, c.out_channels, c.taps, c.dilation, c.groups, start, end);
+    generalForwardRange(c.out, c.input, c.weight, c.state, c.bias, c.in_channels, c.out_channels, c.taps, c.dilation, c.groups, start, end);
 }
 
 fn runGeneralBackwardInputRows(c: GeneralConvCtx, start: usize, end: usize) void {
@@ -445,11 +450,56 @@ inline fn generalConvInputRow(
     return s[shifted * in_channels ..][0..in_channels];
 }
 
+/// Frames per register tile of the general causal conv forward: every
+/// weight vector load feeds `time_tile` fused multiply-adds with the
+/// accumulators in registers. Without the tile the walk is one FMA per
+/// weight load with the accumulator round-tripping through memory, which
+/// measures 10x slower at the 16-channel shapes of the NAM WaveNet.
+const time_tile = 8;
+/// Taps up to this many have their tile's input rows resolved once per tile
+/// (8 KB of slices on the stack); longer kernels resolve per output block.
+const max_cached_taps = 64;
+
+/// The `time_tile` input rows feeding tap `k` of the tile at `t`, every one
+/// of which resolves (the tile path's contract).
+inline fn resolveTileRows(
+    dst: *[time_tile][]const f32,
+    input: []const f32,
+    state: ?[]const f32,
+    in_channels: usize,
+    pad: usize,
+    t: usize,
+    k: usize,
+    dilation: usize,
+) *const [time_tile][]const f32 {
+    inline for (0..time_tile) |tt| dst[tt] = generalConvInputRow(input, state, in_channels, pad, t + tt, k, dilation) orelse unreachable;
+    return dst;
+}
+/// The (tap, in-channel) walk is blocked so the weight slab one output
+/// vector visits per block stays in L1 across the output blocks and the
+/// slab as a whole stays in L2 across the frame tiles: a block is at most
+/// `max_block_pairs` (tap, in) pairs, one cache line of out channels each.
+/// Partial sums round-trip through the output rows between blocks, which
+/// is exact, so the per-element order stays tap-major, in-channel-inner
+/// from zero, then bias, whatever the blocking. Without it the DAC entry
+/// conv (1024 -> 1536, 7 taps, 44 MB of weights) re-streamed its weights
+/// from DRAM once per output vector, 1.7x slower than a plain per-frame walk.
+const max_block_pairs = 384;
+
+/// General causal conv forward over output rows `[t_start, t_end)`.
+/// Per output element the accumulation is `k`-major, in-channel-inner
+/// fused multiply-add from zero, then the optional bias, the same in the
+/// tile body, the frame tail and the channel tail, so the result is
+/// bitwise independent of the tiling, the blocking and any row split. Rows
+/// whose oldest tap precedes the chunk read zeros when no state is given;
+/// those frames take the per-frame path, every later frame resolves all
+/// its rows and takes the tile path.
 fn generalForwardRange(
     out: []f32,
     input: []const f32,
     weight: []const f32,
     state: ?[]const f32,
+    bias: ?[]const f32,
     in_channels: usize,
     out_channels: usize,
     taps: usize,
@@ -458,292 +508,303 @@ fn generalForwardRange(
     t_start: usize,
     t_end: usize,
 ) void {
-    if (taps == 1) {
-        generalForward1x1Range(out, input, weight, in_channels, out_channels, groups, t_start, t_end);
+    if (groups == 1 and in_channels == 1 and out_channels == 1 and dilation == 1 and taps > 1) {
+        firForwardRange(out, input, weight, state, bias, taps, t_start, t_end);
         return;
     }
-    if (groups == 1) {
-        if (in_channels == 8 and out_channels == 16) {
-            if (comptime 16 % vector_len == 0) {
-                generalForwardFixedDenseRange(8, 16, out, input, weight, state, taps, dilation, t_start, t_end);
-            } else {
-                generalForwardFixedDenseScalarRange(8, 16, out, input, weight, state, taps, dilation, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 8 and out_channels == 8) {
-            if (comptime 8 % vector_len == 0) {
-                generalForwardFixedDenseRange(8, 8, out, input, weight, state, taps, dilation, t_start, t_end);
-            } else {
-                generalForwardFixedDenseScalarRange(8, 8, out, input, weight, state, taps, dilation, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 8 and out_channels == 1) {
-            generalForwardFixedDenseScalarRange(8, 1, out, input, weight, state, taps, dilation, t_start, t_end);
-            return;
-        }
-        if (in_channels == 4 and out_channels == 8) {
-            if (comptime 8 % vector_len == 0) {
-                generalForwardFixedDenseRange(4, 8, out, input, weight, state, taps, dilation, t_start, t_end);
-            } else {
-                generalForwardFixedDenseScalarRange(4, 8, out, input, weight, state, taps, dilation, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 4 and out_channels == 4) {
-            if (comptime 4 % vector_len == 0) {
-                generalForwardFixedDenseRange(4, 4, out, input, weight, state, taps, dilation, t_start, t_end);
-            } else {
-                generalForwardFixedDenseScalarRange(4, 4, out, input, weight, state, taps, dilation, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 3 and out_channels == 3) {
-            generalForwardFixedDenseScalarRange(3, 3, out, input, weight, state, taps, dilation, t_start, t_end);
-            return;
-        }
-        if (in_channels == 3 and out_channels == 1) {
-            generalForwardFixedDenseScalarRange(3, 1, out, input, weight, state, taps, dilation, t_start, t_end);
-            return;
-        }
-        if (in_channels == 2 and out_channels == 4) {
-            if (comptime 4 % vector_len == 0) {
-                generalForwardFixedDenseRange(2, 4, out, input, weight, state, taps, dilation, t_start, t_end);
-            } else {
-                generalForwardFixedDenseScalarRange(2, 4, out, input, weight, state, taps, dilation, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 2 and out_channels == 2) {
-            generalForwardFixedDenseScalarRange(2, 2, out, input, weight, state, taps, dilation, t_start, t_end);
-            return;
-        }
-        if (in_channels == 2 and out_channels == 1) {
-            generalForwardFixedDenseScalarRange(2, 1, out, input, weight, state, taps, dilation, t_start, t_end);
-            return;
-        }
-    }
     const pad = dilation * (taps - 1);
-    const in_per_group = in_channels / groups;
-    const out_per_group = out_channels / groups;
-    for (t_start..t_end) |t| {
-        const out_row = out[t * out_channels ..][0..out_channels];
-        @memset(out_row, 0);
-        for (0..taps) |k| {
-            const x_row = generalConvInputRow(input, state, in_channels, pad, t, k, dilation) orelse continue;
-            if (groups == 1) {
-                for (0..in_channels) |i| {
-                    axpyRow(out_row, x_row[i], weight[(k * in_channels + i) * out_channels ..][0..out_channels]);
-                }
-                continue;
-            }
-            for (0..groups) |group| {
-                const input_start = group * in_per_group;
-                const out_start = group * out_per_group;
-                const out_part = out_row[out_start..][0..out_per_group];
-                for (0..in_per_group) |local_i| {
-                    axpyRow(out_part, x_row[input_start + local_i], weight[(k * in_per_group + local_i) * out_channels + out_start ..][0..out_per_group]);
-                }
-            }
-        }
-    }
+    const tile_start = if (state == null) @min(@max(t_start, pad), t_end) else t_start;
+    if (tile_start > t_start) forwardFramesRange(out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, t_start, tile_start);
+    forwardTilesRange(out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, tile_start, t_end);
 }
 
-fn generalForwardFixedDenseRange(
-    comptime in_channels: usize,
-    comptime out_channels: usize,
+/// One (tap, in-channel) block of the walk: pairs `[p0, p1)` of the flat
+/// tap-major sequence, as the tap range they span.
+const PairBlock = struct {
+    p0: usize,
+    p1: usize,
+    in_per_group: usize,
+
+    fn first(self: PairBlock) bool {
+        return self.p0 == 0;
+    }
+
+    fn k0(self: PairBlock) usize {
+        return self.p0 / self.in_per_group;
+    }
+
+    fn k1(self: PairBlock) usize {
+        return (self.p1 - 1) / self.in_per_group + 1;
+    }
+
+    /// The in-channel range of tap `k` inside the block.
+    fn range(self: PairBlock, k: usize) [2]usize {
+        const base = k * self.in_per_group;
+        const lo = if (self.p0 > base) self.p0 - base else 0;
+        const hi = @min(self.in_per_group, self.p1 - base);
+        return .{ lo, hi };
+    }
+};
+
+/// The tile body: `time_tile` frames per weight load, blocked over the
+/// (tap, in-channel) walk. Every row resolves (the caller's contract); the
+/// remainder frames take the per-frame path.
+fn forwardTilesRange(
     out: []f32,
     input: []const f32,
     weight: []const f32,
     state: ?[]const f32,
-    taps: usize,
-    dilation: usize,
-    t_start: usize,
-    t_end: usize,
-) void {
-    comptime std.debug.assert(out_channels % vector_len == 0);
-    const vec_blocks = out_channels / vector_len;
-    const pad = dilation * (taps - 1);
-    for (t_start..t_end) |t| {
-        var acc: [vec_blocks]Vf32 = undefined;
-        inline for (0..vec_blocks) |b| acc[b] = @splat(0);
-        for (0..taps) |k| {
-            const x_row = generalConvInputRow(input, state, in_channels, pad, t, k, dilation) orelse continue;
-            inline for (0..in_channels) |i| {
-                const sv: Vf32 = @splat(x_row[i]);
-                const base = (k * in_channels + i) * out_channels;
-                inline for (0..vec_blocks) |b| {
-                    const w: Vf32 = weight[base + b * vector_len ..][0..vector_len].*;
-                    acc[b] = @mulAdd(Vf32, sv, w, acc[b]);
-                }
-            }
-        }
-        const out_row = out[t * out_channels ..][0..out_channels];
-        inline for (0..vec_blocks) |b| {
-            out_row[b * vector_len ..][0..vector_len].* = acc[b];
-        }
-    }
-}
-
-fn generalForwardFixedDenseScalarRange(
-    comptime in_channels: usize,
-    comptime out_channels: usize,
-    out: []f32,
-    input: []const f32,
-    weight: []const f32,
-    state: ?[]const f32,
-    taps: usize,
-    dilation: usize,
-    t_start: usize,
-    t_end: usize,
-) void {
-    const pad = dilation * (taps - 1);
-    for (t_start..t_end) |t| {
-        var acc: [out_channels]f32 = [_]f32{0} ** out_channels;
-        for (0..taps) |k| {
-            const x_row = generalConvInputRow(input, state, in_channels, pad, t, k, dilation) orelse continue;
-            inline for (0..in_channels) |i| {
-                const s = x_row[i];
-                const base = (k * in_channels + i) * out_channels;
-                inline for (0..out_channels) |o| {
-                    acc[o] = @mulAdd(f32, s, weight[base + o], acc[o]);
-                }
-            }
-        }
-        const out_row = out[t * out_channels ..][0..out_channels];
-        inline for (0..out_channels) |o| {
-            out_row[o] = acc[o];
-        }
-    }
-}
-
-fn generalForward1x1Range(
-    out: []f32,
-    input: []const f32,
-    weight: []const f32,
+    bias: ?[]const f32,
     in_channels: usize,
     out_channels: usize,
+    taps: usize,
+    dilation: usize,
     groups: usize,
     t_start: usize,
     t_end: usize,
 ) void {
-    if (groups == 1) {
-        if (in_channels == 8 and out_channels == 8) {
-            if (comptime 8 % vector_len == 0) {
-                generalForwardFixedDense1x1Range(8, 8, out, input, weight, t_start, t_end);
-            } else {
-                generalForwardFixedDense1x1ScalarRange(8, 8, out, input, weight, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 4 and out_channels == 4) {
-            if (comptime 4 % vector_len == 0) {
-                generalForwardFixedDense1x1Range(4, 4, out, input, weight, t_start, t_end);
-            } else {
-                generalForwardFixedDense1x1ScalarRange(4, 4, out, input, weight, t_start, t_end);
-            }
-            return;
-        }
-        if (in_channels == 3 and out_channels == 3) {
-            generalForwardFixedDense1x1ScalarRange(3, 3, out, input, weight, t_start, t_end);
-            return;
-        }
-        if (in_channels == 2 and out_channels == 2) {
-            generalForwardFixedDense1x1ScalarRange(2, 2, out, input, weight, t_start, t_end);
-            return;
+    const in_per_group = in_channels / groups;
+    const pairs = taps * in_per_group;
+    if (pairs <= max_block_pairs) {
+        // One block, the common case: no partial-sum round trip anywhere.
+        const block = PairBlock{ .p0 = 0, .p1 = pairs, .in_per_group = in_per_group };
+        forwardTilesBlock(true, true, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        return;
+    }
+    var p0: usize = 0;
+    while (p0 < pairs) : (p0 += max_block_pairs) {
+        const block = PairBlock{ .p0 = p0, .p1 = @min(pairs, p0 + max_block_pairs), .in_per_group = in_per_group };
+        const last = block.p1 == pairs;
+        if (block.first()) {
+            forwardTilesBlock(true, false, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        } else if (last) {
+            forwardTilesBlock(false, true, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        } else {
+            forwardTilesBlock(false, false, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
         }
     }
+}
+
+/// The tile body of one (tap, in-channel) block: `first` starts the
+/// accumulators from zero (else from the output rows), `last` adds the
+/// bias before the store.
+fn forwardTilesBlock(
+    comptime first: bool,
+    comptime last: bool,
+    out: []f32,
+    input: []const f32,
+    weight: []const f32,
+    state: ?[]const f32,
+    bias: ?[]const f32,
+    in_channels: usize,
+    out_channels: usize,
+    taps: usize,
+    dilation: usize,
+    groups: usize,
+    block: PairBlock,
+    t_start: usize,
+    t_end: usize,
+) void {
+    const pad = dilation * (taps - 1);
     const in_per_group = in_channels / groups;
     const out_per_group = out_channels / groups;
+    const k0 = block.k0();
+    const k1 = block.k1();
+    var t = t_start;
+    while (t + time_tile <= t_end) : (t += time_tile) {
+        var cached: [max_cached_taps][time_tile][]const f32 = undefined;
+        const cache_rows = taps <= max_cached_taps;
+        if (cache_rows) {
+            for (k0..k1) |k| _ = resolveTileRows(&cached[k], input, state, in_channels, pad, t, k, dilation);
+        }
+        for (0..groups) |g| {
+            const in_start = g * in_per_group;
+            const out_start = g * out_per_group;
+            var o: usize = 0;
+            while (o + vector_len <= out_per_group) : (o += vector_len) {
+                var acc: [time_tile]Vf32 = undefined;
+                inline for (0..time_tile) |tt| acc[tt] = if (first) @splat(0) else out[(t + tt) * out_channels + out_start + o ..][0..vector_len].*;
+                for (k0..k1) |k| {
+                    var local: [time_tile][]const f32 = undefined;
+                    const rows = if (cache_rows) &cached[k] else resolveTileRows(&local, input, state, in_channels, pad, t, k, dilation);
+                    const r = block.range(k);
+                    for (r[0]..r[1]) |local_i| {
+                        const wv: Vf32 = weight[(k * in_per_group + local_i) * out_channels + out_start + o ..][0..vector_len].*;
+                        inline for (0..time_tile) |tt| acc[tt] = @mulAdd(Vf32, @splat(rows[tt][in_start + local_i]), wv, acc[tt]);
+                    }
+                }
+                if (last) {
+                    if (bias) |b| {
+                        const bv: Vf32 = b[out_start + o ..][0..vector_len].*;
+                        inline for (0..time_tile) |tt| acc[tt] += bv;
+                    }
+                }
+                inline for (0..time_tile) |tt| out[(t + tt) * out_channels + out_start + o ..][0..vector_len].* = acc[tt];
+            }
+            while (o < out_per_group) : (o += 1) {
+                var acc: [time_tile]f32 = undefined;
+                inline for (0..time_tile) |tt| acc[tt] = if (first) 0 else out[(t + tt) * out_channels + out_start + o];
+                for (k0..k1) |k| {
+                    var local: [time_tile][]const f32 = undefined;
+                    const rows = if (cache_rows) &cached[k] else resolveTileRows(&local, input, state, in_channels, pad, t, k, dilation);
+                    const r = block.range(k);
+                    for (r[0]..r[1]) |local_i| {
+                        const w = weight[(k * in_per_group + local_i) * out_channels + out_start + o];
+                        inline for (0..time_tile) |tt| acc[tt] = @mulAdd(f32, rows[tt][in_start + local_i], w, acc[tt]);
+                    }
+                }
+                if (last) {
+                    if (bias) |b| {
+                        inline for (0..time_tile) |tt| acc[tt] += b[out_start + o];
+                    }
+                }
+                inline for (0..time_tile) |tt| out[(t + tt) * out_channels + out_start + o] = acc[tt];
+            }
+        }
+    }
+    if (t < t_end) forwardFramesBlock(first, last, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t, t_end);
+}
+
+/// One frame at a time with the accumulators in registers, over the whole
+/// (tap, in-channel) walk in blocks.
+fn forwardFramesRange(
+    out: []f32,
+    input: []const f32,
+    weight: []const f32,
+    state: ?[]const f32,
+    bias: ?[]const f32,
+    in_channels: usize,
+    out_channels: usize,
+    taps: usize,
+    dilation: usize,
+    groups: usize,
+    t_start: usize,
+    t_end: usize,
+) void {
+    const in_per_group = in_channels / groups;
+    const pairs = taps * in_per_group;
+    if (pairs <= max_block_pairs) {
+        const block = PairBlock{ .p0 = 0, .p1 = pairs, .in_per_group = in_per_group };
+        forwardFramesBlock(true, true, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        return;
+    }
+    var p0: usize = 0;
+    while (p0 < pairs) : (p0 += max_block_pairs) {
+        const block = PairBlock{ .p0 = p0, .p1 = @min(pairs, p0 + max_block_pairs), .in_per_group = in_per_group };
+        const last = block.p1 == pairs;
+        if (block.first()) {
+            forwardFramesBlock(true, false, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        } else if (last) {
+            forwardFramesBlock(false, true, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        } else {
+            forwardFramesBlock(false, false, out, input, weight, state, bias, in_channels, out_channels, taps, dilation, groups, block, t_start, t_end);
+        }
+    }
+}
+
+/// The per-frame body of one block: a missing row (before the chunk, no
+/// state) contributes nothing, which is what the zero row would.
+fn forwardFramesBlock(
+    comptime first: bool,
+    comptime last: bool,
+    out: []f32,
+    input: []const f32,
+    weight: []const f32,
+    state: ?[]const f32,
+    bias: ?[]const f32,
+    in_channels: usize,
+    out_channels: usize,
+    taps: usize,
+    dilation: usize,
+    groups: usize,
+    block: PairBlock,
+    t_start: usize,
+    t_end: usize,
+) void {
+    const pad = dilation * (taps - 1);
+    const in_per_group = in_channels / groups;
+    const out_per_group = out_channels / groups;
+    const k0 = block.k0();
+    const k1 = block.k1();
     for (t_start..t_end) |t| {
-        const x_row = input[t * in_channels ..][0..in_channels];
-        const out_row = out[t * out_channels ..][0..out_channels];
-        if (groups == 1) {
-            if (in_channels == 1) {
-                scaleRow(out_row, x_row[0], weight[0..out_channels]);
-                continue;
+        for (0..groups) |g| {
+            const in_start = g * in_per_group;
+            const out_start = g * out_per_group;
+            const out_row = out[t * out_channels + out_start ..][0..out_per_group];
+            var o: usize = 0;
+            while (o + vector_len <= out_per_group) : (o += vector_len) {
+                var acc: Vf32 = if (first) @splat(0) else out_row[o..][0..vector_len].*;
+                for (k0..k1) |k| {
+                    const row = generalConvInputRow(input, state, in_channels, pad, t, k, dilation) orelse continue;
+                    const r = block.range(k);
+                    for (r[0]..r[1]) |local_i| {
+                        const wv: Vf32 = weight[(k * in_per_group + local_i) * out_channels + out_start + o ..][0..vector_len].*;
+                        acc = @mulAdd(Vf32, @splat(row[in_start + local_i]), wv, acc);
+                    }
+                }
+                if (last) {
+                    if (bias) |b| acc += @as(Vf32, b[out_start + o ..][0..vector_len].*);
+                }
+                out_row[o..][0..vector_len].* = acc;
             }
-            @memset(out_row, 0);
-            for (0..in_channels) |i| {
-                axpyRow(out_row, x_row[i], weight[i * out_channels ..][0..out_channels]);
-            }
-            continue;
-        }
-        if (in_per_group == 1) {
-            for (0..groups) |group| {
-                const out_start = group * out_per_group;
-                const out_part = out_row[out_start..][0..out_per_group];
-                scaleRow(out_part, x_row[group], weight[out_start..][0..out_per_group]);
-            }
-            continue;
-        }
-        @memset(out_row, 0);
-        for (0..groups) |group| {
-            const input_start = group * in_per_group;
-            const out_start = group * out_per_group;
-            const out_part = out_row[out_start..][0..out_per_group];
-            for (0..in_per_group) |local_i| {
-                axpyRow(out_part, x_row[input_start + local_i], weight[local_i * out_channels + out_start ..][0..out_per_group]);
+            while (o < out_per_group) : (o += 1) {
+                var acc: f32 = if (first) 0 else out_row[o];
+                for (k0..k1) |k| {
+                    const row = generalConvInputRow(input, state, in_channels, pad, t, k, dilation) orelse continue;
+                    const r = block.range(k);
+                    for (r[0]..r[1]) |local_i| {
+                        acc = @mulAdd(f32, row[in_start + local_i], weight[(k * in_per_group + local_i) * out_channels + out_start + o], acc);
+                    }
+                }
+                if (last) {
+                    if (bias) |b| acc += b[out_start + o];
+                }
+                out_row[o] = acc;
             }
         }
     }
 }
 
-fn generalForwardFixedDense1x1Range(
-    comptime in_channels: usize,
-    comptime out_channels: usize,
+/// Single-channel undilated FIR (`in = out = 1`, the cab-IR and linear
+/// model shapes, thousands of taps): each output is one contiguous dot of
+/// the taps against the signal window, vectorized along the taps. A window
+/// that starts inside the state is two dots (state part, chunk part).
+fn firForwardRange(
     out: []f32,
     input: []const f32,
     weight: []const f32,
+    state: ?[]const f32,
+    bias: ?[]const f32,
+    taps: usize,
     t_start: usize,
     t_end: usize,
 ) void {
-    comptime std.debug.assert(out_channels % vector_len == 0);
-    const vec_blocks = out_channels / vector_len;
+    const pad = taps - 1;
+    const b: f32 = if (bias) |values| values[0] else 0;
     for (t_start..t_end) |t| {
-        const x_row = input[t * in_channels ..][0..in_channels];
-        var acc: [vec_blocks]Vf32 = undefined;
-        inline for (0..vec_blocks) |b| acc[b] = @splat(0);
-        inline for (0..in_channels) |i| {
-            const sv: Vf32 = @splat(x_row[i]);
-            const base = i * out_channels;
-            inline for (0..vec_blocks) |b| {
-                const w: Vf32 = weight[base + b * vector_len ..][0..vector_len].*;
-                acc[b] = @mulAdd(Vf32, sv, w, acc[b]);
-            }
+        var acc: f32 = undefined;
+        if (t >= pad) {
+            acc = firDot(weight, input[t - pad ..][0..taps]);
+        } else {
+            const from_state = pad - t;
+            acc = if (state) |s| firDot(weight[0..from_state], s[t..][0..from_state]) else 0;
+            acc += firDot(weight[from_state..], input[0 .. t + 1]);
         }
-        const out_row = out[t * out_channels ..][0..out_channels];
-        inline for (0..vec_blocks) |b| {
-            out_row[b * vector_len ..][0..vector_len].* = acc[b];
-        }
+        out[t] = if (bias != null) acc + b else acc;
     }
 }
 
-fn generalForwardFixedDense1x1ScalarRange(
-    comptime in_channels: usize,
-    comptime out_channels: usize,
-    out: []f32,
-    input: []const f32,
-    weight: []const f32,
-    t_start: usize,
-    t_end: usize,
-) void {
-    for (t_start..t_end) |t| {
-        const x_row = input[t * in_channels ..][0..in_channels];
-        var acc: [out_channels]f32 = [_]f32{0} ** out_channels;
-        inline for (0..in_channels) |i| {
-            const s = x_row[i];
-            const base = i * out_channels;
-            inline for (0..out_channels) |o| {
-                acc[o] = @mulAdd(f32, s, weight[base + o], acc[o]);
-            }
-        }
-        const out_row = out[t * out_channels ..][0..out_channels];
-        inline for (0..out_channels) |o| {
-            out_row[o] = acc[o];
-        }
+/// Contiguous dot with fused multiply-adds along the vector body and a
+/// scalar tail (the NAM cab's summation order).
+inline fn firDot(w: []const f32, x: []const f32) f32 {
+    var accv: Vf32 = @splat(0);
+    var k: usize = 0;
+    while (k + vector_len <= w.len) : (k += vector_len) {
+        accv = @mulAdd(Vf32, w[k..][0..vector_len].*, x[k..][0..vector_len].*, accv);
     }
+    var acc: f32 = @reduce(.Add, accv);
+    while (k < w.len) : (k += 1) acc += w[k] * x[k];
+    return acc;
 }
 
 fn generalBackwardInputRange(
@@ -1999,13 +2060,14 @@ pub const scalar = struct {
         input: *const Tensor,
         weight: *const Tensor,
         state: ?[]const f32,
+        bias: ?[]const f32,
         seq: usize,
         in_channels: usize,
         out_channels: usize,
         taps: usize,
         dilation: usize,
     ) void {
-        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, 1, 0, seq);
+        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, bias, in_channels, out_channels, taps, dilation, 1, 0, seq);
     }
 
     pub fn causalConv1dBackwardInputInto(
@@ -2040,6 +2102,7 @@ pub const scalar = struct {
         input: *const Tensor,
         weight: *const Tensor,
         state: ?[]const f32,
+        bias: ?[]const f32,
         seq: usize,
         in_channels: usize,
         out_channels: usize,
@@ -2047,7 +2110,7 @@ pub const scalar = struct {
         dilation: usize,
         groups: usize,
     ) void {
-        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, in_channels, out_channels, taps, dilation, groups, 0, seq);
+        groupedCausalConv1dRange(out.data(), input.dataConst(), weight.dataConst(), state, bias, in_channels, out_channels, taps, dilation, groups, 0, seq);
     }
 
     pub fn groupedCausalConv1dBackwardInputInto(
@@ -2395,6 +2458,7 @@ pub const scalar = struct {
         input: []const f32,
         weight: []const f32,
         state: ?[]const f32,
+        bias: ?[]const f32,
         in_channels: usize,
         out_channels: usize,
         taps: usize,
@@ -2417,6 +2481,7 @@ pub const scalar = struct {
                         acc += causalConvInputValue(input, state, in_channels, pad, t, i, k, dilation) * weight[(k * in_per_group + local_i) * out_channels + o];
                     }
                 }
+                if (bias) |b| acc += b[o];
                 out[t * out_channels + o] = acc;
             }
         }

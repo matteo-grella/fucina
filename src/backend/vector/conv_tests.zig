@@ -29,7 +29,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     var out = try Tensor.zeros(allocator, &.{ 3, 2 });
     defer out.deinit();
 
-    conv.causalConv1dInto(.{}, &out, &input, &weight, null, 3, 2, 2, 2, 1);
+    conv.causalConv1dInto(.{}, &out, &input, &weight, null, null, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         31,  42,
         372, 504,
@@ -38,7 +38,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
 
     // Same conv with one state row [5, 7] feeding the t=0 oldest tap.
     const state = [_]f32{ 5, 7 };
-    conv.causalConv1dInto(.{}, &out, &input, &weight, &state, 3, 2, 2, 2, 1);
+    conv.causalConv1dInto(.{}, &out, &input, &weight, &state, null, 3, 2, 2, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{
         291, 422,
         372, 504,
@@ -53,11 +53,11 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     var dilated_out = try Tensor.zeros(allocator, &.{ 4, 1 });
     defer dilated_out.deinit();
 
-    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, null, 4, 1, 1, 2, 2);
+    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, null, null, 4, 1, 1, 2, 2);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 13, 24 }, dilated_out.dataConst());
 
     const dilated_state = [_]f32{ 100, 200 };
-    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, &dilated_state, 4, 1, 1, 2, 2);
+    conv.causalConv1dInto(.{}, &dilated_out, &dilated_input, &dilated_weight, &dilated_state, null, 4, 1, 1, 2, 2);
     try std.testing.expectEqualSlices(f32, &.{ 1001, 2002, 13, 24 }, dilated_out.dataConst());
 
     // out=5 exercises both the SIMD body and the scalar tail of axpyRow.
@@ -65,7 +65,7 @@ test "general causal conv vector kernel: channel mixing, dilation, state, vector
     defer wide_weight.deinit();
     var wide_out = try Tensor.zeros(allocator, &.{ 4, 5 });
     defer wide_out.deinit();
-    conv.causalConv1dInto(.{}, &wide_out, &dilated_input, &wide_weight, null, 4, 1, 5, 1, 1);
+    conv.causalConv1dInto(.{}, &wide_out, &dilated_input, &wide_weight, null, null, 4, 1, 5, 1, 1);
     try std.testing.expectEqualSlices(f32, &.{
         1, 2, 3,  4,  5,
         2, 4, 6,  8,  10,
@@ -158,7 +158,7 @@ test "general causal conv vector kernels match a naive reference at SIMD-body wi
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    conv.causalConv1dInto(.{}, &out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation);
+    conv.causalConv1dInto(.{}, &out, &input, &weight, &state_data, null, seq, in_ch, out_ch, taps, dilation);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             var acc: f64 = 0;
@@ -236,7 +236,7 @@ test "grouped general causal conv vector kernels match a naive reference at SIMD
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &state_data, seq, in_ch, out_ch, taps, dilation, groups);
+    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &state_data, null, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             const group = o / out_per_group;
@@ -314,7 +314,7 @@ test "grouped 1x1 general causal conv fast path matches a naive reference" {
 
     var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
     defer out.deinit();
-    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &unused_state, seq, in_ch, out_ch, taps, dilation, groups);
+    conv.groupedCausalConv1dInto(.{}, &out, &input, &weight, &unused_state, null, seq, in_ch, out_ch, taps, dilation, groups);
     for (0..seq) |t| {
         for (0..out_ch) |o| {
             const group = o / out_per_group;
@@ -1028,6 +1028,135 @@ test "conv2d backward kernels + col2im: pooled split is bit-identical to serial"
             conv.col2imInto(.{}, &c2i_serial, &col, d);
             conv.col2imInto(.{ .pool = &pool }, &c2i_pooled, &col, d);
             try std.testing.expectEqualSlices(f32, c2i_serial.dataConst(), c2i_pooled.dataConst());
+        }
+    }
+}
+
+test "general causal conv tile path: bias epilogue, ragged tails, grouped, pooled split bitwise" {
+    const allocator = std.testing.allocator;
+    // 16 -> 16, k3, dilation 2, 37 rows: four full tiles plus a five-row
+    // tail; with state every row resolves, without it the first four rows
+    // take the per-frame path.
+    const seq = 37;
+    const in_ch = 16;
+    const out_ch = 16;
+    const taps = 3;
+    const dilation = 2;
+    const pad = dilation * (taps - 1);
+
+    var input_data: [seq * in_ch]f32 = undefined;
+    for (&input_data, 0..) |*v, idx| v.* = @sin(@as(f32, @floatFromInt(idx)) * 0.37) + 0.1;
+    var weight_data: [taps * in_ch * out_ch]f32 = undefined;
+    for (&weight_data, 0..) |*v, idx| v.* = 0.2 * @cos(@as(f32, @floatFromInt(idx)) * 0.13) - 0.02;
+    var bias_data: [out_ch]f32 = undefined;
+    for (&bias_data, 0..) |*v, idx| v.* = 0.5 - 0.07 * @as(f32, @floatFromInt(idx));
+    var state_data: [pad * in_ch]f32 = undefined;
+    for (&state_data, 0..) |*v, idx| v.* = @cos(@as(f32, @floatFromInt(idx)) * 0.9);
+
+    var input = try Tensor.fromSlice(allocator, &.{ seq, in_ch }, &input_data);
+    defer input.deinit();
+    var weight = try Tensor.fromSlice(allocator, &.{ taps, in_ch, out_ch }, &weight_data);
+    defer weight.deinit();
+    var out = try Tensor.zeros(allocator, &.{ seq, out_ch });
+    defer out.deinit();
+
+    for ([_]?[]const f32{ &state_data, null }) |state| {
+        conv.causalConv1dInto(.{}, &out, &input, &weight, state, &bias_data, seq, in_ch, out_ch, taps, dilation);
+        for (0..seq) |t| {
+            for (0..out_ch) |o| {
+                var acc: f64 = 0;
+                for (0..taps) |k| {
+                    const shifted = t + k * dilation;
+                    for (0..in_ch) |i| {
+                        const x: f64 = if (shifted >= pad)
+                            input_data[(shifted - pad) * in_ch + i]
+                        else if (state) |s| s[shifted * in_ch + i] else 0;
+                        acc += x * weight_data[(k * in_ch + i) * out_ch + o];
+                    }
+                }
+                acc += bias_data[o];
+                try std.testing.expectApproxEqAbs(@as(f32, @floatCast(acc)), out.dataConst()[t * out_ch + o], 1e-5);
+            }
+        }
+    }
+
+    // Grouped (2 groups, 8 -> 8, k2): each output group reads its own inputs.
+    const g_in = 8;
+    const g_out = 8;
+    const g_taps = 2;
+    var g_weight_data: [g_taps * 4 * g_out]f32 = undefined;
+    for (&g_weight_data, 0..) |*v, idx| v.* = 0.3 * @sin(@as(f32, @floatFromInt(idx)) * 0.5);
+    var g_input = try Tensor.fromSlice(allocator, &.{ seq, g_in }, input_data[0 .. seq * g_in]);
+    defer g_input.deinit();
+    var g_weight = try Tensor.fromSlice(allocator, &.{ g_taps, 4, g_out }, &g_weight_data);
+    defer g_weight.deinit();
+    var g_result = try Tensor.zeros(allocator, &.{ seq, g_out });
+    defer g_result.deinit();
+    conv.groupedCausalConv1dInto(.{}, &g_result, &g_input, &g_weight, null, bias_data[0..g_out], seq, g_in, g_out, g_taps, 1, 2);
+    for (0..seq) |t| {
+        for (0..g_out) |o| {
+            const group = o / 4;
+            var acc: f64 = 0;
+            for (0..g_taps) |k| {
+                const shifted = t + k;
+                if (shifted < 1) continue;
+                for (0..4) |li| acc += @as(f64, input_data[(shifted - 1) * g_in + group * 4 + li]) * g_weight_data[(k * 4 + li) * g_out + o];
+            }
+            acc += bias_data[o];
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(acc)), g_result.dataConst()[t * g_out + o], 1e-5);
+        }
+    }
+
+    // Pooled row split is bitwise the serial result (work above the thread gate).
+    const big_seq = 400;
+    const big_input_data = try allocator.alloc(f32, big_seq * in_ch);
+    defer allocator.free(big_input_data);
+    for (big_input_data, 0..) |*v, idx| v.* = @sin(@as(f32, @floatFromInt(idx)) * 0.011);
+    var big_input = try Tensor.fromSlice(allocator, &.{ big_seq, in_ch }, big_input_data);
+    defer big_input.deinit();
+    var serial = try Tensor.zeros(allocator, &.{ big_seq, out_ch });
+    defer serial.deinit();
+    var pooled = try Tensor.zeros(allocator, &.{ big_seq, out_ch });
+    defer pooled.deinit();
+    var pool: thread.Pool = undefined;
+    try pool.init(.{ .allocator = allocator, .max_workers = 3 });
+    defer pool.deinit();
+    conv.causalConv1dInto(.{}, &serial, &big_input, &weight, &state_data, &bias_data, big_seq, in_ch, out_ch, taps, dilation);
+    conv.causalConv1dInto(.{ .pool = &pool }, &pooled, &big_input, &weight, &state_data, &bias_data, big_seq, in_ch, out_ch, taps, dilation);
+    try std.testing.expectEqualSlices(f32, serial.dataConst(), pooled.dataConst());
+}
+
+test "general causal conv single-channel FIR path matches the naive dot with state and bias" {
+    const allocator = std.testing.allocator;
+    const seq = 50;
+    const taps = 300;
+    const pad = taps - 1;
+    var input_data: [seq]f32 = undefined;
+    for (&input_data, 0..) |*v, idx| v.* = @sin(@as(f32, @floatFromInt(idx)) * 0.21);
+    var weight_data: [taps]f32 = undefined;
+    for (&weight_data, 0..) |*v, idx| v.* = 0.05 * @cos(@as(f32, @floatFromInt(idx)) * 0.07) * @exp(-@as(f32, @floatFromInt(idx)) / 200.0);
+    var state_data: [pad]f32 = undefined;
+    for (&state_data, 0..) |*v, idx| v.* = 0.5 * @sin(@as(f32, @floatFromInt(idx)) * 0.33);
+    const bias = [_]f32{0.25};
+
+    var input = try Tensor.fromSlice(allocator, &.{ seq, 1 }, &input_data);
+    defer input.deinit();
+    var weight = try Tensor.fromSlice(allocator, &.{ taps, 1, 1 }, &weight_data);
+    defer weight.deinit();
+    var out = try Tensor.zeros(allocator, &.{ seq, 1 });
+    defer out.deinit();
+    for ([_]?[]const f32{ &state_data, null }) |state| {
+        conv.causalConv1dInto(.{}, &out, &input, &weight, state, &bias, seq, 1, 1, taps, 1);
+        for (0..seq) |t| {
+            var acc: f64 = bias[0];
+            for (0..taps) |k| {
+                const shifted = t + k;
+                const x: f64 = if (shifted >= pad)
+                    input_data[shifted - pad]
+                else if (state) |s| s[shifted] else 0;
+                acc += x * weight_data[k];
+            }
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(acc)), out.dataConst()[t], 1e-5);
         }
     }
 }

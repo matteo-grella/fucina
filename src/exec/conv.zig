@@ -11,6 +11,7 @@ const kernels = backend_mod.kernels;
 const parallel = @import("../parallel.zig");
 const tuning = @import("../tuning.zig");
 const tensor = @import("../tensor.zig");
+const streamconv = @import("../streamconv.zig");
 
 const exec_matmul = @import("matmul.zig");
 const exec_elementwise = @import("elementwise.zig");
@@ -165,7 +166,7 @@ pub fn causalConv1d(
     var out = try ctx.empty(.f32, .{ seq, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_channels, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    kernels.causalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation);
+    kernels.causalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, null, seq, in_channels, out_channels, taps, dilation);
     return out;
 }
 
@@ -1214,7 +1215,54 @@ pub fn groupedCausalConv1d(
     var out = try ctx.empty(.f32, .{ seq, out_channels });
     errdefer out.deinit();
     ctx.enableNativeVectorPoolForWork(causalConvWork(seq, in_per_group, out_channels, taps), parallel.vector_elementwise_len_threshold);
-    kernels.groupedCausalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, seq, in_channels, out_channels, taps, dilation, groups);
+    kernels.groupedCausalConv1dInto(ctx.pc(), &out, ii.tensor(), ww.tensor(), state, null, seq, in_channels, out_channels, taps, dilation, groups);
+    return out;
+}
+
+/// `groupedCausalConv1d` over a stream, the inference spelling: `state`
+/// (a `streamconv.CausalState` for `in_channels`, `taps`, `dilation`) is
+/// the left context and is advanced past `input`'s rows afterwards, and
+/// `bias` (`[out]`) is added in the kernel epilogue — one call per chunk,
+/// no separate bias pass, no caller-side history. Runs on the calling
+/// thread: a realtime chunk wants one thread's deterministic latency, not
+/// a fork-join whose cross-core reads of the context ring measured slower
+/// than the serial kernel at 512-frame chunks.
+pub fn groupedCausalConv1dStreaming(
+    ctx: *ExecContext,
+    comptime rank: usize,
+    input: *const Tensor,
+    weight: *const Tensor,
+    bias: ?[]const f32,
+    comptime time_axis: usize,
+    comptime channel_axis: usize,
+    dilation: usize,
+    groups: usize,
+    state: *streamconv.CausalState,
+) !Tensor {
+    comptime requireTimeMajor("groupedCausalConv1dStreaming", "[time, in]", rank, time_axis, channel_axis);
+
+    const source = try input.rankView(rank);
+    const weight_view = try weight.rankView(3);
+    const seq = source.shape[time_axis];
+    const in_channels = source.shape[channel_axis];
+    const taps = weight_view.shape[0];
+    const out_channels = weight_view.shape[2];
+    if (state.in_channels != in_channels) return tensor.TensorError.ShapeMismatch;
+    const in_per_group = try validateGroupedCausalConv(state.slice(), in_channels, out_channels, taps, dilation, groups);
+    if (weight_view.shape[1] != in_per_group) return tensor.TensorError.ShapeMismatch;
+    if (bias) |b| {
+        if (b.len != out_channels) return tensor.TensorError.InvalidDataLength;
+    }
+
+    var ii = try ctx.prepareContiguous(.f32, input);
+    defer ii.deinit();
+    var ww = try ctx.prepareContiguous(.f32, weight);
+    defer ww.deinit();
+
+    var out = try ctx.empty(.f32, .{ seq, out_channels });
+    errdefer out.deinit();
+    kernels.groupedCausalConv1dInto(.{}, &out, ii.tensor(), ww.tensor(), state.slice(), bias, seq, in_channels, out_channels, taps, dilation, groups);
+    state.advance(ii.tensor().dataConst());
     return out;
 }
 
