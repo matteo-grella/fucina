@@ -303,6 +303,7 @@ Captures with no `gear_type`, and pedal-only chains, are left alone.
 | `inspect <model.nam\|.gguf>` | Print structure + metadata. |
 | `render <model> <in.wav> <out.wav> [--blocksize N] [--ir cab.wav]` | Offline file processing (matches upstream `tools/render`; `--ir` appends a cab). |
 | `bench <model> [--blocksize N]` | Per-block cost vs the realtime budget. |
+| `bench --train-step <spec> [--ny N]` | One training step (segment loss + backward) at the trainer's window shape. |
 | `list [--profiles-dir d]` | Profiles in `./nam-profiles` (or `$FUCINA_NAM_PROFILES`). |
 | `export-gguf` / `import-gguf` | Lossless GGUF interchange (byte-identical `.nam` recovery). |
 

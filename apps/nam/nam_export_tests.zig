@@ -20,7 +20,8 @@ test "exported file round-trips through our own loader" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var model = try train.Trainable.init(allocator, &ctx, train.ModelSpec.tiny, 3);
+    const spec = train.TrainingSpec{ .classic = train.ModelSpec.tiny };
+    var model = try spec.initTrainable(allocator, &ctx, 3);
     defer model.deinit();
     const weights = try model.extractWeights(&ctx, allocator);
     defer allocator.free(weights);

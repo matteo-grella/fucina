@@ -19,13 +19,13 @@ test "ir cab: chunked processing equals one-shot" {
     for (&input, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.37);
 
     var oneshot: [100]f32 = undefined;
-    cab.process(&input, &oneshot, 100);
+    try cab.process(&input, &oneshot, 100);
 
     cab.reset();
     var chunked: [100]f32 = undefined;
     var off: usize = 0;
     for ([_]usize{ 1, 7, 3, 16, 13, 60 }) |n| {
-        cab.process(input[off..], chunked[off..], n);
+        try cab.process(input[off..], chunked[off..], n);
         off += n;
     }
     try std.testing.expectEqual(@as(usize, 100), off);
@@ -44,8 +44,8 @@ test "ir cab: in-place processing matches separate buffers" {
     var buf: [16]f32 = undefined;
     for (&buf, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)));
     var sep: [16]f32 = undefined;
-    cab1.process(&buf, &sep, 16);
-    cab2.process(&buf, &buf, 16); // in place: input == output
+    try cab1.process(&buf, &sep, 16);
+    try cab2.process(&buf, &buf, 16); // in place: input == output
     try std.testing.expectEqualSlices(f32, &sep, &buf);
 }
 

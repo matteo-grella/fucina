@@ -7,10 +7,11 @@
 //! like upstream (base.py:121-156) on the vendored standardized 1 s signal.
 
 const std = @import("std");
+const fucina = @import("fucina");
 const nam_file = @import("nam_file.zig");
 const wav = @import("wav.zig");
 const train = @import("train.zig");
-const models = @import("models.zig");
+const lstm = @import("lstm.zig");
 const data = @import("data.zig");
 
 pub const UserMetadata = struct {
@@ -93,14 +94,19 @@ pub fn measureLoudnessAndGainLstm(
     defer allocator.free(scaled);
     const out = try allocator.alloc(f32, x.len);
     defer allocator.free(out);
-    var engine = try models.LstmEngine.init(allocator, config, weights, 48000);
-    defer engine.deinit();
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    var model = try lstm.Model.initFromNam(allocator, &ctx, config, weights, false, .{});
+    defer model.deinit();
+    var stream = try lstm.Stream.init(allocator, &ctx, &model);
+    defer stream.deinit();
     var levels: [11]f64 = undefined;
     for (&levels, 0..) |*level, i| {
         const g = @as(f32, @floatFromInt(i)) / 10.0;
         for (scaled, x) |*dst, v| dst.* = g * v;
-        engine.reset();
-        engine.process(scaled, out, x.len);
+        try stream.reset(&ctx);
+        try stream.process(&ctx, scaled, out, x.len);
         var sum_sq: f64 = 0;
         for (out) |v| sum_sq += @as(f64, v) * v;
         level.* = @sqrt(sum_sq / @as(f64, @floatFromInt(out.len)));

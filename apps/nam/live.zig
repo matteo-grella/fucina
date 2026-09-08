@@ -408,7 +408,9 @@ fn runChain(shared: *Shared, chain: *const Chain, in: []const f32, out: []f32, f
                     if (stage_in.ptr != dst.ptr) @memcpy(dst, stage_in);
                 };
             },
-            .cab => |cab| cab.process(stage_in, dst, frames),
+            .cab => |cab| cab.process(stage_in, dst, frames) catch {
+                if (stage_in.ptr != dst.ptr) @memcpy(dst, stage_in);
+            },
         }
         src = dst;
         src_owned = true; // dst is a ping buffer (intermediate) or out (last)
@@ -1268,10 +1270,10 @@ test "runChain: 3 cab stages + mid trim == manual sequential; dry input preserve
     var t1: [frames]f32 = undefined;
     var t1b: [frames]f32 = undefined;
     var ref: [frames]f32 = undefined;
-    ma.process(&input, &t0, frames);
+    try ma.process(&input, &t0, frames);
     for (&t1, t0) |*d, v| d.* = v * mid_trim;
-    mb.process(&t1, &t1b, frames);
-    mc.process(&t1b, &ref, frames);
+    try mb.process(&t1, &t1b, frames);
+    try mc.process(&t1b, &ref, frames);
 
     try std.testing.expectEqualSlices(f32, &ref, &out);
     // The chain must never write its input (the gate's DRY source + in meter).
@@ -1326,9 +1328,9 @@ test "audioCallback: mute zeroes the output but keeps the chain streaming" {
     shared.mute.store(false, .monotonic);
     audioCallback(&shared, &out, &input, frames);
     var ref: [frames]f32 = undefined;
-    m.process(&input, &ref, frames);
-    m.process(&input, &ref, frames);
-    m.process(&input, &ref, frames);
+    try m.process(&input, &ref, frames);
+    try m.process(&input, &ref, frames);
+    try m.process(&input, &ref, frames);
     try std.testing.expectEqualSlices(f32, &ref, &out);
 }
 
@@ -1357,7 +1359,7 @@ test "runChain: single stage lands in out" {
     runChain(&shared, &chain, &input, &out, frames);
 
     var ref: [frames]f32 = undefined;
-    m.process(&input, &ref, frames);
+    try m.process(&input, &ref, frames);
     try std.testing.expectEqualSlices(f32, &ref, &out);
 }
 

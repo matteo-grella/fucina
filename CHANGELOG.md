@@ -25,13 +25,23 @@ this point; earlier history is `git log`.
 
 ### Added
 
-- `causalConv1dStreaming` / `groupedCausalConv1dStreaming`: the inference
-  spelling of the causal conv over a stream — the left context lives in a
+- `causalConv1dStreaming` / `groupedCausalConv1dStreaming`: the causal
+  conv over a stream — the left context lives in a
   `fucina.streamconv.CausalState` (a ring of context rows advanced by the
-  op) and the bias is added in the kernel epilogue; chunk by chunk it is
-  bit-identical to the whole-signal `causalConv1d` plus bias. No-grad only.
+  op) and `bias` is a `[out]` tensor or `null`; chunk by chunk it is
+  bit-identical to the whole-signal `causalConv1d` plus the bias `add`.
+  Without gradients the conv, the bias and the state carry are one kernel
+  call; when an operand requires grad the same values come from the
+  recorded conv over the ring's rows and a broadcast `add`, so one model
+  written against the op trains and streams.
 - `Tensor.copyFrom(src)`: the mirror of `copyTo`, host data into a
   persistent contiguous no-grad tensor without a new storage header.
+- `apps/nam`: one tensor WaveNet (`wavenet.zig`) trains and streams; the
+  hand-rolled inference kernels (`stream_conv.zig`, `activations.zig`, the
+  WaveNet/LSTM/ConvNet/Linear engines) and the separate trainable copies
+  are gone. Every architecture streams as fucina tensors on an
+  `ExecContext` the engine owns; the cab IR is the core's FIR route.
+  `fucina-nam bench --train-step <spec>` times a training step.
 - `fucina.rnn`: the LSTM over the facade. `LstmCell.step` is one
   `[x | h | 1] · W` product plus the gate nonlinearities, written once for
   both the recorded forward (`Lstm.forward` with burn-in and truncated

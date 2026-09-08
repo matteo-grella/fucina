@@ -15,6 +15,7 @@ const ir_cab = @import("ir_cab.zig");
 const chain_mod = @import("chain.zig");
 const data = @import("data.zig");
 const train_mod = @import("train.zig");
+const wavenet_mod = @import("wavenet.zig");
 const nam_export = @import("nam_export.zig");
 const audio_mod = @import("audio.zig");
 const midi_mod = @import("midi.zig");
@@ -84,8 +85,6 @@ pub fn main(init: std.process.Init) !void {
         render(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "bench"))
         bench(io, allocator, stdout, args[2..])
-    else if (std.mem.eql(u8, command, "facade-bench"))
-        @import("facade_bench.zig").run(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "train"))
         train(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "validate"))
@@ -254,7 +253,7 @@ fn render(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args
     while (offset < samples.len) {
         const n = @min(blocksize, samples.len - offset);
         try engine.process(samples[offset..], output[offset..], n);
-        if (ir_storage) |*c| c.process(output[offset..], output[offset..], n);
+        if (ir_storage) |*c| try c.process(output[offset..], output[offset..], n);
         offset += n;
     }
 
@@ -270,9 +269,11 @@ fn nowNs(io: std.Io) i96 {
 
 fn bench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const []const u8) !void {
     if (args.len < 1) {
-        try stdout.writeAll("usage: zig build nam -- bench <model.nam> [--blocksize N] [--seconds S]\n");
+        try stdout.writeAll("usage: zig build nam -- bench <model.nam | standard> [--blocksize N] [--seconds S]\n       zig build nam -- bench --train-step <spec> [--ny N]\n");
         return;
     }
+    if (std.mem.eql(u8, args[0], "--train-step")) return benchTrainStep(io, allocator, stdout, args[1..]);
+    if (std.mem.eql(u8, args[0], "standard")) return benchStandard(io, allocator, stdout, args[1..]);
     var blocksize: usize = 64;
     var seconds: f64 = 5.0;
     var i: usize = 1;
@@ -336,6 +337,103 @@ fn bench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
     try stdout.print("blocksize:    {d} frames @ {d} Hz (budget {d:.0} us/block)\n", .{ blocksize, rate, budget_ns / 1e3 });
     try stdout.print("measured:     {d:.1} us/block over {d} blocks ({d:.1} ns/sample)\n", .{ ns_per_block / 1e3, total_blocks, ns_per_block / @as(f64, @floatFromInt(blocksize)) });
     try stdout.print("realtime:     {d:.1}x headroom\n", .{budget_ns / ns_per_block});
+}
+
+/// The reference 16/8 standard WaveNet with synthetic weights (no file
+/// needed): per-block cost of the tensor model at `--blocksize`.
+fn benchStandard(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const []const u8) !void {
+    var blocksize: usize = 64;
+    var seconds: f64 = 5.0;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--blocksize")) {
+            i += 1;
+            if (i >= args.len) return error.MissingBlocksize;
+            blocksize = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--seconds")) {
+            i += 1;
+            if (i >= args.len) return error.MissingSeconds;
+            seconds = try std.fmt.parseFloat(f64, args[i]);
+        } else return error.UnknownArgument;
+    }
+    if (blocksize == 0 or !std.math.isFinite(seconds) or seconds <= 0 or seconds > 3600) return error.InvalidArgument;
+    const rate: f64 = 48000.0;
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    const weights = try wavenet_mod.syntheticWeights(allocator, &wavenet_mod.standard_config, 11, 0.25);
+    defer allocator.free(weights);
+    var model = try wavenet_mod.WaveNet.init(allocator, &ctx, &wavenet_mod.standard_config, weights, .{ .chunk_hint = blocksize });
+    defer model.deinit();
+
+    const input = try allocator.alloc(f32, blocksize);
+    defer allocator.free(input);
+    wavenet_mod.fillSignal(input, 42);
+    const output = try allocator.alloc(f32, blocksize);
+    defer allocator.free(output);
+    const total_blocks: usize = @intFromFloat(@max(1.0, seconds * rate / @as(f64, @floatFromInt(blocksize))));
+    for (0..@min(total_blocks, 64)) |_| try model.process(&ctx, input, output, blocksize);
+    const bench_start = nowNs(io);
+    for (0..total_blocks) |_| try model.process(&ctx, input, output, blocksize);
+    const elapsed_ns: u64 = @intCast(nowNs(io) - bench_start);
+    const ns_per_block = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total_blocks));
+    const budget_ns = @as(f64, @floatFromInt(blocksize)) / rate * 1e9;
+    try stdout.print("model:        standard 16/8 WaveNet, synthetic weights ({d} weights)\n", .{weights.len});
+    try stdout.print("blocksize:    {d} frames @ {d} Hz (budget {d:.0} us/block)\n", .{ blocksize, rate, budget_ns / 1e3 });
+    try stdout.print("measured:     {d:.1} us/block over {d} blocks ({d:.1} ns/sample)\n", .{ ns_per_block / 1e3, total_blocks, ns_per_block / @as(f64, @floatFromInt(blocksize)) });
+    try stdout.print("realtime:     {d:.1}x headroom\n", .{budget_ns / ns_per_block});
+}
+
+/// One training step (segment loss + backward) of a fresh model at the
+/// trainer's window shape (`ny` targets after the receptive field), best of
+/// three timed steps after two warm-ups.
+fn benchTrainStep(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args: []const []const u8) !void {
+    if (args.len < 1) {
+        try stdout.writeAll("usage: zig build nam -- bench --train-step <spec> [--ny N]\n");
+        return;
+    }
+    var ny: usize = 8192;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--ny")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgumentValue;
+            ny = try std.fmt.parseInt(usize, args[i], 10);
+        } else return error.UnknownArgument;
+    }
+    if (ny == 0) return error.InvalidArgument;
+    const spec = try train_mod.TrainingSpec.parse(args[0]);
+    const rf = spec.receptiveField();
+    const nx = rf - 1 + ny;
+    const window = try allocator.alloc(f32, nx);
+    defer allocator.free(window);
+    wavenet_mod.fillSignal(window, 9);
+    const target = try allocator.alloc(f32, ny);
+    defer allocator.free(target);
+    for (target, window[nx - ny ..]) |*dst, v| dst.* = 0.5 * std.math.tanh(2.0 * v);
+
+    var ctx: fucina.ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    var model = try spec.initTrainable(allocator, &ctx, 5);
+    defer model.deinit();
+    var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.001, .weight_decay = 0 });
+    defer opt.deinit();
+    try model.registerParams(&opt);
+    var best: f64 = std.math.inf(f64);
+    for (0..5) |iter| {
+        const start = nowNs(io);
+        {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var loss = try model.segmentLoss(&ctx, window, target);
+            try loss.backward(&ctx);
+        }
+        opt.zeroGrad();
+        const ns: f64 = @floatFromInt(nowNs(io) - start);
+        if (iter >= 2) best = @min(best, ns);
+    }
+    try stdout.print("train step {s}: nx {d} ny {d}: {d:.2} ms (loss + backward, best of 3)\n", .{ spec.name(), nx, ny, best / 1e6 });
 }
 
 const TrainSplits = struct {
@@ -692,7 +790,7 @@ fn train(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
 
     var model: train_mod.ActiveTrainable = undefined;
     if (init_model) |*loaded| {
-        model = .{ .a2 = try train_mod.A2Trainable.initFromWaveNet(allocator, &ctx, template_config.?, loaded.weights) };
+        model = .{ .wavenet = try wavenet_mod.WaveNet.init(allocator, &ctx, template_config.?, loaded.weights, .{ .trainable = true }) };
     } else {
         model = try spec.initTrainable(allocator, &ctx, seed);
     }
@@ -1552,8 +1650,6 @@ const rng = fucina.rng;
 test {
     _ = @import("wav.zig");
     _ = @import("nam_file.zig");
-    _ = @import("activations.zig");
-    _ = @import("stream_conv.zig");
     _ = @import("wavenet.zig");
     _ = @import("models.zig");
     _ = @import("engine.zig");
@@ -1568,5 +1664,4 @@ test {
     _ = @import("tuner.zig");
     _ = @import("ui.zig");
     _ = @import("lstm.zig");
-    _ = @import("facade_assessment_tests.zig");
 }

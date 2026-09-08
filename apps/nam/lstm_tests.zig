@@ -1,14 +1,12 @@
-//! Behavioral tests for the tensor LSTM (`lstm.zig`): parity with the
-//! hand-rolled `models.LstmEngine` (the NAM/PyTorch semantics) on the
-//! vendored upstream model and on a two-layer synthetic one, streaming
-//! versus windowed forward, the NAM weight-stream round trip, gradients
-//! against finite differences, one optimizer step, and the exported `.nam`
-//! played by the app engine.
+//! Behavioral tests for the tensor LSTM (`lstm.zig`): streaming versus
+//! windowed forward, the NAM weight-stream round trip, gradients against
+//! finite differences, one optimizer step, and the exported `.nam` played
+//! by the app engine (the upstream render golden in `engine_tests.zig` is
+//! the NAM-level parity reference).
 
 const std = @import("std");
 const fucina = @import("fucina");
 const lstm = @import("lstm.zig");
-const models = @import("models.zig");
 const nam_file = @import("nam_file.zig");
 const nam_export = @import("nam_export.zig");
 const engine_mod = @import("engine.zig");
@@ -37,47 +35,6 @@ fn syntheticWeights(allocator: std.mem.Allocator, config: *const nam_file.LstmCo
     const weights = try allocator.alloc(f32, nam_file.expectedWeightCount(&file_config));
     fillUniform(weights, seed, 0.4);
     return weights;
-}
-
-fn expectStreamParity(allocator: std.mem.Allocator, config: *const nam_file.LstmConfig, weights: []const f32, total: usize, label: []const u8) !void {
-    var ctx: ExecContext = undefined;
-    ctx.init(allocator);
-    defer ctx.deinit();
-    var reference = try models.LstmEngine.init(allocator, config, weights, 48000);
-    defer reference.deinit();
-    var model = try lstm.Model.initFromNam(allocator, &ctx, config, weights, false, .{});
-    defer model.deinit();
-    var stream = try lstm.Stream.init(allocator, &ctx, &model);
-    defer stream.deinit();
-
-    const input = try allocator.alloc(f32, total);
-    defer allocator.free(input);
-    fillSignal(input, 9);
-    const expected = try allocator.alloc(f32, total);
-    defer allocator.free(expected);
-    const got = try allocator.alloc(f32, total);
-    defer allocator.free(got);
-    reference.process(input, expected, total);
-    try stream.process(&ctx, input, got, total);
-    var max_abs: f32 = 0;
-    var max_ref: f32 = 0;
-    for (expected, got) |e, g| {
-        max_abs = @max(max_abs, @abs(e - g));
-        max_ref = @max(max_ref, @abs(e));
-    }
-    std.debug.print("  [lstm] {s}: max|d|={e:.2} (max|ref|={d:.3}) over {d} samples\n", .{ label, max_abs, max_ref, total });
-    try std.testing.expect(max_abs <= 2e-5 * @max(1.0, max_ref));
-}
-
-test "lstm stream matches the hand-rolled engine on the upstream model and a two-layer synthetic" {
-    const allocator = std.testing.allocator;
-    var model = try nam_file.loadFromSlice(allocator, @embedFile("testdata/lstm.nam"));
-    defer model.deinit();
-    try expectStreamParity(allocator, &model.config.lstm, model.weights, 800, "upstream lstm.nam (hidden 3)");
-
-    const weights = try syntheticWeights(allocator, &synthetic_config, 21);
-    defer allocator.free(weights);
-    try expectStreamParity(allocator, &synthetic_config, weights, 600, "synthetic hidden 8 x 2 layers");
 }
 
 test "lstm streaming equals the windowed forward and stays allocation-free" {

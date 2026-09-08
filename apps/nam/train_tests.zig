@@ -1,6 +1,7 @@
-//! Tests for the NAM WaveNet trainer (apps/nam/train.zig): forward/export
-//! parity vs the streaming engine, optimizer-step loss reduction, MRSTFT torch
-//! goldens, and packed / A2 training-spec round-trips through the public API.
+//! Tests for the NAM WaveNet trainer (apps/nam/train.zig): recorded-forward
+//! versus streamed-render parity through export, optimizer-step loss
+//! reduction, MRSTFT torch goldens, and packed / A2 training-spec round-trips
+//! through the public API.
 
 const std = @import("std");
 const fucina = @import("fucina");
@@ -11,8 +12,6 @@ const train = @import("train.zig");
 const Tensor = fucina.Tensor;
 const ExecContext = fucina.ExecContext;
 
-const Trainable = train.Trainable;
-const A2Trainable = train.A2Trainable;
 const ModelSpec = train.ModelSpec;
 const TrainingSpec = train.TrainingSpec;
 const PackedSpec = train.PackedSpec;
@@ -32,7 +31,8 @@ test "trainable forward matches the streaming engine through export" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var model = try Trainable.init(allocator, &ctx, ModelSpec.tiny, 42);
+    const spec = TrainingSpec{ .classic = ModelSpec.tiny };
+    var model = try spec.initTrainable(allocator, &ctx, 42);
     defer model.deinit();
 
     var window: [200]f32 = undefined;
@@ -42,17 +42,16 @@ test "trainable forward matches the streaming engine through export" {
     const scope = ctx.openExecScope();
     var graph_pred: [200]f32 = undefined;
     {
-        const pred = try model.forward(&ctx, &window);
-        const values = try pred.dataConst();
-        @memcpy(&graph_pred, values);
+        const pred = try model.wavenet.forward(&ctx, &window);
+        try pred.copyTo(&graph_pred);
     }
     ctx.closeExecScope(scope);
 
-    // Streaming-engine forward through the exported flat weights.
+    // Streamed forward through the exported flat weights.
     const weights = try model.extractWeights(&ctx, allocator);
     defer allocator.free(weights);
     var engine_pred: [200]f32 = undefined;
-    try renderWeights(allocator, &model.spec, weights, &window, &engine_pred);
+    try renderWeights(allocator, &ModelSpec.tiny, weights, &window, &engine_pred);
 
     for (graph_pred, engine_pred) |a, b| {
         try std.testing.expect(@abs(a - b) < 2e-5);
@@ -68,7 +67,8 @@ test "one optimizer step reduces the segment loss" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var model = try Trainable.init(allocator, &ctx, ModelSpec.tiny, 7);
+    const spec = TrainingSpec{ .classic = ModelSpec.tiny };
+    var model = try spec.initTrainable(allocator, &ctx, 7);
     defer model.deinit();
     var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.004, .weight_decay = 0 });
     defer opt.deinit();
@@ -186,7 +186,7 @@ test "A2 WaveNet snapshot owns updated recursive condition DSP weights" {
     ctx.init(allocator);
     defer ctx.deinit();
 
-    var model = try A2Trainable.initFromWaveNet(allocator, &ctx, &top_config, top_weights);
+    var model = try wavenet.WaveNet.init(allocator, &ctx, &top_config, top_weights, .{ .trainable = true });
     defer model.deinit();
 
     var opt = try fucina.optim.Adam.init(allocator, .{ .lr = 0.01, .weight_decay = 0 });
@@ -197,12 +197,12 @@ test "A2 WaveNet snapshot owns updated recursive condition DSP weights" {
         defer ctx.closeExecScope(scope);
         const input = [_]f32{ 0.2, -0.1, 0.4, 0.7 };
         const target = [_]f32{ -0.3, 0.25 };
-        var loss = try model.segmentLoss(&ctx, &input, &target);
+        var loss = try train.wavenetSegmentLoss(&model, &ctx, &input, &target, .{});
         try loss.backward(&ctx);
     }
     try opt.step(&ctx);
 
-    var snapshot = try model.extractWaveNetSnapshot(&ctx, allocator, &top_config);
+    var snapshot = try train.wavenetSnapshot(&model, &ctx, allocator, &top_config);
     defer snapshot.deinit(allocator);
     const snapshot_dsp = snapshot.config.condition_dsp orelse return error.TestExpectedConditionDsp;
     try std.testing.expectEqual(nam_file.Arch.wavenet, snapshot_dsp.architecture);
@@ -523,67 +523,4 @@ test "packed WaveNet spec sums submodel losses and extracts slimmable snapshots"
     try std.testing.expectEqual(@as(usize, 8), packed_snapshot.submodels[1].config.layers[0].channels);
     try std.testing.expectEqual(nam_file.expectedWeightCount(&.{ .wavenet = packed_snapshot.submodels[0].config }), packed_snapshot.submodels[0].weights.len);
     try std.testing.expectEqual(nam_file.expectedWeightCount(&.{ .wavenet = packed_snapshot.submodels[1].config }), packed_snapshot.submodels[1].weights.len);
-}
-
-test "A2 trainable forward matches the streaming engine on the upstream max fixture when present" {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
-    const allocator = gpa.allocator();
-
-    var file_model = nam_file.loadFile(
-        std.testing.io,
-        allocator,
-        "refs/NeuralAmpModelerCore/example_models/wavenet_a2_max.nam",
-    ) catch |err| switch (err) {
-        error.FileNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer file_model.deinit();
-    if (file_model.config != .wavenet) return error.TestExpectedWaveNet;
-
-    var ctx: ExecContext = undefined;
-    ctx.init(allocator);
-    defer ctx.deinit();
-
-    var model = try A2Trainable.initFromWaveNet(allocator, &ctx, &file_model.config.wavenet, file_model.weights);
-    defer model.deinit();
-    const roundtrip = try model.extractWeights(&ctx, allocator);
-    defer allocator.free(roundtrip);
-    try std.testing.expectEqualSlices(f32, file_model.weights, roundtrip);
-
-    const frames = 257;
-    const out_channels = model.outputChannels();
-    var input: [frames]f32 = undefined;
-    for (&input, 0..) |*v, i| {
-        v.* = 0.35 * @sin(@as(f32, @floatFromInt(i)) * 0.071) + 0.12 * @cos(@as(f32, @floatFromInt(i)) * 0.019);
-    }
-
-    const graph_pred = try allocator.alloc(f32, frames * out_channels);
-    defer allocator.free(graph_pred);
-    const scope = ctx.openExecScope();
-    {
-        const pred = try model.forward(&ctx, &input);
-        try pred.copyTo(graph_pred);
-    }
-    ctx.closeExecScope(scope);
-
-    var const_model = try A2Trainable.initConstFromWaveNet(allocator, &ctx, &file_model.config.wavenet, file_model.weights);
-    defer const_model.deinit();
-    const const_pred = try allocator.alloc(f32, frames * out_channels);
-    defer allocator.free(const_pred);
-    try const_model.renderBorrowed(&ctx, &input, const_pred);
-
-    var engine = try wavenet.WaveNetEngine.init(allocator, &file_model.config.wavenet, file_model.weights);
-    defer engine.deinit();
-    try engine.reset(frames);
-    const engine_pred = try allocator.alloc(f32, frames * out_channels);
-    defer allocator.free(engine_pred);
-    engine.process(&input, engine_pred, frames);
-
-    var max_abs: f32 = 0;
-    for (graph_pred, engine_pred) |a, b| max_abs = @max(max_abs, @abs(a - b));
-    try std.testing.expect(max_abs < 2e-5);
-    max_abs = 0;
-    for (const_pred, engine_pred) |a, b| max_abs = @max(max_abs, @abs(a - b));
-    try std.testing.expect(max_abs < 2e-5);
 }
