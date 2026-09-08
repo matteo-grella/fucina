@@ -16,6 +16,7 @@ const activations = @import("activations.zig");
 const ir_cab = @import("ir_cab.zig");
 const models = @import("models.zig");
 const gguf_compat = @import("gguf_compat.zig");
+const lstm = @import("lstm.zig");
 
 const ExecContext = fucina.ExecContext;
 const kernels = fucina.internal.backend_mod.kernels;
@@ -458,7 +459,9 @@ fn lstmMicrobench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     for (weights) |*v| v.* = (prng.random().float(f32) * 2 - 1) * 0.3;
     var reference = try models.LstmEngine.init(allocator, &config, weights, 48000);
     defer reference.deinit();
-    var candidate = try facade.Lstm.init(allocator, ctx, &reference);
+    var model = try lstm.Model.initFromNam(allocator, ctx, &config, weights, false, .{});
+    defer model.deinit();
+    var candidate = try lstm.Stream.init(allocator, ctx, &model);
     defer candidate.deinit();
 
     const total = 24000;
@@ -480,9 +483,168 @@ fn lstmMicrobench(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writ
     const fac_ns = elapsedNs(io, start) / @as(f64, @floatFromInt(total));
     var max_abs: f32 = 0;
     reference.reset();
-    try candidate.reset();
+    try candidate.reset(ctx);
     reference.process(input, out_ref, total);
     try candidate.process(ctx, input, out_fac, total);
     for (out_ref, out_fac) |r, g| max_abs = @max(max_abs, @abs(r - g));
-    try stdout.print("\nlstm hidden 24 x 1 layer: LstmEngine {d:.0} ns/sample   facade per-sample composition {d:.0} ns/sample   ({d:.2}x, max|d|={e:.2})\n", .{ ref_ns, fac_ns, fac_ns / ref_ns, max_abs });
+    try stdout.print("\nlstm hidden 24 x 1 layer: LstmEngine {d:.0} ns/sample   tensor lstm.Stream {d:.0} ns/sample   ({d:.2}x, max|d|={e:.2})\n", .{ ref_ns, fac_ns, fac_ns / ref_ns, max_abs });
+    try lstmOpCosts(io, stdout, ctx, config.hidden_size);
+}
+
+/// The cost of each facade op at the LSTM step's shapes (ns per call):
+/// where a per-sample composition spends its time.
+fn lstmOpCosts(io: std.Io, stdout: *std.Io.Writer, ctx: *ExecContext, hidden: usize) !void {
+    const H = hidden;
+    const K = 1 + H + 1;
+    const reps: usize = 20000;
+    var w_data: [4 * 32 * 34]f32 = undefined;
+    for (&w_data, 0..) |*v, i| v.* = 0.01 * @as(f32, @floatFromInt(i % 17));
+    var w = try fucina.Tensor(.{ .unit, .k }).fromSlice(ctx, .{ 4 * H, K }, w_data[0 .. 4 * H * K]);
+    defer w.deinit();
+    var h = try fucina.Tensor(.{.unit}).zeros(ctx, .{H});
+    defer h.deinit();
+    var c = try fucina.Tensor(.{.unit}).zeros(ctx, .{H});
+    defer c.deinit();
+    var x_t = try fucina.Tensor(.{.k}).zeros(ctx, .{1});
+    defer x_t.deinit();
+    var one = try fucina.Tensor(.{.k}).ones(ctx, .{1});
+    defer one.deinit();
+    var gates = try fucina.Tensor(.{.unit}).zeros(ctx, .{4 * H});
+    defer gates.deinit();
+    var bias: [128]f32 = undefined;
+    @memset(&bias, 0.1);
+    const sample = [_]f32{0.3};
+
+    var start = nowNs(io);
+    for (0..reps) |_| try x_t.copyFrom(&sample);
+    const t_copyfrom = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try h.withTags(ctx, .{.k});
+        v.deinit();
+    }
+    const t_view = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try gates.narrow(ctx, .unit, H, H);
+        v.deinit();
+    }
+    const t_narrow = elapsedNs(io, start) / reps;
+
+    var h_k = try h.withTags(ctx, .{.k});
+    defer h_k.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try x_t.concat(ctx, .k, &.{ &h_k, &one });
+        v.deinit();
+    }
+    const t_concat = elapsedNs(io, start) / reps;
+
+    var xh = try x_t.concat(ctx, .k, &.{ &h_k, &one });
+    defer xh.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try w.dot(ctx, &xh, .k);
+        v.deinit();
+    }
+    const t_dot = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| try gates.addAxisVectorInPlace(ctx, bias[0 .. 4 * H], .unit);
+    const t_bias = elapsedNs(io, start) / reps;
+
+    // matvec alternatives: matmul against a [k, 1] view, and mul + sum.
+    var xh_col = try xh.split(ctx, .k, .{ .k, .one }, .{ K, 1 });
+    defer xh_col.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try w.matmul(ctx, &xh_col, .plain, .{ .unit, .one });
+        v.deinit();
+    }
+    const t_matmul = elapsedNs(io, start) / reps;
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var prod = try w.mul(ctx, &xh);
+        defer prod.deinit();
+        var v = try prod.sum(ctx, .k, .{});
+        v.deinit();
+    }
+    const t_mulsum = elapsedNs(io, start) / reps;
+    // Transposed orientation: weights stored [k, unit], vector times matrix.
+    var w_kn = try w.permuteTo(ctx, .{ .k, .unit });
+    defer w_kn.deinit();
+    var w_kn_c = try w_kn.materialize(ctx);
+    defer w_kn_c.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try xh.dot(ctx, &w_kn_c, .k);
+        v.deinit();
+    }
+    const t_dot_t = elapsedNs(io, start) / reps;
+    var xh_row = try xh.split(ctx, .k, .{ .one, .k }, .{ 1, K });
+    defer xh_row.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try xh_row.matmul(ctx, &w_kn_c, .plain, .{ .one, .unit });
+        v.deinit();
+    }
+    const t_matmul_t = elapsedNs(io, start) / reps;
+    // The raw kernel for the transposed orientation (no dispatch).
+    var raw_out = try fucina.Tensor(.{.unit}).zeros(ctx, .{4 * H});
+    defer raw_out.deinit();
+    const raw_a = xh.asRawTensor();
+    const raw_b = w_kn_c.asRawTensor();
+    var raw_o = try fucina.internal.tensor_mod.Tensor.fromBorrowedSlice(ctx.allocator(), &.{ 1, 4 * H }, try raw_out.data());
+    defer raw_o.deinit();
+    start = nowNs(io);
+    for (0..reps) |_| kernels.gemm(.{}, .{ .kind = .plain }, &raw_o, raw_a, raw_b, 1, 4 * H, K);
+    const t_raw_t = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try c.sigmoid(ctx);
+        v.deinit();
+    }
+    const t_sigmoid = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try c.tanh(ctx);
+        v.deinit();
+    }
+    const t_tanh = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try c.glu(ctx, &h);
+        v.deinit();
+    }
+    const t_glu = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try c.mul(ctx, &h);
+        v.deinit();
+    }
+    const t_mul = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| try c.addScaledInPlace(ctx, &h, 1.0);
+    const t_axpy = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| {
+        var v = try fucina.Tensor(.{.k}).fromSlice(ctx, .{1}, &sample);
+        v.deinit();
+    }
+    const t_fromslice = elapsedNs(io, start) / reps;
+
+    start = nowNs(io);
+    for (0..reps) |_| _ = try x_t.item();
+    const t_item = elapsedNs(io, start) / reps;
+
+    try stdout.print("  matvec orientations (ns): [4H x K]·[K] dot {d:.0}  matmul {d:.0}  mul+sum {d:.0}  |  [K]·[K x 4H] dot {d:.0}  matmul {d:.0}  raw gemm kernel {d:.0}\n", .{ t_dot, t_matmul, t_mulsum, t_dot_t, t_matmul_t, t_raw_t });
+    try stdout.print("  op costs at H={d} (ns): copyFrom[1] {d:.0}  withTags view {d:.0}  narrow view {d:.0}  concat[1+H+1] {d:.0}  dot[4H x {d}] {d:.0}  matmul[4H x {d}]x[{d} x 1] {d:.0}  mul+sum {d:.0}  bias add[4H] {d:.0}  sigmoid[H] {d:.0}  tanh[H] {d:.0}  glu[H] {d:.0}  mul[H] {d:.0}  addScaledInPlace[H] {d:.0}  fromSlice[1] {d:.0}  item {d:.0}\n", .{ H, t_copyfrom, t_view, t_narrow, t_concat, K, t_dot, K, K, t_matmul, t_mulsum, t_bias, t_sigmoid, t_tanh, t_glu, t_mul, t_axpy, t_fromslice, t_item });
 }

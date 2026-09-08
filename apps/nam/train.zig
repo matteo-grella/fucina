@@ -10,6 +10,8 @@ const std = @import("std");
 const fucina = @import("fucina");
 const nam_file = @import("nam_file.zig");
 const wavenet = @import("wavenet.zig");
+const engines = @import("models.zig");
+const lstm = @import("lstm.zig");
 const data = @import("data.zig");
 
 const Tensor = fucina.Tensor;
@@ -1743,8 +1745,10 @@ pub const TrainingSpec = union(enum) {
     classic: ModelSpec,
     a2: A2Spec,
     packed_wavenet: PackedSpec,
+    lstm: lstm.Spec,
 
     pub fn parse(spec_name: []const u8) !TrainingSpec {
+        if (std.mem.eql(u8, spec_name, "lstm")) return .{ .lstm = lstm.Spec.standard };
         if (std.mem.eql(u8, spec_name, "tiny")) return .{ .classic = ModelSpec.tiny };
         if (std.mem.eql(u8, spec_name, "standard") or std.mem.eql(u8, spec_name, "a1") or std.mem.eql(u8, spec_name, "a1-standard")) {
             return .{ .classic = ModelSpec.classic };
@@ -1762,6 +1766,7 @@ pub const TrainingSpec = union(enum) {
             .classic => |*spec| if (spec.arrays.len == 2) "standard" else "tiny",
             .a2 => |spec| spec.name(),
             .packed_wavenet => |spec| spec.name(),
+            .lstm => |spec| spec.name(),
         };
     }
 
@@ -1770,6 +1775,7 @@ pub const TrainingSpec = union(enum) {
             .classic => |*spec| spec.receptiveField(),
             .a2 => |*spec| spec.receptiveField(),
             .packed_wavenet => |*spec| spec.receptiveField(),
+            .lstm => |*spec| spec.receptiveField(),
         };
     }
 
@@ -1784,6 +1790,7 @@ pub const TrainingSpec = union(enum) {
                 break :blk .{ .a2 = try A2Trainable.initFromWaveNet(allocator, ctx, &config, weights) };
             },
             .packed_wavenet => .{ .packed_wavenet = try PackedTrainable.init(allocator, ctx, seed) },
+            .lstm => |spec| .{ .lstm = try lstm.Model.init(allocator, ctx, spec, seed) },
         };
     }
 
@@ -1791,7 +1798,7 @@ pub const TrainingSpec = union(enum) {
         return switch (self.*) {
             .classic => |*spec| toEngineConfig(allocator, spec),
             .a2 => |*spec| toA2EngineConfig(allocator, spec),
-            .packed_wavenet => error.UnsupportedFeature,
+            .packed_wavenet, .lstm => error.UnsupportedFeature,
         };
     }
 
@@ -1835,12 +1842,14 @@ pub const ActiveTrainable = union(enum) {
     classic: Trainable,
     a2: A2Trainable,
     packed_wavenet: PackedTrainable,
+    lstm: lstm.Model,
 
     pub fn deinit(self: *ActiveTrainable) void {
         switch (self.*) {
             .classic => |*model| model.deinit(),
             .a2 => |*model| model.deinit(),
             .packed_wavenet => |*model| model.deinit(),
+            .lstm => |*model| model.deinit(),
         }
         self.* = undefined;
     }
@@ -1850,6 +1859,7 @@ pub const ActiveTrainable = union(enum) {
             .classic => |*model| try model.registerParams(opt),
             .a2 => |*model| try model.registerParams(opt),
             .packed_wavenet => |*model| try model.registerParams(opt),
+            .lstm => |*model| try model.registerParams(opt),
         }
     }
 
@@ -1862,6 +1872,7 @@ pub const ActiveTrainable = union(enum) {
             .classic => |*model| model.segmentLoss(ctx, window, target),
             .a2 => |*model| model.segmentLossWithOptions(ctx, window, target, options),
             .packed_wavenet => |*model| model.segmentLossWithOptions(ctx, window, target, options),
+            .lstm => |*model| model.segmentLoss(ctx, window, target),
         };
     }
 
@@ -1869,6 +1880,7 @@ pub const ActiveTrainable = union(enum) {
         return switch (self.*) {
             .classic => |*model| model.extractWeights(ctx, allocator),
             .a2 => |*model| model.extractWeights(ctx, allocator),
+            .lstm => |*model| model.extractWeights(ctx, allocator),
             .packed_wavenet => error.UnsupportedFeature,
         };
     }
@@ -1885,6 +1897,7 @@ pub const ActiveTrainable = union(enum) {
                 .weights = try model.extractWeights(ctx, allocator),
             },
             .a2 => |*model| model.extractWaveNetSnapshot(ctx, allocator, template_config),
+            .lstm => error.UnsupportedFeature,
             .packed_wavenet => error.UnsupportedFeature,
         };
     }
@@ -1898,6 +1911,7 @@ pub const ActiveTrainable = union(enum) {
         return switch (self.*) {
             .classic, .a2 => .{ .wavenet = try self.extractWaveNetSnapshot(ctx, allocator, template_config orelse return error.UnsupportedFeature) },
             .packed_wavenet => |*model| .{ .packed_wavenet = try model.extractPackedSnapshot(ctx, allocator) },
+            .lstm => |*model| .{ .lstm = .{ .config = model.spec.engineConfig(), .weights = try model.extractWeights(ctx, allocator) } },
         };
     }
 };
@@ -1926,18 +1940,38 @@ pub const PackedSnapshot = struct {
     }
 };
 
+pub const LstmSnapshot = struct {
+    config: nam_file.LstmConfig,
+    weights: []f32,
+
+    pub fn deinit(self: *LstmSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.weights);
+        self.* = undefined;
+    }
+};
+
 pub const TrainingSnapshot = union(enum) {
     wavenet: WaveNetSnapshot,
     packed_wavenet: PackedSnapshot,
+    lstm: LstmSnapshot,
 
     pub fn deinit(self: *TrainingSnapshot, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .wavenet => |*snapshot| snapshot.deinit(allocator),
             .packed_wavenet => |*snapshot| snapshot.deinit(allocator),
+            .lstm => |*snapshot| snapshot.deinit(allocator),
         }
         self.* = undefined;
     }
 };
+
+/// Renders `x` through the hand-rolled LSTM engine from its learned initial
+/// state (the validation path for an LSTM snapshot).
+pub fn renderLstmConfig(allocator: std.mem.Allocator, config: *const nam_file.LstmConfig, weights: []const f32, x: []const f32, out: []f32) !void {
+    var engine = try engines.LstmEngine.init(allocator, config, weights, 48000);
+    defer engine.deinit();
+    engine.process(x, out, x.len);
+}
 
 /// Builds the engine-facing config for a spec (classic shape: ungated,
 /// layer1x1 active, no head1x1, no post head, Tanh). Slices are allocated;

@@ -519,9 +519,17 @@ fn validationEsrConfig(allocator: std.mem.Allocator, config: *const nam_file.Wav
     return data.esr(pred[nx - 1 ..], val_y[nx - 1 ..]);
 }
 
+fn validationEsrLstm(allocator: std.mem.Allocator, config: *const nam_file.LstmConfig, weights: []const f32, val_x: []const f32, val_y: []const f32, nx: usize) !f64 {
+    const pred = try allocator.alloc(f32, val_x.len);
+    defer allocator.free(pred);
+    try train_mod.renderLstmConfig(allocator, config, weights, val_x, pred);
+    return data.esr(pred[nx - 1 ..], val_y[nx - 1 ..]);
+}
+
 fn validationEsrSnapshot(allocator: std.mem.Allocator, snapshot: *const train_mod.TrainingSnapshot, val_x: []const f32, val_y: []const f32, nx: usize) !f64 {
     return switch (snapshot.*) {
         .wavenet => |*s| try validationEsrConfig(allocator, &s.config, s.weights, val_x, val_y, nx),
+        .lstm => |*s| try validationEsrLstm(allocator, &s.config, s.weights, val_x, val_y, nx),
         .packed_wavenet => |*packed_snapshot| blk: {
             var total: f64 = 0;
             for (packed_snapshot.submodels) |*submodel| {
@@ -652,7 +660,7 @@ fn train(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
         }
     } else {
         switch (spec) {
-            .packed_wavenet => {
+            .packed_wavenet, .lstm => {
                 train_name = spec.name();
             },
             else => {
@@ -763,6 +771,7 @@ fn train(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, args:
     switch (final_snapshot.*) {
         .wavenet => |*snapshot| try nam_export.exportWaveNetConfig(io, allocator, out_path.?, &snapshot.config, snapshot.weights, export_info),
         .packed_wavenet => |*snapshot| try nam_export.exportSlimmableContainer(io, allocator, out_path.?, snapshot.submodels, export_info),
+        .lstm => |*snapshot| try nam_export.exportLstmConfig(io, allocator, out_path.?, &snapshot.config, snapshot.weights, export_info),
     }
     try stdout.print("exported {s}\n", .{out_path.?});
 }
@@ -1558,5 +1567,6 @@ test {
     _ = @import("midi.zig");
     _ = @import("tuner.zig");
     _ = @import("ui.zig");
+    _ = @import("lstm.zig");
     _ = @import("facade_assessment_tests.zig");
 }

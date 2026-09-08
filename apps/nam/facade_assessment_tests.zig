@@ -13,6 +13,7 @@ const stream_conv = @import("stream_conv.zig");
 const activations = @import("activations.zig");
 const ir_cab = @import("ir_cab.zig");
 const models = @import("models.zig");
+const lstm = @import("lstm.zig");
 
 const ExecContext = fucina.ExecContext;
 const Activation = nam_file.Activation;
@@ -310,13 +311,13 @@ test "facade: the wavenet block path stops allocating once the buffer pool is wa
     const lstm_weights = try std.testing.allocator.alloc(f32, nam_file.expectedWeightCount(&lstm_file_config));
     defer std.testing.allocator.free(lstm_weights);
     fillUniform(lstm_weights, 5, 0.3);
-    var reference_lstm = try models.LstmEngine.init(std.testing.allocator, &lstm_config, lstm_weights, 48000);
-    defer reference_lstm.deinit();
-    var lstm = try facade.Lstm.init(std.testing.allocator, &ctx, &reference_lstm);
-    defer lstm.deinit();
-    try lstm.process(&ctx, &input, &output, block);
+    var lstm_model = try lstm.Model.initFromNam(std.testing.allocator, &ctx, &lstm_config, lstm_weights, false, .{});
+    defer lstm_model.deinit();
+    var lstm_stream = try lstm.Stream.init(std.testing.allocator, &ctx, &lstm_model);
+    defer lstm_stream.deinit();
+    try lstm_stream.process(&ctx, &input, &output, block);
     const lstm_warm = counting.allocs.load(.monotonic);
-    try lstm.process(&ctx, &input, &output, block);
+    try lstm_stream.process(&ctx, &input, &output, block);
     const lstm_steady = counting.allocs.load(.monotonic) - lstm_warm;
     std.debug.print("  [facade] steady-state allocations: cab IR {d} per 16 blocks, lstm {d} per 64 samples\n", .{ cab_steady, lstm_steady });
     try std.testing.expectEqual(@as(usize, 0), cab_steady);
@@ -447,7 +448,9 @@ test "facade: per-sample LSTM composition matches LstmEngine" {
 
     var reference = try models.LstmEngine.init(allocator, &config, weights, 48000);
     defer reference.deinit();
-    var candidate = try facade.Lstm.init(allocator, &ctx, &reference);
+    var model = try lstm.Model.initFromNam(allocator, &ctx, &config, weights, false, .{});
+    defer model.deinit();
+    var candidate = try lstm.Stream.init(allocator, &ctx, &model);
     defer candidate.deinit();
 
     const total = 600;

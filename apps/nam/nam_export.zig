@@ -10,6 +10,7 @@ const std = @import("std");
 const nam_file = @import("nam_file.zig");
 const wav = @import("wav.zig");
 const train = @import("train.zig");
+const models = @import("models.zig");
 const data = @import("data.zig");
 
 pub const UserMetadata = struct {
@@ -74,6 +75,40 @@ pub fn measureLoudnessAndGainConfig(
         for (out) |v| sum_sq += @as(f64, v) * v;
         level.* = @sqrt(sum_sq / @as(f64, @floatFromInt(out.len)));
     }
+    return loudnessGainFromLevels(levels);
+}
+
+/// Upstream's loudness + gain metadata for an LSTM (the same sweep as the
+/// WaveNet form, rendered through the LSTM engine from its learned initial
+/// state).
+pub fn measureLoudnessAndGainLstm(
+    allocator: std.mem.Allocator,
+    config: *const nam_file.LstmConfig,
+    weights: []const f32,
+) !LoudnessGain {
+    var signal = try wav.parse(allocator, @embedFile("resources/loudness_input.wav"));
+    defer signal.deinit();
+    const x = try signal.requireMono();
+    const scaled = try allocator.alloc(f32, x.len);
+    defer allocator.free(scaled);
+    const out = try allocator.alloc(f32, x.len);
+    defer allocator.free(out);
+    var engine = try models.LstmEngine.init(allocator, config, weights, 48000);
+    defer engine.deinit();
+    var levels: [11]f64 = undefined;
+    for (&levels, 0..) |*level, i| {
+        const g = @as(f32, @floatFromInt(i)) / 10.0;
+        for (scaled, x) |*dst, v| dst.* = g * v;
+        engine.reset();
+        engine.process(scaled, out, x.len);
+        var sum_sq: f64 = 0;
+        for (out) |v| sum_sq += @as(f64, v) * v;
+        level.* = @sqrt(sum_sq / @as(f64, @floatFromInt(out.len)));
+    }
+    return loudnessGainFromLevels(levels);
+}
+
+fn loudnessGainFromLevels(levels: [11]f64) LoudnessGain {
     const loudness = 20.0 * std.math.log10(@max(levels[10], 1e-20));
     var total: f64 = 0;
     for (levels) |v| total += v;
@@ -84,6 +119,38 @@ pub fn measureLoudnessAndGainConfig(
     else
         0.0;
     return .{ .loudness = loudness, .gain = gain };
+}
+
+/// `.nam` v0.7.0 with `"architecture": "LSTM"`: the config the upstream
+/// player reads (`input_size`, `hidden_size`, `num_layers`) and the weight
+/// stream in spec §5.3 order. The output-scale compensation folds into the
+/// head weight and bias (the last `hidden_size + 1` floats).
+pub fn exportLstmConfig(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    config: *const nam_file.LstmConfig,
+    weights: []const f32,
+    info: ExportInfo,
+) !void {
+    const compensated = try allocator.dupe(f32, weights);
+    defer allocator.free(compensated);
+    const head_start = compensated.len - (config.hidden_size + 1);
+    for (compensated[head_start..]) |*v| v.* *= info.output_scale_compensation;
+    const measured = try measureLoudnessAndGainLstm(allocator, config, compensated);
+
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    var buffer: [64 * 1024]u8 = undefined;
+    var writer = file.writer(io, &buffer);
+    const w = &writer.interface;
+    try w.writeAll("{\"version\": \"0.7.0\", \"metadata\": ");
+    try writeMetadata(w, info, measured);
+    try w.print(", \"architecture\": \"LSTM\", \"config\": {{\"input_size\": {d}, \"hidden_size\": {d}, \"num_layers\": {d}}}", .{ config.input_size, config.hidden_size, config.num_layers });
+    try w.writeAll(", \"weights\": ");
+    try writeWeights(w, compensated);
+    try w.print(", \"sample_rate\": {d}}}", .{info.sample_rate});
+    try w.flush();
 }
 
 pub fn exportWaveNetConfig(
