@@ -84,6 +84,8 @@ pub fn main(init: std.process.Init) !void {
         render(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "bench"))
         bench(io, allocator, stdout, args[2..])
+    else if (std.mem.eql(u8, command, "facade-bench"))
+        @import("facade_bench.zig").run(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "train"))
         train(io, allocator, stdout, args[2..])
     else if (std.mem.eql(u8, command, "validate"))
@@ -1556,4 +1558,5 @@ test {
     _ = @import("midi.zig");
     _ = @import("tuner.zig");
     _ = @import("ui.zig");
+    _ = @import("facade_assessment_tests.zig");
 }
