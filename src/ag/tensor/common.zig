@@ -81,6 +81,17 @@ pub fn Ops(comptime Self: type) type {
             return self.value.copyTo(@ptrCast(dst));
         }
 
+        /// The mirror of `copyTo`: writes `src` (row-major, `src.len` = the
+        /// storage length) into this tensor's contiguous storage. The way host
+        /// data enters a persistent tensor without a new storage header (a
+        /// block of audio into a streaming engine's input slot); the same
+        /// no-grad and contiguity rules as `data`.
+        pub fn copyFrom(self: *Self, src: []const Elem) !void {
+            const dst = try self.data();
+            if (dst.len != src.len) return TensorError.InvalidDataLength;
+            @memcpy(dst, src);
+        }
+
         pub fn requiresGrad(self: *const Self) bool {
             if (comptime has_grad) return self.grad_state != null;
             return false;

@@ -508,3 +508,22 @@ test "public Tensor mutable access to read-only borrowed storage is refused" {
     // The const data is untouched and readable.
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, try t.dataConst());
 }
+
+test "public Tensor copyFrom writes host values into contiguous no-grad storage" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    var t = try Tensor(.{.n}).zeros(&ctx, .{3});
+    defer t.deinit();
+    try t.copyFrom(&.{ 1, 2, 3 });
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3 }, try t.dataConst());
+    try std.testing.expectError(error.InvalidDataLength, t.copyFrom(&.{ 1, 2 }));
+
+    var v = try Tensor(.{.n}).variable(&ctx, try ctx.fromSlice(.f32, &.{3}, &.{ 0, 0, 0 }));
+    defer v.deinit();
+    try std.testing.expectError(error.MutableDataRequiresNoGrad, v.copyFrom(&.{ 1, 2, 3 }));
+}
