@@ -160,7 +160,22 @@ pub inline fn vecUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32) void 
     while (i + vector_len <= z.len) : (i += vector_len) {
         z[i..][0..vector_len].* = applyUnaryVec(op, x[i..][0..vector_len].*);
     }
-    while (i < z.len) : (i += 1) z[i] = ops.unaryScalar(op, x[i]);
+    if (i < z.len) {
+        const out: [vector_len]f32 = applyUnaryVec(op, paddedTail(x, i));
+        @memcpy(z[i..], out[0 .. z.len - i]);
+    }
+}
+
+/// The tail of `x` from `i` as one full vector, the spare lanes filled
+/// with the last element. Every lane kernel runs its tail through this,
+/// so an element's result depends only on its value, never on where it
+/// sits in the array: chunkings, row splits and the pooled range split
+/// stay bitwise stable, and no lane sees a value the input does not
+/// contain (no spurious exception flags).
+inline fn paddedTail(x: []const f32, i: usize) Vf32 {
+    var tail: [vector_len]f32 = @splat(x[x.len - 1]);
+    @memcpy(tail[0 .. x.len - i], x[i..]);
+    return tail;
 }
 
 /// Input-based unary derivatives with a vector body — the unary VJP's hot
@@ -226,7 +241,10 @@ pub inline fn vecUnaryVjp(comptime op: ops.UnaryOp, dsts: []f32, xs: []const f32
     while (i + vector_len <= dsts.len) : (i += vector_len) {
         dsts[i..][0..vector_len].* = @as(Vf32, gys[i..][0..vector_len].*) * unaryDerivativeVec(op, xs[i..][0..vector_len].*);
     }
-    while (i < dsts.len) : (i += 1) dsts[i] = gys[i] * unaryDerivativeScalar(op, xs[i]);
+    if (i < dsts.len) {
+        const out: [vector_len]f32 = paddedTail(gys, i) * unaryDerivativeVec(op, paddedTail(xs, i));
+        @memcpy(dsts[i..], out[0 .. dsts.len - i]);
+    }
 }
 
 pub inline fn vecAddUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32, y: []const f32) void {
@@ -240,21 +258,26 @@ pub inline fn vecAddUnary(comptime op: ops.UnaryOp, z: []f32, x: []const f32, y:
     while (i + vector_len <= z.len) : (i += vector_len) {
         z[i..][0..vector_len].* = applyUnaryVec(op, @as(Vf32, x[i..][0..vector_len].*) + @as(Vf32, y[i..][0..vector_len].*));
     }
-    while (i < z.len) : (i += 1) z[i] = ops.unaryScalar(op, x[i] + y[i]);
+    if (i < z.len) {
+        const out: [vector_len]f32 = applyUnaryVec(op, paddedTail(x, i) + paddedTail(y, i));
+        @memcpy(z[i..], out[0 .. z.len - i]);
+    }
 }
 
-/// `cap * tanh(x / cap)`: the logit softcap, with the vector tanh on the
-/// lanes and libm on the tail.
+/// `cap * tanh(x / cap)`: the logit softcap on the vector tanh, tail
+/// included.
 pub inline fn vecSoftcap(z: []f32, x: []const f32, cap: f32) void {
-    const inv = 1.0 / cap;
     const cap_v: Vf32 = @splat(cap);
-    const inv_v: Vf32 = @splat(inv);
+    const inv_v: Vf32 = @splat(1.0 / cap);
     var i: usize = 0;
     while (i + vector_len <= z.len) : (i += vector_len) {
         const xv: Vf32 = x[i..][0..vector_len].*;
         z[i..][0..vector_len].* = cap_v * tanhVec(xv * inv_v);
     }
-    while (i < z.len) : (i += 1) z[i] = cap * std.math.tanh(x[i] * inv);
+    if (i < z.len) {
+        const out: [vector_len]f32 = cap_v * tanhVec(paddedTail(x, i) * inv_v);
+        @memcpy(z[i..], out[0 .. z.len - i]);
+    }
 }
 
 pub inline fn vecLeakyRelu(z: []f32, x: []const f32, negative_slope: f32) void {
@@ -308,7 +331,10 @@ pub inline fn vecGated(comptime op: ops.GatedOp, z: []f32, x: []const f32, y: []
     while (i + vector_len <= z.len) : (i += vector_len) {
         z[i..][0..vector_len].* = gatedSourceVec(op, x[i..][0..vector_len].*) * gatedActivationVec(op, y[i..][0..vector_len].*);
     }
-    while (i < z.len) : (i += 1) z[i] = ops.gatedPairScalar(op, y[i], x[i]);
+    if (i < z.len) {
+        const out: [vector_len]f32 = gatedSourceVec(op, paddedTail(x, i)) * gatedActivationVec(op, paddedTail(y, i));
+        @memcpy(z[i..], out[0 .. z.len - i]);
+    }
 }
 
 pub inline fn applyUnaryVec(comptime op: ops.UnaryOp, value: Vf32) Vf32 {

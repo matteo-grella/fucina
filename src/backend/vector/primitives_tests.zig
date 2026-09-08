@@ -350,3 +350,47 @@ test "vecUnary elu matches the scalar path bit-for-bit over every finite f16 and
         return error.TestUnexpectedResult;
     }
 }
+
+test "lane kernels are value-only: a tail element equals the same value inside a full vector" {
+    // tanh, sigmoid, silu, exp and the gated pairs run an approximation on
+    // the lanes; the tail must run the same one, so chunkings and row
+    // splits of an elementwise op stay bitwise stable (the NAM engine's
+    // block-size-independence gate runs through these).
+    const n = 4 * @import("common.zig").vector_len + 3;
+    var x: [n]f32 = undefined;
+    for (&x, 0..) |*v, i| v.* = -3.0 + 6.0 * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(n - 1));
+    var y: [n]f32 = undefined;
+    for (&y, 0..) |*v, i| v.* = 0.5 * @sin(@as(f32, @floatFromInt(i)));
+    var full: [n]f32 = undefined;
+    var short: [n]f32 = undefined;
+    inline for (.{ .tanh, .sigmoid, .silu, .exp, .gelu, .softplus }) |op| {
+        primitives.vecUnary(op, &full, &x);
+        // The same values, but every element sits in a scalar-tail position
+        // of some shorter call.
+        for (0..n) |i| {
+            const len = i + 1;
+            primitives.vecUnary(op, short[0..len], x[0..len]);
+            try std.testing.expectEqual(full[i], short[i]);
+        }
+    }
+    inline for (.{ .glu, .swiglu }) |op| {
+        primitives.vecGated(op, &full, &x, &y);
+        for (0..n) |i| {
+            const len = i + 1;
+            primitives.vecGated(op, short[0..len], x[0..len], y[0..len]);
+            try std.testing.expectEqual(full[i], short[i]);
+        }
+    }
+    primitives.vecAddUnary(.tanh, &full, &x, &y);
+    for (0..n) |i| {
+        const len = i + 1;
+        primitives.vecAddUnary(.tanh, short[0..len], x[0..len], y[0..len]);
+        try std.testing.expectEqual(full[i], short[i]);
+    }
+    primitives.vecSoftcap(&full, &x, 2.5);
+    for (0..n) |i| {
+        const len = i + 1;
+        primitives.vecSoftcap(short[0..len], x[0..len], 2.5);
+        try std.testing.expectEqual(full[i], short[i]);
+    }
+}
