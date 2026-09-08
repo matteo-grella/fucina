@@ -22,6 +22,7 @@ const nam_file = @import("nam_file.zig");
 const wavenet = @import("wavenet.zig");
 
 const ExecContext = fucina.ExecContext;
+const Tensor = fucina.Tensor;
 const Conv = wavenet.Conv;
 const InputSlot = wavenet.InputSlot;
 
@@ -36,6 +37,7 @@ pub const ConvNet = struct {
     blocks: []ConvNetBlock,
     head: Conv,
     activation: nam_file.Activation,
+    activation_slopes: ?wavenet.Bias,
     prewarm_samples: usize,
     input_slot: InputSlot = .{},
 
@@ -65,12 +67,25 @@ pub const ConvNet = struct {
                 const gamma = weights[cursor + weight_len + 2 * cout ..][0..cout];
                 const beta = weights[cursor + weight_len + 3 * cout ..][0..cout];
                 const eps = weights[cursor + weight_len + 4 * cout];
+                // The fold in f64 (convnet.cpp:14-37): scale and offset per
+                // out channel; the offset is the conv's bias.
+                const scales = try allocator.alloc(f32, cout);
+                defer allocator.free(scales);
                 for (0..cout) |c| {
                     const scale64 = @as(f64, gamma[c]) / @sqrt(@as(f64, eps) + @as(f64, variance[c]));
-                    const scale: f32 = @floatCast(scale64);
-                    const row = weights[cursor + c * cin * k ..][0 .. cin * k];
-                    for (folded[c * cin * k ..][0 .. cin * k], row) |*dst, w| dst.* = w * scale;
+                    scales[c] = @floatCast(scale64);
                     folded[weight_len + c] = @floatCast(@as(f64, beta[c]) - scale64 * @as(f64, mean[c]));
+                }
+                // The scale into the weight rows: the stream's (out, in, tap)
+                // rows as a [out, in·tap] view times the [out] scales.
+                {
+                    var rows = try Tensor(.{ .out, .taps }).fromBorrowedConstSlice(ctx, .{ cout, cin * k }, weights[cursor..][0..weight_len]);
+                    defer rows.deinit();
+                    var scale_t = try Tensor(.{.out}).fromSlice(ctx, .{cout}, scales);
+                    defer scale_t.deinit();
+                    var scaled = try rows.mul(ctx, &scale_t);
+                    defer scaled.deinit();
+                    try scaled.copyTo(folded[0..weight_len]);
                 }
                 var folded_cursor: usize = 0;
                 block.conv = try Conv.init(allocator, ctx, cin, cout, k, dilation, true, 1, options, folded, &folded_cursor);
@@ -86,15 +101,17 @@ pub const ConvNet = struct {
         errdefer head.deinit();
         if (cursor != weights.len) return Error.WeightCountMismatch;
 
+        const activation_slopes = try wavenet.preluSlopes(ctx, &config.activation, config.channels);
         var prewarm: usize = 1;
         for (config.dilations) |d| prewarm += d;
-        return .{ .allocator = allocator, .blocks = blocks, .head = head, .activation = config.activation, .prewarm_samples = prewarm };
+        return .{ .allocator = allocator, .blocks = blocks, .head = head, .activation = config.activation, .activation_slopes = activation_slopes, .prewarm_samples = prewarm };
     }
 
     pub fn deinit(self: *ConvNet) void {
         for (self.blocks) |*block| block.conv.deinit();
         self.allocator.free(self.blocks);
         self.head.deinit();
+        if (self.activation_slopes) |*t| t.deinit();
         self.input_slot.deinit();
         self.* = undefined;
     }
@@ -116,7 +133,7 @@ pub const ConvNet = struct {
         var current = try self.input_slot.view(ctx, input, frames);
         for (self.blocks) |*block| {
             const y = try block.conv.forward(ctx, &current);
-            const activated = try wavenet.activate(ctx, &self.activation, &y, false);
+            const activated = try wavenet.activate(ctx, &self.activation, &y, false, if (self.activation_slopes) |*t| t else null);
             current = try activated.withTags(ctx, .{ .time, .in });
         }
         const out = try self.head.forward(ctx, &current);

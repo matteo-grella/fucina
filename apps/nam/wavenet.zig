@@ -121,25 +121,25 @@ pub const Conv = struct {
         const weight_len = taps * in_per_group * out_channels;
         var idx = cursor.*;
         if (idx + weight_len + bias_len > stream.len) return Error.WeightCountMismatch;
-        const scratch = try allocator.alloc(f32, weight_len);
-        defer allocator.free(scratch);
-        {
-            // The stream holds each group as (out_per_group, in_per_group, tap):
-            // a rank-4 view, permuted to [tap, in_per_group, group,
-            // out_per_group], copied out stride-aware into the packed layout.
-            var stream_view = try Tensor(.{ .grp, .opg, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ groups, out_per_group, in_per_group, taps }, stream[idx..][0..weight_len]);
-            defer stream_view.deinit();
-            var ours = try stream_view.permuteTo(ctx, .{ .tap, .in_group, .grp, .opg });
-            defer ours.deinit();
-            try ours.copyTo(scratch);
-        }
-        var weight = try param(GroupedWeight, ctx, .{ taps, in_per_group, out_channels }, scratch, options.trainable);
+        // The stream holds each group as (out_per_group, in_per_group, tap):
+        // a rank-4 view of it, permuted to [tap, in_per_group, group,
+        // out_per_group], materialized once into the packed layout and
+        // owned by the conv.
+        var stream_view = try Tensor(.{ .grp, .opg, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ groups, out_per_group, in_per_group, taps }, stream[idx..][0..weight_len]);
+        defer stream_view.deinit();
+        var permuted = try stream_view.permuteTo(ctx, .{ .tap, .in_group, .grp, .opg });
+        defer permuted.deinit();
+        var packed_weight = try permuted.merge(ctx, .out, .{ .grp, .opg });
+        defer packed_weight.deinit();
+        var weight = try own(GroupedWeight, ctx, &packed_weight, options.trainable);
         errdefer weight.deinit();
         idx += weight_len;
         var bias: ?Bias = null;
         errdefer if (bias) |*b| b.deinit();
         if (has_bias) {
-            bias = try param(Bias, ctx, .{out_channels}, stream[idx..][0..out_channels], options.trainable);
+            var bias_view = try Bias.fromBorrowedConstSlice(ctx, .{out_channels}, stream[idx..][0..out_channels]);
+            defer bias_view.deinit();
+            bias = try own(Bias, ctx, &bias_view, options.trainable);
             idx += out_channels;
         }
         const state = try CausalState.init(allocator, in_channels, taps, dilation, options.chunk_hint);
@@ -154,10 +154,6 @@ pub const Conv = struct {
             .taps = taps,
             .dilation = dilation,
         };
-    }
-
-    fn param(comptime T: type, ctx: *ExecContext, shape: anytype, values: []const f32, trainable: bool) !T {
-        return if (trainable) T.variableFromSlice(ctx, shape, values) else T.fromSlice(ctx, shape, values);
     }
 
     pub fn deinit(self: *Conv) void {
@@ -201,6 +197,16 @@ pub const Conv = struct {
     }
 };
 
+/// A tensor of `src`'s values that the model owns whatever scope is open:
+/// one materialization of the view (any strides), wrapped as a variable
+/// when `trainable` and as a constant otherwise (explicit constructors,
+/// never scope-owned).
+pub fn own(comptime T: type, ctx: *ExecContext, src: *const T, trainable: bool) !T {
+    var raw = try ctx.materialize(.f32, src.asRawTensor());
+    errdefer raw.deinit();
+    return if (trainable) T.variable(ctx, raw) else T.fromTensor(ctx, raw);
+}
+
 fn appendView(allocator: std.mem.Allocator, out: *std.ArrayList(f32), view: anytype) !void {
     var count: usize = 1;
     for (view.shape()) |dim| count *= dim;
@@ -230,8 +236,10 @@ pub const Film = struct {
 };
 
 /// One activation over `[time, out]`. `fast_tanh` swaps the exact tanh for
-/// the rational approximation, as the trainer's option does.
-pub fn activate(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, fast_tanh: bool) !TimeOut {
+/// the rational approximation, as the trainer's option does; `slopes` is
+/// the per-channel PReLU slope tensor built once by `preluSlopes` (null
+/// for every other kind).
+pub fn activate(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, fast_tanh: bool, slopes: ?*const Bias) !TimeOut {
     return switch (act.kind) {
         .tanh => if (fast_tanh) x.fastTanh(ctx) else x.tanh(ctx),
         .fasttanh => x.fastTanh(ctx),
@@ -240,7 +248,7 @@ pub fn activate(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, fa
         .leaky_relu => x.leakyRelu(ctx, act.negative_slope),
         .sigmoid => x.sigmoid(ctx),
         .silu => x.silu(ctx),
-        .prelu => prelu(ctx, act, x),
+        .prelu => prelu(ctx, act, x, slopes),
         .hardswish => blk: {
             // x · clamp(x + 3, 0, 6) / 6
             var shifted = try x.addScalar(ctx, 3.0);
@@ -281,23 +289,28 @@ pub fn activate(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, fa
     };
 }
 
-fn prelu(ctx: *ExecContext, act: *const Activation, x: *const TimeOut) !TimeOut {
+/// The per-channel PReLU slopes of `act` as a `[width]` tensor (the
+/// upstream list cycled over the channels), built once at load; null when
+/// `act` is not a per-channel PReLU.
+pub fn preluSlopes(ctx: *ExecContext, act: *const Activation, width: usize) !?Bias {
+    if (act.kind != .prelu or act.negative_slopes.len == 0) return null;
+    const slopes = try ctx.allocator().alloc(f32, width);
+    defer ctx.allocator().free(slopes);
+    for (slopes, 0..) |*dst, i| dst.* = act.negative_slopes[i % act.negative_slopes.len];
+    return try Bias.fromSlice(ctx, .{width}, slopes);
+}
+
+fn prelu(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, slopes: ?*const Bias) !TimeOut {
     var positive = try x.relu(ctx);
     defer positive.deinit();
     var negative = try x.clamp(ctx, -std.math.inf(f32), 0.0);
     defer negative.deinit();
-    if (act.negative_slopes.len == 0) {
-        var scaled_negative = try negative.scale(ctx, act.negative_slope);
+    if (slopes) |slope_tensor| {
+        var scaled_negative = try negative.mul(ctx, slope_tensor);
         defer scaled_negative.deinit();
         return positive.add(ctx, &scaled_negative);
     }
-    const width = x.dim(.out);
-    const slopes = try ctx.allocator().alloc(f32, width);
-    defer ctx.allocator().free(slopes);
-    for (slopes, 0..) |*dst, i| dst.* = act.negative_slopes[i % act.negative_slopes.len];
-    var slope_tensor = try Bias.fromSlice(ctx, .{width}, slopes);
-    defer slope_tensor.deinit();
-    var scaled_negative = try negative.mul(ctx, &slope_tensor);
+    var scaled_negative = try negative.scale(ctx, act.negative_slope);
     defer scaled_negative.deinit();
     return positive.add(ctx, &scaled_negative);
 }
@@ -317,6 +330,10 @@ pub const Layer = struct {
     head1x1_post_film: ?Film,
     activation: Activation,
     secondary_activation: Activation,
+    /// Per-channel PReLU slopes of the two activations, built once (null
+    /// for every other kind).
+    activation_slopes: ?Bias,
+    secondary_slopes: ?Bias,
     gating_mode: nam_file.GatingMode,
     bottleneck: usize,
 };
@@ -330,6 +347,7 @@ pub const LayerArray = struct {
 pub const PostHeadBlock = struct {
     conv: Conv,
     activation: Activation,
+    activation_slopes: ?Bias,
 };
 
 /// A persistent owned `[max_frames, 1]` input tensor: a block is copied
@@ -392,13 +410,15 @@ pub const WaveNet = struct {
         var post_head: []PostHeadBlock = &.{};
         errdefer allocator.free(post_head);
         var post_built: usize = 0;
-        errdefer for (post_head[0..post_built]) |*block| block.conv.deinit();
+        errdefer for (post_head[0..post_built]) |*block| deinitPostHead(block);
         if (config.head) |*hc| {
             post_head = try allocator.alloc(PostHeadBlock, hc.kernel_sizes.len);
             var cin = config.layers[config.layers.len - 1].head_out;
             for (post_head, hc.kernel_sizes, 0..) |*block, k, i| {
                 const cout = if (i == hc.kernel_sizes.len - 1) hc.out_channels else hc.channels;
                 block.activation = hc.activation;
+                block.activation_slopes = try preluSlopes(ctx, &hc.activation, cin);
+                errdefer if (block.activation_slopes) |*t| t.deinit();
                 block.conv = try Conv.init(allocator, ctx, cin, cout, k, 1, true, 1, options, weights, &cursor);
                 post_built += 1;
                 cin = cout;
@@ -493,6 +513,9 @@ pub const WaveNet = struct {
         errdefer if (layer1x1_post_film) |*f| f.conv.deinit();
         var head1x1_post_film = try buildFilm(allocator, ctx, lc, lc.head1x1_out, lc.head1x1_post_film, options, weights, cursor);
         errdefer if (head1x1_post_film) |*f| f.conv.deinit();
+        var activation_slopes = try preluSlopes(ctx, &lc.activations[l], lc.bottleneck);
+        errdefer if (activation_slopes) |*t| t.deinit();
+        const secondary_slopes = try preluSlopes(ctx, &lc.secondary_activations[l], lc.bottleneck);
 
         return .{
             .conv = conv,
@@ -509,6 +532,8 @@ pub const WaveNet = struct {
             .head1x1_post_film = head1x1_post_film,
             .activation = lc.activations[l],
             .secondary_activation = lc.secondary_activations[l],
+            .activation_slopes = activation_slopes,
+            .secondary_slopes = secondary_slopes,
             .gating_mode = lc.gating_modes[l],
             .bottleneck = lc.bottleneck,
         };
@@ -534,8 +559,15 @@ pub const WaveNet = struct {
         if (film.*) |*f| f.conv.deinit();
     }
 
+    fn deinitPostHead(block: *PostHeadBlock) void {
+        block.conv.deinit();
+        if (block.activation_slopes) |*t| t.deinit();
+    }
+
     fn deinitLayer(layer: *Layer) void {
         layer.conv.deinit();
+        if (layer.activation_slopes) |*t| t.deinit();
+        if (layer.secondary_slopes) |*t| t.deinit();
         layer.input_mixin.deinit();
         if (layer.layer1x1) |*c| c.deinit();
         if (layer.head1x1) |*c| c.deinit();
@@ -559,7 +591,7 @@ pub const WaveNet = struct {
     pub fn deinit(self: *WaveNet) void {
         for (self.arrays) |*array| deinitLayerArray(self.allocator, array);
         self.allocator.free(self.arrays);
-        for (self.post_head) |*block| block.conv.deinit();
+        for (self.post_head) |*block| deinitPostHead(block);
         self.allocator.free(self.post_head);
         if (self.condition_child) |child| {
             child.deinit();
@@ -699,7 +731,7 @@ pub const WaveNet = struct {
         var current = try head_prev.?.scale(ctx, self.head_scale);
         errdefer current.deinit();
         for (self.post_head) |*block| {
-            var activated = try activate(ctx, &block.activation, &current, self.fast_tanh);
+            var activated = try activate(ctx, &block.activation, &current, self.fast_tanh, if (block.activation_slopes) |*t| t else null);
             defer activated.deinit();
             var conv_in = try asIn(ctx, &activated);
             defer conv_in.deinit();
@@ -820,19 +852,19 @@ pub const WaveNet = struct {
 
     fn gate(self: *const WaveNet, ctx: *ExecContext, layer: *const Layer, z: *const TimeOut, b: usize) !TimeOut {
         switch (layer.gating_mode) {
-            .none => return activate(ctx, &layer.activation, z, self.fast_tanh),
+            .none => return activate(ctx, &layer.activation, z, self.fast_tanh, if (layer.activation_slopes) |*t| t else null),
             .gated => {
                 var top = try z.narrow(ctx, .out, 0, b);
                 defer top.deinit();
                 var bottom = try z.narrow(ctx, .out, b, b);
                 defer bottom.deinit();
-                var primary = try activate(ctx, &layer.activation, &top, self.fast_tanh);
+                var primary = try activate(ctx, &layer.activation, &top, self.fast_tanh, if (layer.activation_slopes) |*t| t else null);
                 defer primary.deinit();
                 return switch (layer.secondary_activation.kind) {
                     .sigmoid => primary.glu(ctx, &bottom),
                     .silu => primary.swiglu(ctx, &bottom),
                     else => blk: {
-                        var gate_value = try activate(ctx, &layer.secondary_activation, &bottom, self.fast_tanh);
+                        var gate_value = try activate(ctx, &layer.secondary_activation, &bottom, self.fast_tanh, if (layer.secondary_slopes) |*t| t else null);
                         defer gate_value.deinit();
                         break :blk try primary.mul(ctx, &gate_value);
                     },
@@ -843,9 +875,9 @@ pub const WaveNet = struct {
                 defer top.deinit();
                 var bottom = try z.narrow(ctx, .out, b, b);
                 defer bottom.deinit();
-                var primary = try activate(ctx, &layer.activation, &top, self.fast_tanh);
+                var primary = try activate(ctx, &layer.activation, &top, self.fast_tanh, if (layer.activation_slopes) |*t| t else null);
                 defer primary.deinit();
-                var alpha = try activate(ctx, &layer.secondary_activation, &bottom, self.fast_tanh);
+                var alpha = try activate(ctx, &layer.secondary_activation, &bottom, self.fast_tanh, if (layer.secondary_slopes) |*t| t else null);
                 defer alpha.deinit();
                 var diff = try primary.sub(ctx, &top);
                 defer diff.deinit();

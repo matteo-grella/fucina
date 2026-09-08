@@ -95,8 +95,8 @@ pub const LstmCell = struct {
     /// From PyTorch's layout: the stacked gate-major matrix `[4H, in + H]`
     /// (rows i, f, g, o; `[W_ih | W_hh]`), the bias `[4H]` (`b_ih + b_hh`),
     /// and the initial state; any views. The matrix is a permuted view
-    /// copied out once; the cell owns its four tensors whatever the scope,
-    /// as variables when `trainable`.
+    /// materialized once; the cell owns its four tensors whatever the
+    /// scope, as variables when `trainable`.
     pub fn fromStacked(ctx: *ExecContext, stacked: *const StackedWeight, bias: *const Units, h0: *const Units, c0: *const Units, trainable: bool) !LstmCell {
         const shape = stacked.shape();
         const hidden = shape[0] / 4;
@@ -114,17 +114,13 @@ pub const LstmCell = struct {
         return .{ .w = w, .b = b, .h0 = h0_own, .c0 = c0_own, .input_size = shape[1] - hidden, .hidden = hidden };
     }
 
-    /// A caller-owned copy of `src` (stride-aware), a variable when
-    /// `trainable`: explicit constructors are the caller's under any scope.
+    /// A caller-owned tensor of `src`'s values (one materialization, any
+    /// strides), a variable when `trainable`: explicit constructors are the
+    /// caller's under any scope.
     fn own(comptime T: type, ctx: *ExecContext, src: *const T, trainable: bool) !T {
-        const shape = src.shape();
-        var count: usize = 1;
-        for (shape) |dim| count *= dim;
-        const allocator = ctx.allocator();
-        const scratch = try allocator.alloc(f32, count);
-        defer allocator.free(scratch);
-        try src.copyTo(scratch);
-        return if (trainable) T.variableFromSlice(ctx, shape, scratch) else T.fromSlice(ctx, shape, scratch);
+        var raw = try ctx.materialize(.f32, src.asRawTensor());
+        errdefer raw.deinit();
+        return if (trainable) T.variable(ctx, raw) else T.fromTensor(ctx, raw);
     }
 
     pub fn deinit(self: *LstmCell) void {

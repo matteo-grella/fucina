@@ -97,16 +97,19 @@ pub const IrCab = struct {
         if (taps == 0) return Error.EmptyIr;
 
         const gain = gainForRate(session_rate);
-        const reversed = try allocator.alloc(f32, taps);
-        defer allocator.free(reversed);
-        // Reverse + gain: weight[taps-1-i] = gain*IR[i] (ImpulseResponse.cpp:81-82).
-        for (0..taps) |i| reversed[taps - 1 - i] = gain * resampled[i];
-
         const ctx = try allocator.create(ExecContext);
         errdefer allocator.destroy(ctx);
         ctx.init(allocator);
         errdefer ctx.deinit();
-        var weight = try Weight.fromSlice(ctx, .{ taps, 1, 1 }, reversed);
+        // Reverse + gain: weight[taps-1-i] = gain*IR[i] (ImpulseResponse.cpp:81-82),
+        // as a flip and a scale of the resampled taps, owned by the cab.
+        var taps_view = try Weight.fromBorrowedConstSlice(ctx, .{ taps, 1, 1 }, resampled[0..taps]);
+        defer taps_view.deinit();
+        var flipped = try taps_view.flip(ctx, .tap);
+        defer flipped.deinit();
+        var gained = try flipped.scale(ctx, gain);
+        defer gained.deinit();
+        var weight = try wavenet.own(Weight, ctx, &gained, false);
         errdefer weight.deinit();
         const state = try CausalState.init(allocator, 1, taps, 1, max_frames);
         return .{

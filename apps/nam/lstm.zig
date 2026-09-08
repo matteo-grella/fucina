@@ -98,7 +98,7 @@ pub const Model = struct {
 
     /// From a NAM weight stream, as trainable variables or as constants:
     /// every layer's slices are borrowed views handed to the core, the
-    /// head's `[out, H]` a permuted view copied out stride-aware.
+    /// head's `[out, H]` a permuted view materialized once.
     pub fn initFromNam(allocator: std.mem.Allocator, ctx: *ExecContext, config: *const nam_file.LstmConfig, weights: []const f32, requires_grad: bool, training: Training) !Model {
         const h = config.hidden_size;
         if (h == 0 or config.num_layers == 0 or config.input_size == 0) return Error.UnsupportedChannels;
@@ -132,25 +132,18 @@ pub const Model = struct {
         if (cursor + h + 1 != weights.len) return Error.WeightCountMismatch;
         var lstm = try rnn.Lstm.fromCells(allocator, cells);
         errdefer lstm.deinit();
-        const scratch = try allocator.alloc(f32, h);
-        defer allocator.free(scratch);
-        {
-            var stream_view = try Tensor(.{ .out, .unit }).fromBorrowedConstSlice(ctx, .{ 1, h }, weights[cursor..][0..h]);
-            defer stream_view.deinit();
-            var ours = try stream_view.permuteTo(ctx, .{ .unit, .out });
-            defer ours.deinit();
-            try ours.copyTo(scratch);
-        }
-        cursor += h;
-        var head_w = try param(HeadWeight, ctx, .{ h, 1 }, scratch, requires_grad);
+        var stream_view = try Tensor(.{ .out, .unit }).fromBorrowedConstSlice(ctx, .{ 1, h }, weights[cursor..][0..h]);
+        defer stream_view.deinit();
+        var transposed = try stream_view.permuteTo(ctx, .{ .unit, .out });
+        defer transposed.deinit();
+        var head_w = try wavenet.own(HeadWeight, ctx, &transposed, requires_grad);
         errdefer head_w.deinit();
-        var head_b = try param(HeadBias, ctx, .{1}, weights[cursor..][0..1], requires_grad);
+        cursor += h;
+        var bias_view = try HeadBias.fromBorrowedConstSlice(ctx, .{1}, weights[cursor..][0..1]);
+        defer bias_view.deinit();
+        var head_b = try wavenet.own(HeadBias, ctx, &bias_view, requires_grad);
         errdefer head_b.deinit();
         return .{ .allocator = allocator, .spec = spec, .lstm = lstm, .head_w = head_w, .head_b = head_b };
-    }
-
-    fn param(comptime T: type, ctx: *ExecContext, shape: anytype, values: []const f32, requires_grad: bool) !T {
-        return if (requires_grad) T.variableFromSlice(ctx, shape, values) else T.fromSlice(ctx, shape, values);
     }
 
     pub fn deinit(self: *Model) void {
