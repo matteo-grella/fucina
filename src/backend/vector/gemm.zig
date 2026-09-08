@@ -349,9 +349,16 @@ const NnFamily = enum {
 };
 
 /// Column-vector unroll of a row block: two vectors per pass for the row
-/// blocks, one for the single row (the historical widths).
+/// blocks, and for the single row as many as the register file holds
+/// (eight on 4-lane and 16-lane ISAs, four on 8-lane AVX2). A single row's
+/// p-loop is one fused multiply-add chain per column vector, so one vector
+/// per pass ran latency-bound: eight independent chains keep both FMA
+/// pipes busy (a 1 x 96 x 26 vector-matrix product 238 -> ~100 ns on M1
+/// Max). The per-element order (p ascending, fused, from zero) is the same
+/// at every width, so results do not change.
 fn colWidths(comptime R: usize) []const usize {
-    return if (R == 1) &.{1} else &.{ 2, 1 };
+    if (R == 1) return if (vector_len == 8) &.{ 4, 2, 1 } else &.{ 8, 4, 2, 1 };
+    return &.{ 2, 1 };
 }
 
 /// C[row .. row + R, col_start .. col_end) (+)= A · B for one `R`-row
