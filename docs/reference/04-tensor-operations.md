@@ -1513,6 +1513,17 @@ is deliberately not fused — compose it with broadcast `add`):
   first, `[row, in]`); absent rows read as zeros; no gradient into `state`.
 - `groupedCausalConv1d(ctx, time_tag, in_tag, tap_tag, in_per_group_tag, out_tag, weight, dilation, groups, state)`
   — grouped variant, weight `[tap, in_per_group, out]`.
+- `causalConv1dStreaming(ctx, time_tag, in_tag, tap_tag, out_tag, weight, bias, dilation, state)`
+  and `groupedCausalConv1dStreaming(ctx, time_tag, in_tag, tap_tag, in_per_group_tag, out_tag, weight, bias, dilation, groups, state)`
+  — the inference spelling over a stream: `state` is a
+  `*fucina.streamconv.CausalState` (the ring of context rows for `in`,
+  `taps`, `dilation`, sized by a chunk hint) read as the left context and
+  advanced past `self`'s rows afterwards, and `bias` (`?[]const f32`,
+  `[out]`) is added in the kernel epilogue — one call per chunk, no
+  separate bias pass, no caller-side history. A stream fed chunk by chunk
+  is bit-identical to the whole signal through `causalConv1d` plus the
+  bias `add`. No-grad only (`UnsupportedGradient` when `self` or `weight`
+  requires grad); training keeps `causalConv1d` + broadcast `add`.
 - `causalDepthwiseConv1d(ctx, time_tag, channel_tag, tap_tag, kernel, dilation, state)`
   — depthwise; `kernel: *const Tensor(.{ channel_tag, tap_tag })` (tap
   `taps−1` = the newest sample). `dilation` spaces the taps

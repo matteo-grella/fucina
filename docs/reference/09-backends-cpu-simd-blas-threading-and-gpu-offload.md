@@ -559,7 +559,27 @@ exposed publicly). The 1-D families cover causal depthwise FIR
 (DeltaNet-style, `[time, channel]` × `[channel, tap]`), channel-mixing dilated
 causal conv (`[tap, in, out]` weights so every kernel runs on contiguous
 out-channel rows), grouped causal conv, and general non-causal conv1d with
-`col2im1d` for transposed conv.
+`col2im1d` for transposed conv. The channel-mixing causal conv forward is
+register-tiled over eight frames: every weight vector load feeds eight
+fused multiply-adds with the accumulators in registers (the tile's input
+rows are resolved once per tap, for kernels up to 64 taps), the
+(tap, in-channel) walk is blocked in slabs of at most 384 pairs so a
+slab stays cache-resident across the output vectors and the frame tiles
+(partial sums round-trip through the output rows exactly), the optional
+bias is added in the epilogue, and the per-element order (tap-major,
+in-channel-inner from zero, then bias) is the same in the tile body, the
+frame tail and the channel tail, so the result is bitwise independent of
+the tiling, the blocking and the pooled row split. The single-channel
+undilated shape (`in = out = 1`, the cab-IR and linear-model FIRs) is one
+contiguous dot per output, vectorized along the taps.
+
+The lane kernels that run an approximation on the vector (`tanh`,
+`sigmoid`, `silu`, `exp`, `gelu`, `softplus`, the gated pairs, the
+softcap) run their array tail through the same lanes on a padded vector
+rather than through the scalar function, so an element's value depends
+only on its value, never on its position: chunkings and pooled row splits
+of an elementwise op are bitwise stable (the byte-parity ops, whose lanes
+reproduce the scalar bytes, are unaffected).
 
 How a conv2d reaches these kernels is exec-side routing
 (`src/exec/conv.zig`), but its gates are backend facts worth stating here.

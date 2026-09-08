@@ -500,6 +500,7 @@ pub fn item(self: *const Self) !f32                 // f32; typed: !dtype.Elemen
 pub fn data(self: *Self) ![]f32                     // mutable element view
 pub fn dataConst(self: *const Self) ![]const f32    // read-only element view
 pub fn copyTo(self: *const Self, dst: []f32) !void  // stride-aware copy out
+pub fn copyFrom(self: *Self, src: []const f32) !void // copy in (contiguous, no-grad)
 pub fn asRawTensor(self: *const Self) *const RawTensor
 ```
 
@@ -522,6 +523,12 @@ branch.)
   (`dst.len` must equal the storage length, else
   `error.InvalidDataLength`); on scalar dtypes it walks strides, so it works
   on non-contiguous views.
+- `copyFrom` is the mirror: it writes `src` row-major into the tensor's
+  storage under `data`'s rules (contiguous, no-grad; `src.len` must equal
+  the storage length). It is how host data enters a persistent tensor
+  without a new storage header — a block of audio into a streaming
+  engine's input slot — where `fromBorrowedSlice` per block would allocate
+  a header each time and `fromSlice` would allocate and copy.
 - `asRawTensor` exposes the underlying raw tensor pointer **read-only** —
   the escape hatch for shape/stride introspection and for interop with
   exec-layer entry points ([§6](06-the-execution-runtime-execcontext-and-the-memory-model.md)/[§8](08-data-types-storage-and-the-raw-tensor-layer-internal.md)). Treat it strictly as a borrow: never
