@@ -782,14 +782,7 @@ fn firForwardRange(
     const pad = taps - 1;
     const b: f32 = if (bias) |values| values[0] else 0;
     for (t_start..t_end) |t| {
-        var acc: f32 = undefined;
-        if (t >= pad) {
-            acc = firDot(weight, input[t - pad ..][0..taps]);
-        } else {
-            const from_state = pad - t;
-            acc = if (state) |s| firDot(weight[0..from_state], s[t..][0..from_state]) else 0;
-            acc += firDot(weight[from_state..], input[0 .. t + 1]);
-        }
+        const acc = if (t >= pad) firDot(weight, input[t - pad ..][0..taps]) else firDotSplit(weight, state, pad - t, input[0 .. t + 1]);
         out[t] = if (bias != null) acc + b else acc;
     }
 }
@@ -805,6 +798,34 @@ inline fn firDot(w: []const f32, x: []const f32) f32 {
     var acc: f32 = @reduce(.Add, accv);
     while (k < w.len) : (k += 1) acc += w[k] * x[k];
     return acc;
+}
+
+/// `firDot` over the virtual window `[the state's last `lead` rows | head]`
+/// (zeros for a missing state), blocked exactly as the contiguous dot is,
+/// so an output near the chunk start has the value the whole signal gives
+/// it whatever the chunking.
+inline fn firDotSplit(w: []const f32, state: ?[]const f32, lead: usize, head: []const f32) f32 {
+    var accv: Vf32 = @splat(0);
+    var k: usize = 0;
+    while (k + vector_len <= w.len) : (k += vector_len) {
+        var xv: Vf32 = undefined;
+        if (k + vector_len <= lead) {
+            xv = if (state) |s| s[s.len - lead + k ..][0..vector_len].* else @splat(0);
+        } else if (k >= lead) {
+            xv = head[k - lead ..][0..vector_len].*;
+        } else {
+            inline for (0..vector_len) |lane| xv[lane] = firWindow(state, lead, head, k + lane);
+        }
+        accv = @mulAdd(Vf32, w[k..][0..vector_len].*, xv, accv);
+    }
+    var acc: f32 = @reduce(.Add, accv);
+    while (k < w.len) : (k += 1) acc += w[k] * firWindow(state, lead, head, k);
+    return acc;
+}
+
+inline fn firWindow(state: ?[]const f32, lead: usize, head: []const f32, j: usize) f32 {
+    if (j < lead) return if (state) |s| s[s.len - lead + j] else 0;
+    return head[j - lead];
 }
 
 fn generalBackwardInputRange(

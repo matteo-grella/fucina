@@ -398,15 +398,17 @@ pub fn Ops(comptime Self: type) type {
             });
         }
 
-        /// `causalConv1d` over a stream, the inference spelling: `state` (a
+        /// `causalConv1d` over a stream: `state` (a
         /// `fucina.streamconv.CausalState` for `in`, `taps`, `dilation`) is
         /// the left context and is advanced past `self`'s rows afterwards,
-        /// and `bias` (`[out]`) is added in the kernel epilogue — one call
-        /// per chunk, no separate bias pass, no caller-side history. A
-        /// stream fed chunk by chunk is bit-identical to the whole signal
-        /// through `causalConv1d`. No-grad only (`UnsupportedGradient` when
-        /// `self` or `weight` requires grad); training keeps `causalConv1d`
-        /// plus broadcast `add`.
+        /// and `bias` (`null` or a `[out]` tensor) is added — one call per
+        /// chunk, no caller-side history. A stream fed chunk by chunk is
+        /// bit-identical to the whole signal through `causalConv1d` plus the
+        /// bias `add`. Without gradients the conv, the bias and the state
+        /// carry are one kernel call; when `self`, `weight` or `bias`
+        /// requires grad the same values come from the recorded
+        /// `causalConv1d` over the ring's rows and a broadcast `add`, so a
+        /// model written once against this op trains and streams.
         pub fn causalConv1dStreaming(
             self: *const Self,
             ctx: *ExecContext,
@@ -415,22 +417,11 @@ pub fn Ops(comptime Self: type) type {
             comptime tap_tag: Tag,
             comptime out_tag: Tag,
             weight: *const Tensor(.{ tap_tag, in_tag, out_tag }),
-            bias: ?[]const f32,
+            bias: anytype,
             dilation: usize,
             state: *streamconv.CausalState,
         ) !Tensor(.{ time_tag, out_tag }) {
-            const time_axis = comptime axis(time_tag);
-            const channel_axis = comptime axis(in_tag);
-            comptime {
-                if (tag_rank != 2) @compileError("causalConv1dStreaming requires a rank-2 input");
-                if (time_axis != 0 or channel_axis != 1) {
-                    @compileError("causalConv1dStreaming requires input storage order [time, in]");
-                }
-            }
-            if (self.requiresGrad() or weight.requiresGrad()) return AgError.UnsupportedGradient;
-            var value = try ctx.groupedCausalConv1dStreaming(tag_rank, self.asRawTensor(), weight.asRawTensor(), bias, time_axis, channel_axis, dilation, 1, state);
-            errdefer value.deinit();
-            return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+            return self.groupedCausalConv1dStreaming(ctx, time_tag, in_tag, tap_tag, in_tag, out_tag, weight, bias, dilation, 1, state);
         }
 
         /// The grouped form of `causalConv1dStreaming`: weight
@@ -445,7 +436,7 @@ pub fn Ops(comptime Self: type) type {
             comptime in_per_group_tag: Tag,
             comptime out_tag: Tag,
             weight: *const Tensor(.{ tap_tag, in_per_group_tag, out_tag }),
-            bias: ?[]const f32,
+            bias: anytype,
             dilation: usize,
             groups: usize,
             state: *streamconv.CausalState,
@@ -458,8 +449,27 @@ pub fn Ops(comptime Self: type) type {
                     @compileError("groupedCausalConv1dStreaming requires input storage order [time, in]");
                 }
             }
-            if (self.requiresGrad() or weight.requiresGrad()) return AgError.UnsupportedGradient;
-            var value = try ctx.groupedCausalConv1dStreaming(tag_rank, self.asRawTensor(), weight.asRawTensor(), bias, time_axis, channel_axis, dilation, groups, state);
+            const has_bias = comptime @TypeOf(bias) != @TypeOf(null);
+            var wants_grad = self.requiresGrad() or weight.requiresGrad();
+            if (has_bias) wants_grad = wants_grad or tensorObjectPtrFrom(@TypeOf(bias), &bias).requiresGrad();
+            if (recordsGrad(wants_grad)) {
+                // The recorded path: the differentiable conv over the ring's
+                // rows, the broadcast bias, then the state carry, in the
+                // order the fused kernel keeps.
+                var conv = try self.groupedCausalConv1d(ctx, time_tag, in_tag, tap_tag, in_per_group_tag, out_tag, weight, dilation, groups, state.slice());
+                if (has_bias) {
+                    defer conv.deinit();
+                    var biased = try conv.add(ctx, bias);
+                    errdefer biased.deinit();
+                    try ctx.advanceCausalState(tag_rank, self.asRawTensor(), time_axis, channel_axis, state);
+                    return biased;
+                }
+                errdefer conv.deinit();
+                try ctx.advanceCausalState(tag_rank, self.asRawTensor(), time_axis, channel_axis, state);
+                return conv;
+            }
+            const bias_rows: ?[]const f32 = if (has_bias) try tensorObjectPtrFrom(@TypeOf(bias), &bias).dataConst() else null;
+            var value = try ctx.groupedCausalConv1dStreaming(tag_rank, self.asRawTensor(), weight.asRawTensor(), bias_rows, time_axis, channel_axis, dilation, groups, state);
             errdefer value.deinit();
             return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
         }

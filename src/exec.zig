@@ -338,6 +338,7 @@ pub const ExecContext = struct {
     pub const causalConv1dBackwardWeight = exec_conv.causalConv1dBackwardWeight;
     pub const groupedCausalConv1d = exec_conv.groupedCausalConv1d;
     pub const groupedCausalConv1dStreaming = exec_conv.groupedCausalConv1dStreaming;
+    pub const advanceCausalState = exec_conv.advanceCausalState;
     pub const groupedCausalConv1dBackwardInput = exec_conv.groupedCausalConv1dBackwardInput;
     pub const groupedCausalConv1dBackwardWeight = exec_conv.groupedCausalConv1dBackwardWeight;
     pub const conv1d = exec_conv.conv1d;

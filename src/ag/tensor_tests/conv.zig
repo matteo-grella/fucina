@@ -818,6 +818,8 @@ test "public Tensor causalConv1dStreaming: chunked stream with bias is bitwise t
     var w_data: [3 * 2 * 3]f32 = undefined;
     for (&w_data, 0..) |*v, idx| v.* = 0.3 * @cos(@as(f32, @floatFromInt(idx)) * 0.41);
     const bias = [_]f32{ 0.1, -0.2, 0.3 };
+    var bias_t = try Tensor(.{.out}).fromSlice(&ctx, .{3}, &bias);
+    defer bias_t.deinit();
 
     var x = try Tensor(.{ .time, .in }).fromSlice(&ctx, .{ seq, 2 }, &x_data);
     defer x.deinit();
@@ -834,7 +836,7 @@ test "public Tensor causalConv1dStreaming: chunked stream with bias is bitwise t
     for ([_]usize{ 7, 13, 20 }) |n| {
         var chunk = try x.narrow(&ctx, .time, offset, n);
         defer chunk.deinit();
-        var y = try chunk.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &w, &bias, 2, &state);
+        var y = try chunk.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &w, &bias_t, 2, &state);
         defer y.deinit();
         try y.copyTo(got[offset * 3 ..][0 .. n * 3]);
         offset += n;
@@ -862,8 +864,77 @@ test "public Tensor causalConv1dStreaming: chunked stream with bias is bitwise t
     }
     try std.testing.expectEqualSlices(f32, try g_whole.dataConst(), &g_got);
 
-    // The streaming spelling is inference-only.
-    var xv = try Tensor(.{ .time, .in }).variable(&ctx, try ctx.fromSlice(.f32, &.{ seq, 2 }, &x_data));
+    // Recorded: variables for the input, the weight and the bias. The
+    // whole-signal conv plus the broadcast add is the reference. One chunk
+    // from a reset ring (the training pattern) reproduces every gradient;
+    // a stream of chunks reproduces the weight and bias gradients (summed
+    // chunk by chunk) and the input gradient of the rows no later chunk
+    // reads as context, since the context carries no gradient.
+    var xv = try Tensor(.{ .time, .in }).variableFromSlice(&ctx, .{ seq, 2 }, &x_data);
     defer xv.deinit();
-    try std.testing.expectError(error.UnsupportedGradient, xv.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &w, &bias, 2, &state));
+    var wv = try Tensor(.{ .tap, .in, .out }).variableFromSlice(&ctx, .{ 3, 2, 3 }, &w_data);
+    defer wv.deinit();
+    var bv = try Tensor(.{.out}).variableFromSlice(&ctx, .{3}, &bias);
+    defer bv.deinit();
+    var weights_data: [seq * 3]f32 = undefined;
+    for (&weights_data, 0..) |*v, idx| v.* = @cos(@as(f32, @floatFromInt(idx)) * 0.17);
+    var ref_grads: [seq * 2 + 3 * 2 * 3 + 3]f32 = undefined;
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const conv = try xv.causalConv1d(&ctx, .time, .in, .tap, .out, &wv, 2, null);
+        const ref_y = try conv.add(&ctx, &bv);
+        var lw = try Tensor(.{ .time, .out }).fromSlice(&ctx, .{ seq, 3 }, &weights_data);
+        defer lw.deinit();
+        const weighted = try ref_y.mul(&ctx, &lw);
+        var loss = try weighted.sumAll(&ctx);
+        try loss.backward(&ctx);
+        var grad_x = (try xv.grad(&ctx)).?;
+        defer grad_x.deinit();
+        var grad_w = (try wv.grad(&ctx)).?;
+        defer grad_w.deinit();
+        var grad_b = (try bv.grad(&ctx)).?;
+        defer grad_b.deinit();
+        @memcpy(ref_grads[0 .. seq * 2], try grad_x.dataConst());
+        @memcpy(ref_grads[seq * 2 ..][0..18], try grad_w.dataConst());
+        @memcpy(ref_grads[seq * 2 + 18 ..][0..3], try grad_b.dataConst());
+    }
+    const chunkings = [_][]const usize{ &.{seq}, &.{ 7, 13, 20 } };
+    for (chunkings) |chunking| {
+        xv.zeroGrad();
+        wv.zeroGrad();
+        bv.zeroGrad();
+        state.reset();
+        {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var lw = try Tensor(.{ .time, .out }).fromSlice(&ctx, .{ seq, 3 }, &weights_data);
+            defer lw.deinit();
+            var total: ?Tensor(.{}) = null;
+            offset = 0;
+            for (chunking) |n| {
+                const chunk = try xv.narrow(&ctx, .time, offset, n);
+                const y = try chunk.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &wv, &bv, 2, &state);
+                try std.testing.expect(y.requiresGrad());
+                try y.copyTo(got[offset * 3 ..][0 .. n * 3]);
+                const lw_chunk = try lw.narrow(&ctx, .time, offset, n);
+                const weighted = try y.mul(&ctx, &lw_chunk);
+                const part = try weighted.sumAll(&ctx);
+                total = if (total) |t| try t.add(&ctx, &part) else part;
+                offset += n;
+            }
+            try total.?.backward(&ctx);
+        }
+        try std.testing.expectEqualSlices(f32, try whole.dataConst(), &got);
+        var grad_x = (try xv.grad(&ctx)).?;
+        defer grad_x.deinit();
+        var grad_w = (try wv.grad(&ctx)).?;
+        defer grad_w.deinit();
+        var grad_b = (try bv.grad(&ctx)).?;
+        defer grad_b.deinit();
+        const last_chunk_rows = (seq - chunking[chunking.len - 1]) * 2;
+        for (ref_grads[last_chunk_rows .. seq * 2], (try grad_x.dataConst())[last_chunk_rows..]) |r, g| try std.testing.expectApproxEqAbs(r, g, 1e-5);
+        for (ref_grads[seq * 2 ..][0..18], try grad_w.dataConst()) |r, g| try std.testing.expectApproxEqAbs(r, g, 1e-4);
+        for (ref_grads[seq * 2 + 18 ..][0..3], try grad_b.dataConst()) |r, g| try std.testing.expectApproxEqAbs(r, g, 1e-4);
+    }
 }

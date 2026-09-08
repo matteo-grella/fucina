@@ -282,6 +282,10 @@ pub const CausalState = struct {
     /// Rows written so far in the ring; the context is the `pad` rows
     /// before it.
     write_pos: usize,
+    /// Whether any chunk has been carried since the last reset: until
+    /// then the context is all zeros and `slice` reports no rows, which
+    /// is the conv family's state-less (faster) route for the same values.
+    carried: bool,
     allocator: Allocator,
 
     /// `chunk_hint` is the chunk length the ring is sized for (rewinds
@@ -293,7 +297,7 @@ pub const CausalState = struct {
         const capacity = if (pad == 0) 0 else pad + @max(pad, chunk_hint);
         const rows = try allocator.alloc(f32, capacity * in_channels);
         @memset(rows, 0);
-        return .{ .rows = rows, .in_channels = in_channels, .pad = pad, .write_pos = pad, .allocator = allocator };
+        return .{ .rows = rows, .in_channels = in_channels, .pad = pad, .write_pos = pad, .carried = false, .allocator = allocator };
     }
 
     pub fn deinit(self: *CausalState) void {
@@ -305,12 +309,14 @@ pub const CausalState = struct {
     pub fn reset(self: *CausalState) void {
         @memset(self.rows[0 .. self.pad * self.in_channels], 0);
         self.write_pos = self.pad;
+        self.carried = false;
     }
 
     /// The context rows as the conv family's `state` argument; `null` for
-    /// a conv without memory (`taps == 1`).
+    /// a conv without memory (`taps == 1`) and for a stream nothing has
+    /// been carried into yet (all-zero rows, the state-less route).
     pub fn slice(self: *const CausalState) ?[]const f32 {
-        if (self.pad == 0) return null;
+        if (self.pad == 0 or !self.carried) return null;
         const in_ch = self.in_channels;
         return self.rows[(self.write_pos - self.pad) * in_ch ..][0 .. self.pad * in_ch];
     }
@@ -324,6 +330,8 @@ pub const CausalState = struct {
         const pad = self.pad;
         if (pad == 0) return;
         const frames = input.len / in_ch;
+        if (frames == 0) return;
+        self.carried = true;
         if (frames >= pad) {
             // The chunk covers the whole context: it is the context, written
             // once at the front (no rewind copy).
@@ -345,8 +353,9 @@ pub const CausalState = struct {
 test "causal state carries the last rows of every chunk, oldest first, across rewinds" {
     var state = try CausalState.init(std.testing.allocator, 2, 3, 2, 3); // pad = 4 rows, ring = 8 rows
     defer state.deinit();
-    try std.testing.expectEqual(@as(usize, 8), state.slice().?.len);
-    try std.testing.expectEqualSlices(f32, &[_]f32{0} ** 8, state.slice().?);
+    // A fresh stream has no rows to report: the zero context is the
+    // state-less route.
+    try std.testing.expect(state.slice() == null);
     // Longer than the context: only the last four rows are kept.
     state.advance(&.{ 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6 });
     try std.testing.expectEqualSlices(f32, &.{ 3, 3, 4, 4, 5, 5, 6, 6 }, state.slice().?);
@@ -358,7 +367,9 @@ test "causal state carries the last rows of every chunk, oldest first, across re
     state.advance(&.{ 11, 11 });
     try std.testing.expectEqualSlices(f32, &.{ 8, 8, 9, 9, 10, 10, 11, 11 }, state.slice().?);
     state.reset();
-    try std.testing.expectEqualSlices(f32, &[_]f32{0} ** 8, state.slice().?);
+    try std.testing.expect(state.slice() == null);
+    state.advance(&.{ 1, 1 });
+    try std.testing.expectEqualSlices(f32, &.{ 0, 0, 0, 0, 0, 0, 1, 1 }, state.slice().?);
 
     var memoryless = try CausalState.init(std.testing.allocator, 3, 1, 1, 64);
     defer memoryless.deinit();

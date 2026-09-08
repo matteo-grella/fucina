@@ -1266,6 +1266,18 @@ pub fn groupedCausalConv1dStreaming(
     return out;
 }
 
+/// Carries `input` (`[time, in]`, any strides) into `state`: the streaming
+/// spelling's state advance on its own, for a caller that ran the conv
+/// through the differentiable op (the recorded path).
+pub fn advanceCausalState(ctx: *ExecContext, comptime rank: usize, input: *const Tensor, comptime time_axis: usize, comptime channel_axis: usize, state: *streamconv.CausalState) !void {
+    comptime requireTimeMajor("advanceCausalState", "[time, in]", rank, time_axis, channel_axis);
+    const source = try input.rankView(rank);
+    if (state.in_channels != source.shape[channel_axis]) return tensor.TensorError.ShapeMismatch;
+    var ii = try ctx.prepareContiguous(.f32, input);
+    defer ii.deinit();
+    state.advance(ii.tensor().dataConst());
+}
+
 pub fn groupedCausalConv1dBackwardInput(
     ctx: *ExecContext,
     comptime rank: usize,
