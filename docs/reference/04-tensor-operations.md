@@ -1528,6 +1528,17 @@ is deliberately not fused — compose it with broadcast `add`):
   (gradients into the input rows of the chunk, the weight and the bias;
   none into the context), so a model written once against this op both
   trains and streams.
+- `lstm(ctx, time_tag, in_tag, unit_tag, w, b, h0, c0)` — the LSTM
+  recurrence over a sequence in one op: `self` is `[T, in]`, `w` the
+  stacked `[W_ih | W_hh]` transposed, `[in + H, 4H]`, `b` `[4H]`, `h0` and
+  `c0` `[H]`; gates i, f, g, o over `[x_t | h_{t-1}] · w + b`,
+  `c_t = σ(f)·c_{t-1} + σ(i)·tanh(g)`, `h_t = σ(o)·tanh(c_t)` (PyTorch's
+  `nn.LSTM`). The result `[2T, H]` holds the hidden rows then the cell
+  rows: the hidden sequence is the contiguous `narrow(time_tag, 0, T)`,
+  the state to carry is rows `T - 1` and `2T - 1`. Serial along time
+  (weights streamed once per step, the lane
+  nonlinearities). Differentiable in the input, the weight, the bias and
+  the initial state: one BPTT pass over the saved gates.
 - `causalDepthwiseConv1d(ctx, time_tag, channel_tag, tap_tag, kernel, dilation, state)`
   — depthwise; `kernel: *const Tensor(.{ channel_tag, tap_tag })` (tap
   `taps−1` = the newest sample). `dilation` spaces the taps

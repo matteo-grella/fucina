@@ -1,7 +1,8 @@
-//! Behavioral tests for `rnn.zig`: the LSTM step against a scalar reference
-//! of PyTorch's equations, streaming versus the windowed forward, the
-//! stacked-layout round trip, gradients against finite differences, and the
-//! burn-in / truncation semantics.
+//! Behavioral tests for `rnn.zig`: the LSTM sequence against a scalar
+//! reference of PyTorch's equations, streaming blocks versus the windowed
+//! forward, the stacked-layout round trip, gradients against finite
+//! differences (the sequence op's BPTT), and the burn-in / truncation
+//! semantics.
 
 const std = @import("std");
 const rnn = @import("rnn.zig");
@@ -72,7 +73,7 @@ fn buildLstm(allocator: std.mem.Allocator, ctx: *ExecContext, layers: []const Ho
         c.* = try layer.cell(ctx, trainable);
         built += 1;
     }
-    return rnn.Lstm.fromCells(allocator, ctx, cells);
+    return rnn.Lstm.fromCells(allocator, cells);
 }
 
 fn sigmoid(x: f64) f64 {
@@ -101,7 +102,7 @@ fn referenceStep(layer: *const HostLayer, x: []const f64, h: []f64, c: []f64, al
     }
 }
 
-test "lstm step matches PyTorch's equations in f64 over a two-layer stack" {
+test "lstm sequence matches PyTorch's equations in f64 over a two-layer stack" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -120,22 +121,25 @@ test "lstm step matches PyTorch's equations in f64 over a two-layer stack" {
         h[l][j] = layers[l].h0[j];
         c[l][j] = layers[l].c0[j];
     };
-    var x_t = try rnn.Input.zeros(&ctx, .{2});
+    var x_t = try rnn.Sequence.zeros(&ctx, .{ 1, 2 });
     defer x_t.deinit();
     var max_err: f64 = 0;
     for (0..12) |t| {
         const xf = [_]f32{ 0.3 * @sin(@as(f32, @floatFromInt(t))), 0.2 * @cos(@as(f32, @floatFromInt(t)) * 0.7) };
         try x_t.copyFrom(&xf);
-        const got = try stream.step(&ctx, &x_t);
+        var got = try stream.step(&ctx, &x_t);
+        defer got.deinit();
+        var got_row: [3]f32 = undefined;
+        try got.copyTo(&got_row);
         const x64 = [_]f64{ xf[0], xf[1] };
         try referenceStep(&layers[0], &x64, &h[0], &c[0], allocator);
         try referenceStep(&layers[1], &h[0], &h[1], &c[1], allocator);
-        for (try got.dataConst(), h[1]) |g, r| max_err = @max(max_err, @abs(@as(f64, g) - r));
+        for (got_row, h[1]) |g, r| max_err = @max(max_err, @abs(@as(f64, g) - r));
     }
     try std.testing.expect(max_err <= 2e-6);
 }
 
-test "lstm streaming is bitwise the windowed forward, repeats after reset, and refuses a scope" {
+test "lstm streaming blocks are bitwise the windowed forward and repeat after reset" {
     const allocator = std.testing.allocator;
     var ctx: ExecContext = undefined;
     ctx.init(allocator);
@@ -159,26 +163,22 @@ test "lstm streaming is bitwise the windowed forward, repeats after reset, and r
     }
     var stream = try rnn.Lstm.Stream.init(allocator, &ctx, &lstm);
     defer stream.deinit();
-    var x_t = try rnn.Input.zeros(&ctx, .{1});
-    defer x_t.deinit();
     var streamed: [frames * 4]f32 = undefined;
-    for (signal, 0..) |v, t| {
-        try x_t.copyFrom(&[_]f32{v});
-        try (try stream.step(&ctx, &x_t)).copyTo(streamed[t * 4 ..][0..4]);
+    // Blocks of uneven lengths, each inside its own scope.
+    for (0..2) |round| {
+        var offset: usize = 0;
+        for ([_]usize{ 7, 1, 13, 20, 9 }) |n| {
+            const scope = ctx.openExecScope();
+            defer ctx.closeExecScope(scope);
+            var x = try rnn.Sequence.fromSlice(&ctx, .{ n, 1 }, signal[offset..][0..n]);
+            defer x.deinit();
+            const hs = try stream.step(&ctx, &x);
+            try hs.copyTo(streamed[offset * 4 ..][0 .. n * 4]);
+            offset += n;
+        }
+        try std.testing.expectEqualSlices(f32, &windowed, &streamed);
+        if (round == 0) try stream.reset();
     }
-    try std.testing.expectEqualSlices(f32, &windowed, &streamed);
-
-    try stream.reset(&ctx);
-    var again: [frames * 4]f32 = undefined;
-    for (signal, 0..) |v, t| {
-        try x_t.copyFrom(&[_]f32{v});
-        try (try stream.step(&ctx, &x_t)).copyTo(again[t * 4 ..][0..4]);
-    }
-    try std.testing.expectEqualSlices(f32, &streamed, &again);
-
-    const scope = ctx.openExecScope();
-    defer ctx.closeExecScope(scope);
-    try std.testing.expectError(error.ActiveExecScopeUnsupported, stream.step(&ctx, &x_t));
 }
 
 test "lstm stacked layout round-trips through fromStacked, stackedWeight and bias" {
@@ -199,11 +199,7 @@ test "lstm stacked layout round-trips through fromStacked, stackedWeight and bia
         var stacked_out: [4 * 3 * 5]f32 = undefined;
         try stacked.copyTo(&stacked_out);
         try std.testing.expectEqualSlices(f32, layer.stacked, &stacked_out);
-        var bias = try cell.bias(&ctx);
-        defer bias.deinit();
-        var bias_out: [12]f32 = undefined;
-        try bias.copyTo(&bias_out);
-        try std.testing.expectEqualSlices(f32, layer.bias, &bias_out);
+        try std.testing.expectEqualSlices(f32, layer.bias, try cell.b.dataConst());
         try std.testing.expectEqualSlices(f32, layer.h0, try cell.h0.dataConst());
         try std.testing.expectEqualSlices(f32, layer.c0, try cell.c0.dataConst());
     }
@@ -276,22 +272,17 @@ test "lstm gradients match finite differences for the weight, bias and initial s
     for (lstm.cells, &layers) |*cell, *layer| {
         var w_grad = (try cell.w.grad(&ctx)).?;
         defer w_grad.deinit();
-        // The stored gradient is [in + H + 1, 4H]: its matrix rows in the
-        // stacked order, its last row the bias gradient.
-        var matrix = try w_grad.narrow(&ctx, .k, 0, layer.input_size + layer.hidden);
-        defer matrix.deinit();
-        var stacked_grad = try matrix.permuteTo(&ctx, .{ .unit, .k });
+        // The stored gradient is [in + H, 4H]: the stacked order is its
+        // transpose.
+        var stacked_grad = try w_grad.permuteTo(&ctx, .{ .unit, .k });
         defer stacked_grad.deinit();
         const analytic_stacked = try allocator.alloc(f32, layer.stacked.len);
         defer allocator.free(analytic_stacked);
         try stacked_grad.copyTo(analytic_stacked);
         try expectFd(allocator, &ctx, &layers, layer.stacked, analytic_stacked, &signal, &weights);
-        var bias_row = try w_grad.narrow(&ctx, .k, layer.input_size + layer.hidden, 1);
-        defer bias_row.deinit();
-        const analytic_bias = try allocator.alloc(f32, layer.bias.len);
-        defer allocator.free(analytic_bias);
-        try bias_row.copyTo(analytic_bias);
-        try expectFd(allocator, &ctx, &layers, layer.bias, analytic_bias, &signal, &weights);
+        var b_grad = (try cell.b.grad(&ctx)).?;
+        defer b_grad.deinit();
+        try expectFd(allocator, &ctx, &layers, layer.bias, try b_grad.dataConst(), &signal, &weights);
         var h0_grad = (try cell.h0.grad(&ctx)).?;
         defer h0_grad.deinit();
         try expectFd(allocator, &ctx, &layers, layer.h0, try h0_grad.dataConst(), &signal, &weights);

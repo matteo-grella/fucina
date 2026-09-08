@@ -792,6 +792,7 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const mean = reduce_ops.mean;
         pub const segmentSum = reduce_ops.segmentSum;
         pub const linearRecurrence = reduce_ops.linearRecurrence;
+        pub const lstm = reduce_ops.lstm;
         pub const sumAll = reduce_ops.sumAll;
         pub const sumMany = reduce_ops.sumMany;
 

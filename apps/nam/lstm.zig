@@ -1,7 +1,8 @@
-//! The NAM LSTM model over `fucina.rnn`: the core's recurrent stack, a
-//! linear head on the last layer's `h`, the NAM weight-stream layout, and
-//! the trainer's window contract (burn-in without gradient, truncated
-//! backpropagation through time, MSE over the segment's tail).
+//! The NAM LSTM model over `fucina.rnn`: the core's recurrent stack (one
+//! sequence op per layer and block), a linear head on the last layer's
+//! `h`, the NAM weight-stream layout, and the trainer's window contract
+//! (burn-in without gradient, truncated backpropagation through time, MSE
+//! over the segment's tail).
 //!
 //! NAM semantics (nam/models/recurrent.py, NAM/lstm.cpp) are the core's
 //! PyTorch semantics: gate order i, f, g, o over `[x | h]`, one bias
@@ -13,6 +14,7 @@
 const std = @import("std");
 const fucina = @import("fucina");
 const nam_file = @import("nam_file.zig");
+const wavenet = @import("wavenet.zig");
 
 const Tensor = fucina.Tensor;
 const ExecContext = fucina.ExecContext;
@@ -20,7 +22,6 @@ const rng = fucina.rng;
 const rnn = fucina.rnn;
 
 pub const Units = rnn.Units;
-pub const Input = rnn.Input;
 pub const HeadWeight = Tensor(.{ .unit, .out });
 pub const HeadBias = Tensor(.{.out});
 pub const Output = Tensor(.{ .time, .hout });
@@ -129,7 +130,7 @@ pub const Model = struct {
             built += 1;
         }
         if (cursor + h + 1 != weights.len) return Error.WeightCountMismatch;
-        var lstm = try rnn.Lstm.fromCells(allocator, ctx, cells);
+        var lstm = try rnn.Lstm.fromCells(allocator, cells);
         errdefer lstm.deinit();
         const scratch = try allocator.alloc(f32, h);
         defer allocator.free(scratch);
@@ -219,9 +220,7 @@ pub const Model = struct {
             var stacked = try cell.stackedWeight(ctx);
             defer stacked.deinit();
             try appendView(allocator, &out, &stacked);
-            var bias = try cell.bias(ctx);
-            defer bias.deinit();
-            try appendView(allocator, &out, &bias);
+            try out.appendSlice(allocator, try cell.b.dataConst());
             try out.appendSlice(allocator, try cell.h0.dataConst());
             try out.appendSlice(allocator, try cell.c0.dataConst());
         }
@@ -242,41 +241,54 @@ pub const Model = struct {
 };
 
 /// Streaming inference over a `Model`: the core's stream plus the head,
-/// one sample at a time, allocation-free once the pool is warm.
+/// one block at a time inside a per-block exec scope, allocation-free once
+/// the pool is warm.
 pub const Stream = struct {
     model: *const Model,
     inner: rnn.Lstm.Stream,
-    x_t: Input,
+    input_slot: wavenet.InputSlot = .{},
 
     pub fn init(allocator: std.mem.Allocator, ctx: *ExecContext, model: *const Model) !Stream {
-        var inner = try rnn.Lstm.Stream.init(allocator, ctx, &model.lstm);
-        errdefer inner.deinit();
-        var x_t = try Input.zeros(ctx, .{1});
-        errdefer x_t.deinit();
-        return .{ .model = model, .inner = inner, .x_t = x_t };
+        const inner = try rnn.Lstm.Stream.init(allocator, ctx, &model.lstm);
+        return .{ .model = model, .inner = inner };
     }
 
     pub fn deinit(self: *Stream) void {
         self.inner.deinit();
-        self.x_t.deinit();
+        self.input_slot.deinit();
         self.* = undefined;
     }
 
     /// Back to the learned initial state.
     pub fn reset(self: *Stream, ctx: *ExecContext) !void {
-        try self.inner.reset(ctx);
-    }
-
-    pub fn processSample(self: *Stream, ctx: *ExecContext, x: f32) !f32 {
-        try self.x_t.copyFrom(&[_]f32{x});
-        const h = try self.inner.step(ctx, &self.x_t);
-        var y = try self.model.head(ctx, h);
-        defer y.deinit();
-        return y.item();
+        _ = ctx;
+        try self.inner.reset();
     }
 
     pub fn process(self: *Stream, ctx: *ExecContext, input: []const f32, output: []f32, frames: usize) !void {
-        for (0..frames) |t| output[t] = try self.processSample(ctx, input[t]);
+        var offset: usize = 0;
+        while (offset < frames) {
+            const n = @min(frames - offset, max_block);
+            try self.processBlock(ctx, input[offset..][0..n], output[offset..][0..n]);
+            offset += n;
+        }
+    }
+
+    /// Blocks longer than this are split: the per-block scope's transients
+    /// (`[n, 2H]` and `[n, H]` rows) stay in the pool's working set.
+    const max_block: usize = 4096;
+
+    fn processBlock(self: *Stream, ctx: *ExecContext, input: []const f32, output: []f32) !void {
+        var no_grad = fucina.noGrad();
+        defer no_grad.close();
+        const mark = ctx.openExecScope();
+        defer ctx.closeExecScope(mark);
+        var x = try self.input_slot.view(ctx, input, input.len);
+        const x_seq = try x.withTags(ctx, .{ .time, .k });
+        const hs = try self.inner.step(ctx, &x_seq);
+        const pred = try hs.dot(ctx, &self.model.head_w, .unit);
+        const biased = try pred.add(ctx, &self.model.head_b);
+        try biased.copyTo(output);
     }
 };
 

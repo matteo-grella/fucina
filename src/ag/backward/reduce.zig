@@ -231,6 +231,55 @@ pub fn LinearRecurrenceBackward(comptime source_tags: anytype, comptime decay_ta
     };
 }
 
+/// VJP for `lstm` (the sequence op): one exec BPTT pass over the saved
+/// input, weight, gates and output produces the gradients of the input,
+/// the weight, the bias and the initial state, each only when its
+/// operand wants one.
+pub fn LstmBackward(comptime out_tags: anytype) type {
+    return struct {
+        parents: [5]?*GradState,
+        x_value: RawTensor,
+        w_value: RawTensor,
+        gates_value: RawTensor,
+        out_value: RawTensor,
+        h0_value: RawTensor,
+        c0_value: RawTensor,
+
+        const Self = @This();
+
+        pub fn vjp(self: *Self, ctx: *ExecContext, gy: *const RawTensor, out: []?RawTensor) !void {
+            var want: [5]bool = undefined;
+            var any = false;
+            for (0..5) |i| {
+                want[i] = core.needs(self, i);
+                any = any or want[i];
+            }
+            if (!any) return;
+            var grads = try ctx.lstmSequenceBackward(gy, &self.x_value, &self.w_value, &self.gates_value, &self.out_value, &self.h0_value, &self.c0_value, want);
+            errdefer grads.deinit();
+            out[0] = grads.gx;
+            out[1] = grads.gw;
+            out[2] = grads.gb;
+            out[3] = grads.gh0;
+            out[4] = grads.gc0;
+            grads = .{ .gx = null, .gw = null, .gb = null, .gh0 = null, .gc0 = null };
+            _ = out_tags;
+        }
+
+        pub fn deinitFields(self: *Self, allocator: std.mem.Allocator) void {
+            _ = allocator;
+            self.x_value.deinit();
+            self.w_value.deinit();
+            self.gates_value.deinit();
+            self.out_value.deinit();
+            self.h0_value.deinit();
+            self.c0_value.deinit();
+        }
+
+        pub const vtable = core.recordVTable(Self);
+    };
+}
+
 pub fn ProdBackward(comptime source_tags: anytype, comptime axis: usize) type {
     return struct {
         parents: [1]?*GradState,

@@ -49,6 +49,7 @@ pub const conv = @import("vector/conv.zig");
 pub const pool = @import("vector/pool.zig");
 pub const winograd = @import("vector/winograd.zig");
 pub const rows = @import("vector/rows.zig");
+pub const rnn = @import("vector/rnn.zig");
 pub const attention = @import("vector/attention.zig");
 
 pub const ParallelConfig = common.ParallelConfig;
@@ -64,6 +65,7 @@ test {
     _ = @import("vector/batched.zig");
     _ = @import("vector/conv.zig");
     _ = @import("vector/pool.zig");
+    _ = @import("vector/rnn.zig");
     _ = @import("vector/winograd.zig");
     _ = @import("vector/primitives.zig");
 }

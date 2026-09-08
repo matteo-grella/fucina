@@ -1,23 +1,23 @@
-//! Recurrent layers over the autograd facade: the LSTM as one `step` that
-//! serves training and streaming inference alike.
-//!
-//! Every transient a step makes is released by a `defer` right after it is
-//! made; under an open exec scope (training, windowed rendering) those
-//! releases are no-ops and the scope owns everything, outside a scope
-//! (streaming) the returned state is the caller's and the step runs
-//! allocation-free once the runtime's pool is warm. The same code records
-//! the graph or runs per sample.
+//! Recurrent layers over the autograd facade: the LSTM as one sequence op
+//! (`Tensor.lstm`) that serves training and streaming inference alike.
 //!
 //! Semantics are PyTorch's `nn.LSTM`: gates i, f, g, o over the
 //! concatenated `[x | h]` input, `c' = σ(f)·c + σ(i)·tanh(g)`,
 //! `h' = σ(o)·tanh(c')`, with the initial state `h0`, `c0` a learnable
-//! parameter per layer. Layout: a cell stores one `[in + H + 1, 4H]`
-//! matrix, PyTorch's stacked `[W_ih | W_hh]` transposed with the bias
-//! (`b_ih + b_hh`) as the last row against a constant-one input, so the
-//! gate pre-activation is one vector-times-matrix `dot` (the orientation
-//! the row kernels run fastest) with no separate bias pass. The stacked
+//! parameter per layer. A cell stores `w` `[in + H, 4H]` (PyTorch's stacked
+//! `[W_ih | W_hh]` transposed) and `b` `[4H]` (`b_ih + b_hh`); the stacked
 //! gate-major form is a permuted view on import and export
-//! (`LstmCell.fromStacked`, `stackedWeight`, `bias`).
+//! (`LstmCell.fromStacked`, `stackedWeight`).
+//!
+//! One op for the block: the recurrence over a sequence runs inside the
+//! kernel (serial by nature, weights streamed once per step, the lane
+//! nonlinearities) and returns `[2T, H]`, the hidden rows then the cell
+//! rows, so a block costs one dispatch per layer whatever the hidden size
+//! and the hidden sequence is a contiguous view; the backward is one BPTT
+//! pass over the saved gates.
+//! Under an open exec scope `Lstm.forward` records it; `Lstm.Stream` feeds
+//! blocks without gradients and carries the last row as the next block's
+//! initial state.
 //!
 //! Sequence training follows the usual recurrent recipe: `burn_in` steps
 //! without gradient from the learned initial state, then truncated
@@ -25,8 +25,8 @@
 //! detached between segments; values never change, only the gradient
 //! horizon).
 //!
-//! Tags are fixed: `.k` is a step's input axis (the contraction axis of the
-//! gate product), `.unit` the hidden/gate axis, `.time` the sequence axis.
+//! Tags are fixed: `.k` is the input axis (the concatenated `[x | h]` axis
+//! of the weight), `.unit` the hidden/gate axis, `.time` the sequence axis.
 //! Callers retag views to and from their own names.
 
 const std = @import("std");
@@ -38,7 +38,6 @@ const Tensor = ag.Tensor;
 const ExecContext = exec_mod.ExecContext;
 
 pub const Units = Tensor(.{.unit});
-pub const Input = Tensor(.{.k});
 pub const Weight = Tensor(.{ .k, .unit });
 /// PyTorch's stacked gate-major matrix `[4H, in + H]`.
 pub const StackedWeight = Tensor(.{ .unit, .k });
@@ -47,7 +46,7 @@ pub const HiddenSequence = Tensor(.{ .time, .unit });
 
 pub const Error = error{ ExecScopeRequired, ActiveExecScopeUnsupported, InvalidShape };
 
-/// The state handed from one step to the next.
+/// The state handed from one block or segment to the next.
 pub const State = struct {
     h: Units,
     c: Units,
@@ -60,56 +59,59 @@ pub const State = struct {
 };
 
 pub const LstmCell = struct {
-    /// `[in + H + 1, 4H]`: the stacked `[W_ih | W_hh]` transposed, then the
-    /// bias as the last row.
+    /// `[in + H, 4H]`: the stacked `[W_ih | W_hh]` transposed.
     w: Weight,
+    /// `[4H]`: `b_ih + b_hh`.
+    b: Units,
     h0: Units,
     c0: Units,
     input_size: usize,
     hidden: usize,
 
-    /// PyTorch's initialization: uniform in ±1/sqrt(H) for the weights and
+    /// PyTorch's initialization: uniform in ±1/sqrt(H) for the weight and
     /// the bias, zeros for the initial state; all trainable.
     pub fn init(ctx: *ExecContext, input_size: usize, hidden: usize, seed: u64, seed_counter: *u64) !LstmCell {
         if (input_size == 0 or hidden == 0) return Error.InvalidShape;
         const allocator = ctx.allocator();
         const width = input_size + hidden;
-        const scratch = try allocator.alloc(f32, (width + 1) * 4 * hidden);
+        const scratch = try allocator.alloc(f32, width * 4 * hidden);
         defer allocator.free(scratch);
         const bound = 1.0 / @sqrt(@as(f32, @floatFromInt(hidden)));
         rng.uniformFill(rng.at(seed, seed_counter.*), scratch, -bound, bound);
         seed_counter.* += 1;
-        var w = try Weight.variableFromSlice(ctx, .{ width + 1, 4 * hidden }, scratch);
+        var w = try Weight.variableFromSlice(ctx, .{ width, 4 * hidden }, scratch);
         errdefer w.deinit();
+        rng.uniformFill(rng.at(seed, seed_counter.*), scratch[0 .. 4 * hidden], -bound, bound);
+        seed_counter.* += 1;
+        var b = try Units.variableFromSlice(ctx, .{4 * hidden}, scratch[0 .. 4 * hidden]);
+        errdefer b.deinit();
         var h0 = try Units.variable(ctx, try ctx.zeros(.f32, &.{hidden}));
         errdefer h0.deinit();
         var c0 = try Units.variable(ctx, try ctx.zeros(.f32, &.{hidden}));
         errdefer c0.deinit();
-        return .{ .w = w, .h0 = h0, .c0 = c0, .input_size = input_size, .hidden = hidden };
+        return .{ .w = w, .b = b, .h0 = h0, .c0 = c0, .input_size = input_size, .hidden = hidden };
     }
 
     /// From PyTorch's layout: the stacked gate-major matrix `[4H, in + H]`
     /// (rows i, f, g, o; `[W_ih | W_hh]`), the bias `[4H]` (`b_ih + b_hh`),
-    /// and the initial state; any views. The layout change is a permuted
-    /// view concatenated with the bias row, copied out once; the cell owns
-    /// its four tensors whatever the scope, as variables when `trainable`.
-    pub fn fromStacked(ctx: *ExecContext, stacked: *const StackedWeight, bias_in: *const Units, h0: *const Units, c0: *const Units, trainable: bool) !LstmCell {
+    /// and the initial state; any views. The matrix is a permuted view
+    /// copied out once; the cell owns its four tensors whatever the scope,
+    /// as variables when `trainable`.
+    pub fn fromStacked(ctx: *ExecContext, stacked: *const StackedWeight, bias: *const Units, h0: *const Units, c0: *const Units, trainable: bool) !LstmCell {
         const shape = stacked.shape();
         const hidden = shape[0] / 4;
         if (hidden == 0 or shape[0] != 4 * hidden or shape[1] <= hidden) return Error.InvalidShape;
-        if (bias_in.shape()[0] != 4 * hidden or h0.shape()[0] != hidden or c0.shape()[0] != hidden) return Error.InvalidShape;
+        if (bias.shape()[0] != 4 * hidden or h0.shape()[0] != hidden or c0.shape()[0] != hidden) return Error.InvalidShape;
         var transposed = try stacked.permuteTo(ctx, .{ .k, .unit });
         defer transposed.deinit();
-        var bias_row = try bias_in.insertAxis(ctx, .k, 0);
-        defer bias_row.deinit();
-        var joined = try transposed.concat(ctx, .k, &.{&bias_row});
-        defer joined.deinit();
-        var w = try own(Weight, ctx, &joined, trainable);
+        var w = try own(Weight, ctx, &transposed, trainable);
         errdefer w.deinit();
+        var b = try own(Units, ctx, bias, trainable);
+        errdefer b.deinit();
         var h0_own = try own(Units, ctx, h0, trainable);
         errdefer h0_own.deinit();
         const c0_own = try own(Units, ctx, c0, trainable);
-        return .{ .w = w, .h0 = h0_own, .c0 = c0_own, .input_size = shape[1] - hidden, .hidden = hidden };
+        return .{ .w = w, .b = b, .h0 = h0_own, .c0 = c0_own, .input_size = shape[1] - hidden, .hidden = hidden };
     }
 
     /// A caller-owned copy of `src` (stride-aware), a variable when
@@ -127,6 +129,7 @@ pub const LstmCell = struct {
 
     pub fn deinit(self: *LstmCell) void {
         self.w.deinit();
+        self.b.deinit();
         self.h0.deinit();
         self.c0.deinit();
         self.* = undefined;
@@ -134,6 +137,7 @@ pub const LstmCell = struct {
 
     pub fn registerParams(self: *LstmCell, opt: anytype) !void {
         try opt.addParam(&self.w);
+        try opt.addParam(&self.b);
         try opt.addParam(&self.h0);
         try opt.addParam(&self.c0);
     }
@@ -141,52 +145,14 @@ pub const LstmCell = struct {
     /// The stacked gate-major matrix `[4H, in + H]` as a view of the stored
     /// weight (copy it out with `copyTo`).
     pub fn stackedWeight(self: *const LstmCell, ctx: *ExecContext) !StackedWeight {
-        var matrix = try self.w.narrow(ctx, .k, 0, self.input_size + self.hidden);
-        defer matrix.deinit();
-        return matrix.permuteTo(ctx, .{ .unit, .k });
+        return self.w.permuteTo(ctx, .{ .unit, .k });
     }
 
-    /// The bias `[4H]` as a view of the stored weight's last row.
-    pub fn bias(self: *const LstmCell, ctx: *ExecContext) !Units {
-        var row = try self.w.narrow(ctx, .k, self.input_size + self.hidden, 1);
-        defer row.deinit();
-        return row.select(ctx, .k, 0);
-    }
-
-    /// One step: `[x | h | 1] · w`, the four gates, the cell and hidden
-    /// updates. `x` is `[in]`, `h` and `c` are `[H]`, `one` the stack's
-    /// constant; the returned state is the caller's (scope-owned under an
-    /// open scope).
-    pub fn step(self: *const LstmCell, ctx: *ExecContext, x: *const Input, one: *const Input, h: *const Units, c: *const Units) !State {
-        const hidden = self.hidden;
-        var h_k = try h.withTags(ctx, .{.k});
-        defer h_k.deinit();
-        var xh = try x.concat(ctx, .k, &.{ &h_k, one });
-        defer xh.deinit();
-        var gates = try xh.dot(ctx, &self.w, .k);
-        defer gates.deinit();
-        var i_pre = try gates.narrow(ctx, .unit, 0, hidden);
-        defer i_pre.deinit();
-        var f_pre = try gates.narrow(ctx, .unit, hidden, hidden);
-        defer f_pre.deinit();
-        var g_pre = try gates.narrow(ctx, .unit, 2 * hidden, hidden);
-        defer g_pre.deinit();
-        var o_pre = try gates.narrow(ctx, .unit, 3 * hidden, hidden);
-        defer o_pre.deinit();
-        var g = try g_pre.tanh(ctx);
-        defer g.deinit();
-        // c' = σ(f)·c + σ(i)·tanh(g): two gated products (glu is x·σ(gate)).
-        var forget = try c.glu(ctx, &f_pre);
-        defer forget.deinit();
-        var write = try g.glu(ctx, &i_pre);
-        defer write.deinit();
-        var c_new = try forget.add(ctx, &write);
-        errdefer c_new.deinit();
-        // h' = σ(o)·tanh(c').
-        var tc = try c_new.tanh(ctx);
-        defer tc.deinit();
-        const h_new = try tc.glu(ctx, &o_pre);
-        return .{ .h = h_new, .c = c_new };
+    /// The sequence `x` `[T, in]` from the state `h`, `c`: the op's
+    /// `[2T, H]` (`h` rows then `c` rows), recorded when anything requires
+    /// grad.
+    pub fn forward(self: *const LstmCell, ctx: *ExecContext, x: *const Sequence, h: *const Units, c: *const Units) !HiddenSequence {
+        return x.lstm(ctx, .time, .k, .unit, &self.w, &self.b, h, c);
     }
 };
 
@@ -194,8 +160,6 @@ pub const LstmCell = struct {
 pub const Lstm = struct {
     allocator: std.mem.Allocator,
     cells: []LstmCell,
-    /// The constant-one input the bias row multiplies.
-    one: Input,
 
     pub const ForwardOptions = struct {
         /// Steps run without gradient before the recorded segment.
@@ -215,24 +179,21 @@ pub const Lstm = struct {
             cell.* = try LstmCell.init(ctx, if (l == 0) input_size else hidden, hidden, seed, &seed_counter);
             built += 1;
         }
-        return fromCells(allocator, ctx, cells);
+        return fromCells(allocator, cells);
     }
 
     /// Takes ownership of `cells` (allocated with `allocator`).
-    pub fn fromCells(allocator: std.mem.Allocator, ctx: *ExecContext, cells: []LstmCell) !Lstm {
+    pub fn fromCells(allocator: std.mem.Allocator, cells: []LstmCell) !Lstm {
         if (cells.len == 0) return Error.InvalidShape;
         for (cells[1..], cells[0 .. cells.len - 1]) |*cell, *previous| {
             if (cell.input_size != previous.hidden) return Error.InvalidShape;
         }
-        var one = try Input.ones(ctx, .{1});
-        errdefer one.deinit();
-        return .{ .allocator = allocator, .cells = cells, .one = one };
+        return .{ .allocator = allocator, .cells = cells };
     }
 
     pub fn deinit(self: *Lstm) void {
         for (self.cells) |*cell| cell.deinit();
         self.allocator.free(self.cells);
-        self.one.deinit();
         self.* = undefined;
     }
 
@@ -251,7 +212,7 @@ pub const Lstm = struct {
     /// The last layer's hidden sequence `[T, H]` for `x` `[T, in]`, every
     /// step from the learned initial state: the first `burn_in` steps
     /// without gradient, the rest recorded in `truncate`-step segments.
-    /// Runs inside the caller's exec scope, which owns every step's
+    /// Runs inside the caller's exec scope, which owns every segment's
     /// tensors.
     pub fn forward(self: *const Lstm, ctx: *ExecContext, x: *const Sequence, options: ForwardOptions) !HiddenSequence {
         if (!ctx.execScopeActive()) return Error.ExecScopeRequired;
@@ -261,70 +222,97 @@ pub const Lstm = struct {
         const states = try allocator.alloc(State, self.cells.len);
         defer allocator.free(states);
         for (states, self.cells) |*state, *cell| state.* = .{ .h = try cell.h0.withTags(ctx, .{.unit}), .c = try cell.c0.withTags(ctx, .{.unit}) };
-        const outputs = try allocator.alloc(Units, frames);
-        defer allocator.free(outputs);
-        const output_ptrs = try allocator.alloc(*const Units, frames);
-        defer allocator.free(output_ptrs);
 
         const burn_in = @min(options.burn_in, frames);
-        {
+        const recorded = frames - burn_in;
+        const segment = if (options.truncate == 0 or options.truncate > recorded) @max(recorded, 1) else options.truncate;
+        const segments = if (recorded == 0) 0 else (recorded + segment - 1) / segment;
+        const parts_len = segments + @as(usize, if (burn_in > 0) 1 else 0);
+        const parts = try allocator.alloc(HiddenSequence, parts_len);
+        defer allocator.free(parts);
+        const part_ptrs = try allocator.alloc(*const HiddenSequence, parts_len);
+        defer allocator.free(part_ptrs);
+        var index: usize = 0;
+
+        if (burn_in > 0) {
+            // The burn-in rows are values: no gradient reaches the initial
+            // state through them.
             var no_grad = ag.noGrad();
             defer no_grad.close();
-            for (0..burn_in) |t| outputs[t] = try self.stepAll(ctx, x, t, states);
+            var prefix = try x.narrow(ctx, .time, 0, burn_in);
+            defer prefix.deinit();
+            parts[index] = try self.stackSegment(ctx, &prefix, states);
+            index += 1;
         }
-        for (burn_in..frames) |t| {
-            const into_segment = t - burn_in;
-            if (options.truncate != 0 and into_segment != 0 and into_segment % options.truncate == 0) {
+        for (0..segments) |s| {
+            const start = burn_in + s * segment;
+            const len = @min(segment, frames - start);
+            var chunk = try x.narrow(ctx, .time, start, len);
+            defer chunk.deinit();
+            if (s > 0) {
                 for (states) |*state| {
                     state.h = try state.h.detach(ctx);
                     state.c = try state.c.detach(ctx);
                 }
             }
-            outputs[t] = try self.stepAll(ctx, x, t, states);
+            parts[index] = try self.stackSegment(ctx, &chunk, states);
+            index += 1;
         }
-        for (outputs, output_ptrs) |*o, *p| p.* = o;
-        return outputs[0].stack(ctx, .time, 0, output_ptrs[1..]);
+        for (parts, part_ptrs) |*o, *p| p.* = o;
+        if (parts_len == 1) return parts[0];
+        return parts[0].concat(ctx, .time, part_ptrs[1..]);
     }
 
-    /// Step `t` of the sequence through every layer, advancing `states`;
-    /// returns the last layer's `h`.
-    fn stepAll(self: *const Lstm, ctx: *ExecContext, x: *const Sequence, t: usize, states: []State) !Units {
-        var x_t = try x.select(ctx, .time, @intCast(t));
-        defer x_t.deinit();
-        var input: *const Input = &x_t;
-        var carried: ?Input = null;
+    /// One segment through every layer, advancing `states` to the segment's
+    /// last row; returns the last layer's `[len, H]` hidden rows.
+    fn stackSegment(self: *const Lstm, ctx: *ExecContext, x: *const Sequence, states: []State) !HiddenSequence {
+        var input: *const Sequence = x;
+        var carried: ?Sequence = null;
         defer if (carried) |*v| v.deinit();
+        var hidden: ?HiddenSequence = null;
+        defer if (hidden) |*v| v.deinit();
         for (self.cells, states) |*cell, *state| {
-            state.* = try cell.step(ctx, input, &self.one, &state.h, &state.c);
+            var out = try cell.forward(ctx, input, &state.h, &state.c);
+            defer out.deinit();
+            const frames = out.shape()[0] / 2;
+            state.h = try out.select(ctx, .time, @intCast(frames - 1));
+            state.c = try out.select(ctx, .time, @intCast(2 * frames - 1));
+            const hs = try out.narrow(ctx, .time, 0, frames);
+            if (hidden) |*v| v.deinit();
+            hidden = hs;
             if (carried) |*v| v.deinit();
-            carried = try state.h.withTags(ctx, .{.k});
+            carried = try hs.withTags(ctx, .{ .time, .k });
             input = &carried.?;
         }
-        return states[states.len - 1].h.withTags(ctx, .{.unit});
+        const result = hidden.?;
+        hidden = null;
+        return result;
     }
 
-    /// Streaming inference: the live state is the previous step's outputs,
-    /// replaced by ownership move each step (no scope, so every `step`
-    /// transient is released at once and the outputs survive).
+    /// Streaming inference: blocks through the stack without gradients,
+    /// the last row of every block carried as the next block's initial
+    /// state in persistent tensors (`copyFrom`), so a block leaves nothing
+    /// behind whatever scope the caller runs it in.
     pub const Stream = struct {
         lstm: *const Lstm,
         allocator: std.mem.Allocator,
         states: []State,
 
         pub fn init(allocator: std.mem.Allocator, ctx: *ExecContext, lstm: *const Lstm) !Stream {
-            if (ctx.execScopeActive()) return Error.ActiveExecScopeUnsupported;
             const states = try allocator.alloc(State, lstm.cells.len);
             errdefer allocator.free(states);
             var built: usize = 0;
             errdefer for (states[0..built]) |*state| state.deinit();
             for (states, lstm.cells) |*state, *cell| {
-                var h = try cell.h0.materialize(ctx);
+                var h = try Units.zeros(ctx, .{cell.hidden});
                 errdefer h.deinit();
-                const c = try cell.c0.materialize(ctx);
+                const c = try Units.zeros(ctx, .{cell.hidden});
                 state.* = .{ .h = h, .c = c };
                 built += 1;
             }
-            return .{ .lstm = lstm, .allocator = allocator, .states = states };
+            var stream = Stream{ .lstm = lstm, .allocator = allocator, .states = states };
+            try stream.reset();
+            return stream;
         }
 
         pub fn deinit(self: *Stream) void {
@@ -334,33 +322,41 @@ pub const Lstm = struct {
         }
 
         /// Back to the learned initial state.
-        pub fn reset(self: *Stream, ctx: *ExecContext) !void {
+        pub fn reset(self: *Stream) !void {
             for (self.states, self.lstm.cells) |*state, *cell| {
-                var h = try cell.h0.materialize(ctx);
-                errdefer h.deinit();
-                const c = try cell.c0.materialize(ctx);
-                state.deinit();
-                state.* = .{ .h = h, .c = c };
+                try state.h.copyFrom(try cell.h0.dataConst());
+                try state.c.copyFrom(try cell.c0.dataConst());
             }
         }
 
-        /// One step of `x` `[in]` through the stack; returns the last
-        /// layer's new `h`, borrowed until the next step or `deinit`.
-        pub fn step(self: *Stream, ctx: *ExecContext, x: *const Input) !*const Units {
-            if (ctx.execScopeActive()) return Error.ActiveExecScopeUnsupported;
-            var input: *const Input = x;
-            var carried: ?Input = null;
+        /// One block `x` `[T, in]` through the stack; the last layer's
+        /// `[T, H]` hidden rows, owned as any op result of the caller's
+        /// scope is.
+        pub fn step(self: *Stream, ctx: *ExecContext, x: *const Sequence) !HiddenSequence {
+            var no_grad = ag.noGrad();
+            defer no_grad.close();
+            var input: *const Sequence = x;
+            var carried: ?Sequence = null;
             defer if (carried) |*v| v.deinit();
+            var hidden: ?HiddenSequence = null;
+            defer if (hidden) |*v| v.deinit();
             for (self.lstm.cells, self.states) |*cell, *state| {
-                var next = try cell.step(ctx, input, &self.lstm.one, &state.h, &state.c);
-                errdefer next.deinit();
-                state.deinit();
-                state.* = next;
+                var out = try cell.forward(ctx, input, &state.h, &state.c);
+                defer out.deinit();
+                const frames = out.shape()[0] / 2;
+                const rows = try out.dataConst();
+                try state.h.copyFrom(rows[(frames - 1) * cell.hidden ..][0..cell.hidden]);
+                try state.c.copyFrom(rows[(2 * frames - 1) * cell.hidden ..][0..cell.hidden]);
+                const hs = try out.narrow(ctx, .time, 0, frames);
+                if (hidden) |*v| v.deinit();
+                hidden = hs;
                 if (carried) |*v| v.deinit();
-                carried = try state.h.withTags(ctx, .{.k});
+                carried = try hs.withTags(ctx, .{ .time, .k });
                 input = &carried.?;
             }
-            return &self.states[self.states.len - 1].h;
+            const result = hidden.?;
+            hidden = null;
+            return result;
         }
     };
 };

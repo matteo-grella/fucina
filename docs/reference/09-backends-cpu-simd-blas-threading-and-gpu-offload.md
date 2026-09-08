@@ -176,6 +176,7 @@ op, request, or container type):
 | row/slice helpers | `addScaledSlice`*, `addRowVectorSlice`*†, `unaryRowSlice`*†, `mulRowSlice`*, `preluChannelsInto`, `preluChannelsBackwardInputInto`*, `preluChannelsBackwardAlphaInto`*, `channelAffineInto` |
 | reductions | `sumInto`, `sumSlice`*, `prodInto`, `prodSlice`*, `sumSliceTyped`*†, `dot`† (comptime dtype; f32 takes the dedicated reduction, every other float dtype the typed one) |
 | 1-D conv | `causalDepthwiseConv1dInto` (+`BackwardInputInto`, `BackwardKernelInto`), `causalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `groupedCausalConv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `conv1dInto` (+`BackwardInputInto`, `BackwardWeightInto`), `col2im1dInto`, `col2im1dBackwardInto` |
+| recurrence | `lstmSequenceInto`*, `lstmSequenceBackwardInto`* (the LSTM over a block, serial along time; `vector/rnn.zig`) |
 | 2-D conv / image | `conv2dInto`, `conv2dDepthwiseInto` (the channel-vectorized tap-major depthwise forward, bit-identical to `conv2dInto`), `conv2dBackwardInputInto`, `conv2dBackwardWeightInto`, `im2colInto`, `col2imInto`, `pool2dInto`†, `avgPool2dBackwardInto`*, `maxPool2dBackwardInto`*, `upsample2xNearestInto` |
 | Winograd transforms | `winogradF2WeightTransformInto`, `winogradF2InputTransformInto`, `winogradF2OutputTransformInto`, `winogradF4WeightTransformInto`, `winogradF4InputTransformInto`, `winogradF4OutputTransformInto` |
 | norm / activation kernels | `groupNormInto`, `groupNormBackwardInto`, `snakeInto`, `snakeBackwardInputInto`, `snakeBackwardParamsInto` |
@@ -205,8 +206,8 @@ test "kernel interface inventory" {
         if (info.params.len == 0 or info.params[0].type != backend.ParallelConfig) pool_free_count += 1;
         if (info.is_generic) generic_count += 1;
     }
-    try std.testing.expectEqual(@as(usize, 168), kernel_count);
-    try std.testing.expectEqual(@as(usize, 108), pool_free_count);
+    try std.testing.expectEqual(@as(usize, 170), kernel_count);
+    try std.testing.expectEqual(@as(usize, 110), pool_free_count);
     try std.testing.expectEqual(@as(usize, 27), generic_count);
 }
 ```

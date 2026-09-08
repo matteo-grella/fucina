@@ -442,3 +442,134 @@ test "public Tensor linearRecurrence wide lanes match the serial reference under
     defer gh0.deinit();
     for (try gh0.dataConst(), 0..) |got, di| try std.testing.expectApproxEqAbs(ad_vals[di] * gh[di], got, 0);
 }
+
+test "public Tensor lstm: the sequence op matches the per-step composition and its gradients match finite differences" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const seq = 5;
+    const in_size = 2;
+    const hidden = 3;
+    const width = 4 * hidden;
+    var x_data: [seq * in_size]f32 = undefined;
+    var w_data: [(in_size + hidden) * width]f32 = undefined;
+    var b_data: [width]f32 = undefined;
+    var h0_data: [hidden]f32 = undefined;
+    var c0_data: [hidden]f32 = undefined;
+    for (&x_data, 0..) |*v, i| v.* = 0.6 * @sin(@as(f32, @floatFromInt(i)) * 0.7);
+    for (&w_data, 0..) |*v, i| v.* = 0.4 * @cos(@as(f32, @floatFromInt(i)) * 0.31);
+    for (&b_data, 0..) |*v, i| v.* = 0.1 * @sin(@as(f32, @floatFromInt(i)) * 1.3);
+    for (&h0_data, 0..) |*v, i| v.* = 0.2 * @cos(@as(f32, @floatFromInt(i)));
+    for (&c0_data, 0..) |*v, i| v.* = 0.3 * @sin(@as(f32, @floatFromInt(i)) + 1.0);
+    var loss_w: [seq * 2 * hidden]f32 = undefined;
+    for (&loss_w, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.17);
+
+    // The per-step composition over public ops: concat, dot, narrows, tanh,
+    // glu, add, tanh, glu; the same PyTorch equations, laid out as the op's
+    // h rows then c rows.
+    var composed: [seq * 2 * hidden]f32 = undefined;
+    {
+        var x = try Tensor(.{ .time, .k }).fromSlice(&ctx, .{ seq, in_size }, &x_data);
+        defer x.deinit();
+        var w = try Tensor(.{ .k, .unit }).fromSlice(&ctx, .{ in_size + hidden, width }, &w_data);
+        defer w.deinit();
+        var b = try Tensor(.{.unit}).fromSlice(&ctx, .{width}, &b_data);
+        defer b.deinit();
+        var h = try Tensor(.{.unit}).fromSlice(&ctx, .{hidden}, &h0_data);
+        defer h.deinit();
+        var c = try Tensor(.{.unit}).fromSlice(&ctx, .{hidden}, &c0_data);
+        defer c.deinit();
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        var h_cur = try h.withTags(&ctx, .{.unit});
+        var c_cur = try c.withTags(&ctx, .{.unit});
+        for (0..seq) |t| {
+            const x_t = try x.select(&ctx, .time, @intCast(t));
+            const h_k = try h_cur.withTags(&ctx, .{.k});
+            const xh = try x_t.concat(&ctx, .k, &.{&h_k});
+            const pre = try xh.dot(&ctx, &w, .k);
+            const gates = try pre.add(&ctx, &b);
+            const i_pre = try gates.narrow(&ctx, .unit, 0, hidden);
+            const f_pre = try gates.narrow(&ctx, .unit, hidden, hidden);
+            const g_pre = try gates.narrow(&ctx, .unit, 2 * hidden, hidden);
+            const o_pre = try gates.narrow(&ctx, .unit, 3 * hidden, hidden);
+            const g = try g_pre.tanh(&ctx);
+            const forget = try c_cur.glu(&ctx, &f_pre);
+            const write = try g.glu(&ctx, &i_pre);
+            c_cur = try forget.add(&ctx, &write);
+            const tc = try c_cur.tanh(&ctx);
+            h_cur = try tc.glu(&ctx, &o_pre);
+            try h_cur.copyTo(composed[t * hidden ..][0..hidden]);
+            try c_cur.copyTo(composed[(seq + t) * hidden ..][0..hidden]);
+        }
+    }
+
+    var xv = try Tensor(.{ .time, .k }).variableFromSlice(&ctx, .{ seq, in_size }, &x_data);
+    defer xv.deinit();
+    var wv = try Tensor(.{ .k, .unit }).variableFromSlice(&ctx, .{ in_size + hidden, width }, &w_data);
+    defer wv.deinit();
+    var bv = try Tensor(.{.unit}).variableFromSlice(&ctx, .{width}, &b_data);
+    defer bv.deinit();
+    var h0v = try Tensor(.{.unit}).variableFromSlice(&ctx, .{hidden}, &h0_data);
+    defer h0v.deinit();
+    var c0v = try Tensor(.{.unit}).variableFromSlice(&ctx, .{hidden}, &c0_data);
+    defer c0v.deinit();
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const out = try xv.lstm(&ctx, .time, .k, .unit, &wv, &bv, &h0v, &c0v);
+        try std.testing.expect(out.requiresGrad());
+        for (try out.dataConst(), composed) |got, want| try std.testing.expectApproxEqAbs(want, got, 2e-6);
+        var lw = try Tensor(.{ .time, .unit }).fromSlice(&ctx, .{ 2 * seq, hidden }, &loss_w);
+        defer lw.deinit();
+        const weighted = try out.mul(&ctx, &lw);
+        var loss = try weighted.sumAll(&ctx);
+        try loss.backward(&ctx);
+    }
+    const Fd = struct {
+        fn loss(alloc: std.mem.Allocator, xd: []const f32, wd: []const f32, bd: []const f32, hd: []const f32, cd: []const f32, lwd: []const f32) !f32 {
+            var fd_ctx: ExecContext = undefined;
+            fd_ctx.init(alloc);
+            defer fd_ctx.deinit();
+            var x = try Tensor(.{ .time, .k }).fromSlice(&fd_ctx, .{ seq, in_size }, xd);
+            defer x.deinit();
+            var w = try Tensor(.{ .k, .unit }).fromSlice(&fd_ctx, .{ in_size + hidden, width }, wd);
+            defer w.deinit();
+            var b = try Tensor(.{.unit}).fromSlice(&fd_ctx, .{width}, bd);
+            defer b.deinit();
+            var h0 = try Tensor(.{.unit}).fromSlice(&fd_ctx, .{hidden}, hd);
+            defer h0.deinit();
+            var c0 = try Tensor(.{.unit}).fromSlice(&fd_ctx, .{hidden}, cd);
+            defer c0.deinit();
+            var lw = try Tensor(.{ .time, .unit }).fromSlice(&fd_ctx, .{ 2 * seq, hidden }, lwd);
+            defer lw.deinit();
+            var out = try x.lstm(&fd_ctx, .time, .k, .unit, &w, &b, &h0, &c0);
+            defer out.deinit();
+            var weighted = try out.mul(&fd_ctx, &lw);
+            defer weighted.deinit();
+            var total = try weighted.sumAll(&fd_ctx);
+            defer total.deinit();
+            return total.item();
+        }
+    };
+    const eps: f32 = 1e-3;
+    inline for (.{ .{ &x_data, &xv }, .{ &w_data, &wv }, .{ &b_data, &bv }, .{ &h0_data, &h0v }, .{ &c0_data, &c0v } }) |case| {
+        var grad = (try case[1].grad(&ctx)).?;
+        defer grad.deinit();
+        const analytic = try grad.dataConst();
+        for (case[0], analytic) |*value, a| {
+            const original = value.*;
+            value.* = original + eps;
+            const plus = try Fd.loss(allocator, &x_data, &w_data, &b_data, &h0_data, &c0_data, &loss_w);
+            value.* = original - eps;
+            const minus = try Fd.loss(allocator, &x_data, &w_data, &b_data, &h0_data, &c0_data, &loss_w);
+            value.* = original;
+            const numeric = (plus - minus) / (2 * eps);
+            try std.testing.expect(@abs(numeric - a) <= 2e-2 * @max(1.0, @abs(a)));
+        }
+    }
+}

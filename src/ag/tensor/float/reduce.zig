@@ -30,6 +30,7 @@ const MaskedMinMaxBackward = backward_stats.MaskedMinMaxBackward;
 const CumsumBackward = backward_reduce.CumsumBackward;
 const SegmentSumBackward = backward_reduce.SegmentSumBackward;
 const LinearRecurrenceBackward = backward_reduce.LinearRecurrenceBackward;
+const LstmBackward = backward_reduce.LstmBackward;
 const ProdBackward = backward_reduce.ProdBackward;
 const CumprodBackward = backward_reduce.CumprodBackward;
 
@@ -320,6 +321,64 @@ pub fn Ops(comptime Self: type) type {
                 .h_value = saved_h,
                 .initial_value = saved_initial,
                 .decay_shape = rawShapeArray(Decay.axis_tags, decay_ptr.asRawTensor()),
+            });
+        }
+
+        /// The LSTM recurrence over a sequence, one op for the block:
+        /// `self` is `[T, in]` (`time_tag`, `in_tag`), `w` is the stacked
+        /// `[W_ih | W_hh]` transposed, `[in + H, 4H]` (`in_tag`, `unit_tag`),
+        /// `b` `[4H]`, `h0` and `c0` `[H]` (`unit_tag`); gates i, f, g, o
+        /// over `[x_t | h_{t-1}] · w + b`, `c_t = σ(f)·c_{t-1} + σ(i)·tanh(g)`,
+        /// `h_t = σ(o)·tanh(c_t)` (PyTorch's `nn.LSTM`). The result is
+        /// `[2T, H]` (`time_tag`, `unit_tag`): rows `0..T` are `h_t`, rows
+        /// `T..2T` are `c_t`, so the hidden sequence is the contiguous
+        /// `narrow(time_tag, 0, T)` and the state to carry is rows `T - 1`
+        /// and `2T - 1`. Serial along time. Differentiable in the input,
+        /// the weight, the bias and the initial state (one BPTT pass over
+        /// the saved gates).
+        pub fn lstm(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime time_tag: Tag,
+            comptime in_tag: Tag,
+            comptime unit_tag: Tag,
+            w: *const Tensor(.{ in_tag, unit_tag }),
+            b: *const Tensor(.{unit_tag}),
+            h0: *const Tensor(.{unit_tag}),
+            c0: *const Tensor(.{unit_tag}),
+        ) !Tensor(.{ time_tag, unit_tag }) {
+            comptime {
+                if (tag_rank != 2 or axis(time_tag) != 0 or axis(in_tag) != 1) {
+                    @compileError("lstm requires input storage order [time, in]");
+                }
+            }
+            var forward = try ctx.lstmSequence(self.asRawTensor(), w.asRawTensor(), b.asRawTensor(), h0.asRawTensor(), c0.asRawTensor());
+            errdefer forward.out.deinit();
+            errdefer forward.gates.deinit();
+            const wants_grad = self.requiresGrad() or w.requiresGrad() or b.requiresGrad() or h0.requiresGrad() or c0.requiresGrad();
+            if (!recordsGrad(wants_grad)) {
+                forward.gates.deinit();
+                return finishNoGrad(.{ time_tag, unit_tag }, ctx, forward.out);
+            }
+            const Record = LstmBackward(.{ time_tag, unit_tag });
+            var saved_x = try self.asRawTensor().cloneView();
+            errdefer saved_x.deinit();
+            var saved_w = try w.asRawTensor().cloneView();
+            errdefer saved_w.deinit();
+            var saved_out = try (&forward.out).cloneView();
+            errdefer saved_out.deinit();
+            var saved_h0 = try h0.asRawTensor().cloneView();
+            errdefer saved_h0.deinit();
+            var saved_c0 = try c0.asRawTensor().cloneView();
+            errdefer saved_c0.deinit();
+            return finishOp(.{ time_tag, unit_tag }, ctx, forward.out, Record{
+                .parents = .{ self.grad_state, w.grad_state, b.grad_state, h0.grad_state, c0.grad_state },
+                .x_value = saved_x,
+                .w_value = saved_w,
+                .gates_value = forward.gates,
+                .out_value = saved_out,
+                .h0_value = saved_h0,
+                .c0_value = saved_c0,
             });
         }
 

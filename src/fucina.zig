@@ -54,8 +54,9 @@ pub const streamconv = @import("streamconv.zig");
 /// train-time plumbing.
 pub const lora = @import("lora.zig");
 /// Recurrent layers over the facade: the LSTM cell and stack (`rnn.Lstm`)
-/// with one `step` for training and streaming, PyTorch semantics, and
-/// stacked-layout import/export views.
+/// on the `Tensor.lstm` sequence op, one call per layer and block for
+/// training and streaming, PyTorch semantics, and stacked-layout
+/// import/export views.
 pub const rnn = @import("rnn.zig");
 /// Optimizers (SGD/AdamW/Muon/APOLLO...) over parameter registries, with
 /// recorded-golden parity tests.

@@ -42,15 +42,19 @@ this point; earlier history is `git log`.
   are gone. Every architecture streams as fucina tensors on an
   `ExecContext` the engine owns; the cab IR is the core's FIR route.
   `fucina-nam bench --train-step <spec>` times a training step.
-- `fucina.rnn`: the LSTM over the facade. `LstmCell.step` is one
-  `[x | h | 1] · W` product plus the gate nonlinearities, written once for
-  both the recorded forward (`Lstm.forward` with burn-in and truncated
-  backpropagation through time under an exec scope) and the
-  allocation-free `Lstm.Stream`; PyTorch's gate order and equations, a
-  learnable initial state per layer, and `fromStacked` /
-  `stackedWeight` / `bias` views for PyTorch's stacked `[4H, in + H]`
-  layout. Gradients are checked against finite differences; streaming is
-  bitwise the windowed forward.
+- `Tensor.lstm`: the LSTM recurrence over a sequence in one op (`[T, in]`
+  through `w` `[in + H, 4H]`, `b`, `h0`, `c0` to `[2T, H]`, the hidden
+  rows then the cell rows, PyTorch's gate order and equations), serial inside the
+  kernel with the lane nonlinearities, differentiable in every operand
+  through one BPTT pass over the saved gates.
+- `fucina.rnn`: the LSTM over that op. `LstmCell.forward` runs a block
+  from a given state; `Lstm.forward` records a window (burn-in under
+  no-grad, truncated backpropagation through time as one op call per
+  segment); `Lstm.Stream.step` feeds blocks without gradients and carries
+  the last row as the next block's state; `fromStacked` / `stackedWeight`
+  convert PyTorch's stacked `[4H, in + H]` layout. Gradients are checked
+  against finite differences; streaming blocks are bitwise the windowed
+  forward.
 - The f32 `dot` lowering takes a comptime-resolved direct path for the
   plain 2-D case (`[m..., k]` against `[k, n...]` or `[n..., k]`, one
   contracted axis, no batch axis, contiguous operands, non-empty output):

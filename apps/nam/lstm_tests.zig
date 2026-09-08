@@ -102,23 +102,8 @@ fn collectGrads(allocator: std.mem.Allocator, ctx: *ExecContext, model: *lstm.Mo
     var out: std.ArrayList(f32) = .empty;
     errdefer out.deinit(allocator);
     for (model.lstm.cells) |*cell| {
-        const width = cell.input_size + cell.hidden;
-        var grad = try cell.w.grad(ctx);
-        if (grad) |*g| {
-            defer g.deinit();
-            var matrix = try g.narrow(ctx, .k, 0, width);
-            defer matrix.deinit();
-            var nam_order = try matrix.permuteTo(ctx, .{ .unit, .k });
-            defer nam_order.deinit();
-            try appendViewTo(allocator, &out, &nam_order);
-            var bias_row = try g.narrow(ctx, .k, width, 1);
-            defer bias_row.deinit();
-            try appendViewTo(allocator, &out, &bias_row);
-        } else {
-            const start = out.items.len;
-            try out.resize(allocator, start + (width + 1) * 4 * cell.hidden);
-            @memset(out.items[start..], 0);
-        }
+        try appendGrad(allocator, ctx, &out, &cell.w, .{ .unit, .k });
+        try appendGrad(allocator, ctx, &out, &cell.b, .{.unit});
         try appendGrad(allocator, ctx, &out, &cell.h0, .{.unit});
         try appendGrad(allocator, ctx, &out, &cell.c0, .{.unit});
     }

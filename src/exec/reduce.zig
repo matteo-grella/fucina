@@ -984,3 +984,125 @@ pub fn segmentBroadcast(
     }
     return out;
 }
+
+/// The LSTM recurrence over a sequence (`kernels.lstmSequenceInto`):
+/// `x` `[T, in]`, `w` `[in + H, 4H]`, `b` `[4H]`, `h0`/`c0` `[H]`; returns
+/// the output `[2T, H]` (rows `0..T` are `h_t`, rows `T..2T` are `c_t`)
+/// and the post-activation gates `[T, 4H]` the backward reads. Serial
+/// along time.
+pub const LstmForward = struct {
+    out: Tensor,
+    gates: Tensor,
+};
+
+pub fn lstmSequence(ctx: *ExecContext, x: *const Tensor, w: *const Tensor, b: *const Tensor, h0: *const Tensor, c0: *const Tensor) !LstmForward {
+    const x_view = try x.rankView(2);
+    const w_view = try w.rankView(2);
+    const seq = x_view.shape[0];
+    const in_size = x_view.shape[1];
+    const width = w_view.shape[1];
+    const hidden = width / 4;
+    if (hidden == 0 or width != 4 * hidden or w_view.shape[0] != in_size + hidden) return tensor.TensorError.ShapeMismatch;
+    if (b.len() != width or h0.len() != hidden or c0.len() != hidden) return tensor.TensorError.ShapeMismatch;
+
+    var xx = try ctx.prepareContiguous(.f32, x);
+    defer xx.deinit();
+    var ww = try ctx.prepareContiguous(.f32, w);
+    defer ww.deinit();
+    var bb = try ctx.prepareContiguous(.f32, b);
+    defer bb.deinit();
+    var hh = try ctx.prepareContiguous(.f32, h0);
+    defer hh.deinit();
+    var cc = try ctx.prepareContiguous(.f32, c0);
+    defer cc.deinit();
+
+    var out = try ctx.empty(.f32, .{ 2 * seq, hidden });
+    errdefer out.deinit();
+    var gates = try ctx.empty(.f32, .{ seq, width });
+    errdefer gates.deinit();
+    kernels.lstmSequenceInto(&out, &gates, xx.tensor(), ww.tensor(), bb.tensor(), hh.tensor(), cc.tensor(), seq, in_size, hidden);
+    return .{ .out = out, .gates = gates };
+}
+
+pub const LstmGrads = struct {
+    gx: ?Tensor,
+    gw: ?Tensor,
+    gb: ?Tensor,
+    gh0: ?Tensor,
+    gc0: ?Tensor,
+
+    pub fn deinit(self: *LstmGrads) void {
+        if (self.gx) |*t| t.deinit();
+        if (self.gw) |*t| t.deinit();
+        if (self.gb) |*t| t.deinit();
+        if (self.gh0) |*t| t.deinit();
+        if (self.gc0) |*t| t.deinit();
+        self.* = undefined;
+    }
+};
+
+/// BPTT for `lstmSequence`: `gy` `[2T, H]` against the forward's operands,
+/// output and gates; each gradient is produced only when its `want` flag
+/// is set.
+pub fn lstmSequenceBackward(
+    ctx: *ExecContext,
+    gy: *const Tensor,
+    x: *const Tensor,
+    w: *const Tensor,
+    gates: *const Tensor,
+    out: *const Tensor,
+    h0: *const Tensor,
+    c0: *const Tensor,
+    want: [5]bool,
+) !LstmGrads {
+    const x_view = try x.rankView(2);
+    const w_view = try w.rankView(2);
+    const seq = x_view.shape[0];
+    const in_size = x_view.shape[1];
+    const width = w_view.shape[1];
+    const hidden = width / 4;
+
+    var gg = try ctx.prepareContiguous(.f32, gy);
+    defer gg.deinit();
+    var xx = try ctx.prepareContiguous(.f32, x);
+    defer xx.deinit();
+    var ww = try ctx.prepareContiguous(.f32, w);
+    defer ww.deinit();
+    var gt = try ctx.prepareContiguous(.f32, gates);
+    defer gt.deinit();
+    var oo = try ctx.prepareContiguous(.f32, out);
+    defer oo.deinit();
+    var hh = try ctx.prepareContiguous(.f32, h0);
+    defer hh.deinit();
+    var cc = try ctx.prepareContiguous(.f32, c0);
+    defer cc.deinit();
+
+    var grads = LstmGrads{ .gx = null, .gw = null, .gb = null, .gh0 = null, .gc0 = null };
+    errdefer grads.deinit();
+    if (want[0]) grads.gx = try ctx.empty(.f32, .{ seq, in_size });
+    if (want[1]) grads.gw = try ctx.empty(.f32, .{ in_size + hidden, width });
+    if (want[2]) grads.gb = try ctx.empty(.f32, .{width});
+    if (want[3]) grads.gh0 = try ctx.empty(.f32, .{hidden});
+    if (want[4]) grads.gc0 = try ctx.empty(.f32, .{hidden});
+    const scratch = try ctx.allocator().alloc(f32, width + 5 * hidden);
+    defer ctx.allocator().free(scratch);
+    kernels.lstmSequenceBackwardInto(
+        if (grads.gx) |*t| t else null,
+        if (grads.gw) |*t| t else null,
+        if (grads.gb) |*t| t else null,
+        if (grads.gh0) |*t| t else null,
+        if (grads.gc0) |*t| t else null,
+        gg.tensor(),
+        xx.tensor(),
+        ww.tensor(),
+        gt.tensor(),
+        oo.tensor(),
+        hh.tensor(),
+        cc.tensor(),
+        seq,
+        in_size,
+        hidden,
+        scratch,
+    );
+    return grads;
+}

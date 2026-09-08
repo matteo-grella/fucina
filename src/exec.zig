@@ -103,6 +103,8 @@ pub const AttentionBackwardRequest = exec_attention.AttentionBackwardRequest;
 /// Masked-mean forward result: the per-lane means plus the per-lane counts of
 /// selected elements (the mean's divisor, which the VJP reuses).
 pub const MaskedMeanResult = exec_reduce.MaskedMeanResult;
+pub const LstmForward = exec_reduce.LstmForward;
+pub const LstmGrads = exec_reduce.LstmGrads;
 pub const AffineOptions = exec_norm.AffineOptions;
 pub const AffineSlices = exec_norm.AffineSlices;
 pub const AffineBackwardOptions = exec_norm.AffineBackwardOptions;
@@ -371,6 +373,8 @@ pub const ExecContext = struct {
     pub const segmentBroadcast = exec_reduce.segmentBroadcast;
     pub const linearRecurrence = exec_reduce.linearRecurrence;
     pub const linearRecurrenceBackward = exec_reduce.linearRecurrenceBackward;
+    pub const lstmSequence = exec_reduce.lstmSequence;
+    pub const lstmSequenceBackward = exec_reduce.lstmSequenceBackward;
     pub const meanAxis = exec_reduce.meanAxis;
     pub const sumMasked = exec_reduce.sumMasked;
     pub const meanMasked = exec_reduce.meanMasked;
