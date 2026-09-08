@@ -380,6 +380,39 @@ fn einsumLower(
     const l_tags = comptime removeTags(left_tags, left_summed);
     const r_tags = comptime removeTags(right_tags, right_summed);
 
+    // The plain 2-D case, resolved at comptime: a `[m..., k]` left against
+    // a `[k, n...]` or `[n..., k]` right, one contracted axis, no batch
+    // axis, nothing summed away, a non-empty output `[m..., n...]` (the
+    // empty output is the full dot product, which keeps its rank-1 dot
+    // kernel). When both operands are contiguous this IS the 2-D matmul
+    // kernel call, in the orientation the probe below would pick, so it
+    // skips the probe's view plumbing and produces the same bits (a
+    // 1 x 96 x 26 vector-matrix product: ~200 ns of views and reshapes on a
+    // ~100 ns kernel).
+    if (comptime tensor_dtype == .f32 and policy == .probe_orientation and out_tags.len != 0 and left_summed.len == 0 and right_summed.len == 0) {
+        const batch = comptime einsumPartTags(left_tags, right_tags, out_tags, .batch);
+        const contracted = comptime einsumPartTags(left_tags, right_tags, out_tags, .contract);
+        const lf = comptime einsumPartTags(left_tags, right_tags, out_tags, .left_free);
+        const rf = comptime einsumPartTags(left_tags, right_tags, out_tags, .right_free);
+        if (comptime batch.len == 0 and contracted.len == 1 and tagsEqual(out_tags, lf ++ rf) and tagsEqual(left_tags, lf ++ contracted)) {
+            const right_plain = comptime tagsEqual(right_tags, contracted ++ rf);
+            const right_trans = comptime tagsEqual(right_tags, rf ++ contracted);
+            if (comptime right_plain or right_trans) {
+                if (left.isContiguous() and right.isContiguous()) {
+                    const m = productRange(.f32, left, 0, lf.len);
+                    const k = left.shape.at(lf.len);
+                    const n = if (comptime right_plain) productRange(.f32, right, 1, rf.len) else productRange(.f32, right, 0, rf.len);
+                    var xm = try left.reshape(&.{ m, k });
+                    defer xm.deinit();
+                    var ym = if (comptime right_plain) try right.reshape(&.{ k, n }) else try right.reshape(&.{ n, k });
+                    defer ym.deinit();
+                    const product = if (comptime right_plain) try ctx.matmul(.f32, .plain, &xm, &ym) else try ctx.matmul(.f32, .trans_b, &xm, &ym);
+                    return contractFinish(.f32, product, result_shape[0..]);
+                }
+            }
+        }
+    }
+
     var l_val = if (comptime tensor_dtype == .f32) try sumManyTensor(left_tags, left, ctx, left_summed) else try left.cloneView();
     defer l_val.deinit();
     var r_val = if (comptime tensor_dtype == .f32) try sumManyTensor(right_tags, right, ctx, right_summed) else try right.cloneView();
