@@ -144,7 +144,7 @@ fn lossFromStream(allocator: std.mem.Allocator, ctx: *ExecContext, config: *cons
 fn collectGrads(allocator: std.mem.Allocator, ctx: *ExecContext, model: *lstm.Model) ![]f32 {
     var out: std.ArrayList(f32) = .empty;
     errdefer out.deinit(allocator);
-    for (model.cells) |*cell| {
+    for (model.lstm.cells) |*cell| {
         const width = cell.input_size + cell.hidden;
         var grad = try cell.w.grad(ctx);
         if (grad) |*g| {
@@ -278,13 +278,13 @@ test "lstm burn-in cuts the initial-state gradient and truncation keeps the forw
     // Detaching between segments changes gradients, never values.
     try std.testing.expectEqual(loss_full, loss_truncated);
     // The burn-in ran without gradient, so the learned initial state gets none.
-    var h0_grad = try full.cells[0].h0.grad(&ctx);
+    var h0_grad = try full.lstm.cells[0].h0.grad(&ctx);
     try std.testing.expect(h0_grad == null);
-    var c0_grad = try full.cells[0].c0.grad(&ctx);
+    var c0_grad = try full.lstm.cells[0].c0.grad(&ctx);
     try std.testing.expect(c0_grad == null);
-    var w_grad = (try full.cells[0].w.grad(&ctx)).?;
+    var w_grad = (try full.lstm.cells[0].w.grad(&ctx)).?;
     defer w_grad.deinit();
-    var w_grad_t = (try truncated.cells[0].w.grad(&ctx)).?;
+    var w_grad_t = (try truncated.lstm.cells[0].w.grad(&ctx)).?;
     defer w_grad_t.deinit();
     var any_nonzero = false;
     for (try w_grad.dataConst(), try w_grad_t.dataConst()) |g, gt| {
