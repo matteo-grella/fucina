@@ -802,3 +802,68 @@ test "tagged autograd snake matches finite differences for input alpha and inv_b
     try fdCheckGrad(a_vals, ga.asRawTensor().dataConst(), 1e-2, 1e-2, fd_ctx, snakeFdLoss);
     try fdCheckGrad(ib_vals, gib.asRawTensor().dataConst(), 1e-2, 1e-2, fd_ctx, snakeFdLoss);
 }
+
+test "public Tensor causalConv1dStreaming: chunked stream with bias is bitwise the whole-signal conv" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    const streamconv = @import("../../streamconv.zig");
+
+    const seq = 40;
+    var x_data: [seq * 2]f32 = undefined;
+    for (&x_data, 0..) |*v, idx| v.* = @sin(@as(f32, @floatFromInt(idx)) * 0.29) + 0.05;
+    var w_data: [3 * 2 * 3]f32 = undefined;
+    for (&w_data, 0..) |*v, idx| v.* = 0.3 * @cos(@as(f32, @floatFromInt(idx)) * 0.41);
+    const bias = [_]f32{ 0.1, -0.2, 0.3 };
+
+    var x = try Tensor(.{ .time, .in }).fromSlice(&ctx, .{ seq, 2 }, &x_data);
+    defer x.deinit();
+    var w = try Tensor(.{ .tap, .in, .out }).fromSlice(&ctx, .{ 3, 2, 3 }, &w_data);
+    defer w.deinit();
+    var whole = try x.causalConv1d(&ctx, .time, .in, .tap, .out, &w, 2, null);
+    defer whole.deinit();
+    try whole.addAxisVectorInPlace(&ctx, &bias, .out);
+
+    var state = try streamconv.CausalState.init(allocator, 2, 3, 2, 16);
+    defer state.deinit();
+    var got: [seq * 3]f32 = undefined;
+    var offset: usize = 0;
+    for ([_]usize{ 7, 13, 20 }) |n| {
+        var chunk = try x.narrow(&ctx, .time, offset, n);
+        defer chunk.deinit();
+        var y = try chunk.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &w, &bias, 2, &state);
+        defer y.deinit();
+        try y.copyTo(got[offset * 3 ..][0 .. n * 3]);
+        offset += n;
+    }
+    try std.testing.expectEqualSlices(f32, try whole.dataConst(), &got);
+
+    // Grouped: 4 -> 4 in two groups, weight [tap, 2, 4], no bias.
+    var gx = try Tensor(.{ .time, .in }).fromSlice(&ctx, .{ seq / 2, 4 }, &x_data);
+    defer gx.deinit();
+    var gw = try Tensor(.{ .tap, .in_group, .out }).fromSlice(&ctx, .{ 2, 2, 4 }, w_data[0..16]);
+    defer gw.deinit();
+    var g_whole = try gx.groupedCausalConv1d(&ctx, .time, .in, .tap, .in_group, .out, &gw, 1, 2, null);
+    defer g_whole.deinit();
+    var g_state = try streamconv.CausalState.init(allocator, 4, 2, 1, 8);
+    defer g_state.deinit();
+    var g_got: [seq / 2 * 4]f32 = undefined;
+    offset = 0;
+    for ([_]usize{ 5, 9, 6 }) |n| {
+        var chunk = try gx.narrow(&ctx, .time, offset, n);
+        defer chunk.deinit();
+        var y = try chunk.groupedCausalConv1dStreaming(&ctx, .time, .in, .tap, .in_group, .out, &gw, null, 1, 2, &g_state);
+        defer y.deinit();
+        try y.copyTo(g_got[offset * 4 ..][0 .. n * 4]);
+        offset += n;
+    }
+    try std.testing.expectEqualSlices(f32, try g_whole.dataConst(), &g_got);
+
+    // The streaming spelling is inference-only.
+    var xv = try Tensor(.{ .time, .in }).variable(&ctx, try ctx.fromSlice(.f32, &.{ seq, 2 }, &x_data));
+    defer xv.deinit();
+    try std.testing.expectError(error.UnsupportedGradient, xv.causalConv1dStreaming(&ctx, .time, .in, .tap, .out, &w, &bias, 2, &state));
+}

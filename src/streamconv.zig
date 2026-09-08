@@ -261,3 +261,107 @@ test "streaming transposed conv chunked == whole-signal (bias-corrected OLA)" {
     }
     for (ref, got) |r, g| try std.testing.expectApproxEqAbs(r, g, 1e-5);
 }
+
+/// The causal left context of a time-major streaming conv: the
+/// `dilation·(taps−1)` input rows preceding the next chunk, oldest first,
+/// row-major `[row, in]` — the `state` the `causalConv1d` family reads.
+/// `advance` carries a chunk's tail forward, so a stream fed chunk by chunk
+/// through `causalConv1dStreaming` with one of these is bit-identical to
+/// the whole signal through `causalConv1d`.
+///
+/// Kept as a ring: the context is a window into a buffer of
+/// `pad + max(pad, chunk_hint)` rows that advances by appending only the
+/// `min(pad, frames)` rows a later chunk can still see, rewinding (one
+/// `pad`-row move) when it reaches the end. A shift-down history copies
+/// `pad` rows per chunk instead, which at a 512-dilated 16-channel layer
+/// is 64 KB per 64-frame block.
+pub const CausalState = struct {
+    rows: []f32,
+    in_channels: usize,
+    pad: usize,
+    /// Rows written so far in the ring; the context is the `pad` rows
+    /// before it.
+    write_pos: usize,
+    allocator: Allocator,
+
+    /// `chunk_hint` is the chunk length the ring is sized for (rewinds
+    /// happen about every `max(pad, chunk_hint) / min(pad, frames)`
+    /// chunks); any chunk length stays correct.
+    pub fn init(allocator: Allocator, in_channels: usize, taps: usize, dilation: usize, chunk_hint: usize) !CausalState {
+        if (in_channels == 0 or taps == 0 or dilation == 0) return error.InvalidShape;
+        const pad = dilation * (taps - 1);
+        const capacity = if (pad == 0) 0 else pad + @max(pad, chunk_hint);
+        const rows = try allocator.alloc(f32, capacity * in_channels);
+        @memset(rows, 0);
+        return .{ .rows = rows, .in_channels = in_channels, .pad = pad, .write_pos = pad, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *CausalState) void {
+        self.allocator.free(self.rows);
+        self.* = undefined;
+    }
+
+    /// Forget the stream: the next chunk sees zeros before it.
+    pub fn reset(self: *CausalState) void {
+        @memset(self.rows[0 .. self.pad * self.in_channels], 0);
+        self.write_pos = self.pad;
+    }
+
+    /// The context rows as the conv family's `state` argument; `null` for
+    /// a conv without memory (`taps == 1`).
+    pub fn slice(self: *const CausalState) ?[]const f32 {
+        if (self.pad == 0) return null;
+        const in_ch = self.in_channels;
+        return self.rows[(self.write_pos - self.pad) * in_ch ..][0 .. self.pad * in_ch];
+    }
+
+    /// Carry `input` (`[frames, in]` row-major) forward: the last
+    /// `min(pad, frames)` rows are appended to the ring (only those can
+    /// still be read); when they do not fit, the current context first
+    /// moves to the front.
+    pub fn advance(self: *CausalState, input: []const f32) void {
+        const in_ch = self.in_channels;
+        const pad = self.pad;
+        if (pad == 0) return;
+        const frames = input.len / in_ch;
+        if (frames >= pad) {
+            // The chunk covers the whole context: it is the context, written
+            // once at the front (no rewind copy).
+            @memcpy(self.rows[0 .. pad * in_ch], input[(frames - pad) * in_ch ..][0 .. pad * in_ch]);
+            self.write_pos = pad;
+            return;
+        }
+        const take = frames;
+        const capacity = self.rows.len / in_ch;
+        if (self.write_pos + take > capacity) {
+            std.mem.copyForwards(f32, self.rows[0 .. pad * in_ch], self.rows[(self.write_pos - pad) * in_ch ..][0 .. pad * in_ch]);
+            self.write_pos = pad;
+        }
+        @memcpy(self.rows[self.write_pos * in_ch ..][0 .. take * in_ch], input[(frames - take) * in_ch ..][0 .. take * in_ch]);
+        self.write_pos += take;
+    }
+};
+
+test "causal state carries the last rows of every chunk, oldest first, across rewinds" {
+    var state = try CausalState.init(std.testing.allocator, 2, 3, 2, 3); // pad = 4 rows, ring = 8 rows
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 8), state.slice().?.len);
+    try std.testing.expectEqualSlices(f32, &[_]f32{0} ** 8, state.slice().?);
+    // Longer than the context: only the last four rows are kept.
+    state.advance(&.{ 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6 });
+    try std.testing.expectEqualSlices(f32, &.{ 3, 3, 4, 4, 5, 5, 6, 6 }, state.slice().?);
+    // Shorter chunks append; the ring rewinds when they no longer fit.
+    state.advance(&.{ 7, 7 });
+    try std.testing.expectEqualSlices(f32, &.{ 4, 4, 5, 5, 6, 6, 7, 7 }, state.slice().?);
+    state.advance(&.{ 8, 8, 9, 9, 10, 10 });
+    try std.testing.expectEqualSlices(f32, &.{ 7, 7, 8, 8, 9, 9, 10, 10 }, state.slice().?);
+    state.advance(&.{ 11, 11 });
+    try std.testing.expectEqualSlices(f32, &.{ 8, 8, 9, 9, 10, 10, 11, 11 }, state.slice().?);
+    state.reset();
+    try std.testing.expectEqualSlices(f32, &[_]f32{0} ** 8, state.slice().?);
+
+    var memoryless = try CausalState.init(std.testing.allocator, 3, 1, 1, 64);
+    defer memoryless.deinit();
+    try std.testing.expect(memoryless.slice() == null);
+    memoryless.advance(&.{ 1, 2, 3 });
+}

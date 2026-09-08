@@ -7,6 +7,7 @@ const core = @import("../../core.zig");
 const AgError = core.AgError;
 const tags_mod = @import("../../../tags.zig");
 const backward_conv = @import("../../backward/conv.zig");
+const streamconv = @import("../../../streamconv.zig");
 
 const RawTensor = tensor_mod.Tensor;
 const ExecContext = exec_mod.ExecContext;
@@ -395,6 +396,72 @@ pub fn Ops(comptime Self: type) type {
                 .weight_value = saved_weight,
                 .state = owned_state,
             });
+        }
+
+        /// `causalConv1d` over a stream, the inference spelling: `state` (a
+        /// `fucina.streamconv.CausalState` for `in`, `taps`, `dilation`) is
+        /// the left context and is advanced past `self`'s rows afterwards,
+        /// and `bias` (`[out]`) is added in the kernel epilogue — one call
+        /// per chunk, no separate bias pass, no caller-side history. A
+        /// stream fed chunk by chunk is bit-identical to the whole signal
+        /// through `causalConv1d`. No-grad only (`UnsupportedGradient` when
+        /// `self` or `weight` requires grad); training keeps `causalConv1d`
+        /// plus broadcast `add`.
+        pub fn causalConv1dStreaming(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime time_tag: Tag,
+            comptime in_tag: Tag,
+            comptime tap_tag: Tag,
+            comptime out_tag: Tag,
+            weight: *const Tensor(.{ tap_tag, in_tag, out_tag }),
+            bias: ?[]const f32,
+            dilation: usize,
+            state: *streamconv.CausalState,
+        ) !Tensor(.{ time_tag, out_tag }) {
+            const time_axis = comptime axis(time_tag);
+            const channel_axis = comptime axis(in_tag);
+            comptime {
+                if (tag_rank != 2) @compileError("causalConv1dStreaming requires a rank-2 input");
+                if (time_axis != 0 or channel_axis != 1) {
+                    @compileError("causalConv1dStreaming requires input storage order [time, in]");
+                }
+            }
+            if (self.requiresGrad() or weight.requiresGrad()) return AgError.UnsupportedGradient;
+            var value = try ctx.groupedCausalConv1dStreaming(tag_rank, self.asRawTensor(), weight.asRawTensor(), bias, time_axis, channel_axis, dilation, 1, state);
+            errdefer value.deinit();
+            return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
+        }
+
+        /// The grouped form of `causalConv1dStreaming`: weight
+        /// `[tap, in_per_group, out]`, output channel `o` reads the input
+        /// group `o / (out / groups)`.
+        pub fn groupedCausalConv1dStreaming(
+            self: *const Self,
+            ctx: *ExecContext,
+            comptime time_tag: Tag,
+            comptime in_tag: Tag,
+            comptime tap_tag: Tag,
+            comptime in_per_group_tag: Tag,
+            comptime out_tag: Tag,
+            weight: *const Tensor(.{ tap_tag, in_per_group_tag, out_tag }),
+            bias: ?[]const f32,
+            dilation: usize,
+            groups: usize,
+            state: *streamconv.CausalState,
+        ) !Tensor(.{ time_tag, out_tag }) {
+            const time_axis = comptime axis(time_tag);
+            const channel_axis = comptime axis(in_tag);
+            comptime {
+                if (tag_rank != 2) @compileError("groupedCausalConv1dStreaming requires a rank-2 input");
+                if (time_axis != 0 or channel_axis != 1) {
+                    @compileError("groupedCausalConv1dStreaming requires input storage order [time, in]");
+                }
+            }
+            if (self.requiresGrad() or weight.requiresGrad()) return AgError.UnsupportedGradient;
+            var value = try ctx.groupedCausalConv1dStreaming(tag_rank, self.asRawTensor(), weight.asRawTensor(), bias, time_axis, channel_axis, dilation, groups, state);
+            errdefer value.deinit();
+            return finishNoGrad(.{ time_tag, out_tag }, ctx, value);
         }
 
         /// General 1-D convolution (PyTorch Conv1d semantics — standard

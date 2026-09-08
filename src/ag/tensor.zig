@@ -526,6 +526,7 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const data = common.data;
         pub const dataConst = common.dataConst;
         pub const copyTo = common.copyTo;
+        pub const copyFrom = common.copyFrom;
         pub const requiresGrad = common.requiresGrad;
         pub const axis = common.axis;
         pub const hasTag = common.hasTag;
@@ -739,6 +740,8 @@ fn FloatTensor(comptime tags: anytype) type {
         pub const causalDepthwiseConv1d = conv_ops.causalDepthwiseConv1d;
         pub const causalConv1d = conv_ops.causalConv1d;
         pub const groupedCausalConv1d = conv_ops.groupedCausalConv1d;
+        pub const causalConv1dStreaming = conv_ops.causalConv1dStreaming;
+        pub const groupedCausalConv1dStreaming = conv_ops.groupedCausalConv1dStreaming;
         pub const conv1d = conv_ops.conv1d;
         pub const convTranspose1d = conv_ops.convTranspose1d;
 
@@ -957,6 +960,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const data = common.data;
         pub const dataConst = common.dataConst;
         pub const copyTo = common.copyTo;
+        pub const copyFrom = common.copyFrom;
         pub const requiresGrad = common.requiresGrad;
         pub const axis = common.axis;
         pub const hasTag = common.hasTag;
@@ -1226,6 +1230,7 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         pub const data = common.data;
         pub const dataConst = common.dataConst;
         pub const copyTo = common.copyTo;
+        pub const copyFrom = common.copyFrom;
         pub const requiresGrad = common.requiresGrad;
         pub const axis = common.axis;
         pub const hasTag = common.hasTag;
@@ -1386,6 +1391,7 @@ fn QuantizedTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         pub const data = common.data;
         pub const dataConst = common.dataConst;
         pub const copyTo = common.copyTo;
+        pub const copyFrom = common.copyFrom;
         pub const requiresGrad = common.requiresGrad;
         pub const axis = common.axis;
         pub const hasTag = common.hasTag;

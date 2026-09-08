@@ -46,7 +46,9 @@ pub const weights = @import("weights.zig");
 pub const ptqtp_gguf = @import("ptqtp_gguf.zig");
 /// GGUF metadata readers + parallel layer loading shared by model loaders.
 pub const gguf_meta = @import("gguf_meta.zig");
-/// Streaming causal 1-D convolutions (codec-decoder state discipline).
+/// Streaming causal 1-D convolutions: the channel-major codec-decoder
+/// pair (`StreamingConv1d`, `StreamingConvTranspose1d`) and the
+/// time-major `CausalState` ring that `causalConv1dStreaming` carries.
 pub const streamconv = @import("streamconv.zig");
 /// LoRA adapters: low-rank deltas over `weights.LinearWeight` plus their
 /// train-time plumbing.
