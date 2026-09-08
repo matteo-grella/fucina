@@ -32,6 +32,17 @@ this point; earlier history is `git log`.
   bit-identical to the whole-signal `causalConv1d` plus bias. No-grad only.
 - `Tensor.copyFrom(src)`: the mirror of `copyTo`, host data into a
   persistent contiguous no-grad tensor without a new storage header.
+- The f32 `dot` lowering takes a comptime-resolved direct path for the
+  plain 2-D case (`[m..., k]` against `[k, n...]` or `[n..., k]`, one
+  contracted axis, no batch axis, contiguous operands, non-empty output):
+  the 2-D matmul kernel call in the orientation the probe would choose,
+  without the probe's views and reshapes. Same kernel, same bits; a
+  `[26]` by `[26, 96]` product 484 → 192 ns on M1 Max.
+- The f32 GEMM row kernel unrolls a single row over eight column vectors
+  (four on 8-lane AVX2) instead of one: the p-loop was one latency-bound
+  fused multiply-add chain per vector. Same per-element order; a
+  1 x 96 x 26 vector-matrix product 238 → 92 ns on M1 Max, and every
+  m = 1 GEMM (the per-token and per-sample recurrences) takes it.
 - The channel-mixing causal conv forward kernel is register-tiled over
   eight frames with the (tap, in-channel) walk blocked in cache-resident
   slabs (bitwise independent of tiling, blocking and row split), and the

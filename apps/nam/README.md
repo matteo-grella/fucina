@@ -173,7 +173,10 @@ known; the last 9 s become the validation split).
 
 Training defaults to the classic "standard" WaveNet (13,802 weights), matching the upstream
 Python full config. `--spec a2`/`--spec a2-standard` selects the C++ reference A2-standard
-shape (8 channels); `--spec a2-nano` selects the 3-channel A2-nano shape. `--spec packed`
+shape (8 channels); `--spec a2-nano` selects the 3-channel A2-nano shape. `--spec lstm`
+trains the upstream LSTM (hidden 24, one layer, learned initial state, 4096-sample
+burn-in without gradient, 512-step truncated backpropagation) and exports
+`"architecture": "LSTM"`. `--spec packed`
 selects the current upstream PackedWaveNet easy-mode recipe: channels-3 and channels-8 A2
 submodels, summed submodel losses, MRSTFT weight 0.0005, Adam weight decay 3.17e-7,
 gamma=0.994, 100 default epochs, and `SlimmableContainer` export. `--init model.nam`
