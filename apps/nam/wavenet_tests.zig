@@ -577,3 +577,86 @@ test "wavenet: the upstream max fixture round-trips and streams as it records, w
     try runStream(allocator, &file_model.config.wavenet, file_model.weights, &input, &streamed, 64);
     try std.testing.expectEqualSlices(f32, &recorded, &streamed);
 }
+
+// ---------------------------------------------------------------------------
+// Per-channel PReLU: the slope tensor built once at load, the activation
+// against a hand computation, the refusals, and both regimes through a
+// model that carries it in a layer and in the post head.
+// ---------------------------------------------------------------------------
+
+test "wavenet: per-channel PReLU slopes apply per channel and refuse a missing or mismatched tensor" {
+    const allocator = std.testing.allocator;
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+    const slopes = [_]f32{ 0.1, 0.5, -0.25 };
+    const act = Activation{ .kind = .prelu, .negative_slopes = &slopes };
+    var slope_tensor = (try wavenet.preluSlopes(&ctx, &act, 6)).?;
+    defer slope_tensor.deinit();
+    // The upstream list cycles over the channels.
+    try std.testing.expectEqualSlices(f32, &.{ 0.1, 0.5, -0.25, 0.1, 0.5, -0.25 }, try slope_tensor.dataConst());
+
+    const values = [_]f32{ 1.0, -1.0, -2.0, 0.5, -0.5, -4.0, -1.0, 2.0, 3.0, -3.0, 0.0, -0.1 };
+    var x = try wavenet.TimeOut.fromSlice(&ctx, .{ 2, 6 }, &values);
+    defer x.deinit();
+    var y = try wavenet.activate(&ctx, &act, &x, false, &slope_tensor);
+    defer y.deinit();
+    var expected: [12]f32 = undefined;
+    for (values, 0..) |v, i| expected[i] = if (v >= 0) v else v * slopes[(i % 6) % 3];
+    try std.testing.expectEqualSlices(f32, &expected, try y.dataConst());
+
+    // A single slope needs no tensor.
+    const scalar_act = Activation{ .kind = .prelu, .negative_slope = 0.2 };
+    try std.testing.expect((try wavenet.preluSlopes(&ctx, &scalar_act, 6)) == null);
+    var y_scalar = try wavenet.activate(&ctx, &scalar_act, &x, false, null);
+    defer y_scalar.deinit();
+    for (values, try y_scalar.dataConst()) |v, got| try std.testing.expectEqual(if (v >= 0) v else v * 0.2, got);
+
+    // Per-channel slopes without their tensor, or with one of another width, are refused.
+    try std.testing.expectError(error.PreluSlopesMissing, wavenet.activate(&ctx, &act, &x, false, null));
+    var narrow_slopes = (try wavenet.preluSlopes(&ctx, &act, 3)).?;
+    defer narrow_slopes.deinit();
+    try std.testing.expectError(error.PreluWidthMismatch, wavenet.activate(&ctx, &act, &x, false, &narrow_slopes));
+}
+
+test "wavenet: a per-channel PReLU model records and streams alike" {
+    const allocator = std.testing.allocator;
+    const slopes = [_]f32{ 0.05, 0.3, -0.1 };
+    const dilations = [_]usize{ 1, 2 };
+    const kernels = [_]usize{ 3, 2 };
+    const acts = [_]Activation{ .{ .kind = .prelu, .negative_slopes = &slopes }, .{ .kind = .prelu, .negative_slopes = &slopes } };
+    const secondary = [_]Activation{ .{ .kind = .prelu, .negative_slopes = &slopes }, .{ .kind = .sigmoid } };
+    const gates = [_]nam_file.GatingMode{ .gated, .none };
+    const layers = [_]nam_file.WaveNetLayerArray{.{
+        .input_size = 1,
+        .condition_size = 1,
+        .channels = 4,
+        .bottleneck = 4,
+        .head_out = 2,
+        .head_kernel = 1,
+        .head_bias = true,
+        .dilations = &dilations,
+        .kernel_sizes = &kernels,
+        .activations = &acts,
+        .gating_modes = &gates,
+        .secondary_activations = &secondary,
+        .layer1x1_active = true,
+        .layer1x1_groups = 1,
+        .head1x1_active = false,
+        .head1x1_out = 4,
+        .head1x1_groups = 1,
+        .groups_input = 1,
+        .groups_input_mixin = 1,
+    }};
+    const post_kernels = [_]usize{ 2, 1 };
+    const config = nam_file.WaveNetConfig{
+        .layers = &layers,
+        .head = .{ .channels = 3, .out_channels = 1, .kernel_sizes = &post_kernels, .activation = .{ .kind = .prelu, .negative_slopes = &slopes } },
+        .head_scale = 0.5,
+        .in_channels = 1,
+        .condition_dsp = null,
+    };
+    const weights = try wavenet.syntheticWeights(allocator, &config, 29, 0.6);
+    defer allocator.free(weights);
+    try expectTwoRegimes(&config, weights, 500);
+}

@@ -5,9 +5,10 @@
 //! ConvNet: blocks of Conv1D(k=2, dilated) + folded BatchNorm + activation,
 //! then a 1x1 head with bias and no activation. The batchnorm fold
 //! (`y·scale[c] + loc[c]`, scale and loc in f64 as convnet.cpp:14-37 does)
-//! goes into the block's conv: the weight rows scaled per out channel, the
-//! offset as the conv's bias, so a block is one streaming conv call plus
-//! the activation. Prewarm = 1 + sum(dilations).
+//! goes into the block's conv: the weight rows scaled per out channel by a
+//! tensor `mul` over the stream view, the offset as the conv's bias, so a
+//! block is one streaming conv call plus the activation. Prewarm = 1 +
+//! sum(dilations).
 //!
 //! Linear: `y[t] = bias + Σ_j w[j]·x[t−j]` with `weights[0]` multiplying the
 //! newest sample (the C++ player semantics, pinned by upstream
@@ -49,46 +50,48 @@ pub const ConvNet = struct {
         var built: usize = 0;
         errdefer for (blocks[0..built]) |*block| block.conv.deinit();
 
+        // The batchnorm fold in f64 (convnet.cpp:14-37): a scale and an
+        // offset per out channel, computed into these once-allocated rows.
+        const cout = config.channels;
+        const scales = try allocator.alloc(f32, cout);
+        defer allocator.free(scales);
+        const offsets = try allocator.alloc(f32, cout);
+        defer allocator.free(offsets);
+
         var cursor: usize = 0;
         var cin = config.in_channels;
         for (blocks, config.dilations) |*block, dilation| {
-            const cout = config.channels;
             const weight_len = cout * cin * k;
             if (config.batchnorm) {
                 // Stream: the conv weights (no bias), then running_mean,
-                // running_var, gamma, beta (cout each) and eps: folded into a
-                // scratch stream `[weight rows · scale[c] | loc]` the conv
-                // reads as weight + bias.
+                // running_var, gamma, beta (cout each) and eps. The scale
+                // goes into the weight rows (a tensor `mul` over the stream's
+                // (out, in, tap) view, permuted into the conv's layout), the
+                // offset is the conv's bias.
                 if (cursor + weight_len + 4 * cout + 1 > weights.len) return Error.WeightCountMismatch;
-                const folded = try allocator.alloc(f32, weight_len + cout);
-                defer allocator.free(folded);
                 const mean = weights[cursor + weight_len ..][0..cout];
                 const variance = weights[cursor + weight_len + cout ..][0..cout];
                 const gamma = weights[cursor + weight_len + 2 * cout ..][0..cout];
                 const beta = weights[cursor + weight_len + 3 * cout ..][0..cout];
                 const eps = weights[cursor + weight_len + 4 * cout];
-                // The fold in f64 (convnet.cpp:14-37): scale and offset per
-                // out channel; the offset is the conv's bias.
-                const scales = try allocator.alloc(f32, cout);
-                defer allocator.free(scales);
                 for (0..cout) |c| {
                     const scale64 = @as(f64, gamma[c]) / @sqrt(@as(f64, eps) + @as(f64, variance[c]));
                     scales[c] = @floatCast(scale64);
-                    folded[weight_len + c] = @floatCast(@as(f64, beta[c]) - scale64 * @as(f64, mean[c]));
+                    offsets[c] = @floatCast(@as(f64, beta[c]) - scale64 * @as(f64, mean[c]));
                 }
-                // The scale into the weight rows: the stream's (out, in, tap)
-                // rows as a [out, in·tap] view times the [out] scales.
-                {
-                    var rows = try Tensor(.{ .out, .taps }).fromBorrowedConstSlice(ctx, .{ cout, cin * k }, weights[cursor..][0..weight_len]);
-                    defer rows.deinit();
-                    var scale_t = try Tensor(.{.out}).fromSlice(ctx, .{cout}, scales);
-                    defer scale_t.deinit();
-                    var scaled = try rows.mul(ctx, &scale_t);
-                    defer scaled.deinit();
-                    try scaled.copyTo(folded[0..weight_len]);
-                }
-                var folded_cursor: usize = 0;
-                block.conv = try Conv.init(allocator, ctx, cin, cout, k, dilation, true, 1, options, folded, &folded_cursor);
+                var rows = try Tensor(.{ .out, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ cout, cin, k }, weights[cursor..][0..weight_len]);
+                defer rows.deinit();
+                var scale_t = try Tensor(.{.out}).fromBorrowedConstSlice(ctx, .{cout}, scales);
+                defer scale_t.deinit();
+                var scaled = try rows.mul(ctx, &scale_t);
+                defer scaled.deinit();
+                var permuted = try scaled.permuteTo(ctx, .{ .tap, .in_group, .out });
+                defer permuted.deinit();
+                var weight = try permuted.copy(ctx);
+                errdefer weight.deinit();
+                var bias = try wavenet.Bias.fromSlice(ctx, .{cout}, offsets);
+                errdefer bias.deinit();
+                block.conv = try Conv.fromTensors(allocator, weight, bias, cin, cout, 1, k, dilation, chunk_hint);
                 cursor += weight_len + 4 * cout + 1;
             } else {
                 block.conv = try Conv.init(allocator, ctx, cin, cout, k, dilation, true, 1, options, weights, &cursor);

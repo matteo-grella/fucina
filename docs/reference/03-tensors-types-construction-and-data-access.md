@@ -460,8 +460,10 @@ pool mid-forward (see [MEMORY-MODEL.md](../MEMORY-MODEL.md) and [§6](06-the-exe
   lets the same defer-deinit forward code run scoped (training) and unscoped
   (inference). Tensors built by the *constructors* above are never
   scope-owned; only op results are.
-- **No public clone.** `detach` and `materialize` are the copy/alias
-  entry points (below); `grad()` returns an owned clone of the gradient.
+- **Copies.** `detach` and `materialize` are the alias/copy entry points
+  (below); `copy` and `copyAsVariable` are the copies that stay the
+  caller's under an open scope (a model's parameters built while training
+  runs); `grad()` returns an owned clone of the gradient.
 - **Thread safety.** An `ExecContext` and the tensors flowing through it are
   single-threaded state: run ops on one context from one thread (parallelism
   happens *inside* ops via the context's worker pool, [§9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md)). Gradient
@@ -471,10 +473,12 @@ pool mid-forward (see [MEMORY-MODEL.md](../MEMORY-MODEL.md) and [§6](06-the-exe
   fence, not permission to share a handle across threads ([§9.9](09-backends-cpu-simd-blas-threading-and-gpu-offload.md#99-gpu-offload-srcbackendgpuzig-metalzig-cudazig)).
 
 ```zig
-pub fn detach(self: *const Self, ctx: *ExecContext) !Self       // every scalar-dtype branch (a no-grad view)
-pub fn materialize(self: *const Self, ctx: *ExecContext) !Self  // all branches
-pub fn contiguous(self: *const Self, ctx: *ExecContext) !Self   // f32 branch only
-pub fn isContiguous(self: *const Self) bool                     // all branches
+pub fn detach(self: *const Self, ctx: *ExecContext) !Self          // every scalar-dtype branch (a no-grad view)
+pub fn materialize(self: *const Self, ctx: *ExecContext) !Self     // all branches
+pub fn contiguous(self: *const Self, ctx: *ExecContext) !Self      // f32 branch only
+pub fn copy(self: *const Self, ctx: *ExecContext) !Self            // every scalar-dtype branch (a caller-owned constant)
+pub fn copyAsVariable(self: *const Self, ctx: *ExecContext) !Self  // grad-carrying branches (a caller-owned leaf)
+pub fn isContiguous(self: *const Self) bool                        // all branches
 ```
 
 `detach` returns a no-grad tensor **sharing storage** with `self` (a
@@ -482,6 +486,14 @@ refcounted view) — the values are live, the graph link is dropped.
 `materialize` returns a **contiguous copy** in the tensor's logical order;
 on the f32 branch it is differentiable (identity VJP through the strided
 view). Use it to make a permuted/broadcast view exportable via `dataConst`.
+`copy` is `materialize`'s contiguous copy wrapped as a plain constant, and
+`copyAsVariable` the same copy as a fresh trainable leaf: explicit
+constructors, so unlike every op result they are never adopted by an open
+exec scope. They are how a model built while a training scope is open
+(a permuted view of a weight stream, say) gets parameters that outlive
+the scope. Both refuse a grad-carrying source (`UnsupportedGradient`),
+since the copy would silently sever its graph; `detach` first when that
+is the intent.
 `contiguous` is the borrow-if-contiguous variant (torch.contiguous): an
 already-contiguous tensor returns a **zero-copy alias** of the same storage
 (graph-linked through an identity VJP; in-place mutation of either handle is

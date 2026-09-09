@@ -390,3 +390,53 @@ test "records retain only the operands the requested derivatives read" {
     defer gx.deinit();
     try std.testing.expectEqualSlices(f32, &.{ 5, 6, 7, 8 }, try gx.dataConst());
 }
+
+test "copy and copyAsVariable stay the caller's under an open scope and refuse a grad-carrying source" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer std.testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+    const allocator = gpa.allocator();
+    var ctx: ExecContext = undefined;
+    ctx.init(allocator);
+    defer ctx.deinit();
+
+    const data = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    var source = try Tensor(.{ .r, .c }).fromBorrowedConstSlice(&ctx, .{ 2, 3 }, &data);
+    defer source.deinit();
+    var permuted = try source.permuteTo(&ctx, .{ .c, .r });
+    defer permuted.deinit();
+
+    var constant: Tensor(.{ .c, .r }) = undefined;
+    var leaf: Tensor(.{ .c, .r }) = undefined;
+    {
+        // Built while a scope is open: neither copy belongs to the scope.
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        constant = try permuted.copy(&ctx);
+        leaf = try permuted.copyAsVariable(&ctx);
+        try std.testing.expect(!constant.scope_owned);
+        try std.testing.expect(!leaf.scope_owned);
+    }
+    defer constant.deinit();
+    defer leaf.deinit();
+    // The values survive the scope's close, contiguous in the view's order.
+    try std.testing.expectEqualSlices(f32, &.{ 1, 4, 2, 5, 3, 6 }, try constant.dataConst());
+    try std.testing.expect(!constant.requiresGrad());
+    try std.testing.expect(leaf.requiresGrad());
+    try std.testing.expectEqualSlices(f32, &.{ 1, 4, 2, 5, 3, 6 }, try leaf.dataConst());
+
+    // A leaf trains as one: a loss through it reaches it, and only it.
+    {
+        const scope = ctx.openExecScope();
+        defer ctx.closeExecScope(scope);
+        const doubled = try leaf.scale(&ctx, 2.0);
+        var loss = try doubled.sumAll(&ctx);
+        try loss.backward(&ctx);
+    }
+    var grad = (try leaf.grad(&ctx)).?;
+    defer grad.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2, 2, 2, 2, 2 }, try grad.dataConst());
+
+    // A grad-carrying source is refused by both.
+    try std.testing.expectError(error.UnsupportedGradient, leaf.copy(&ctx));
+    try std.testing.expectError(error.UnsupportedGradient, leaf.copyAsVariable(&ctx));
+}

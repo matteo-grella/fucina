@@ -102,14 +102,14 @@ pub const IrCab = struct {
         ctx.init(allocator);
         errdefer ctx.deinit();
         // Reverse + gain: weight[taps-1-i] = gain*IR[i] (ImpulseResponse.cpp:81-82),
-        // as a flip and a scale of the resampled taps, owned by the cab.
+        // a flip and a scale of the resampled taps. The context is the cab's
+        // own and fresh, so no scope is open and the result is the cab's.
+        std.debug.assert(!ctx.execScopeActive());
         var taps_view = try Weight.fromBorrowedConstSlice(ctx, .{ taps, 1, 1 }, resampled[0..taps]);
         defer taps_view.deinit();
         var flipped = try taps_view.flip(ctx, .tap);
         defer flipped.deinit();
-        var gained = try flipped.scale(ctx, gain);
-        defer gained.deinit();
-        var weight = try wavenet.own(Weight, ctx, &gained, false);
+        var weight = try flipped.scale(ctx, gain);
         errdefer weight.deinit();
         const state = try CausalState.init(allocator, 1, taps, 1, max_frames);
         return .{

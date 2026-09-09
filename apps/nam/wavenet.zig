@@ -48,7 +48,7 @@ pub const TimeOut = Tensor(.{ .time, .out });
 pub const GroupedWeight = Tensor(.{ .tap, .in_group, .out });
 pub const Bias = Tensor(.{.out});
 
-pub const Error = error{ UnsupportedFeature, WeightCountMismatch, InvalidConvShape, ExecScopeRequired };
+pub const Error = error{ UnsupportedFeature, WeightCountMismatch, InvalidConvShape, ExecScopeRequired, PreluSlopesMissing, PreluWidthMismatch };
 
 pub const Options = struct {
     /// Weights as variables (gradients, optimizer registration).
@@ -123,15 +123,14 @@ pub const Conv = struct {
         if (idx + weight_len + bias_len > stream.len) return Error.WeightCountMismatch;
         // The stream holds each group as (out_per_group, in_per_group, tap):
         // a rank-4 view of it, permuted to [tap, in_per_group, group,
-        // out_per_group], materialized once into the packed layout and
-        // owned by the conv.
+        // out_per_group], copied once into the packed layout the conv owns.
         var stream_view = try Tensor(.{ .grp, .opg, .in_group, .tap }).fromBorrowedConstSlice(ctx, .{ groups, out_per_group, in_per_group, taps }, stream[idx..][0..weight_len]);
         defer stream_view.deinit();
         var permuted = try stream_view.permuteTo(ctx, .{ .tap, .in_group, .grp, .opg });
         defer permuted.deinit();
         var packed_weight = try permuted.merge(ctx, .out, .{ .grp, .opg });
         defer packed_weight.deinit();
-        var weight = try own(GroupedWeight, ctx, &packed_weight, options.trainable);
+        var weight = try if (options.trainable) packed_weight.copyAsVariable(ctx) else packed_weight.copy(ctx);
         errdefer weight.deinit();
         idx += weight_len;
         var bias: ?Bias = null;
@@ -139,11 +138,26 @@ pub const Conv = struct {
         if (has_bias) {
             var bias_view = try Bias.fromBorrowedConstSlice(ctx, .{out_channels}, stream[idx..][0..out_channels]);
             defer bias_view.deinit();
-            bias = try own(Bias, ctx, &bias_view, options.trainable);
+            bias = try if (options.trainable) bias_view.copyAsVariable(ctx) else bias_view.copy(ctx);
             idx += out_channels;
         }
-        const state = try CausalState.init(allocator, in_channels, taps, dilation, options.chunk_hint);
+        const conv = try fromTensors(allocator, weight, bias, in_channels, out_channels, groups, taps, dilation, options.chunk_hint);
         cursor.* = idx;
+        return conv;
+    }
+
+    /// A conv over tensors the caller built (taken over, `weight`
+    /// `[tap, in_per_group, out]`, `bias` `[out]` or null), with a fresh
+    /// context ring for `chunk_hint`-frame blocks.
+    pub fn fromTensors(allocator: std.mem.Allocator, weight: GroupedWeight, bias: ?Bias, in_channels: usize, out_channels: usize, groups: usize, taps: usize, dilation: usize, chunk_hint: usize) !Conv {
+        if (taps < 1 or dilation < 1 or groups == 0) return Error.InvalidConvShape;
+        if (in_channels % groups != 0 or out_channels % groups != 0) return Error.InvalidConvShape;
+        const shape = weight.shape();
+        if (shape[0] != taps or shape[1] != in_channels / groups or shape[2] != out_channels) return Error.InvalidConvShape;
+        if (bias) |*b| {
+            if (b.shape()[0] != out_channels) return Error.InvalidConvShape;
+        }
+        const state = try CausalState.init(allocator, in_channels, taps, dilation, chunk_hint);
         return .{
             .weight = weight,
             .bias = bias,
@@ -196,16 +210,6 @@ pub const Conv = struct {
         if (self.bias) |*b| try out.appendSlice(allocator, try b.dataConst());
     }
 };
-
-/// A tensor of `src`'s values that the model owns whatever scope is open:
-/// one materialization of the view (any strides), wrapped as a variable
-/// when `trainable` and as a constant otherwise (explicit constructors,
-/// never scope-owned).
-pub fn own(comptime T: type, ctx: *ExecContext, src: *const T, trainable: bool) !T {
-    var raw = try ctx.materialize(.f32, src.asRawTensor());
-    errdefer raw.deinit();
-    return if (trainable) T.variable(ctx, raw) else T.fromTensor(ctx, raw);
-}
 
 fn appendView(allocator: std.mem.Allocator, out: *std.ArrayList(f32), view: anytype) !void {
     var count: usize = 1;
@@ -300,17 +304,19 @@ pub fn preluSlopes(ctx: *ExecContext, act: *const Activation, width: usize) !?Bi
     return try Bias.fromSlice(ctx, .{width}, slopes);
 }
 
+/// `max(x, 0) + slope·min(x, 0)`, the slope per channel from the tensor
+/// `preluSlopes` built for this activation (refused when it is missing or
+/// sized for another width) or the single scalar.
 fn prelu(ctx: *ExecContext, act: *const Activation, x: *const TimeOut, slopes: ?*const Bias) !TimeOut {
     var positive = try x.relu(ctx);
     defer positive.deinit();
     var negative = try x.clamp(ctx, -std.math.inf(f32), 0.0);
     defer negative.deinit();
-    if (slopes) |slope_tensor| {
-        var scaled_negative = try negative.mul(ctx, slope_tensor);
-        defer scaled_negative.deinit();
-        return positive.add(ctx, &scaled_negative);
-    }
-    var scaled_negative = try negative.scale(ctx, act.negative_slope);
+    var scaled_negative = if (act.negative_slopes.len != 0) blk: {
+        const slope_tensor = slopes orelse return Error.PreluSlopesMissing;
+        if (slope_tensor.dim(.out) != x.dim(.out)) return Error.PreluWidthMismatch;
+        break :blk try negative.mul(ctx, slope_tensor);
+    } else try negative.scale(ctx, act.negative_slope);
     defer scaled_negative.deinit();
     return positive.add(ctx, &scaled_negative);
 }

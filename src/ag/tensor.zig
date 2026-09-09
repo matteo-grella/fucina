@@ -541,6 +541,7 @@ fn FloatTensor(comptime tags: anytype) type {
         }
         pub const variable = autograd_ops.variable;
         pub const variableFromSlice = autograd_ops.variableFromSlice;
+        pub const copyAsVariable = autograd_ops.copyAsVariable;
         pub const zeroGrad = autograd_ops.zeroGrad;
         pub const grad = autograd_ops.grad;
         pub const gradView = autograd_ops.gradView;
@@ -559,6 +560,7 @@ fn FloatTensor(comptime tags: anytype) type {
         }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
+        pub const copy = views.copy;
         pub const detach = views.detach;
         pub const withTags = views.withTags;
         pub const viewWithStrides = views.viewWithStrides;
@@ -979,6 +981,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         }
         pub const variable = autograd_ops.variable;
         pub const variableFromSlice = autograd_ops.variableFromSlice;
+        pub const copyAsVariable = autograd_ops.copyAsVariable;
         pub const zeroGrad = autograd_ops.zeroGrad;
         pub const grad = autograd_ops.grad;
         pub const gradView = autograd_ops.gradView;
@@ -990,6 +993,7 @@ fn TypedFloatTensor(comptime tags: anytype, comptime tensor_dtype: DType) type {
         }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
+        pub const copy = views.copy;
         pub const detach = views.detach;
         pub const withTags = views.withTags;
         pub const viewWithStrides = views.viewWithStrides;
@@ -1246,6 +1250,7 @@ fn TypedScalarTensor(comptime tags: anytype, comptime tensor_dtype: DType) type 
         }
         pub const materialize = views.materialize;
         pub const contiguous = views.contiguous;
+        pub const copy = views.copy;
         pub const detach = views.detach;
         pub const withTags = views.withTags;
         pub const viewWithStrides = views.viewWithStrides;

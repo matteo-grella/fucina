@@ -105,45 +105,62 @@ pub const Model = struct {
         if (config.in_channels != 1 or config.out_channels != 1) return Error.UnsupportedChannels;
         const spec = Spec{ .hidden_size = h, .num_layers = config.num_layers, .input_size = config.input_size, .burn_in = training.burn_in, .truncate = training.truncate };
 
-        const cells = try allocator.alloc(rnn.LstmCell, config.num_layers);
-        errdefer allocator.free(cells);
-        var built: usize = 0;
-        errdefer for (cells[0..built]) |*cell| cell.deinit();
         var cursor: usize = 0;
-        for (cells, 0..) |*cell, l| {
-            const in_l = if (l == 0) config.input_size else h;
-            const width = in_l + h;
-            if (cursor + 4 * h * width + 4 * h + 2 * h > weights.len) return Error.WeightCountMismatch;
-            var stacked = try rnn.StackedWeight.fromBorrowedConstSlice(ctx, .{ 4 * h, width }, weights[cursor..][0 .. 4 * h * width]);
-            defer stacked.deinit();
-            cursor += 4 * h * width;
-            var bias = try Units.fromBorrowedConstSlice(ctx, .{4 * h}, weights[cursor..][0 .. 4 * h]);
-            defer bias.deinit();
-            cursor += 4 * h;
-            var h0 = try Units.fromBorrowedConstSlice(ctx, .{h}, weights[cursor..][0..h]);
-            defer h0.deinit();
-            cursor += h;
-            var c0 = try Units.fromBorrowedConstSlice(ctx, .{h}, weights[cursor..][0..h]);
-            defer c0.deinit();
-            cursor += h;
-            cell.* = try rnn.LstmCell.fromStacked(ctx, &stacked, &bias, &h0, &c0, requires_grad);
-            built += 1;
+        const cells = try buildCells(allocator, ctx, config, weights, &cursor, requires_grad);
+        if (cursor + h + 1 != weights.len) {
+            for (cells) |*cell| cell.deinit();
+            allocator.free(cells);
+            return Error.WeightCountMismatch;
         }
-        if (cursor + h + 1 != weights.len) return Error.WeightCountMismatch;
-        var lstm = try rnn.Lstm.fromCells(allocator, cells);
+        // `fromCells` takes the cells over; until it has, they are ours.
+        var lstm = rnn.Lstm.fromCells(allocator, cells) catch |err| {
+            for (cells) |*cell| cell.deinit();
+            allocator.free(cells);
+            return err;
+        };
         errdefer lstm.deinit();
         var stream_view = try Tensor(.{ .out, .unit }).fromBorrowedConstSlice(ctx, .{ 1, h }, weights[cursor..][0..h]);
         defer stream_view.deinit();
         var transposed = try stream_view.permuteTo(ctx, .{ .unit, .out });
         defer transposed.deinit();
-        var head_w = try wavenet.own(HeadWeight, ctx, &transposed, requires_grad);
+        var head_w = try if (requires_grad) transposed.copyAsVariable(ctx) else transposed.copy(ctx);
         errdefer head_w.deinit();
         cursor += h;
         var bias_view = try HeadBias.fromBorrowedConstSlice(ctx, .{1}, weights[cursor..][0..1]);
         defer bias_view.deinit();
-        var head_b = try wavenet.own(HeadBias, ctx, &bias_view, requires_grad);
+        var head_b = try if (requires_grad) bias_view.copyAsVariable(ctx) else bias_view.copy(ctx);
         errdefer head_b.deinit();
         return .{ .allocator = allocator, .spec = spec, .lstm = lstm, .head_w = head_w, .head_b = head_b };
+    }
+
+    /// The layers of the NAM stream from `cursor`, each a set of borrowed
+    /// views handed to the core; owned by the caller until `fromCells`.
+    fn buildCells(allocator: std.mem.Allocator, ctx: *ExecContext, config: *const nam_file.LstmConfig, weights: []const f32, cursor: *usize, requires_grad: bool) ![]rnn.LstmCell {
+        const h = config.hidden_size;
+        const cells = try allocator.alloc(rnn.LstmCell, config.num_layers);
+        errdefer allocator.free(cells);
+        var built: usize = 0;
+        errdefer for (cells[0..built]) |*cell| cell.deinit();
+        for (cells, 0..) |*cell, l| {
+            const in_l = if (l == 0) config.input_size else h;
+            const width = in_l + h;
+            if (cursor.* + 4 * h * width + 4 * h + 2 * h > weights.len) return Error.WeightCountMismatch;
+            var stacked = try rnn.StackedWeight.fromBorrowedConstSlice(ctx, .{ 4 * h, width }, weights[cursor.*..][0 .. 4 * h * width]);
+            defer stacked.deinit();
+            cursor.* += 4 * h * width;
+            var bias = try Units.fromBorrowedConstSlice(ctx, .{4 * h}, weights[cursor.*..][0 .. 4 * h]);
+            defer bias.deinit();
+            cursor.* += 4 * h;
+            var h0 = try Units.fromBorrowedConstSlice(ctx, .{h}, weights[cursor.*..][0..h]);
+            defer h0.deinit();
+            cursor.* += h;
+            var c0 = try Units.fromBorrowedConstSlice(ctx, .{h}, weights[cursor.*..][0..h]);
+            defer c0.deinit();
+            cursor.* += h;
+            cell.* = try rnn.LstmCell.fromStacked(ctx, &stacked, &bias, &h0, &c0, requires_grad);
+            built += 1;
+        }
+        return cells;
     }
 
     pub fn deinit(self: *Model) void {

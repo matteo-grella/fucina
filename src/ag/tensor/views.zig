@@ -126,6 +126,20 @@ pub fn Ops(comptime Self: type) type {
             return finishOp(tags, ctx, value, Record{ .parents = .{gradStateOf(self)} });
         }
 
+        /// A copy of the values the caller owns under any scope:
+        /// `materialize`'s contiguous copy wrapped as a plain constant,
+        /// never adopted by an open exec scope and carrying no graph. The
+        /// constructor for a model built while a training scope is open
+        /// (its parameters must outlive the scope). A grad-carrying `self`
+        /// is refused (`UnsupportedGradient`): the copy would silently sever
+        /// the graph; `detach` first when that is the intent.
+        pub fn copy(self: *const Self, ctx: *ExecContext) !Self {
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
+            var value = try ctx.materialize(dtype, self.asRawTensor());
+            errdefer value.deinit();
+            return Self.fromTensor(ctx, value);
+        }
+
         /// No-grad view of the same storage.
         pub fn detach(self: *const Self, ctx: *ExecContext) !Self {
             var value = try self.value.cloneView();

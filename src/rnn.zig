@@ -95,8 +95,8 @@ pub const LstmCell = struct {
     /// From PyTorch's layout: the stacked gate-major matrix `[4H, in + H]`
     /// (rows i, f, g, o; `[W_ih | W_hh]`), the bias `[4H]` (`b_ih + b_hh`),
     /// and the initial state; any views. The matrix is a permuted view
-    /// materialized once; the cell owns its four tensors whatever the
-    /// scope, as variables when `trainable`.
+    /// copied once (`copy` / `copyAsVariable`); the cell owns its four
+    /// tensors whatever the scope, as variables when `trainable`.
     pub fn fromStacked(ctx: *ExecContext, stacked: *const StackedWeight, bias: *const Units, h0: *const Units, c0: *const Units, trainable: bool) !LstmCell {
         const shape = stacked.shape();
         const hidden = shape[0] / 4;
@@ -104,23 +104,14 @@ pub const LstmCell = struct {
         if (bias.shape()[0] != 4 * hidden or h0.shape()[0] != hidden or c0.shape()[0] != hidden) return Error.InvalidShape;
         var transposed = try stacked.permuteTo(ctx, .{ .k, .unit });
         defer transposed.deinit();
-        var w = try own(Weight, ctx, &transposed, trainable);
+        var w = try if (trainable) transposed.copyAsVariable(ctx) else transposed.copy(ctx);
         errdefer w.deinit();
-        var b = try own(Units, ctx, bias, trainable);
+        var b = try if (trainable) bias.copyAsVariable(ctx) else bias.copy(ctx);
         errdefer b.deinit();
-        var h0_own = try own(Units, ctx, h0, trainable);
+        var h0_own = try if (trainable) h0.copyAsVariable(ctx) else h0.copy(ctx);
         errdefer h0_own.deinit();
-        const c0_own = try own(Units, ctx, c0, trainable);
+        const c0_own = try if (trainable) c0.copyAsVariable(ctx) else c0.copy(ctx);
         return .{ .w = w, .b = b, .h0 = h0_own, .c0 = c0_own, .input_size = shape[1] - hidden, .hidden = hidden };
-    }
-
-    /// A caller-owned tensor of `src`'s values (one materialization, any
-    /// strides), a variable when `trainable`: explicit constructors are the
-    /// caller's under any scope.
-    fn own(comptime T: type, ctx: *ExecContext, src: *const T, trainable: bool) !T {
-        var raw = try ctx.materialize(.f32, src.asRawTensor());
-        errdefer raw.deinit();
-        return if (trainable) T.variable(ctx, raw) else T.fromTensor(ctx, raw);
     }
 
     pub fn deinit(self: *LstmCell) void {

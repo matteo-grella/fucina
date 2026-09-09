@@ -36,6 +36,11 @@ this point; earlier history is `git log`.
   written against the op trains and streams.
 - `Tensor.copyFrom(src)`: the mirror of `copyTo`, host data into a
   persistent contiguous no-grad tensor without a new storage header.
+- `Tensor.copy(ctx)` / `Tensor.copyAsVariable(ctx)`: `materialize`'s
+  contiguous copy as a plain constant or a fresh trainable leaf that stays
+  the caller's under an open exec scope (a model's parameters built from
+  views of a weight stream while training runs); a grad-carrying source
+  is refused.
 - `apps/nam`: one tensor WaveNet (`wavenet.zig`) trains and streams; the
   hand-rolled inference kernels (`stream_conv.zig`, `activations.zig`, the
   WaveNet/LSTM/ConvNet/Linear engines) and the separate trainable copies

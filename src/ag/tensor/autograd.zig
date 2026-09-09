@@ -51,6 +51,18 @@ pub fn Ops(comptime Self: type) type {
             return .{ .value = v, .grad_state = state };
         }
 
+        /// A trainable leaf with `self`'s values, owned by the caller under
+        /// any scope (`copy`'s counterpart for parameters): a contiguous
+        /// copy of the values as a fresh variable, no link to `self`'s
+        /// graph. A grad-carrying `self` is refused (`UnsupportedGradient`).
+        pub fn copyAsVariable(self: *const Self, ctx: *ExecContext) !Self {
+            comptime requireGradDtype("copyAsVariable");
+            if (self.requiresGrad()) return AgError.UnsupportedGradient;
+            var value = try ctx.materialize(dtype, self.asRawTensor());
+            errdefer value.deinit();
+            return Self.variable(ctx, value);
+        }
+
         pub fn variableFromSlice(ctx: *ExecContext, raw_shape: [tensor_rank]usize, values: []const Elem) !Self {
             comptime requireGradDtype("variableFromSlice");
             var value = try ctx.fromSlice(dtype, raw_shape, @as([]const RawElem, @ptrCast(values)));
