@@ -23,6 +23,14 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-09
+
+### Fixed
+
+- `gguf.File.loadMmap` on Windows reads the file into memory instead of
+  calling the POSIX mmap that does not exist there, so a Windows consumer
+  compiles and loads GGUF files; the release paths never unmap on Windows.
+
 ### Removed
 
 - `apps/nam` and its `nam` / `test-nam` build steps: the Neural Amp Modeler

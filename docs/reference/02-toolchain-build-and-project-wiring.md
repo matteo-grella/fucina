@@ -220,12 +220,12 @@ itself is centralized in six helpers applied per executable:
 ## 2.5 Consuming Fucina from another project
 
 Fucina is an ordinary Zig package: `build.zig.zon` names it `.fucina`, the
-repository is tagged (`v0.5.0`), and the three library modules are exported by
+repository is tagged (`v0.5.1`), and the three library modules are exported by
 `build.zig` (`b.addModule`), so the standard path is the package manager.
 From the consumer project:
 
 ```sh
-zig fetch --save git+https://github.com/matteo-grella/fucina#v0.5.0
+zig fetch --save git+https://github.com/matteo-grella/fucina#v0.5.1
 ```
 
 ```zig
