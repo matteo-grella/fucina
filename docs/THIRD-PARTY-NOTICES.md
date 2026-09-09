@@ -23,7 +23,7 @@ LICENSE files, and repository pages (last checked 2026-07-07).
 | CUDA quantized-GEMM/GEMV kernels — dequant bit-logic + block structs translated from the vendored Metal kernel above (compute core is Fucina-authored FFMA tiling) | `src/backend/cuda/kernels.cu` (+ generated `kernels.ptx`) | same ggml lineage as `ggml_mul_mm.metal` | MIT, Copyright (c) 2023-2026 The ggml authors |
 | Apple MLX "steel" GEMM Metal kernel (f32/f16) | `src/backend/metal/mlx_gemm.metal` | [ml-explore/mlx](https://github.com/ml-explore/mlx) (`backend/metal/kernels/steel/gemm`) | MIT, Copyright © 2023-2024 Apple Inc. |
 | ggml IQ/TQ/FP4 dequantization lookup tables (numeric codebooks) | `src/backend/quant_tables.zig` | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) (`ggml/src/ggml-common.h`) | MIT, Copyright (c) 2023-2026 The ggml authors |
-| miniaudio v0.11.25 (single-header audio I/O) | `apps/nam/third_party/miniaudio.h` | [mackron/miniaudio](https://github.com/mackron/miniaudio) | Dual: public domain (Unlicense) **or** MIT No Attribution, at your option — Copyright 2026 David Reid; full texts in the vendored header |
+| miniaudio v0.11.25 (single-header audio I/O) | `apps/voiceagent/audio/third_party/miniaudio.h` | [mackron/miniaudio](https://github.com/mackron/miniaudio) | Dual: public domain (Unlicense) **or** MIT No Attribution, at your option — Copyright 2026 David Reid; full texts in the vendored header |
 | llguidance v1.7.6 — `parser` + `toktrie` crates (constrained-decoding engine: grammar compiler, Earley parser, token-mask computation; Rust, compiled and linked only under `-Dllguidance=true`) | `vendor/llguidance/` (crate sources byte-verbatim; the two `Cargo.toml` manifest deviations and the pinned upstream commit are documented in `vendor/llguidance/README.md`; crates.io dependencies are fetched at build time, pinned by the committed `Cargo.lock`, not redistributed here) | [guidance-ai/llguidance](https://github.com/guidance-ai/llguidance) | MIT, Copyright (c) Microsoft Corporation |
 | font8x8 glyph table (128 ASCII 8×8 bitmaps, Marcel Sondaar's IBM-style ROM font) | `apps/locate_anything/visualize.zig` | [dhepper/font8x8](https://github.com/dhepper/font8x8), via locate-anything.cpp | Public domain |
 
@@ -84,8 +84,6 @@ From other projects:
 | face-detect.cpp face pipeline (port: SCRFD/ArcFace/GenderAge/MiniFASNet/landmark graph structure and BN-fold conventions, cv2-exact letterbox + umeyama align constants, anchor decode + NMS semantics, GGUF schema incl. the embedded anti-spoof/landmark node lists, CLI JSON formats) | `apps/facedetect/` | [mudler/face-detect.cpp](https://github.com/mudler/face-detect.cpp) by Ettore Di Giacinto; the underlying buffalo_l / landmark models are [insightface's](https://github.com/deepinsight/insightface) (weights not in this repo, subject to insightface's non-commercial model license; GGUF conversions from [mudler/face-detect-gguf](https://huggingface.co/mudler/face-detect-gguf)) | MIT |
 | Pillow BICUBIC resampler (port, via locate-anything.cpp's `pil_resize.cpp`) | `apps/locate_anything/preproc.zig` | [python-pillow/Pillow](https://github.com/python-pillow/Pillow) `libImaging/Resample.c` | MIT-CMU |
 | OmniVoice TTS engine (port, incl. Higgs Audio v2 codec chain, torchaudio-parity resampler, pydub-parity postproc, Philox RNG alignment) | `apps/omnivoice/` | [ServeurpersoCom/omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp) | MIT |
-| Neural Amp Modeler runtime (port) | `apps/nam/` | [sdatkinson/NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore) | MIT |
-| NAM trainer recipe + loudness asset | `apps/nam/`, `apps/nam/resources/` | [sdatkinson/neural-amp-modeler](https://github.com/sdatkinson/neural-amp-modeler) | MIT |
 | Byte-level BPE tokenizer core | `src/models/text/tokenizer.zig` | ZINC — Zig INferenCe engine | MIT, Copyright (c) 2025 ZINC Contributors |
 | `erff` (used by `gelu_erf`) | `src/backend/ops.zig` | [musl libc](https://musl.libc.org) `src/math/erff.c` | MIT (FDLIBM lineage, Copyright (C) 1993 Sun Microsystems, Inc.) |
 | Muon optimizer | `src/optim.zig` | [KellerJordan/Muon](https://github.com/KellerJordan/Muon); RMS-matching scale per Moonlight (arXiv:2502.16982) | MIT |
@@ -229,12 +227,6 @@ grouped-MoE path does not use the split.
 
 ## Test fixtures
 
-- `apps/nam/testdata/*.nam` — four tiny format-parity fixtures from the
-  NeuralAmpModelerCore ecosystem (MIT; provenance in
-  `apps/nam/testdata/README.md`).
-- `apps/nam/resources/loudness_input.wav` — the standardized loudness
-  measurement signal required by the `.nam` metadata contract (MIT; see
-  `apps/nam/resources/README.md`).
 - Quantization golden vectors in tests — byte outputs of running ggml's
   encoders over documented inputs (generated 2026-06-11).
 - `apps/voiceagent/goldens/*.npy` — the per-stage GTCRN-AEC fixtures published by

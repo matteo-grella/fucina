@@ -9,8 +9,8 @@ error (a newer toolchain passes that check but is equally unsupported — the
 pin is exact). Every module, executable, and option is wired in
 `build.zig`; the manifest has no dependencies of its own. There
 is also no C/C++ build system — the only non-Zig translation units are a few
-vendored shims (`src/backend/metal/shim.m`, the miniaudio/MIDI shims under
-`examples/`) compiled by `build.zig` itself when the relevant option or
+vendored shims (`src/backend/metal/shim.m`, the miniaudio shims under
+`apps/`) compiled by `build.zig` itself when the relevant option or
 example requires them. System dependencies appear only when options select
 them: a CBLAS provider for `-Dblas=...`, Apple frameworks for
 `-Dgpu=metal`/`-Dblas=accelerate` and the audio examples, libc for
@@ -211,11 +211,11 @@ itself is centralized in six helpers applied per executable:
   bundled LLVM libunwind via `link_libcpp` (the Rust FFI converts panics to
   error strings with `catch_unwind`, and glibc does not export
   `_Unwind_*`; macOS's libSystem ships an unwinder).
-- `configureNamAudio` / `configureOmnivoiceAudio` / `configureAudioShim`
-  — the vendored miniaudio C shims (`apps/nam/audio_shim.c`, plus
-  `midi_shim.c` for NAM and `apps/omnivoice/play_shim.c` for playback),
-  with CoreAudio/CoreMIDI frameworks on macOS; elsewhere miniaudio `dlopen`s
-  its backend through libc.
+- `configureAudioShim` / `configureOmnivoiceAudio` — the vendored miniaudio
+  C shim (`apps/voiceagent/audio/audio_shim.c`, the `audio_io` module's
+  implementation, plus `apps/omnivoice/play_shim.c` for playback), with the
+  CoreAudio frameworks on macOS; elsewhere miniaudio `dlopen`s its backend
+  through libc.
 
 ## 2.5 Consuming Fucina from another project
 

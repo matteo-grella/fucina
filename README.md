@@ -240,9 +240,11 @@ pinned-set + LRU tier, bit-identical to the resident path — that is how the
 | **[OmniVoice](apps/omnivoice/README.md)** | MaskGIT text-to-speech with voice cloning (Higgs Audio v2 codec included) |
 | **[LocateAnything-3B](apps/locate_anything/README.md)** | NVIDIA's open-vocabulary detection VLM: text-prompted labeled boxes, byte-compatible with the reference CLI |
 | **[facedetect](apps/facedetect/README.md)** (insightface buffalo_l) | face detection, recognition, gender/age, anti-spoofing, and dense landmarks |
-| **[Neural Amp Modeler](apps/nam/README.md)** | `.nam` guitar-amp profiles: run, train, export, live amp simulation |
 
-These applications will eventually graduate into their own repositories.
+These applications will eventually graduate into their own repositories;
+the Neural Amp Modeler port already has: [nam-zig](https://github.com/matteo-grella/nam-zig)
+(`.nam` guitar-amp profiles: run, train, export, live amp simulation)
+consumes Fucina as a package pinned to a release tag.
 The known debt of the in-tree phase is that generic operations accumulate
 inside the apps — resamplers, spectrograms, reference-parity image
 resizing — and graduation starts with an audit of which of those are
@@ -475,7 +477,8 @@ Fucina exists because others built the road first.
   [omnivoice.cpp](https://github.com/ServeurpersoCom/omnivoice.cpp), which
   also provided the codec porting groundwork (Higgs Audio v2 / HuBERT / DAC).
 - **Steven Atkinson** — NeuralAmpModelerCore and neural-amp-modeler, the
-  reference for the entire NAM example.
+  reference for the Neural Amp Modeler port that grew up in this tree and
+  now lives in [nam-zig](https://github.com/matteo-grella/nam-zig).
 - **ZINC** — the byte-level BPE tokenizer core was adapted from the ZINC Zig
   inference engine.
 - **ZML** — the tagged-tensor approach (axis tags carried in the type,

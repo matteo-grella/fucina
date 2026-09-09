@@ -127,8 +127,8 @@ zig build omnivoice -Doptimize=ReleaseFast -- tts --model $BASE --codec $CODEC \
 
 ## Speaker playback (`--play`)
 
-`--play` sends the synthesis to a playback-only miniaudio device (vendored
-from the NAM example; the 24 kHz mono stream is converted to the device's
+`--play` sends the synthesis to a playback-only miniaudio device (the
+miniaudio build shared with the voice agent, `apps/voiceagent/audio/`; the 24 kHz mono stream is converted to the device's
 native rate internally). `devices` lists the playback devices;
 `--playback <idx>` picks one (default: the system device). At least one of
 `-o` / `--play` is required; `--play` with `-o -` is invalid (stdout is the

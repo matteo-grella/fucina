@@ -121,8 +121,6 @@ omnivoice.cpp|https://github.com/ServeurpersoCom/omnivoice.cpp|0f37401bebe9b20c0
 nanochat|https://github.com/karpathy/nanochat|92d63d4e8bb4df75c3b71618f31ddde2378b2bcd
 rustbpe|https://github.com/karpathy/rustbpe|ddf848f6961a0655dc8693742fc338e5682c0d3b
 zinc|https://github.com/zolotukhin/zinc|986c2390bdf337d1fb46aa611e12ab1b7a74a05e
-NeuralAmpModelerCore|https://github.com/sdatkinson/NeuralAmpModelerCore|e49c93e678549230d09efbb0beeb50511e387874
-neural-amp-modeler|https://github.com/sdatkinson/neural-amp-modeler|a11ed88a128031c306faba79878eade51a209c48
 ds4|https://github.com/antirez/ds4|b0309611041655f4e45671cfd9c9886aff161406
 colibri|https://github.com/JustVugg/colibri|33e67a9c004b6e608d1f19dfbdcc20793377f94f
 es-at-scale|https://github.com/VsonicV/es-at-scale|574a9d134da1ffce2a8bb812019899e5c96b588a

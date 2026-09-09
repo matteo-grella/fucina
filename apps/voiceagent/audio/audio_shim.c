@@ -1,7 +1,7 @@
-/* Single-TU miniaudio build + a narrow extern-C ABI for the NAM example
+/* Single-TU miniaudio build + a narrow extern-C ABI for the audio apps
  * (mirrors the repo's Metal shim.m pattern: one C file, a handful of
  * extern functions, no C types leaking into Zig beyond what's declared in
- * audio.zig). Duplex (capture -> user callback -> playback) with f32 mono
+ * audio.zig; omnivoice's play_shim.c links this same implementation). Duplex (capture -> user callback -> playback) with f32 mono
  * frames at a fixed period size; same-device duplex is the recommended
  * configuration: one clock, so no drift. Split in/out devices run on
  * independent clocks with no drift correction in miniaudio, so latency
@@ -13,19 +13,19 @@
 
 #include <string.h>
 
-typedef void (*nam_audio_callback)(void* user, float* output, const float* input, unsigned int frame_count);
+typedef void (*fucina_audio_callback)(void* user, float* output, const float* input, unsigned int frame_count);
 
 typedef struct {
     ma_context context;
     ma_device device;
-    nam_audio_callback callback;
+    fucina_audio_callback callback;
     void* user;
     int context_ready;
     int device_ready;
-} nam_audio;
+} fucina_audio;
 
-static void nam_device_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) {
-    nam_audio* audio = (nam_audio*)device->pUserData;
+static void fucina_device_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) {
+    fucina_audio* audio = (fucina_audio*)device->pUserData;
     /* output is NULL for capture-only streams; the Zig side handles it. */
     if (audio->callback != NULL) {
         audio->callback(audio->user, (float*)output, (const float*)input, frame_count);
@@ -34,8 +34,8 @@ static void nam_device_callback(ma_device* device, void* output, const void* inp
     }
 }
 
-nam_audio* nam_audio_create(void) {
-    nam_audio* audio = (nam_audio*)MA_MALLOC(sizeof(nam_audio));
+fucina_audio* fucina_audio_create(void) {
+    fucina_audio* audio = (fucina_audio*)MA_MALLOC(sizeof(fucina_audio));
     if (audio == NULL) return NULL;
     memset(audio, 0, sizeof(*audio));
     ma_context_config context_config = ma_context_config_init();
@@ -51,7 +51,7 @@ nam_audio* nam_audio_create(void) {
     return audio;
 }
 
-void nam_audio_destroy(nam_audio* audio) {
+void fucina_audio_destroy(fucina_audio* audio) {
     if (audio == NULL) return;
     if (audio->device_ready) ma_device_uninit(&audio->device);
     if (audio->context_ready) ma_context_uninit(&audio->context);
@@ -61,7 +61,7 @@ void nam_audio_destroy(nam_audio* audio) {
 /* Writes up to `cap` device descriptions; returns the total count of the
  * requested kind (kind 0 = playback, 1 = capture). Each name is copied
  * NUL-terminated into name_buf + i*name_cap. */
-int nam_audio_list_devices(nam_audio* audio, int kind, char* name_buf, int name_cap, unsigned char* default_flags, int cap) {
+int fucina_audio_list_devices(fucina_audio* audio, int kind, char* name_buf, int name_cap, unsigned char* default_flags, int cap) {
     ma_device_info* playback_infos;
     ma_uint32 playback_count;
     ma_device_info* capture_infos;
@@ -83,13 +83,13 @@ int nam_audio_list_devices(nam_audio* audio, int kind, char* name_buf, int name_
 /* Opens a full-duplex mono f32 stream. capture_index / playback_index are
  * indices into the respective enumeration order, or -1 for the system
  * default. Returns 0 on success. */
-int nam_audio_start(
-    nam_audio* audio,
+int fucina_audio_start(
+    fucina_audio* audio,
     int capture_index,
     int playback_index,
     unsigned int sample_rate,
     unsigned int period_frames,
-    nam_audio_callback callback,
+    fucina_audio_callback callback,
     void* user) {
     if (audio->device_ready) return -1;
 
@@ -116,12 +116,12 @@ int nam_audio_start(
     config.periodSizeInFrames = period_frames;
     config.performanceProfile = ma_performance_profile_low_latency;
     /* Deliver whatever the device gives instead of re-buffering to a fixed
-     * size: removes one intermediary buffer layer (the engines accept any
-     * frame count up to their reset cap). */
+     * size: removes one intermediary buffer layer (callers accept any frame
+     * count up to the cap they sized for). */
     config.noFixedSizedCallback = MA_TRUE;
     /* Skip miniaudio's output pre-zeroing and f32 clip pass: the callback
-     * always writes every frame, and clipping is monitored at our gain
-     * stage (CLIP! indicator) rather than silently clamped. */
+     * always writes every frame, and clipping is the caller's to monitor
+     * rather than silently clamped. */
     config.noPreSilencedOutputBuffer = MA_TRUE;
     config.noClip = MA_TRUE;
 #ifdef __APPLE__
@@ -132,7 +132,7 @@ int nam_audio_start(
      * do; it changes the device rate system-wide for the session. */
     config.coreaudio.allowNominalSampleRateChange = MA_TRUE;
 #endif
-    config.dataCallback = nam_device_callback;
+    config.dataCallback = fucina_device_callback;
     config.pUserData = audio;
 
     if (ma_device_init(&audio->context, &config, &audio->device) != MA_SUCCESS) return -4;
@@ -145,14 +145,14 @@ int nam_audio_start(
     return 0;
 }
 
-/* Capture-only stream (input probing): same contract as nam_audio_start
+/* Capture-only stream (input probing): same contract as fucina_audio_start
  * but no playback side; the callback receives output == NULL. */
-int nam_audio_start_capture(
-    nam_audio* audio,
+int fucina_audio_start_capture(
+    fucina_audio* audio,
     int capture_index,
     unsigned int sample_rate,
     unsigned int period_frames,
-    nam_audio_callback callback,
+    fucina_audio_callback callback,
     void* user) {
     if (audio->device_ready) return -1;
 
@@ -174,7 +174,7 @@ int nam_audio_start_capture(
     config.capture.channels = 1;
     config.sampleRate = sample_rate;
     config.periodSizeInFrames = period_frames;
-    config.dataCallback = nam_device_callback;
+    config.dataCallback = fucina_device_callback;
     config.pUserData = audio;
 
     if (ma_device_init(&audio->context, &config, &audio->device) != MA_SUCCESS) return -4;
@@ -187,21 +187,21 @@ int nam_audio_start_capture(
     return 0;
 }
 
-void nam_audio_stop(nam_audio* audio) {
+void fucina_audio_stop(fucina_audio* audio) {
     if (!audio->device_ready) return;
     ma_device_uninit(&audio->device);
     audio->device_ready = 0;
     audio->callback = NULL;
 }
 
-unsigned int nam_audio_actual_sample_rate(nam_audio* audio) {
+unsigned int fucina_audio_actual_sample_rate(fucina_audio* audio) {
     return audio->device_ready ? audio->device.sampleRate : 0;
 }
 
 /* The device's native rate on the given side (kind 0 = playback,
  * 1 = capture). When this differs from the stream rate, miniaudio is
  * resampling internally — extra latency the user should know about. */
-unsigned int nam_audio_internal_sample_rate(nam_audio* audio, int kind) {
+unsigned int fucina_audio_internal_sample_rate(fucina_audio* audio, int kind) {
     if (!audio->device_ready) return 0;
     return kind == 0 ? audio->device.playback.internalSampleRate : audio->device.capture.internalSampleRate;
 }
@@ -209,13 +209,13 @@ unsigned int nam_audio_internal_sample_rate(nam_audio* audio, int kind) {
 /* The device-side period actually negotiated (can exceed the requested
  * one); the duplex ring pre-seeks 2x the CAPTURE internal period, so this
  * is the honest latency input. */
-unsigned int nam_audio_internal_period_frames(nam_audio* audio, int kind) {
+unsigned int fucina_audio_internal_period_frames(fucina_audio* audio, int kind) {
     if (!audio->device_ready) return 0;
     return kind == 0 ? audio->device.playback.internalPeriodSizeInFrames : audio->device.capture.internalPeriodSizeInFrames;
 }
 
 #ifdef __APPLE__
-static unsigned int nam_coreaudio_property_u32(AudioObjectID device_id, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope) {
+static unsigned int fucina_coreaudio_property_u32(AudioObjectID device_id, AudioObjectPropertySelector selector, AudioObjectPropertyScope scope) {
     AudioObjectPropertyAddress address;
     UInt32 value = 0;
     UInt32 size = sizeof(value);
@@ -230,15 +230,15 @@ static unsigned int nam_coreaudio_property_u32(AudioObjectID device_id, AudioObj
 /* Real per-device latency in frames (device latency + safety offset +
  * device buffer), straight from the CoreAudio properties. 0 when unknown
  * (non-macOS or query failure). kind 0 = playback, 1 = capture. */
-unsigned int nam_audio_device_latency_frames(nam_audio* audio, int kind) {
+unsigned int fucina_audio_device_latency_frames(fucina_audio* audio, int kind) {
 #ifdef __APPLE__
     if (!audio->device_ready) return 0;
     AudioObjectID device_id = kind == 0 ? audio->device.coreaudio.deviceObjectIDPlayback : audio->device.coreaudio.deviceObjectIDCapture;
     AudioObjectPropertyScope scope = kind == 0 ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput;
     if (device_id == 0) return 0;
-    unsigned int frames = nam_coreaudio_property_u32(device_id, kAudioDevicePropertyLatency, scope)
-                        + nam_coreaudio_property_u32(device_id, kAudioDevicePropertySafetyOffset, scope)
-                        + nam_coreaudio_property_u32(device_id, kAudioDevicePropertyBufferFrameSize, scope);
+    unsigned int frames = fucina_coreaudio_property_u32(device_id, kAudioDevicePropertyLatency, scope)
+                        + fucina_coreaudio_property_u32(device_id, kAudioDevicePropertySafetyOffset, scope)
+                        + fucina_coreaudio_property_u32(device_id, kAudioDevicePropertyBufferFrameSize, scope);
     /* Per-stream latency rides on the device's first stream and is NOT
      * included in the device-level properties. */
     {
@@ -249,7 +249,7 @@ unsigned int nam_audio_device_latency_frames(nam_audio* audio, int kind) {
         address.mScope = scope;
         address.mElement = kAudioObjectPropertyElementMain;
         if (AudioObjectGetPropertyData(device_id, &address, 0, NULL, &size, streams) == noErr && size >= sizeof(AudioStreamID)) {
-            frames += nam_coreaudio_property_u32(streams[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal);
+            frames += fucina_coreaudio_property_u32(streams[0], kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal);
         }
     }
     return frames;
@@ -261,7 +261,7 @@ unsigned int nam_audio_device_latency_frames(nam_audio* audio, int kind) {
 }
 
 /* Copies the names of the running device pair (capture, playback). */
-void nam_audio_running_names(nam_audio* audio, char* capture_name, char* playback_name, int cap) {
+void fucina_audio_running_names(fucina_audio* audio, char* capture_name, char* playback_name, int cap) {
     if (!audio->device_ready) {
         if (cap > 0) {
             capture_name[0] = '\0';

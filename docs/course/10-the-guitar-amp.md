@@ -28,6 +28,14 @@ The repository's top-level README credits the ecosystem's author directly:
 "**Steven Atkinson** — NeuralAmpModelerCore and neural-amp-modeler, the
 reference for the entire NAM example" (`README.md`, Acknowledgments).
 
+> **Where the code lives now.** The Neural Amp Modeler port has been
+> promoted to its own repository, [nam-zig](https://github.com/matteo-grella/nam-zig),
+> which consumes Fucina as a package. This chapter cites the in-tree
+> snapshot the course is pinned to (commit `3565985`, the
+> [`apps/nam/` tree at that commit](https://github.com/matteo-grella/fucina/tree/3565985/apps/nam)):
+> every `apps/nam/...` path below refers to that tree, and the
+> `zig build nam` commands become `zig build run` in a nam-zig checkout.
+
 ## 10.1 Full circle: a language born from audio
 
 None of what follows is recorded anywhere in the Fucina repository, so it is
@@ -1165,7 +1173,8 @@ reference, write the numbers down with their dates — travels unchanged.
 ## Exercises
 
 1. **(Easy)** Download a `.nam` profile (Tone3000 has thousands) and run
-   `zig build nam -Doptimize=ReleaseFast -- bench profile.nam` at block sizes
+   `zig build run -Doptimize=ReleaseFast -- bench profile.nam` (in a nam-zig
+   checkout) at block sizes
    16, 64, and 512 (`--blocksize`). Record your per-block cost and headroom
    at each size, then rebuild without `-Doptimize=ReleaseFast` and bench
    again. Compare your Debug/ReleaseFast ratio with the README's "~20×" and

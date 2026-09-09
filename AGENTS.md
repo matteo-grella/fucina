@@ -39,7 +39,6 @@ zig build nanochat -- <args>   # nanochat port (karpathy/nanochat): tok-train / 
 zig build diffusion-gemma -- <args>  # DiffusionGemma block text-diffusion: --eval parity harness vs llama.cpp PR 24423, --chat EB decoding (apps/diffusion_gemma/main.zig)
 zig build locate-anything -- <args>  # LocateAnything-3B open-vocabulary detection: detect/info CLI + exit-code parity gates vs reference dumps (apps/locate_anything/main.zig)
 zig build spirals              # two-spirals training demo: SGD/AdamW/Muon/APOLLO + checkpoints (examples/spirals/main.zig)
-zig build nam -- <args>        # Neural Amp Modeler: .nam profile import/run/train/export, GGUF interchange, live amp sim (apps/nam/main.zig)
 zig build finetune -- <args>   # LoRA fine-tune a Qwen3 GGUF on CPU (apps/finetune/main.zig)
 zig build cartridge -- <args>  # Cartridges (arXiv 2506.06266): train a corpus into a reusable KV prefix by in-process self-study distillation + serve it (apps/cartridge/main.zig; see docs/CARTRIDGES.md)
 zig build cartridge-fleet -- <args>  # per-document cartridge fleets: joint training, budget manager, cosine cartridge-RAG (apps/cartridge_fleet/main.zig)
@@ -132,9 +131,13 @@ Build options (consumed at comptime via `build_options`; the full table with def
 | `apps/locate_anything/` | LocateAnything-3B open-vocabulary detection VLM port | `apps/locate_anything/README.md` |
 | `apps/facedetect/` | buffalo_l face pipeline port (detect/recognize/analyze) | `apps/facedetect/README.md` |
 | `apps/nanochat/` | nanochat port: BPE training, pretraining, SFT, eval, chat on CPU | `apps/nanochat/README.md` |
-| `apps/nam/` | Neural Amp Modeler port: `.nam` engines, training, live audio/MIDI | `apps/nam/README.md` |
 | `bench/`, `src/bench_raw.zig` | microbenchmarks + their internal raw-surface module | `docs/BENCHMARK.md` |
 | `refs/` (untracked) | reference-repo clones + parity goldens (`tools/fetch_refs.sh`) | `docs/PORTING.md`; `docs/BENCHMARK.md` |
+
+The Neural Amp Modeler port (`.nam` engines, training, live audio/MIDI) is its
+own repository, [nam-zig](https://github.com/matteo-grella/nam-zig), consuming fucina as a
+package; the miniaudio device layer it hosted is `apps/voiceagent/audio/`
+(the `audio_io` module in `build.zig`, shared with parakeet and omnivoice).
 
 **Placement policy** (reusable family vs example-local port, kernel orchestration, shared audio
 helpers): `docs/DEVELOPMENT.md` §1.8.

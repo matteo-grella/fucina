@@ -5,8 +5,9 @@ This file is the benchmark record for Fucina's runners: the measurement
 protocol, and results against each family's reference implementation on the
 same machine, same weights, same thread count, CPU-only on both sides —
 llama.cpp for the LLM runners (the bulk of this file), parakeet.cpp for
-ASR, omnivoice.cpp for TTS. The NAM example is parity-oriented
-(NeuralAmpModelerCore); its record lives in `apps/nam/README.md`.
+ASR, omnivoice.cpp for TTS. The Neural Amp Modeler port is parity-oriented
+(NeuralAmpModelerCore) and lives in its own repository, [nam-zig](https://github.com/matteo-grella/nam-zig),
+with its record.
 **The record is one snapshot, taken as of 2026-07-04** (llama.cpp build
 30af6e2 throughout; every reference is pinned to its exact commit in
 `tools/fetch_refs.sh`).

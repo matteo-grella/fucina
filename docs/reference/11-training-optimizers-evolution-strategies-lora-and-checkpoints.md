@@ -1363,6 +1363,7 @@ test "lstm: a recorded window and the same steps streamed in blocks" {
 }
 ```
 
-The NAM port (`apps/nam/lstm.zig`) is the reference consumer: the core
-stack plus a linear head, the `.nam` weight stream as views into
-`fromStacked`, and the trainer's window contract on top of `forward`.
+The Neural Amp Modeler port ([nam-zig](https://github.com/matteo-grella/nam-zig),
+`src/lstm.zig`) is the reference consumer: the core stack plus a linear
+head, the `.nam` weight stream as views into `fromStacked`, and the
+trainer's window contract on top of `forward`.

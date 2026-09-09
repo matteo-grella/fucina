@@ -199,7 +199,7 @@ designing.
 | VLM port | `apps/locate_anything/` | ViT tower + LM, custom RopeTable, MTP box decode |
 | ASR / encoder stack | `src/models/parakeet/` | the reusable-family precedent |
 | TTS / codec port | `apps/omnivoice/` | codec parity, RNG parity, chunked streaming |
-| Streaming DSP / effects | `apps/nam/` | streaming engines, format interchange, live IO |
+| Streaming DSP / effects | [nam-zig](https://github.com/matteo-grella/nam-zig) (its own repository; a package consumer) | streaming engines over `causalConv1dStreaming` and `Tensor.lstm`, format interchange, live IO |
 | Training pipeline | `apps/nanochat/`, `examples/spirals/main.zig`, `apps/finetune/main.zig` | full pretrain→SFT→chat; minimal optimizer demo; LoRA on a real GGUF |
 | HTTP/API frontend | `apps/lmserve/main.zig` | OpenAI-compatible mapping tables, SSE, backend matrix |
 
@@ -432,7 +432,7 @@ with the same option set as the corresponding executable: `src/fucina.zig`
 (the core, with `build_options`), `src/models.zig` (the LLM/ASR stack,
 imports `fucina`), `src/serving.zig` (the serving transport, imports
 `fucina` and `fucina_models`), and the example roots wired in `build.zig`
-(lmserve, nam, parakeet, omnivoice, locate_anything, facedetect,
+(lmserve, parakeet, omnivoice, locate_anything, facedetect,
 voiceagent, nanochat), each also reachable alone through its solo step
 (`test-fucina`, `test-models`, `test-serving`, `test-<example>`).
 
@@ -441,7 +441,7 @@ material skip themselves cleanly rather than fail: the OmniVoice parity
 suites gate on `OMNIVOICE_PARITY`
 ([§2.6](reference/02-toolchain-build-and-project-wiring.md#26-runtime-environment-variables)); asset-dependent tests
 (facedetect goldens, the GGUF re-emit byte-identity test, tokenizer-parity
-fixtures, NAM training goldens) translate `error.FileNotFound` into
+fixtures) translate `error.FileNotFound` into
 `error.SkipZigTest`; GPU-dependent tests (`src/models/gemma/moe_tests.zig`)
 skip unless the build has a GPU provider *and* a device is actually
 present. Tests for **opt-in build features** follow the same discipline

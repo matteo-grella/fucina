@@ -93,7 +93,6 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build pockettts` | Pocket TTS v2 (kyutai): flow-matching TTS, no codec stage | [examples/pockettts/README.md](../examples/pockettts/README.md) |
 | `zig build locate-anything` | LocateAnything-3B open-vocabulary detection | [apps/locate_anything/README.md](../apps/locate_anything/README.md) |
 | `zig build facedetect` | Face detection/recognition (buffalo_l): detect/embed/verify/analyze | [apps/facedetect/README.md](../apps/facedetect/README.md) |
-| `zig build nam` | Neural Amp Modeler: `.nam` profiles, live amp sim, training | [apps/nam/README.md](../apps/nam/README.md) |
 | `zig build nanochat` | nanochat port: tok-train/base-train/sft/eval-bpb/chat | [apps/nanochat/README.md](../apps/nanochat/README.md) |
 | `zig build finetune` | LoRA fine-tune a Qwen3 GGUF on CPU; merge/serve via `export-gguf` | [apps/finetune/README.md](../apps/finetune/README.md) |
 | `zig build es-finetune` | Gradient-free (evolution strategies) fine-tune, LoRA or full-parameter | [apps/es_finetune/README.md](../apps/es_finetune/README.md) |
@@ -106,6 +105,10 @@ zig build qwen3 -Doptimize=ReleaseFast -- models/Qwen3-0.6B-Q8_0.gguf --repl
 | `zig build ptqtp-spirals` | Float MLP post-training-quantized to dual trit-planes | [examples/ptqtp_spirals/README.md](../examples/ptqtp_spirals/README.md) |
 | `zig build ptqtp-qwen3` | PTQTP-decorate a Qwen3 GGUF's linears; NLL before/after | [examples/ptqtp_qwen3/README.md](../examples/ptqtp_qwen3/README.md) |
 | `zig build smoke` | smoke: the minimal tensor/autograd sanity demo | [examples/smoke/README.md](../examples/smoke/README.md) |
+
+The Neural Amp Modeler (`.nam` guitar-amp profiles: live amp simulation,
+training, export) is its own repository, [nam-zig](https://github.com/matteo-grella/nam-zig),
+built on this library.
 
 ---
 

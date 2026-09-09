@@ -1,22 +1,22 @@
 /* Playback-only miniaudio shim for the OmniVoice example (--play).
  *
- * NAM's audio_shim.c is the single MINIAUDIO_IMPLEMENTATION TU and its
- * device entry point is duplex-only (capture + playback — opening it would
+ * The voice agent's audio_shim.c is the single MINIAUDIO_IMPLEMENTATION TU
+ * and its device entry point is duplex-only (capture + playback — opening it would
  * trip the macOS microphone permission for a pure TTS tool), so this file
  * declares its own playback-only device over the SAME vendored miniaudio
  * build: it includes the header in declaration mode and links against the
- * implementation compiled in apps/nam/audio_shim.c (build.zig's
+ * implementation compiled in apps/voiceagent/audio/audio_shim.c (build.zig's
  * configureOmnivoiceAudio adds both TUs). Both TUs take the MA_NO_* config
- * from the shared ../nam/miniaudio_config.h so their view of the header
+ * from the shared ../voiceagent/audio/miniaudio_config.h so their view of the header
  * cannot diverge across a future miniaudio version bump.
  *
- * Unlike the NAM duplex shim this one does NOT retune the device's nominal
+ * Unlike the duplex shim this one does NOT retune the device's nominal
  * rate (allowNominalSampleRateChange): playback has no drift-accumulation
  * problem, so miniaudio's internal resampler converts the 24 kHz synthesis
  * rate to whatever the device runs natively. */
 
-#include "../nam/miniaudio_config.h"
-#include "../nam/third_party/miniaudio.h"
+#include "../voiceagent/audio/miniaudio_config.h"
+#include "../voiceagent/audio/third_party/miniaudio.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +65,7 @@ void ov_play_destroy(ov_play* play) {
 
 /* Writes up to `cap` playback device descriptions; returns the total count.
  * Each name is copied NUL-terminated into name_buf + i*name_cap (the same
- * contract as nam_audio_list_devices, playback side only). */
+ * contract as fucina_audio_list_devices, playback side only). */
 int ov_play_list_devices(ov_play* play, char* name_buf, int name_cap, unsigned char* default_flags, int cap) {
     ma_device_info* playback_infos;
     ma_uint32 playback_count;
@@ -85,7 +85,7 @@ int ov_play_list_devices(ov_play* play, char* name_buf, int name_cap, unsigned c
 
 /* Opens a playback-only mono f32 stream. playback_index is an index into
  * the enumeration order, or -1 for the system default. Returns 0 on
- * success (error codes mirror nam_audio_start). */
+ * success (error codes mirror fucina_audio_start). */
 int ov_play_start(
     ov_play* play,
     int playback_index,

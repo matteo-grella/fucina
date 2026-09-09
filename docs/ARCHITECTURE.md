@@ -319,7 +319,7 @@ directory: `smoke/`, `spirals/`, `es_spirals/`, `gemma4/`, `qwen35/`,
 `engram/`, and more), `apps/` (product- and port-shaped programs with their
 own tests, shims, and goldens: `run/` (the registry runner), `qwen3/`,
 `deepseek4/`, `diffusion_gemma/`, `lmserve/`, `parakeet/`, `omnivoice/`,
-`nam/`, `voiceagent/`, `facedetect/`, `locate_anything/`, `nanochat/`,
+`voiceagent/`, `facedetect/`, `locate_anything/`, `nanochat/`,
 `finetune/`, `es_finetune/`, `cartridge/`, `cartridge_fleet/`), `tools/`
 (`export_gguf.zig`, `check_import_graph.zig`, `check_doc_links.zig`, plus the
 benchmark/parity helper scripts), `bench/` (microbenchmarks plus the shared

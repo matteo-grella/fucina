@@ -27,7 +27,7 @@ The same arc, as a review index:
 | I — Foundations | [0](00-introduction.md)–[2](02-just-enough-ml.md) | the premise, the language, the math | README.md; `AGENTS.md` |
 | II — The tensor core | [3](03-tensors-from-scratch.md)–[6](06-going-fast-on-cpus.md) | dtypes, storage, tensors, tags, ops, SIMD | `src/dtype.zig`, `src/storage.zig`, `src/tensor.zig`, `src/tags.zig`, `src/exec.zig`, `src/backend/` |
 | III — Learning | [7](07-autograd.md)–[9](09-training-without-gradients.md) | autograd, optimizers, evolution strategies | `src/ag/`, `src/optim.zig`, `src/es.zig` |
-| IV — Sound | [10](10-the-guitar-amp.md) | a real-time neural guitar amp | `apps/nam/` |
+| IV — Sound | [10](10-the-guitar-amp.md) | a real-time neural guitar amp | `apps/nam/` at the course pin; today [nam-zig](https://github.com/matteo-grella/nam-zig) |
 | V — Language models | [11](11-model-files-and-quantization.md)–[15](15-training-llms-on-cpu.md) | GGUF, quantization, a transformer, inference tricks, low-bit, CPU training | `src/gguf.zig`, `src/backend/quant/`, `src/models/`, `apps/` |
 | VI — The craft | [16](16-the-craft.md) | the discipline that holds it together | `docs/`, `tools/`, the CI matrix |
 
@@ -70,7 +70,7 @@ Notice the pattern in the milestone column: in every project the first thing you
 
 **4. Port a small model.** This is the project that teaches the most, because it forces every layer of the stack through your hands at once. Do not improvise the method — `docs/PORTING.md` *is* the method, written for the next port, and its one-line version is the whole discipline: you don't optimize what you can't verify, so the oracle is built first, parity closes stage by stage behind mechanical gates, and only then does performance work begin. Pin the reference at an exact commit; choose the smallest variant that exercises every code path you must port (PORTING.md's own example: "the Parakeet port anchored on a 110M hybrid precisely because it has *both* decode heads"); climb the parity ladder (tokenizer token-ID-exact → logits from raw ids → generation); and respect the tolerance tiers — discrete outputs gate on exact equality, and the tolerance is never loosened to make a gate pass.
 
-**5. Train a NAM profile of your own amp.** [Chapter 10](10-the-guitar-amp.md) ran other people's profiles; now capture your own rig. `apps/nam/README.md` walks the whole path — reamp-box wiring, the standardized capture signal, level discipline (the trainer refuses clipped input), then `profile` for one-step capture + train + export, or `train --input in.wav --output reamp.wav --out m.nam` from an existing pair. Profiles are exchanged "with the original NAM tooling in both directions" (apps/nam/README.md). There is something clarifying about a project whose loss you can *hear*.
+**5. Train a NAM profile of your own amp.** [Chapter 10](10-the-guitar-amp.md) ran other people's profiles; now capture your own rig. The [nam-zig](https://github.com/matteo-grella/nam-zig) README walks the whole path — reamp-box wiring, the standardized capture signal, level discipline (the trainer refuses clipped input), then `profile` for one-step capture + train + export, or `train --input in.wav --output reamp.wav --out m.nam` from an existing pair. Profiles are exchanged "with the original NAM tooling in both directions" (nam-zig README). There is something clarifying about a project whose loss you can *hear*.
 
 **6. Contribute upstream.** `CONTRIBUTING.md` is short because the bar is simple, and after this course you can meet it. Two rules matter most.
 
@@ -135,7 +135,7 @@ The fire is lit. Forge something.
 - `src/backend/ops.zig` — the semantic spec of the pointwise library; the cleanest place to begin project 2.
 - `src/backend/quant/cold_tests.zig` — what "bit-exact against embedded goldens" looks like; the bar for project 3.
 - `docs/PORTING.md` — the method, before you port anything.
-- `apps/nam/README.md` — the capture-to-profile walkthrough for project 5.
+- the [nam-zig](https://github.com/matteo-grella/nam-zig) README — the capture-to-profile walkthrough for project 5.
 - `CONTRIBUTING.md` — two pages; read them before your first PR, not after.
 - `docs/THIRD-PARTY-NOTICES.md` — the full provenance inventory; the model for crediting whatever you build on.
 

@@ -152,8 +152,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const nam_audio_module = b.createModule(.{
-        .root_source_file = b.path("apps/nam/audio.zig"),
+    const audio_io_module = b.createModule(.{
+        .root_source_file = b.path("apps/voiceagent/audio/audio.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -197,8 +197,6 @@ pub fn build(b: *std.Build) void {
     // fucina_models consumers in the same compilation (the lmserve app).
     _ = addTarget(b, tool_ctx, .{ .step = "nanochat", .desc = "nanochat port (karpathy/nanochat): tok-train / base-train / sft / eval-bpb / chat", .exe = "fucina-nanochat", .root = "apps/nanochat/main.zig", .models = true });
     _ = addTarget(b, tool_ctx, .{ .step = "spirals", .desc = "Train a two-spirals MLP with SGD/AdamW/Muon/APOLLO (+groups/schedule/clip), checkpoint, resume, infer", .exe = "fucina-spirals", .root = "examples/spirals/main.zig", .models = false });
-    const nam = addTarget(b, tool_ctx, .{ .step = "nam", .desc = "Neural Amp Modeler: .nam profiles, profiling/training, live amp sim", .exe = "fucina-nam", .root = "apps/nam/main.zig", .models = false });
-    configureNamAudio(nam.exe);
     const qwen3 = addTarget(b, tool_ctx, .{ .step = "qwen3", .desc = "Run Qwen3 dense/MoE GGUF inference (text chat; --spec/--spec-ref lossless speculative decode, --tokenize tokenizer-parity oracle, --shine in-context hypernetwork adapters)", .exe = "fucina-qwen3", .root = "apps/qwen3/main.zig", .models = true });
     configureLlguidance(qwen3.exe, llguidance_dep);
     // The registry runner: one binary for every registered architecture
@@ -210,7 +208,7 @@ pub fn build(b: *std.Build) void {
     configureLlguidance(run_app.exe, llguidance_dep);
     _ = addTarget(b, tool_ctx, .{ .step = "deepseek4", .desc = "Run DeepSeek V4 Flash GGUF inference (CSA/HCA + streamed experts)", .exe = "fucina-deepseek4", .root = "apps/deepseek4/main.zig", .models = true });
     const voiceagent = addTarget(b, tool_ctx, .{ .step = "voiceagent", .desc = "Native cascade voice agent TUI: mic -> parakeet EOU STT -> qwen3 chat -> qwen3-tts -> speakers", .exe = "fucina-voiceagent", .root = "apps/voiceagent/main.zig", .models = true });
-    voiceagent.exe.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent.exe.root_module.addImport("audio_io", audio_io_module);
     voiceagent.exe.root_module.addImport("fucina_serving", serving_module);
     configureAudioShim(voiceagent.exe);
     configureLlguidance(voiceagent.exe, llguidance_dep);
@@ -245,7 +243,7 @@ pub fn build(b: *std.Build) void {
     // for the Linux leg.
     lmserve.exe.root_module.link_libc = true;
     const parakeet = addTarget(b, tool_ctx, .{ .step = "parakeet", .desc = "Parakeet ASR (NeMo FastConformer): transcribe a WAV (mel -> encoder -> CTC/TDT decoder -> text); --stream/--manifest/--mic, --compare parity harness", .exe = "fucina-parakeet", .root = "apps/parakeet/main.zig", .models = true });
-    parakeet.exe.root_module.addImport("nam_audio", nam_audio_module);
+    parakeet.exe.root_module.addImport("audio_io", audio_io_module);
     const parakeet_opts = b.addOptions();
     parakeet_opts.addOption(bool, "parakeet_mic", parakeet_mic);
     parakeet.exe.root_module.addOptions("build_options", parakeet_opts);
@@ -614,11 +612,8 @@ pub fn build(b: *std.Build) void {
     configureLlguidance(lmserve_tests, llguidance_dep);
     lmserve_tests.root_module.link_libc = true;
 
-    const nam_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-nam", .desc = "Run the nam-root unit tests only", .root = "apps/nam/main.zig" });
-    configureNamAudio(nam_tests);
-
     const parakeet_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-parakeet", .desc = "Run the parakeet-root unit tests only", .root = "apps/parakeet/main.zig", .models = true });
-    parakeet_tests.root_module.addImport("nam_audio", nam_audio_module);
+    parakeet_tests.root_module.addImport("audio_io", audio_io_module);
     parakeet_tests.root_module.addOptions("build_options", parakeet_opts);
     if (parakeet_mic) configureAudioShim(parakeet_tests);
 
@@ -633,7 +628,7 @@ pub fn build(b: *std.Build) void {
     // exporter fixtures, so kernel work on aec.zig iterates on the solo step
     // instead of the full matrix.
     const voiceagent_tests = addTestRoot(b, tool_ctx, test_step, .{ .step = "test-voiceagent", .desc = "Run the voiceagent-root unit tests only (GTCRN-AEC parity + duplex gates)", .root = "apps/voiceagent/main.zig", .models = true });
-    voiceagent_tests.root_module.addImport("nam_audio", nam_audio_module);
+    voiceagent_tests.root_module.addImport("audio_io", audio_io_module);
     voiceagent_tests.root_module.addImport("fucina_serving", serving_module);
     configureAudioShim(voiceagent_tests);
 
@@ -697,11 +692,11 @@ fn installArtifactStep(b: *std.Build, exe: *std.Build.Step.Compile) *std.Build.S
     return &install.step;
 }
 
-/// Vendored-miniaudio linkage shared by every audio-facing target: NAM's
-/// single MINIAUDIO_IMPLEMENTATION TU (`apps/nam/audio_shim.c`) plus any
-/// per-target shim TUs, libc, and the CoreAudio frameworks on macOS
+/// Vendored-miniaudio linkage shared by every audio-facing target: the
+/// single MINIAUDIO_IMPLEMENTATION TU (`apps/voiceagent/audio/audio_shim.c`)
+/// plus any per-target shim TUs, libc, and the CoreAudio frameworks on macOS
 /// (MA_NO_RUNTIME_LINKING in the audio shim); elsewhere miniaudio dlopens
-/// its backend at runtime through libc. The three configure* wrappers
+/// its backend at runtime through libc. The two configure* wrappers
 /// below state each target's extras.
 fn configureMiniaudio(
     step: *std.Build.Step.Compile,
@@ -711,7 +706,7 @@ fn configureMiniaudio(
     const module = step.root_module;
     module.link_libc = true;
     module.addCSourceFile(.{
-        .file = step.step.owner.path("apps/nam/audio_shim.c"),
+        .file = step.step.owner.path("apps/voiceagent/audio/audio_shim.c"),
         .flags = &.{ "-fno-sanitize=undefined", "-O2" },
     });
     for (extra_sources) |source| {
@@ -727,12 +722,6 @@ fn configureMiniaudio(
         module.linkFramework("AudioToolbox", .{});
         for (extra_frameworks) |framework| module.linkFramework(framework, .{});
     }
-}
-
-/// NAM's audio/MIDI device layer: miniaudio plus the CoreMIDI shim (stubs
-/// off macOS).
-fn configureNamAudio(step: *std.Build.Step.Compile) void {
-    configureMiniaudio(step, &.{"apps/nam/midi_shim.c"}, &.{"CoreMIDI"});
 }
 
 /// OmniVoice's speaker-playback layer (`--play`): miniaudio plus the

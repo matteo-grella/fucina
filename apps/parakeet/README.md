@@ -142,9 +142,9 @@ identical to transcribing that file singly.
 ## Live microphone: `-Dparakeet-mic`
 
 `--mic` is compiled out of the default build. Build with `-Dparakeet-mic` to
-link the vendored miniaudio capture stack — it reuses the NAM example's
-audio shim (`apps/nam/audio_shim.c` + `third_party/miniaudio.h`,
-capture only, no MIDI). The option defaults to false to keep the default
+link the vendored miniaudio capture stack — it reuses the voice agent's
+audio shim (`apps/voiceagent/audio/audio_shim.c` + `third_party/miniaudio.h`,
+capture only). The option defaults to false to keep the default
 parakeet build fast; without it, `--mic` exits with a message pointing at
 the flag. On macOS the build links the CoreFoundation/CoreAudio/AudioToolbox
 frameworks; on other platforms miniaudio dlopens its backend at runtime.
@@ -156,7 +156,7 @@ build option.
 window, reprinting the partial transcript as tokens arrive, then finalizing
 and exiting. On macOS the microphone permission is attributed to your
 **terminal app** — a denied permission yields silence with no error (check
-System Settings → Privacy → Microphone); the [NAM example](../nam/README.md)
+System Settings → Privacy → Microphone); [nam-zig](https://github.com/matteo-grella/nam-zig)
 has the same note for the same capture stack.
 
 ## Performance

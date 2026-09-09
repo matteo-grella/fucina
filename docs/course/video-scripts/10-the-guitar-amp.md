@@ -2,6 +2,8 @@
 
 *Series: Forging Deep Learning in Zig · Source: ../10-the-guitar-amp.md*
 
+*The Neural Amp Modeler port now lives in [nam-zig](https://github.com/matteo-grella/nam-zig); the `apps/nam/...` citations below are the course pin's tree, and `zig build nam` on camera is `zig build run` in a nam-zig checkout.*
+
 ## Logline
 
 The series' flagship: a 13,802-weight WaveNet imitates a tube amplifier live,

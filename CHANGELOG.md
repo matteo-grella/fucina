@@ -23,6 +23,15 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+### Removed
+
+- `apps/nam` and its `nam` / `test-nam` build steps: the Neural Amp Modeler
+  port is its own repository, [nam-zig](https://github.com/matteo-grella/nam-zig),
+  consuming fucina as a package pinned at `v0.5.0`. The miniaudio device
+  layer it hosted is `apps/voiceagent/audio/` (the `audio_io` module in
+  `build.zig`), shared by voiceagent, parakeet `--mic`, and omnivoice
+  `--play`; `tools/fetch_refs.sh` no longer pins the two NAM references.
+
 ## 0.5.0 - 2026-09-09
 
 ### Added

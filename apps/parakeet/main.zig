@@ -163,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
         try runMicSim(stdout, &file, init.io, init.arena.allocator(), audio_path, lang);
         return;
     }
-    // --mic: live microphone capture (NAM miniaudio) → incremental streaming.
+    // --mic: live microphone capture (the shared miniaudio layer) → incremental streaming.
     if (mic) {
         try runMic(stdout, &file, init.io, init.arena.allocator(), lang);
         return;
@@ -492,7 +492,7 @@ fn micCallback(user: ?*anyopaque, output: ?[*]f32, input: ?[*]const f32, frame_c
     if (input) |inp| ring.write(inp[0..frame_count]);
 }
 
-// --mic: live microphone streaming (NAM miniaudio capture → ring → incremental
+// --mic: live microphone streaming (miniaudio capture → ring → incremental
 // driver → live transcript). Live I/O — manually verified, no automated parity
 // (the loop environment has no audio device). Gated behind -Dparakeet-mic so the
 // default parakeet build does not link the audio stack.
@@ -501,7 +501,7 @@ fn runMic(stdout: *std.Io.Writer, file: *const fucina.gguf.File, io: std.Io, are
         try stdout.print("--mic requires building with -Dparakeet-mic=true (links the vendored miniaudio capture stack).\n", .{});
         return;
     } else {
-        const audio = @import("nam_audio");
+        const audio = @import("audio_io");
         const cfg = try parakeet_loader.Config.fromGguf(file);
         const sc = (parakeet_loader.StreamingConfig.fromGguf(file) catch null) orelse {
             try stdout.print("--mic requires a streaming model\n", .{});
