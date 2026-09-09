@@ -137,7 +137,7 @@ construction, ownership, tagged contraction, backward — is unpacked in
 ## 1.5 Stability
 
 Fucina is a production-oriented core, not a finished 1.0 product: the
-package manifest and 0.x tags (`v0.3.0`) exist so consumers can pin a
+package manifest and 0.x tags (`v0.5.0`) exist so consumers can pin a
 version ([§2.5](02-toolchain-build-and-project-wiring.md#25-consuming-fucina-from-another-project)), but a 0.x tag is a pin, not a semver stability contract —
 the public API may change between tags (see
 *Current Production Gaps* in [ARCHITECTURE.md](../ARCHITECTURE.md)). This

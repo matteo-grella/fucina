@@ -1027,7 +1027,7 @@ behavioral tests, and `arch-check` ignores the imports inside them.
 ## Known limitations
 
 - No stable external API contract: the package manifest and 0.x tags give
-  consumers a pin (`zig fetch --save git+...#v0.3.0`), not a semver
+  consumers a pin (`zig fetch --save git+...#v0.5.0`), not a semver
   stability promise — the public API may change between tags.
 - The CUDA backend (`-Dgpu=cuda`, Linux) covers f32/f16 GEMM + quantized
   dense/MoE prefill + opt-in decode GEMV; no attention/KV offload and no

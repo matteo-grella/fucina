@@ -23,6 +23,8 @@ this point; earlier history is `git log`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-09
+
 ### Added
 
 - `causalConv1dStreaming` / `groupedCausalConv1dStreaming`: the causal
