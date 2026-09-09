@@ -4,6 +4,14 @@
 //! passthrough re-reads wire types from.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Releases a mapping made by `loadMmap`; never reached on Windows, where
+/// `loadMmap` reads the file instead of mapping it.
+fn unmap(bytes: []const u8) void {
+    if (builtin.os.tag == .windows) unreachable;
+    std.posix.munmap(@alignCast(bytes));
+}
 
 const wire = @import("wire.zig");
 
@@ -110,6 +118,8 @@ pub const File = struct {
     /// loading. Preferred for large (multi-GB) models — avoids a giant heap copy
     /// that would otherwise coexist with the materialized weights and OOM.
     pub fn loadMmap(allocator: Allocator, io: std.Io, path: []const u8) !File {
+        // No mmap on Windows: the whole file is read into memory instead.
+        if (builtin.os.tag == .windows) return load(allocator, io, path);
         var handle = try std.Io.Dir.cwd().openFile(io, path, .{});
         defer handle.close(io); // POSIX keeps the mapping valid after the fd closes.
 
@@ -325,11 +335,11 @@ pub const File = struct {
         self.metadata.deinit();
         self.index.deinit();
         self.allocator.free(self.tensors);
-        for (self.extra_bytes) |part_bytes| std.posix.munmap(@alignCast(part_bytes));
+        for (self.extra_bytes) |part_bytes| unmap(part_bytes);
         if (self.extra_bytes.len > 0) self.allocator.free(self.extra_bytes);
         if (self.part_data_offsets.len > 0) self.allocator.free(self.part_data_offsets);
         if (self.is_mmap) {
-            std.posix.munmap(@alignCast(self.bytes));
+            unmap(self.bytes);
         } else if (self.bytes.len > 0) {
             self.allocator.free(self.bytes);
         }
@@ -343,7 +353,7 @@ pub const File = struct {
         bytes: []const u8,
 
         pub fn deinit(self: *MappedRegion) void {
-            std.posix.munmap(@alignCast(self.bytes));
+            unmap(self.bytes);
             self.* = undefined;
         }
     };
